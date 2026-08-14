@@ -1,0 +1,18 @@
+# Claude/agent working materials — local only, not part of the public repo
+CLAUDE.md
+.claude/
+specs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+
+# Local scratch
+*.log

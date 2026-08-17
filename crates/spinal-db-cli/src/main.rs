@@ -98,6 +98,17 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { db, schema_dir } => {
+            // Refuse an existing database (CLI critique F6): the schema applies
+            // file-by-file under autocommit, so re-applying onto existing state
+            // fails partway and can leave a mixed state. Only an absent or
+            // zero-byte path (a `touch`ed placeholder) counts as fresh.
+            if std::fs::metadata(&db).map(|m| m.len() > 0).unwrap_or(false) {
+                bail!(
+                    "{}: already exists; refusing to re-apply schema \
+                     (init targets a fresh path; use a new file)",
+                    db.display()
+                );
+            }
             match schema_dir {
                 None => spinal_db_core::schema_init::init_schema_from_sources(&db, EMBEDDED_SCHEMA)?,
                 Some(None) => spinal_db_core::schema_init::init_schema_from_dir(

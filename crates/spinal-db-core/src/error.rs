@@ -54,11 +54,14 @@ pub enum DbError {
     #[error("write conflict: transaction still lost the race after {attempts} retries")]
     Conflict { attempts: u32 },
 
-    /// The public write API (`api::write_parameter`) was handed a batch it
-    /// cannot interpret — wrong column count, a non-string entity column, an
-    /// unsupported Arrow type for a dimension or the value column, etc. A
-    /// caller-facing contract error, never a stack trace.
-    #[error("write_parameter: {0}")]
+    /// The public write API (`api::write_parameter` / `api::ingest_segments`)
+    /// was handed a batch it cannot interpret — wrong column count, a
+    /// non-string entity column, an unsupported Arrow type for a dimension or
+    /// the value column, etc. A caller-facing contract error, never a stack
+    /// trace. The message carries its own context (segment ordinal and
+    /// class:parameter where known) — no entry-point prefix is added here, so
+    /// wrapped errors are never double-prefixed (CLI critique F5).
+    #[error("{0}")]
     Api(String),
 
     #[error(transparent)]

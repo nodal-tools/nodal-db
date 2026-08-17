@@ -38,10 +38,6 @@ fn arrow_versions_unify(
     b
 }
 
-/// The explicit end-of-stream marker every segment MUST end with (§2.2.1):
-/// continuation sentinel + zero metadata length.
-const EOS: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0];
-
 /// Schema-level metadata keys this reader knows (§4.1); any other `spinal:`
 /// key is warn-and-ignore (E5, §3.2).
 const KNOWN_SCHEMA_KEYS: [&str; 7] = [
@@ -68,6 +64,11 @@ pub struct ImportArgs {
 }
 
 pub fn run(args: &ImportArgs) -> Result<()> {
+    // The commit author is a CLI usage concern, resolved before the container
+    // is even read (critique F5): a missing author is not a payload error and
+    // must not wear an E-class after a possibly-large decode.
+    let user = resolve_user(args)?;
+
     let bytes = std::fs::read(&args.file)
         .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?;
     // E1: not an IPC stream — empty file or the IPC *file* (Feather) magic.
@@ -118,16 +119,18 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     }
 
     // E7: duplicate (class, parameter, alternative) target, case-insensitive
-    // (§4.2 — core name resolution folds via lower()).
+    // (§4.2 — core name resolution folds via DuckDB lower(), which is Unicode;
+    // alternative names carry no ASCII charset CHECK, so the fold here must be
+    // Unicode too or Ä/ä-aliased targets slip past — critique F3).
     let mut targets: HashSet<(String, String, String)> = HashSet::new();
     let mut segments: Vec<Segment> = Vec::with_capacity(raws.len());
     for (raw, meta) in raws.iter().zip(&metas) {
         let alternative = effective_alternative(raw.ordinal, meta, args)?;
         assert_flags(raw.ordinal, meta, args)?;
         if !targets.insert((
-            meta.class.to_ascii_lowercase(),
-            meta.parameter.to_ascii_lowercase(),
-            alternative.to_ascii_lowercase(),
+            meta.class.to_lowercase(),
+            meta.parameter.to_lowercase(),
+            alternative.to_lowercase(),
         )) {
             bail!(
                 "E7: duplicate target {}:{} (alternative {:?}) across segments \
@@ -147,13 +150,6 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         });
     }
 
-    let user = args
-        .user
-        .clone()
-        .or_else(|| std::env::var("USER").ok())
-        .or_else(|| std::env::var("USERNAME").ok())
-        .or_else(|| std::env::var("LOGNAME").ok())
-        .unwrap_or_default();
     let opts = WriteOptions {
         force_replace: args.force_replace,
         retain_override: None,
@@ -205,6 +201,34 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the commit author (spec §8.2): `--user` if given (must be
+/// non-blank), else the first of `USER`/`USERNAME`/`LOGNAME` whose value is
+/// non-blank — a set-but-empty variable falls through (critique F5). No source
+/// at all is a plain CLI usage error, not an E-class payload error.
+fn resolve_user(args: &ImportArgs) -> Result<String> {
+    if let Some(u) = &args.user {
+        let u = u.trim();
+        if u.is_empty() {
+            bail!("--user must be non-empty");
+        }
+        return Ok(u.to_string());
+    }
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no commit author: --user was not given and none of USER/USERNAME/LOGNAME \
+                 is set to a non-blank value (pass --user <name>)"
+            )
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Container framing: segment loop with per-segment EOS verification (§2.2/.1)
 // ---------------------------------------------------------------------------
@@ -242,17 +266,93 @@ fn split_segments(bytes: &[u8]) -> Result<Vec<RawSegment>> {
         let end = pos + consumed;
         // Truncation defense (§2.2.1): every stock reader treats a bare EOF at
         // a message boundary as a clean end of stream, so EOS-terminated must
-        // be distinguished from bare-EOF-terminated here, by the framing.
-        if consumed < 8 || bytes[end - 8..end] != EOS {
-            bail!(
+        // be distinguished from bare-EOF-terminated here — by walking the
+        // message frames, never by comparing raw trailing bytes: a batch body
+        // whose last 8 bytes coincidentally equal the EOS sequence must not
+        // pass for a terminator (critique F1).
+        match classify_termination(&bytes[pos..end])
+            .map_err(|e| anyhow!("E6: segment {ordinal}: {e}"))?
+        {
+            Termination::Eos => {}
+            Termination::LegacyEos => bail!(
+                "E10: segment {ordinal} ends with the legacy (pre-Arrow-0.15) 4-byte \
+                 end-of-stream marker, not the 8-byte marker the format requires \
+                 (§2.2.1) — likely a legacy-format IPC stream; rewrite it with a \
+                 modern Arrow writer"
+            ),
+            Termination::BareEof => bail!(
                 "E10: segment {ordinal} is not terminated by the end-of-stream marker \
                  — truncation suspected (producer crash before close?)"
-            );
+            ),
         }
         pos = end;
         out.push(RawSegment { ordinal, schema, batches });
     }
     Ok(out)
+}
+
+/// How the byte range a `StreamReader` consumed terminates (§2.2.1).
+enum Termination {
+    /// A genuine 8-byte end-of-stream frame (continuation sentinel + zero
+    /// metadata length) exactly at the reader's stop position.
+    Eos,
+    /// A pre-Arrow-0.15 4-byte EOS frame (zero length, no continuation prefix)
+    /// at the stop position — a well-formed *legacy* stream, which the format
+    /// nevertheless rejects (the 8-byte marker is normative).
+    LegacyEos,
+    /// The range ends at a message boundary with no EOS frame: bare-EOF
+    /// truncation (producer crash before close).
+    BareEof,
+}
+
+/// Walk the IPC message frames of one consumed segment range and classify its
+/// termination. Each frame is a 4-byte continuation sentinel + 4-byte metadata
+/// length (legacy: length only), the flatbuffer metadata, then
+/// `Message.bodyLength()` body bytes — so the walk lands exactly on every
+/// message boundary the reader saw, and only a real EOS *frame* at the stop
+/// position counts as termination (critique F1).
+fn classify_termination(seg: &[u8]) -> Result<Termination> {
+    const CONT: [u8; 4] = [0xff; 4];
+    let mut pos = 0usize;
+    loop {
+        if pos + 4 > seg.len() {
+            return Ok(Termination::BareEof);
+        }
+        let word: [u8; 4] = seg[pos..pos + 4].try_into().unwrap();
+        let (meta_len, header) = if word == CONT {
+            if pos + 8 > seg.len() {
+                return Ok(Termination::BareEof);
+            }
+            (i32::from_le_bytes(seg[pos + 4..pos + 8].try_into().unwrap()), 8usize)
+        } else {
+            // Pre-0.15 framing: the length arrives without a continuation
+            // sentinel (arrow-rs reads both; the format accepts only modern).
+            (i32::from_le_bytes(word), 4usize)
+        };
+        if meta_len == 0 {
+            // An EOS frame — genuine only when it sits exactly at the stop
+            // position (an EOS the reader read past cannot terminate anything).
+            return Ok(if pos + header == seg.len() {
+                if header == 8 { Termination::Eos } else { Termination::LegacyEos }
+            } else {
+                Termination::BareEof
+            });
+        }
+        let meta_len = usize::try_from(meta_len)
+            .map_err(|_| anyhow!("bad metadata length {meta_len} in IPC frame at byte {pos}"))?;
+        let meta_end = pos
+            .checked_add(header + meta_len)
+            .filter(|&e| e <= seg.len())
+            .ok_or_else(|| anyhow!("IPC frame at byte {pos} overruns the segment"))?;
+        let msg = arrow::ipc::root_as_message(&seg[pos + header..meta_end])
+            .map_err(|e| anyhow!("invalid IPC message flatbuffer at byte {pos}: {e}"))?;
+        let body_len = usize::try_from(msg.bodyLength())
+            .map_err(|_| anyhow!("negative bodyLength in IPC message at byte {pos}"))?;
+        pos = meta_end
+            .checked_add(body_len)
+            .filter(|&e| e <= seg.len())
+            .ok_or_else(|| anyhow!("IPC message body at byte {pos} overruns the segment"))?;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +473,9 @@ fn parse_version(s: &str) -> Result<(u32, u32)> {
 fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<String> {
     match (&meta.alternative, &args.alternative) {
         (Some(m), Some(f)) => {
-            if !m.eq_ignore_ascii_case(f) {
+            // Unicode fold, matching DuckDB lower() — alternative names have no
+            // ASCII charset CHECK (critique F3).
+            if m.to_lowercase() != f.to_lowercase() {
                 bail!(
                     "E4: segment {ordinal} ({}:{}): spinal:alternative {m:?} conflicts with \
                      --alternative {f:?} (no precedence — a conflict is always a mistake, §4.3)",
@@ -746,6 +848,18 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                 );
             }
             let coords = extract_coords(tag, fields[d + 1].name(), &dim_kinds[d], &list.value(row), row, &ent)?;
+            // A zero-length dim list would expand the whole row to zero long
+            // tuples — the entity would vanish without error, violating §9.3's
+            // no-silent-drop rule (critique F2). The spec never legalizes an
+            // empty list; reject it as the E8 shape-law class.
+            if coords.is_empty() {
+                bail!(
+                    "E8: {tag}: empty {:?} dim list in dense row {row} (entity {ent:?}) — \
+                     an empty dim list would expand the entity to nothing; absence is \
+                     expressed in long form, never by an empty dense axis (§6.2, §9.3)",
+                    fields[d + 1].name()
+                );
+            }
             // §6.2: entries within each dim list must be distinct (E8).
             let mut seen: HashSet<&Coord> = HashSet::new();
             for c in &coords {
@@ -883,7 +997,16 @@ fn extract_coords(
                     1_000 => arr.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(k),
                     _ => arr.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap().value(k),
                 };
-                Coord::Ts(raw * factor)
+                // Checked upcast (critique F10): an overflowing ×factor would
+                // wrap in release and store a garbage instant silently.
+                let up = raw.checked_mul(*factor).ok_or_else(|| {
+                    anyhow!(
+                        "E6: {tag}: timestamp coordinate {raw} (upcast ×{factor} to µs) in \
+                         {dim_name:?} dim list of dense row {row} (entity {ent:?}) overflows \
+                         the microsecond timestamp range (§5.2.1)"
+                    )
+                })?;
+                Coord::Ts(up)
             }
             DimKind::Int => Coord::Int(arr.as_any().downcast_ref::<Int64Array>().unwrap().value(k)),
             DimKind::Label => {

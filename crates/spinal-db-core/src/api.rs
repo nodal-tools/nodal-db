@@ -132,13 +132,16 @@ pub fn ingest_segments(
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
     // defined history semantics (spec §4.2, E7 class); compare by the same
-    // `lower()` fold every core name resolver applies.
+    // `lower()` fold every core name resolver applies. DuckDB `lower()` is
+    // Unicode, and alternative names carry no ASCII charset CHECK, so the fold
+    // must be Unicode too — an ASCII fold lets Ä/ä-aliased targets resolve to
+    // one row and die as a raw CHECK error mid-transaction (critique F3).
     let mut seen: HashMap<(String, String, String), ()> = HashMap::new();
     for s in &segments {
         let key = (
-            s.class.to_ascii_lowercase(),
-            s.parameter.to_ascii_lowercase(),
-            s.alternative.to_ascii_lowercase(),
+            s.class.to_lowercase(),
+            s.parameter.to_lowercase(),
+            s.alternative.to_lowercase(),
         );
         if seen.insert(key, ()).is_some() {
             return Err(DbError::Api(format!(

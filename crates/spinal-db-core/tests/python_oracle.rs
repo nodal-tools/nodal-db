@@ -36,21 +36,27 @@ fn independent_python_oracle_reproduces_every_vector() {
          (see conformance/oracle/encode_axis.py)",
         python.display()
     );
-    let oracle = root.join("conformance/oracle/encode_axis.py");
+    // The axis encoder (spec §4-§7) and the value encoder (spec §9, OPEN-7)
+    // each have an independent Python re-encoder; both must agree.
+    for rel in [
+        "conformance/oracle/encode_axis.py",
+        "conformance/oracle/encode_value.py",
+    ] {
+        let oracle = root.join(rel);
+        let output = Command::new(&python)
+            .arg(&oracle)
+            .output()
+            .expect("spawn python oracle");
 
-    let output = Command::new(&python)
-        .arg(&oracle)
-        .output()
-        .expect("spawn python oracle");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    println!("{stdout}");
-    if !stderr.is_empty() {
-        eprintln!("{stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("{rel}:\n{stdout}");
+        if !stderr.is_empty() {
+            eprintln!("{stderr}");
+        }
+        assert!(
+            output.status.success(),
+            "independent Python oracle {rel} DISAGREED with the Rust encoder (or failed):\n{stdout}\n{stderr}"
+        );
     }
-    assert!(
-        output.status.success(),
-        "independent Python oracle DISAGREED with the Rust encoder (or failed):\n{stdout}\n{stderr}"
-    );
 }

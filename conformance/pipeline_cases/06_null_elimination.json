@@ -1,0 +1,20 @@
+{
+  "description": "NULL elimination (NULL is absent): null-valued tuples are dropped BEFORE axis derivation, so the integer axis is {0,2} not {0,1,2,3}",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Integer" }
+  ],
+  "rows": [
+    { "dims": [0], "value": 1.0 },
+    { "dims": [1], "value": null },
+    { "dims": [2], "value": 3.0 },
+    { "dims": [3], "value": null }
+  ],
+  "expected": {
+    "tier": "Array",
+    "axes": [
+      { "length": 2, "body": { "type": "IntegerParametric", "start": 0, "step": 2 } }
+    ],
+    "shape": { "Array": [1.0, 3.0] }
+  }
+}

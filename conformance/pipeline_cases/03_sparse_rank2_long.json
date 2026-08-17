@@ -1,0 +1,31 @@
+{
+  "description": "sparse rank-2 grid (5 of 6 cells present) -> Tier Long; index set is not the Cartesian product",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Integer" },
+    { "position": 2, "kind": "Integer" }
+  ],
+  "rows": [
+    { "dims": [0, 10], "value": 1.0 },
+    { "dims": [0, 11], "value": 2.0 },
+    { "dims": [0, 12], "value": 3.0 },
+    { "dims": [1, 10], "value": 4.0 },
+    { "dims": [1, 11], "value": 5.0 }
+  ],
+  "expected": {
+    "tier": "Long",
+    "axes": [
+      { "length": 2, "body": { "type": "IntegerParametric", "start": 0, "step": 1 } },
+      { "length": 3, "body": { "type": "IntegerParametric", "start": 10, "step": 1 } }
+    ],
+    "shape": {
+      "Long": [
+        { "positions": [0, 0], "value": { "Float": 1.0 } },
+        { "positions": [0, 1], "value": { "Float": 2.0 } },
+        { "positions": [0, 2], "value": { "Float": 3.0 } },
+        { "positions": [1, 0], "value": { "Float": 4.0 } },
+        { "positions": [1, 1], "value": { "Float": 5.0 } }
+      ]
+    }
+  }
+}

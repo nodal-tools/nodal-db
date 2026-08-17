@@ -10,5 +10,16 @@
 /// (see the Phase-0 spike) and, later, by `conn`.
 pub const MINIMUM_DUCKDB: (u32, u32) = (1, 4);
 
-/// Canonical byte encoding + 64-bit content hash (Phase 1).
+/// Plain FFI-friendly data types for the pipeline (Phase 2).
+pub mod types;
+
+/// Canonical byte encoding + 64-bit content hash (Phase 1) + value encoding
+/// (Phase 2, spec §9 / OPEN-7).
 pub mod encoding;
+
+/// The canonicalization pipeline: NULL elimination, axis derivation, sort,
+/// tier (Phase 2, VMP Part 3).
+pub mod canon;
+
+/// The tier decision — pipeline step 4 (Phase 2, VMP Part 3).
+pub mod tier;

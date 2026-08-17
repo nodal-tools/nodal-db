@@ -1,0 +1,29 @@
+{
+  "description": "tier-boundary A: full 2x2 datetime x integer float grid -> Tier Array (sibling of case 08)",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Datetime" },
+    { "position": 2, "kind": "Integer" }
+  ],
+  "rows": [
+    { "dims": [1577836800000000, 0], "value": 1.0 },
+    { "dims": [1577836800000000, 1], "value": 2.0 },
+    { "dims": [1577840400000000, 0], "value": 3.0 },
+    { "dims": [1577840400000000, 1], "value": 4.0 }
+  ],
+  "expected": {
+    "tier": "Array",
+    "axes": [
+      {
+        "length": 2,
+        "body": {
+          "type": "DatetimeParametric",
+          "start_ts": 1577836800000000,
+          "step": { "months": 0, "micros": 3600000000 }
+        }
+      },
+      { "length": 2, "body": { "type": "IntegerParametric", "start": 0, "step": 1 } }
+    ],
+    "shape": { "Array": [1.0, 2.0, 3.0, 4.0] }
+  }
+}

@@ -7,8 +7,10 @@ reproduce `expected_canonical_hex` and `expected_hash_u64` byte-for-byte for
 each vector. The authoritative runner is
 `crates/spinal-db-core/tests/encoding_vectors.rs`.
 
-Value encodings (spec §9) are **not** covered here — they are deferred behind
-OPEN-7 (value-equality semantics, pending sign-off).
+Value encodings (spec §9) are **not** covered here — they live in
+`conformance/value_vectors/` (OPEN-7 resolved 2026-08-17; runner
+`crates/spinal-db-core/tests/value_vectors.rs`, oracle
+`conformance/oracle/encode_value.py`).
 
 ## Vector schema
 

@@ -1,0 +1,32 @@
+{
+  "description": "rank-1 float over a label dim; ordinals come from the caller domain (non-contiguous: 0,2,3), pos assigned in ascending-ordinal order",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Label" }
+  ],
+  "domains": [
+    { "position": 1, "labels": ["winter", "spring", "summer", "autumn"] }
+  ],
+  "rows": [
+    { "dims": ["summer"], "value": 5.0 },
+    { "dims": ["winter"], "value": 1.0 },
+    { "dims": ["autumn"], "value": 9.0 }
+  ],
+  "expected": {
+    "tier": "Array",
+    "axes": [
+      {
+        "length": 3,
+        "body": {
+          "type": "Label",
+          "positions": [
+            { "ordinal": 0, "label": "winter" },
+            { "ordinal": 2, "label": "summer" },
+            { "ordinal": 3, "label": "autumn" }
+          ]
+        }
+      }
+    ],
+    "shape": { "Array": [1.0, 5.0, 9.0] }
+  }
+}

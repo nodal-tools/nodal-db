@@ -611,28 +611,51 @@ governs (a) the `pipeline_cases` conformance vectors, (b) cross-writer value
 equality and history diffs (VMP Part 3), and (c) any future value-level
 content-hash column — all of which must be freeze-safe from day one.
 
-9.3. **Structure.** The canonical byte string of a single canonicalized value
-is the concatenation:
+9.3. **Structure (OPEN-7 [resolved]).** OPEN-7 was closed by jkiviluo
+(2026-08-17): the value encoding folds in the **identity key and the
+position/shape context**, not the measure alone (see §9.6). The canonical byte
+string of a single canonicalized value is the concatenation:
 
-1. **`value_kind` tag** — string (§3.4, NFC, `u32`-length-prefixed,
+1. **Key block** (OPEN-7) — the identity triple, three `i64` little-endian
+   fields in this order: `entity_id`, `parameter_definition_id`,
+   `alternative_id`. Identical measures under different keys therefore encode
+   differently (§9.6).
+2. **`value_kind` tag** — string (§3.4, NFC, `u32`-length-prefixed,
    case-sensitive §3.4.3); the open tag from `value_scalar.value_kind` etc.
    (`'float'|'int'|'bool'|'string'|'date_time'|'duration'|…`). Note the
    `date_time` spelling (underscore) is the **value_kind** tag, distinct from
-   the `datetime` **axis-kind** tag (§5.1.2 footgun).
-2. **Component block** — a **`u8` component-count prefix** `k` = the number of
-   **populated** component columns (H2), then `k` entries, one per populated
-   component, in **ascending component-slot order**, present-only (identical
-   mechanism to the axis property block, §6.3):
-   - component-slot id as `u8`, then
-   - the component's value encoded by its physical type (below).
+   the `datetime` **axis-kind** tag (§5.1.2 footgun). For a Tier-A array the tag
+   is `float` (the Tier-A rule is float-valued).
+3. **Shape block** (OPEN-7) — a **`u8` rank** (the number of axes; `0` for a
+   rank-0 scalar), then that many **axis content hashes** (`u64` little-endian
+   each, spec §2), in declared-dimension order. This is the position/shape
+   context: the value is bound to the exact axis objects it indexes. A scalar
+   emits rank `0` and no hashes.
+4. **Measure block** — per tier:
+   - **scalar**: one **component block** (below) carrying the slot-1 measure;
+   - **array** (Tier A): one **component block** whose slot-1 bytes are a `u32`
+     element-count prefix then each canonical DOUBLE, row-major flattened in
+     declared-dimension order (§9.5). Positions are implicit (dense Cartesian)
+     and pinned by the axis hashes + row-major order;
+   - **long** (Tier L): a `u32` **cell count**, then per cell — in canonical
+     row-major order — the **positions** (`i32` little-endian per axis, declared
+     order) followed by a **component block** of that cell's measure. The
+     per-cell positions are the folded-in position context (OPEN-7).
 
-   The count prefix makes the component block self-delimiting for the same
-   injectivity reason as the property block (§6.3.1): the primary measure can
-   itself be variable-length (`v_str`, or an array payload), so without a count
-   the boundary after the last component is not pinned. Today `k = 1` for every
-   value (slot 1 only); it rises to `2` only when a slot-2 component is actually
-   populated — leaving every existing single-component value's bytes (and any
-   future hash) unchanged, exactly the §8 rehash-stable rule applied to values.
+A **component block** is a **`u8` component-count prefix** `k` = the number of
+**populated** component columns (H2), then `k` entries, one per populated
+component, in **ascending component-slot order**, present-only (identical
+mechanism to the axis property block, §6.3):
+- component-slot id as `u8`, then
+- the component's value encoded by its physical type (§9.5).
+
+The count prefix makes the component block self-delimiting for the same
+injectivity reason as the property block (§6.3.1): the primary measure can
+itself be variable-length (`v_str`, or an array payload), so without a count
+the boundary after the last component is not pinned. Today `k = 1` for every
+value (slot 1 only); it rises to `2` only when a slot-2 component is actually
+populated — leaving every existing single-component value's bytes (and any
+future hash) unchanged, exactly the §8 rehash-stable rule applied to values.
 
 9.4. **Component slots** are append-only:
 
@@ -664,11 +687,19 @@ step 1) is what makes an absent component contribute nothing.
   (exactly one populated) is a writer invariant (`050_values.sql`); whichever
   is populated is the slot-1 component.
 
-9.6. The value encoding does **not** encode the axis identities or index
-positions of a long/array value — those are the axis objects' concern (§4) and
-the row key's concern. The value encoding is strictly the *measure content*,
-so identical measures under different keys encode identically (the property the
-component-wise rule protects).
+9.6. **Value equality = key + shape + measure (OPEN-7 [resolved]).** jkiviluo
+(2026-08-17) closed OPEN-7 **against** the measure-only reading: the value
+encoding **does** fold in the identity key (§9.3 step 1) and the position/shape
+context — axis content hashes (§9.3 step 3) and, for the long tier, per-cell
+positions (§9.3 step 4). Two values are "equal" iff they share key, shape, and
+measure. Rationale (recorded in `specs/rust_impl_session_decisions.md`): the
+conservative, collision-avoiding default; the only thing given up is a future
+cross-key value-dedup, which is not a use case. The component-wise /
+populated-columns-only rule (§9.1, §9.4) still applies **orthogonally** to the
+measure block, so a future second component slot never rehashes an existing
+value. (The array and long tiers already carry position/shape inherently via
+the axis hashes and per-cell positions; this decision additionally binds in the
+entity/parameter/alternative key.)
 
 **OPEN-6 [resolved — keep].** The array-payload `u32` element-count prefix is
 **kept**, and this is now load-bearing, not a nicety. Once a **second component
@@ -680,17 +711,14 @@ non-injective and two different values can collide. The count makes each array
 payload self-delimiting (and makes an axis-product/length mismatch a byte
 mismatch). It is required for injectivity, so it stays.
 
-⚠️ **OPEN-7 [still open — needs jkiviluo's sign-off].** Whether a *scalar/long*
-(and array) value encoding should carry the axis/key context is a genuine design
-choice, **left explicitly open**. As written (§9.6), the value encoding is
-**measure-content only**: identical measures under different keys/shapes encode
-identically, and shape/key equality is decided separately by the axis objects
-(§4) and the row key. The critique's lean is to **resolve it as written**
-(measure equality is the useful cross-writer/history-diff notion, and dragging
-key context into value bytes would defeat the very de-duplication the
-component-wise rule protects) — but because this determines what "two values are
-equal" *means* for history diffs and any future value-level content hash, it is
-flagged for Juha's explicit confirmation rather than silently closed.
+**OPEN-7 [resolved — jkiviluo, 2026-08-17].** The value encoding carries the
+axis/key context. The measure-only alternative was **rejected**: the value
+encoding folds in the identity key (§9.3 step 1) and the position/shape (axis
+content hashes + per-cell long positions, §9.3 steps 3-4), with the measure
+still encoded component-wise / populated-columns-only (§9.4). "Two values are
+equal" therefore means same key, same shape, same measure — the conservative,
+collision-avoiding notion — for history diffs and any future value-level content
+hash. See §9.6 and `specs/rust_impl_session_decisions.md`.
 
 ---
 
@@ -834,8 +862,8 @@ self-delimiting (§6.3.1, §9.4 — the false-merge regression, H2).
 ## Open points for review
 
 Following the adversarial critique (H1–H3, M1–M6), OPEN-1 through OPEN-6 are
-**resolved in-text** as noted below; only **OPEN-7** still needs Juha's
-sign-off, and the H3 FMA probe result is recorded.
+**resolved in-text** as noted below; **OPEN-7 is now resolved** (jkiviluo,
+2026-08-17), and the H3 FMA probe result is recorded.
 
 - **OPEN-1 [resolved] (§3.1.2):** widths pinned — `i32` for signed value fields
   (`length`, `ordinal`, `p_step_months`); `u32` for every length/count prefix;
@@ -854,12 +882,12 @@ sign-off, and the H3 FMA probe result is recorded.
 - **OPEN-6 [resolved — keep] (§9.5):** array element-count prefix kept; now
   justified as **required for injectivity** once a second component slot exists
   (not merely a nicety).
-- **⚠️ OPEN-7 [STILL OPEN — needs Juha] (§9.6):** value encoding is
-  measure-content only (no axis/key context); value equality = measure equality,
-  shape/key equality decided separately. The critique's lean is to **resolve as
-  written**, but this defines what "equal value" means for history diffs and any
-  future value-level hash, so it is left for explicit sign-off rather than
-  silently closed.
+- **OPEN-7 [resolved — jkiviluo, 2026-08-17] (§9.3, §9.6):** the value encoding
+  folds in the identity **key** and the position/**shape** (axis content hashes +
+  per-cell long positions), with the measure still component-wise /
+  populated-columns-only. Value equality = same key + shape + measure — the
+  conservative, collision-avoiding notion. The measure-only alternative was
+  rejected.
 
 **H3 FMA probe result (recorded, §10.2 [verified]):** DuckDB 1.4.4 does **not**
 contract `p_start_dbl + p_step_dbl * pos` to a fused multiply-add — it returns

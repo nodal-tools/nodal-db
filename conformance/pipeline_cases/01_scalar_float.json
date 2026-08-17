@@ -1,0 +1,13 @@
+{
+  "description": "rank-0 scalar float -> Tier Scalar",
+  "value_kind": "Float",
+  "declared": [],
+  "rows": [
+    { "dims": [], "value": 3.5 }
+  ],
+  "expected": {
+    "tier": "Scalar",
+    "axes": [],
+    "shape": { "Scalar": { "Float": 3.5 } }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "description": "scalar string value; variable-length measure made self-delimiting by the component-count prefix (spec §9.3)",
+  "key": { "entity_id": 5, "parameter_definition_id": 6, "alternative_id": 7 },
+  "content": { "type": "Scalar", "value": { "Str": "peak" } },
+  "expected_canonical_hex": "05000000000000000600000000000000070000000000000006000000737472696e67000101040000007065616b",
+  "expected_hash_u64": 5256284573664032421
+}

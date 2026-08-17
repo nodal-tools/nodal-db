@@ -13,6 +13,8 @@
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::types::{ScalarValue, ValueKey, ValueKind};
+
 /// Micros per day; the fixed conversion for the day-vs-micros split (spec §3.5).
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 
@@ -371,6 +373,17 @@ pub fn datetime_reproduces(start_ts: i64, step: &Duration, coords: &[i64]) -> bo
         .all(|(pos, &c)| datetime_coord(start_ts, step, pos as i64) == Some(c))
 }
 
+/// Civil `(year, month, day)` of a µs-since-epoch timestamp. Exposed for
+/// canon's datetime step *proposal* (canon owns step derivation; this module
+/// owns the clamp/reproduce verification, spec §7.1.2) so the two share one
+/// civil-calendar implementation — no second calendar to drift (CLAUDE.md
+/// invariant 2). A wrong proposal is harmless: `datetime_reproduces` rejects it
+/// and the axis materializes, so this only affects completeness, never
+/// correctness.
+pub fn ymd_from_micros(ts_micros: i64) -> (i64, u32, u32) {
+    civil_from_days(ts_micros.div_euclid(MICROS_PER_DAY))
+}
+
 /// Integer regularity (spec §7.1.2.3): seed `start = c[0]`, `step = c[1]-c[0]`,
 /// and verify `start + step*pos` reproduces every coordinate under checked i64
 /// arithmetic. `Some(step)` ⇒ store parametric; `None` ⇒ materialize.
@@ -413,7 +426,178 @@ pub fn float_regular_step(coords: &[f64]) -> Option<f64> {
     Some(step)
 }
 
-// deferred: OPEN-7 — the VALUE component-wise encoding (spec §9) is NOT
-// implemented here. It hinges on the value-equality semantics still awaiting
-// jkiviluo's sign-off (spec §9.6 / OPEN-7). No value-encoding logic exists in
-// this module by design; it lands once OPEN-7 is resolved.
+// ---------------------------------------------------------------------------
+// Value canonical encoding (spec §9), OPEN-7 resolution.
+//
+// jkiviluo (2026-08-17) closed OPEN-7: the value encoding INCLUDES full
+// context — the identity KEY (entity/parameter/alternative) and the
+// position/shape (axis content hashes + per-cell positions) — NOT measure-only.
+// The measure itself is still encoded component-wise / populated-columns-only
+// (D-5, spec §9.4): a future second component slot (e.g. `v_imag`) is emitted
+// only when populated, so it never rehashes an existing value.
+// ---------------------------------------------------------------------------
+
+/// The shaped content of a single canonicalized value, feeding the value
+/// encoding (spec §9). Built by `canon` from a `CanonicalValue`; the borrow
+/// keeps the axis-hash / cell buffers owned by the caller.
+pub enum ValueContent<'a> {
+    /// Rank-0 scalar: no axes, no positions.
+    Scalar(&'a ScalarValue),
+    /// Tier A dense float array: shape given by the axis content hashes, payload
+    /// row-major flattened (spec §9.5). Float-only, matching the Tier-A rule.
+    Array {
+        axis_hashes: &'a [u64],
+        values: &'a [f64],
+    },
+    /// Tier L rank>=1: per-cell positions + measure, in canonical row order.
+    Long {
+        value_kind: ValueKind,
+        axis_hashes: &'a [u64],
+        cells: &'a [(Vec<i32>, ScalarValue)],
+    },
+}
+
+/// A `u8` component-count prefix then `k` present-only entries, each a `u8`
+/// slot-id followed by the component's bytes (spec §9.3, mirroring the §6.3
+/// property block). Today `k == 1` (slot 1, the primary measure); a future
+/// populated slot 2 raises the count only on values that carry it, leaving every
+/// existing single-component value's bytes unchanged (spec §9.4 / §8).
+fn push_component_block(out: &mut Vec<u8>, components: &[(u8, Vec<u8>)]) {
+    out.push(components.len() as u8);
+    for (slot, bytes) in components {
+        out.push(*slot);
+        out.extend_from_slice(bytes);
+    }
+}
+
+/// Rank byte then each axis content hash (`u64` LE) — the value's shape/identity
+/// context (spec §9, OPEN-7). Scalars carry rank 0 and no hashes.
+fn push_shape(out: &mut Vec<u8>, axis_hashes: &[u64]) {
+    out.push(axis_hashes.len() as u8);
+    for h in axis_hashes {
+        out.extend_from_slice(&h.to_le_bytes());
+    }
+}
+
+/// Encode a scalar measure by its physical type (spec §9.5). Returns the
+/// slot-1 component bytes.
+fn encode_measure(m: &ScalarValue) -> Result<Vec<u8>, EncodeError> {
+    let mut b = Vec::new();
+    match m {
+        ScalarValue::Float(x) => push_double(&mut b, *x)?,
+        ScalarValue::Int(n) => b.extend_from_slice(&n.to_le_bytes()),
+        ScalarValue::Bool(v) => b.push(if *v { 0x01 } else { 0x00 }),
+        ScalarValue::Str(s) => push_string(&mut b, s),
+        ScalarValue::DateTime(ts) => b.extend_from_slice(&ts.to_le_bytes()),
+        ScalarValue::Duration { months, micros } => {
+            b.extend_from_slice(&months.to_le_bytes());
+            b.extend_from_slice(&micros.to_le_bytes());
+        }
+    }
+    Ok(b)
+}
+
+/// The canonical byte string of a single value (spec §9, OPEN-7). Layout:
+///   1. key: entity_id, parameter_definition_id, alternative_id (`i64` LE each);
+///   2. `value_kind` tag (string, §3.4);
+///   3. shape: rank `u8` + axis content hashes (`u64` LE each), §9 OPEN-7;
+///   4. measure block, per tier:
+///      - scalar: one component block (slot 1) of the measure;
+///      - array:  one component block whose slot-1 bytes are a `u32` element
+///        count then each canonical DOUBLE, row-major (§9.5);
+///      - long:   a `u32` cell count, then per cell the positions (`i32` LE per
+///        axis) + a component block of the cell measure.
+/// Errors only on a NaN measure (§3.3.1).
+pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, EncodeError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&key.entity_id.to_le_bytes());
+    out.extend_from_slice(&key.parameter_definition_id.to_le_bytes());
+    out.extend_from_slice(&key.alternative_id.to_le_bytes());
+
+    match content {
+        ValueContent::Scalar(m) => {
+            push_string(&mut out, m.kind().tag());
+            push_shape(&mut out, &[]);
+            push_component_block(&mut out, &[(1u8, encode_measure(m)?)]);
+        }
+        ValueContent::Array {
+            axis_hashes,
+            values,
+        } => {
+            push_string(&mut out, ValueKind::Float.tag());
+            push_shape(&mut out, axis_hashes);
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for x in *values {
+                push_double(&mut payload, *x)?;
+            }
+            push_component_block(&mut out, &[(1u8, payload)]);
+        }
+        ValueContent::Long {
+            value_kind,
+            axis_hashes,
+            cells,
+        } => {
+            push_string(&mut out, value_kind.tag());
+            push_shape(&mut out, axis_hashes);
+            out.extend_from_slice(&(cells.len() as u32).to_le_bytes());
+            for (positions, m) in *cells {
+                for p in positions {
+                    out.extend_from_slice(&p.to_le_bytes());
+                }
+                push_component_block(&mut out, &[(1u8, encode_measure(m)?)]);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Convenience: encode then hash a value (spec §2 over §9 bytes).
+pub fn hash_value(key: &ValueKey, content: &ValueContent) -> Result<u64, EncodeError> {
+    Ok(content_hash(&encode_value(key, content)?))
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn component_block_slot2_is_rehash_stable() {
+        // A value with only slot 1 populated encodes with count = 1. Opening a
+        // future slot-2 door (a `v_imag` component) appends bytes ONLY on values
+        // that populate it, so a slot-1-only value's bytes are byte-identical
+        // before and after the door exists (spec §9.4 / §8). This is the exact
+        // freeze-safety guarantee the count prefix buys.
+        let measure = vec![0xAA, 0xBB];
+
+        let mut only_slot1 = Vec::new();
+        push_component_block(&mut only_slot1, &[(1, measure.clone())]);
+        assert_eq!(only_slot1, [1u8, 1u8, 0xAA, 0xBB]);
+
+        // A value that DOES populate slot 2 is a different (count = 2) encoding —
+        // correctly distinct content, never a silent rehash of the slot-1 value.
+        let mut both = Vec::new();
+        push_component_block(&mut both, &[(1, measure), (2, vec![0xCC])]);
+        assert_eq!(both, [2u8, 1u8, 0xAA, 0xBB, 2u8, 0xCC]);
+        assert!(both.starts_with(&[]) && both != only_slot1);
+    }
+
+    #[test]
+    fn scalar_value_folds_in_key() {
+        // OPEN-7: identical measures under different keys encode differently.
+        let m = ScalarValue::Float(1.5);
+        let k1 = ValueKey {
+            entity_id: 1,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        let k2 = ValueKey {
+            entity_id: 9,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        let a = encode_value(&k1, &ValueContent::Scalar(&m)).unwrap();
+        let b = encode_value(&k2, &ValueContent::Scalar(&m)).unwrap();
+        assert_ne!(a, b, "value encoding MUST fold in the identity key (OPEN-7)");
+    }
+}

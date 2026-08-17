@@ -1,0 +1,26 @@
+{
+  "description": "rank-1 float over a regular hourly datetime grid -> Tier Array with a PARAMETRIC datetime axis (micros step)",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Datetime" }
+  ],
+  "rows": [
+    { "dims": [1577836800000000], "value": 10.0 },
+    { "dims": [1577840400000000], "value": 20.0 },
+    { "dims": [1577844000000000], "value": 30.0 }
+  ],
+  "expected": {
+    "tier": "Array",
+    "axes": [
+      {
+        "length": 3,
+        "body": {
+          "type": "DatetimeParametric",
+          "start_ts": 1577836800000000,
+          "step": { "months": 0, "micros": 3600000000 }
+        }
+      }
+    ],
+    "shape": { "Array": [10.0, 20.0, 30.0] }
+  }
+}

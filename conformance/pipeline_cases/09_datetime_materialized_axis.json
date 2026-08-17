@@ -1,0 +1,25 @@
+{
+  "description": "rank-1 float over an IRREGULAR datetime grid (0h,1h,3h): no single (months,micros) step reproduces it, so the axis MATERIALIZES",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Datetime" }
+  ],
+  "rows": [
+    { "dims": [1577836800000000], "value": 10.0 },
+    { "dims": [1577840400000000], "value": 20.0 },
+    { "dims": [1577847600000000], "value": 30.0 }
+  ],
+  "expected": {
+    "tier": "Array",
+    "axes": [
+      {
+        "length": 3,
+        "body": {
+          "type": "DatetimeMaterialized",
+          "coords": [1577836800000000, 1577840400000000, 1577847600000000]
+        }
+      }
+    ],
+    "shape": { "Array": [10.0, 20.0, 30.0] }
+  }
+}

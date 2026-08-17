@@ -1,0 +1,34 @@
+{
+  "description": "tier-boundary B: the case-07 grid with ONE cell (t1,1) removed -> the tuple set is no longer Cartesian, so it flips Array->Long over the SAME derived axes",
+  "value_kind": "Float",
+  "declared": [
+    { "position": 1, "kind": "Datetime" },
+    { "position": 2, "kind": "Integer" }
+  ],
+  "rows": [
+    { "dims": [1577836800000000, 0], "value": 1.0 },
+    { "dims": [1577836800000000, 1], "value": 2.0 },
+    { "dims": [1577840400000000, 0], "value": 3.0 }
+  ],
+  "expected": {
+    "tier": "Long",
+    "axes": [
+      {
+        "length": 2,
+        "body": {
+          "type": "DatetimeParametric",
+          "start_ts": 1577836800000000,
+          "step": { "months": 0, "micros": 3600000000 }
+        }
+      },
+      { "length": 2, "body": { "type": "IntegerParametric", "start": 0, "step": 1 } }
+    ],
+    "shape": {
+      "Long": [
+        { "positions": [0, 0], "value": { "Float": 1.0 } },
+        { "positions": [0, 1], "value": { "Float": 2.0 } },
+        { "positions": [1, 0], "value": { "Float": 3.0 } }
+      ]
+    }
+  }
+}

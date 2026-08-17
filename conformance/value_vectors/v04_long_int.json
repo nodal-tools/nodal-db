@@ -1,0 +1,15 @@
+{
+  "description": "Tier-L rank-2 int-valued value; per-cell positions (OPEN-7) + component block, cells in canonical row order",
+  "key": { "entity_id": 10, "parameter_definition_id": 20, "alternative_id": 30 },
+  "content": {
+    "type": "Long",
+    "value_kind": "Int",
+    "axis_hashes": [16820818339860931418, 2970426163089183614],
+    "cells": [
+      { "positions": [0, 0], "value": { "Int": 7 } },
+      { "positions": [1, 0], "value": { "Int": 8 } }
+    ]
+  },
+  "expected_canonical_hex": "0a0000000000000014000000000000001e0000000000000003000000696e74025a63c9da288d6fe97e13757adb12392902000000000000000000000001010700000000000000010000000000000001010800000000000000",
+  "expected_hash_u64": 12211385446512873807
+}

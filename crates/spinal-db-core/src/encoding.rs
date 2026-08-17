@@ -182,6 +182,11 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             out.extend_from_slice(&step.micros.to_le_bytes());
         }
         AxisBody::DatetimeMaterialized { coords } => {
+            debug_assert_eq!(
+                axis.length as usize,
+                coords.len(),
+                "length must equal materialized coord count (spec §5.3)"
+            );
             for ts in coords {
                 out.extend_from_slice(&ts.to_le_bytes());
             }
@@ -191,6 +196,11 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             out.extend_from_slice(&step.to_le_bytes());
         }
         AxisBody::IntegerMaterialized { coords } => {
+            debug_assert_eq!(
+                axis.length as usize,
+                coords.len(),
+                "length must equal materialized coord count (spec §5.3)"
+            );
             for n in coords {
                 out.extend_from_slice(&n.to_le_bytes());
             }
@@ -200,17 +210,32 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             push_double(&mut out, *step)?;
         }
         AxisBody::FloatMaterialized { coords } => {
+            debug_assert_eq!(
+                axis.length as usize,
+                coords.len(),
+                "length must equal materialized coord count (spec §5.3)"
+            );
             for c in coords {
                 push_double(&mut out, *c)?;
             }
         }
         AxisBody::Label { positions } => {
+            debug_assert_eq!(
+                axis.length as usize,
+                positions.len(),
+                "length must equal position count (spec §5.3)"
+            );
             for p in positions {
                 out.extend_from_slice(&p.ordinal.to_le_bytes());
                 push_string(&mut out, &p.label);
             }
         }
         AxisBody::Period { positions } => {
+            debug_assert_eq!(
+                axis.length as usize,
+                positions.len(),
+                "length must equal position count (spec §5.3)"
+            );
             for p in positions {
                 out.extend_from_slice(&p.start_ts.to_le_bytes());
                 out.extend_from_slice(&p.end_ts.to_le_bytes());
@@ -224,6 +249,11 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             }
         }
         AxisBody::TimePattern { positions } => {
+            debug_assert_eq!(
+                axis.length as usize,
+                positions.len(),
+                "length must equal position count (spec §5.3)"
+            );
             for p in positions {
                 out.extend_from_slice(&p.ordinal.to_le_bytes());
                 out.extend_from_slice(&(p.terms.len() as u32).to_le_bytes());

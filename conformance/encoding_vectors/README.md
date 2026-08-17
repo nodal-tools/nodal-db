@@ -64,15 +64,21 @@ An optional store-decision assertion checked by the reproduce helpers, tagged by
 reconstruction (so the axis MUST be stored parametric); `false` asserts they do
 not (MUST be materialized).
 
-## Regenerating
+## The goldens are authoritative — no in-test regeneration
 
-`expected_canonical_hex` / `expected_hash_u64` are produced by the reference
-encoder. To refresh them after an intentional spec change, run the runner with
-`REGEN=1`:
+`expected_canonical_hex` / `expected_hash_u64` are **fixed literals**, not
+values the test can rewrite. The runner (`encoding_vectors.rs`) only ever
+*asserts* the encoder reproduces them; there is deliberately **no `REGEN`
+path**, because a self-regenerating oracle would let a spec-divergent encoder
+edit stay green (it would just overwrite its own goldens). Two independent
+implementations must agree on these bytes:
 
-```
-REGEN=1 cargo test -p spinal-db-core --test encoding_vectors
-```
+- `crates/spinal-db-core/tests/encoding_vectors.rs` — the Rust encoder;
+- `conformance/oracle/encode_axis.py` — an independent Python re-encoder that
+  re-derives the same bytes and XXH3-64 hash from the spec, sharing no code with
+  Rust (run in CI by `crates/spinal-db-core/tests/python_oracle.rs`).
 
-This rewrites the `expected_*` fields in place. Review the diff against the spec
-before committing — a change here is a rehash-class event (spec §2.4).
+Changing a golden is a **rehash-class event** (spec §2.4): edit the JSON by hand
+against the spec, then confirm BOTH the Rust runner and the Python oracle agree
+on the new value. Never machine-overwrite these fields from the encoder under
+test.

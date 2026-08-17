@@ -5,8 +5,13 @@
 //! parametric-first store decisions (`regularity`), the NaN-reject vector, and
 //! that the NON-DEDUP property family hashes are pairwise distinct (spec §6).
 //!
-//! Regenerate the expected values after an intentional spec change with
-//! `REGEN=1 cargo test -p spinal-db-core --test encoding_vectors`.
+//! The committed `expected_canonical_hex` / `expected_hash_u64` in each vector
+//! are **authoritative literals**: this runner asserts the encoder reproduces
+//! them and NEVER rewrites them. There is deliberately no in-test regeneration
+//! path — a spec-divergent edit that also "regenerated" the goldens would stay
+//! green, defeating the oracle. Goldens change only by a human editing the JSON
+//! (a rehash-class event, spec §2.4), cross-checked by the independent Python
+//! oracle (`conformance/oracle/encode_axis.py`, run by `python_oracle.rs`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -76,7 +81,6 @@ fn to_hex(bytes: &[u8]) -> String {
 
 #[test]
 fn encoding_vectors_match() {
-    let regen = std::env::var("REGEN").is_ok();
     let mut dedup_group: BTreeMap<String, u64> = BTreeMap::new();
     let mut checked = 0usize;
 
@@ -138,32 +142,23 @@ fn encoding_vectors_match() {
             dedup_group.insert(name.clone(), hash);
         }
 
-        if regen {
-            let mut val: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            val["expected_canonical_hex"] = serde_json::Value::String(got_hex);
-            val["expected_hash_u64"] = serde_json::Value::Number(hash.into());
-            let mut out = serde_json::to_string_pretty(&val).unwrap();
-            out.push('\n');
-            fs::write(&path, out).unwrap();
-        } else {
-            let want_hex = vector
-                .expected_canonical_hex
-                .as_deref()
-                .unwrap_or_else(|| panic!("{name}: no expected_canonical_hex (run REGEN=1)"));
-            assert_eq!(
-                got_hex, want_hex,
-                "{name}: canonical bytes mismatch ({})",
-                vector.description
-            );
-            let want_hash = vector
-                .expected_hash_u64
-                .unwrap_or_else(|| panic!("{name}: no expected_hash_u64 (run REGEN=1)"));
-            assert_eq!(
-                hash, want_hash,
-                "{name}: content hash mismatch ({})",
-                vector.description
-            );
-        }
+        // Goldens are authoritative literals; assert, never rewrite.
+        let want_hex = vector.expected_canonical_hex.as_deref().unwrap_or_else(|| {
+            panic!("{name}: committed vector is missing expected_canonical_hex")
+        });
+        assert_eq!(
+            got_hex, want_hex,
+            "{name}: canonical bytes mismatch ({})",
+            vector.description
+        );
+        let want_hash = vector
+            .expected_hash_u64
+            .unwrap_or_else(|| panic!("{name}: committed vector is missing expected_hash_u64"));
+        assert_eq!(
+            hash, want_hash,
+            "{name}: content hash mismatch ({})",
+            vector.description
+        );
         checked += 1;
     }
 
@@ -184,9 +179,7 @@ fn encoding_vectors_match() {
         hashes.len()
     );
 
-    if !regen {
-        assert!(checked >= 18, "expected >=18 vectors, got {checked}");
-    }
+    assert!(checked >= 18, "expected >=18 vectors, got {checked}");
     println!(
         "encoding vectors: {checked} checked, {} in NON-DEDUP GROUP",
         hashes.len()

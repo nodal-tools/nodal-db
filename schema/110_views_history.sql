@@ -97,6 +97,14 @@ CREATE MACRO parameter_type_dimension_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_t, cur_p) FROM parameter_type_dimension
 WHERE valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+CREATE MACRO display_mode_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_id, cur_name) FROM display_mode
+WHERE valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
+CREATE MACRO entity_class_display_mode_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_dm, cur_ec) FROM entity_class_display_mode
+WHERE valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
 -- value tiers as of commit c
 CREATE MACRO value_scalar_asof(c) AS TABLE
 SELECT * EXCLUDE (ce, cp, ca) FROM value_scalar

@@ -21,6 +21,8 @@ CREATE SEQUENCE seq_parameter_definition;
 CREATE SEQUENCE seq_parameter_type;
 CREATE SEQUENCE seq_axis;
 CREATE SEQUENCE seq_axis_label;
+CREATE SEQUENCE seq_display_mode;
+-- (no seq for entity_class_display_mode: composite-keyed link table)
 
 -- The commit table (SDP Part 1 `commit`): append-only and immutable — the one
 -- exception to the mutable-table from/to pattern. max(id) doubles as the

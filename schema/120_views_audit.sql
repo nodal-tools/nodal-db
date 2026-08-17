@@ -164,7 +164,20 @@ SELECT 'definition_value', 'pd=' || parameter_definition_id || ',' || slot, 'par
 FROM (SELECT parameter_definition_id, slot FROM definition_value_scalar WHERE valid_to_commit IS NULL
       UNION ALL SELECT parameter_definition_id, slot FROM definition_value_long WHERE valid_to_commit IS NULL
       UNION ALL SELECT parameter_definition_id, slot FROM definition_value_array WHERE valid_to_commit IS NULL)
-WHERE parameter_definition_id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL);
+WHERE parameter_definition_id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)
+UNION ALL
+-- entity_class_display_mode FK intent to versioned display_mode / entity_class
+-- (deviation D1; Decision 12): lifecycle is writer-owned — closing out a class
+-- closes out its ecdm rows; a stale row lands here, never hard-blocks.
+SELECT 'entity_class_display_mode', 'mode=' || display_mode_id || ',class=' || entity_class_id,
+       'display_mode', display_mode_id
+FROM entity_class_display_mode WHERE valid_to_commit IS NULL
+  AND display_mode_id NOT IN (SELECT id FROM display_mode WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'entity_class_display_mode', 'mode=' || display_mode_id || ',class=' || entity_class_id,
+       'entity_class', entity_class_id
+FROM entity_class_display_mode WHERE valid_to_commit IS NULL
+  AND entity_class_id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL);
 
 -- Entity-name uniqueness across a class-set's members (#2364, Decision 5 —
 -- cross-table, so a view rather than an index).
@@ -633,6 +646,8 @@ FROM (
     UNION ALL SELECT valid_to_commit FROM definition_value_scalar
     UNION ALL SELECT valid_to_commit FROM definition_value_long
     UNION ALL SELECT valid_to_commit FROM definition_value_array
+    UNION ALL SELECT valid_to_commit FROM display_mode
+    UNION ALL SELECT valid_to_commit FROM entity_class_display_mode
   )
 )
 UNION ALL

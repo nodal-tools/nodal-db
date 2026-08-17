@@ -52,6 +52,10 @@ CREATE VIEW parameter_type_current AS
   SELECT * EXCLUDE (cur_id) FROM parameter_type WHERE valid_to_commit IS NULL;
 CREATE VIEW parameter_type_dimension_current AS
   SELECT * EXCLUDE (cur_t, cur_p) FROM parameter_type_dimension WHERE valid_to_commit IS NULL;
+CREATE VIEW display_mode_current AS
+  SELECT * EXCLUDE (cur_id, cur_name) FROM display_mode WHERE valid_to_commit IS NULL;
+CREATE VIEW entity_class_display_mode_current AS
+  SELECT * EXCLUDE (cur_dm, cur_ec) FROM entity_class_display_mode WHERE valid_to_commit IS NULL;
 
 -- value tiers (VMP Part 5 "Reading history": current = one predicate)
 CREATE VIEW value_scalar_current AS

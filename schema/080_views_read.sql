@@ -252,3 +252,25 @@ JOIN entity e ON e.entity_class_id = pd.entity_class_id AND e.valid_to_commit IS
 LEFT JOIN entity_parameter_unit o
        ON o.entity_id = e.id AND o.parameter_definition_id = pd.id AND o.valid_to_commit IS NULL
 WHERE pd.valid_to_commit IS NULL;
+
+-- Resolved per-mode class presentation (Spine-Toolbox #2492): every current
+-- class gets a row; a class with no entity_class_display_mode row defaults to
+-- visible + its own display_order (greyed-not-hidden means a class is never
+-- dropped from the list). Any interface renders this without tool-specific
+-- knowledge. Views take no parameters, so this is a MACRO (cf. the *_asof
+-- macros / read_parameter).
+CREATE MACRO entity_class_display(mode_name) AS TABLE
+SELECT dm.name                                        AS display_mode,
+       ec.id                                          AS entity_class_id,
+       ec.name                                        AS entity_class,
+       coalesce(ecdm.display_status, 'visible')       AS display_status,
+       coalesce(ecdm.display_order, ec.display_order) AS display_order,
+       ecdm.font_color,
+       ecdm.background_color
+FROM display_mode dm
+CROSS JOIN entity_class ec
+LEFT JOIN entity_class_display_mode ecdm
+  ON ecdm.display_mode_id = dm.id AND ecdm.entity_class_id = ec.id
+  AND ecdm.valid_to_commit IS NULL
+WHERE dm.valid_to_commit IS NULL AND ec.valid_to_commit IS NULL
+  AND dm.cur_name = lower(mode_name);

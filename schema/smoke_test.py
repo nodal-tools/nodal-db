@@ -340,6 +340,14 @@ def main():
                                 [ax_field, ax_p, ax_tier], [f, p, t], "float", "v_float",
                                 float((f + 1) * 1000 + (p + 1) * 10 + (t + 1)),
                                 accels={"i2_dt": p_starts[p], "i3_num": 1 + t})
+
+    # authored display mode (Decision 12): greys one class under 'creator'
+    creator = nextval(con, "seq_display_mode")
+    insert("display_mode", "id, name, valid_from_commit", [creator, "creator", c2])
+    insert("entity_class_display_mode",
+           "display_mode_id, entity_class_id, display_status, display_order,"
+           " font_color, background_color, valid_from_commit",
+           [creator, unit, "greyed_out", 7, "FF0000", "00FF00", c2])
     con.execute("COMMIT")
 
     # ---- checks -----------------------------------------------------------
@@ -494,6 +502,35 @@ def main():
           eff == {"node_a": "MW", "node_b": "tonne", "node_c": "MW"}, str(eff))
     ver = one("SELECT version FROM dataset_version")[0]
     check("dataset_version cookie = last commit id", ver == c3, f"{ver} vs {c3}")
+
+    # ---- display mode (Decision 12): round-trip, uniqueness, FK intent
+    disp = {ec: (st, order, fc, bc) for ec, st, order, fc, bc in allrows(
+        "SELECT entity_class_id, display_status, display_order, font_color, background_color"
+        " FROM entity_class_display('creator')")}
+    check("display mode: greyed class returns status/order/color under creator",
+          disp.get(unit) == ("greyed_out", 7, "FF0000", "00FF00"), str(disp.get(unit)))
+    check("display mode: class with no ecdm row defaults to visible + own display_order",
+          disp.get(node) == ("visible", None, None, None), str(disp.get(node)))
+    try:
+        con.execute("BEGIN")
+        con.execute(
+            "INSERT INTO entity_class_display_mode (display_mode_id, entity_class_id,"
+            " display_status, valid_from_commit, version) VALUES (?, ?, 'hidden', ?, 9)",
+            [creator, unit, c2])
+        con.execute("ROLLBACK")
+        check("one_current_ecdm rejects duplicate current (mode, class) row", False)
+    except duckdb.ConstraintException:
+        con.execute("ROLLBACK")
+        check("one_current_ecdm rejects duplicate current (mode, class) row", True)
+    con.execute("BEGIN")
+    con.execute("INSERT INTO entity_class_display_mode (display_mode_id, entity_class_id,"
+                " display_status, valid_from_commit) VALUES (?, 99999, 'visible', ?)", [creator, c3])
+    con.execute("COMMIT")
+    n = one("SELECT count(*) FROM audit_dangling_ref WHERE src_table = 'entity_class_display_mode'"
+            " AND ref_table = 'entity_class' AND ref_id = 99999")[0]
+    check("display mode: ecdm pointing at missing entity_class fires audit_dangling_ref",
+          n == 1, f"n={n}")
+    con.execute("DELETE FROM entity_class_display_mode WHERE entity_class_id = 99999")
 
     # =======================================================================
     # Hostile-data regression checks: every DDL-critique finding (F1..F10 +

@@ -139,3 +139,32 @@ pub struct WriteReport {
     pub rows: usize,
     pub axes: usize,
 }
+
+/// The full result of one `history::write_value` / `history::delete_value` call
+/// (VMP Part 5). Owned, FFI-friendly; folds into a [`WriteReport`] for callers
+/// that only want the summary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteOutcome {
+    /// The tier now current for the key; `None` after a delete.
+    pub tier: Option<Tier>,
+    /// Version stamped on the new current row(s); `0` after a delete.
+    pub version: u16,
+    /// Rows newly inserted (or, on the array tier, replaced) as current.
+    pub rows_written: usize,
+    /// Rows closed out (from/to tiers) or moved to the `_hist` twin (array).
+    pub rows_closed: usize,
+    /// New `axis` rows inserted while resolving this value's axes.
+    pub axes_created: usize,
+    /// Existing `axis` rows reused (content-verified dedup) for this value.
+    pub axes_reused: usize,
+}
+
+impl From<&WriteOutcome> for WriteReport {
+    fn from(o: &WriteOutcome) -> Self {
+        WriteReport {
+            tier: o.tier,
+            rows: o.rows_written,
+            axes: o.axes_created + o.axes_reused,
+        }
+    }
+}

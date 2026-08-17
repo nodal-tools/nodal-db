@@ -72,6 +72,13 @@ pub fn dedup_or_insert(
     cache: &mut AxisCache,
     axis: &CanonicalAxis,
 ) -> Result<i64, DbError> {
+    // F1 writer-boundary guard (Phase-2b critique): a materialized axis must
+    // carry exactly `length` non-empty child rows. Checked here, at the axis
+    // write boundary and BEFORE `encode_axis` (whose matching assert is
+    // debug-only), so a malformed materialized axis is rejected in RELEASE and
+    // can never be persisted — its child count is the audited round-trip identity.
+    ensure_wellformed(axis)?;
+
     let input_bytes = encode_axis(axis)?;
     let hash = hash_axis(axis)?;
     let kind = axis.kind_tag();
@@ -94,6 +101,33 @@ pub fn dedup_or_insert(
     let new_id = insert_axis(conn, axis, hash)?;
     cache.remember(hash, new_id, axis.clone());
     Ok(new_id)
+}
+
+/// F1 guard: a materialized axis body must have a non-empty child list whose
+/// length equals the declared `length` (parametric forms carry no child rows
+/// and are exempt). Release-mode; the `encode_axis` equivalent is debug-only.
+fn ensure_wellformed(axis: &CanonicalAxis) -> Result<(), DbError> {
+    let children = match &axis.body {
+        AxisBody::DatetimeMaterialized { coords } | AxisBody::IntegerMaterialized { coords } => {
+            coords.len()
+        }
+        AxisBody::FloatMaterialized { coords } => coords.len(),
+        AxisBody::Label { positions } => positions.len(),
+        AxisBody::Period { positions } => positions.len(),
+        AxisBody::TimePattern { positions } => positions.len(),
+        // Parametric forms have no child rows — nothing to validate here.
+        AxisBody::DatetimeParametric { .. }
+        | AxisBody::IntegerParametric { .. }
+        | AxisBody::FloatParametric { .. } => return Ok(()),
+    };
+    if children == 0 || children != axis.length as usize {
+        return Err(DbError::MalformedAxis {
+            kind: axis.kind_tag(),
+            length: axis.length,
+            children,
+        });
+    }
+    Ok(())
 }
 
 /// Candidate `axis.id`s sharing the content hash and kind — the accelerated

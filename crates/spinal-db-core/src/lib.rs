@@ -39,3 +39,7 @@ pub mod conn;
 
 /// Content-verified axis dedup persistence (Phase 2b, VMP Part 4).
 pub mod axis;
+
+/// The history write protocol: from/to close-out, array `_hist` pre-image,
+/// version counter, retention, tier transitions (Phase 3a, VMP Part 5).
+pub mod history;

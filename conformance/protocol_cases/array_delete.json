@@ -1,0 +1,24 @@
+{
+  "name": "array delete (moved to _hist, current row removed)",
+  "key": [13, 23, 33],
+  "steps": [
+    {
+      "op": { "array_float": { "start": 0, "step": 1, "length": 2, "values": [2.0, 4.0] } },
+      "expect": {
+        "array": [
+          { "version": 1, "v_min": 2.0, "v_max": 4.0, "first": 2.0 }
+        ],
+        "array_hist": []
+      }
+    },
+    {
+      "op": "delete",
+      "expect": {
+        "array": [],
+        "array_hist": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "values_present": true, "first": 2.0 }
+        ]
+      }
+    }
+  ]
+}

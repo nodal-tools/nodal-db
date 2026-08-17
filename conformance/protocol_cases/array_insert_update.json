@@ -1,0 +1,26 @@
+{
+  "name": "array insert then update (SQL-side _hist pre-image + replaced current)",
+  "key": [11, 21, 31],
+  "steps": [
+    {
+      "op": { "array_float": { "start": 0, "step": 1, "length": 3, "values": [1.0, 2.0, 3.0] } },
+      "expect": {
+        "array": [
+          { "version": 1, "v_min": 1.0, "v_max": 3.0, "first": 1.0 }
+        ],
+        "array_hist": []
+      }
+    },
+    {
+      "op": { "array_float": { "start": 0, "step": 1, "length": 3, "values": [4.0, 5.0, 6.0] } },
+      "expect": {
+        "array": [
+          { "version": 2, "v_min": 4.0, "v_max": 6.0, "first": 4.0 }
+        ],
+        "array_hist": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "values_present": true, "first": 1.0 }
+        ]
+      }
+    }
+  ]
+}

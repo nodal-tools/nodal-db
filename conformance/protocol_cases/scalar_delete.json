@@ -1,0 +1,22 @@
+{
+  "name": "scalar delete (close-out only, content retained)",
+  "key": [12, 22, 32],
+  "steps": [
+    {
+      "op": { "scalar_float": { "v": 9.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": null, "retained": true, "v_float": 9.0 }
+        ]
+      }
+    },
+    {
+      "op": "delete",
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "v_float": 9.0 }
+        ]
+      }
+    }
+  ]
+}

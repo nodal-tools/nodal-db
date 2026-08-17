@@ -98,6 +98,17 @@ pub fn with_write_txn<T, F>(
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
+    run_txn_once(db_path, user, message, f)
+}
+
+/// One open → BEGIN → `commit` row → closure → COMMIT → close cycle. Shared by
+/// [`with_write_txn`] (once) and [`with_write_txn_retrying`] (per attempt); a
+/// fresh RW connection and a fresh `commit` row are used every call, so a
+/// rolled-back attempt leaves no orphan commit (VMP Part 5).
+fn run_txn_once<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> Result<T, DbError>
+where
+    F: FnOnce(&Connection, i64) -> Result<T, DbError>,
+{
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
     assert_min_version(&conn)?;
 
@@ -109,12 +120,16 @@ where
             duckdb::params![user, message],
             |r| r.get(0),
         )?;
-        f(&conn, commit_id)
+        let value = f(&conn, commit_id)?;
+        // COMMIT is inside the fallible block: DuckDB can raise the write-write
+        // `Conflict` here (not only at the conflicting statement), and the retry
+        // loop must see it.
+        conn.execute_batch("COMMIT")?;
+        Ok(value)
     })();
 
     match result {
         Ok(value) => {
-            conn.execute_batch("COMMIT")?;
             conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
             Ok(value)
         }
@@ -125,6 +140,49 @@ where
             Err(e)
         }
     }
+}
+
+/// Is this a DuckDB write-write conflict (VMP Part 5 retry trigger)? Matched on
+/// the robust `Conflict` substring, not the full phrase: DuckDB 1.5.5 says
+/// `Conflict on tuple deletion!`, 1.4.4 said `Conflict on update!`.
+fn is_conflict(e: &DbError) -> bool {
+    matches!(e, DbError::Duckdb(_)) && e.to_string().contains("Conflict")
+}
+
+/// Bounded retry budget for the write-write conflict loop (VMP Part 5).
+const MAX_CONFLICT_ATTEMPTS: u32 = 5;
+
+/// Like [`with_write_txn`], but re-runs the *whole* closure from scratch on a
+/// write-write conflict (VMP Part 5). Each attempt opens a fresh transaction and
+/// a fresh `commit` row, so the closure re-reads every piece of state it depends
+/// on — current versions, array pre-images, axis lookups — inside the new
+/// transaction; nothing read before the conflict is reused. Hence `F: Fn` (must
+/// be re-runnable), not `FnOnce`. After [`MAX_CONFLICT_ATTEMPTS`] the conflict is
+/// surfaced as [`DbError::Conflict`]; any non-conflict error returns immediately.
+pub fn with_write_txn_retrying<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
+    for attempt in 1..=MAX_CONFLICT_ATTEMPTS {
+        match run_txn_once(db_path, user, message, &f) {
+            Ok(value) => return Ok(value),
+            Err(e) if is_conflict(&e) => {
+                if attempt == MAX_CONFLICT_ATTEMPTS {
+                    return Err(DbError::Conflict {
+                        attempts: MAX_CONFLICT_ATTEMPTS,
+                    });
+                }
+                // Roll back happened in run_txn_once; loop re-executes fresh.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("loop returns on the final attempt")
 }
 
 /// Open a fresh read-only connection, run `f`, and close. Per-operation only —

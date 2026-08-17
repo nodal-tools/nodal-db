@@ -35,6 +35,25 @@ pub enum DbError {
     #[error("axis id {id}: unknown kind {kind:?} in DB row")]
     UnknownAxisKind { id: i64, kind: String },
 
+    /// A materialized axis reached the write boundary with an empty or
+    /// mismatched child list (F1 guard, Phase-2b critique): its declared
+    /// `length` must equal the number of coordinate/position child rows, and
+    /// must be non-zero. A release-mode check so a malformed axis can never be
+    /// persisted (the debug-only `encode_axis` assert is not enough).
+    #[error("malformed materialized axis ({kind}): length {length} != child count {children}")]
+    MalformedAxis {
+        kind: &'static str,
+        length: i32,
+        children: usize,
+    },
+
+    /// The history write protocol exhausted its bounded conflict-retry budget:
+    /// a concurrent writer kept winning the write-write race on the same key
+    /// (DuckDB `TransactionException: Conflict …`). Surfaced to the user, never
+    /// a stack trace (VMP Part 5 retry semantics).
+    #[error("write conflict: transaction still lost the race after {attempts} retries")]
+    Conflict { attempts: u32 },
+
     #[error(transparent)]
     Duckdb(#[from] duckdb::Error),
 

@@ -1,0 +1,36 @@
+{
+  "name": "tier transition scalar -> array (old tier closed, new tier starts at its own v1)",
+  "key": [14, 24, 34],
+  "steps": [
+    {
+      "op": { "scalar_float": { "v": 1.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": null, "retained": true, "v_float": 1.0 }
+        ]
+      }
+    },
+    {
+      "op": { "scalar_float": { "v": 2.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "v_float": 1.0 },
+          { "version": 2, "valid_to_step": null, "retained": true, "v_float": 2.0 }
+        ]
+      }
+    },
+    {
+      "op": { "array_float": { "start": 0, "step": 1, "length": 3, "values": [7.0, 8.0, 9.0] } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "v_float": 1.0 },
+          { "version": 2, "valid_to_step": 3, "retained": true, "v_float": 2.0 }
+        ],
+        "array": [
+          { "version": 1, "v_min": 7.0, "v_max": 9.0, "first": 7.0 }
+        ],
+        "array_hist": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "scalar insert then update (from/to close-out)",
+  "key": [10, 20, 30],
+  "steps": [
+    {
+      "op": { "scalar_float": { "v": 5.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": null, "retained": true, "v_float": 5.0 }
+        ]
+      }
+    },
+    {
+      "op": { "scalar_float": { "v": 7.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "v_float": 5.0 },
+          { "version": 2, "valid_to_step": null, "retained": true, "v_float": 7.0 }
+        ]
+      }
+    }
+  ]
+}

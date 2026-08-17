@@ -8,15 +8,18 @@ resolver = "2"
 # arrow is intentionally NOT listed here — it is consumed only through
 # `duckdb::arrow` so exactly one arrow major is ever in the tree (risk R2).
 [workspace.dependencies]
-duckdb = { version = "1.4", features = ["bundled"] }
-thiserror = "2"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# duckdb-rs versions its crate to encode the bundled DuckDB release; 1.10505.0
+# bundles DuckDB 1.5.5. The bundled DuckDB must stay >= 1.4 (the line the
+# schema was verified on).
+duckdb = { version = "1.10505.0", features = ["bundled"] }
+thiserror = "2.0.20"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 # NFC normalization. Pinned to =0.1.24 because that release's tables are
 # Unicode 16.0.0 — the version spec §3.4.1.1 pins. (0.1.25 bumped to Unicode
 # 17.0.0.) A version bump here is a rehash-class change (spec §2.4).
 unicode-normalization = "=0.1.24"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-tempfile = "3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+clap = { version = "4.6.6", features = ["derive"] }
+anyhow = "1.0.104"
+tempfile = "3.27.0"

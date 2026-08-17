@@ -202,6 +202,19 @@ fn sparse_int_writes_long_tier_and_reads_back() {
 }
 
 #[test]
+fn empty_user_is_rejected_and_empty_message_is_fine() {
+    let (_dir, db) = fresh_db();
+    let opts = WriteOptions::default();
+
+    let err = write_parameter(&db, "node", "demand", "Base", scalar_batch("n", 1.0), &[], opts, "  ", "m")
+        .expect_err("blank user must be rejected");
+    assert!(err.to_string().contains("user"), "unexpected error: {err}");
+
+    write_parameter(&db, "node", "demand", "Base", scalar_batch("n", 1.0), &[], opts, "tool", "")
+        .expect("empty message is allowed");
+}
+
+#[test]
 fn updating_a_scalar_bumps_the_version() {
     let (_dir, db) = fresh_db();
     let opts = WriteOptions::default();

@@ -65,6 +65,11 @@ pub fn write_parameter(
     user: &str,
     message: &str,
 ) -> Result<WriteReport, DbError> {
+    // Every commit must carry a real author; message is the caller's choice
+    // (may be empty) — jkiviluo 2026-08-18.
+    if user.trim().is_empty() {
+        return Err(DbError::Api("user must be non-empty".into()));
+    }
     let ncols = batch.num_columns();
     if ncols < 2 {
         return Err(DbError::Api(format!(

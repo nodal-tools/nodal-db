@@ -19,3 +19,6 @@ venv/
 
 # Local scratch
 *.log
+
+# Local build tmp (custom TMPDIR)
+.cargo-tmp/

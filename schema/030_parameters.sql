@@ -11,6 +11,8 @@ CREATE TABLE units_of_measure (
   name              VARCHAR NOT NULL,
   description       VARCHAR,
   semantic_link     VARCHAR,   -- optional semantic/ontology link — the only structured door held open
+  quantity_kind_link VARCHAR,  -- optional QUDT quantitykind: IRI (e.g. .../Power) — expresses
+                               -- "capacity is a power, not an energy"; cold, inert (fitness 2b/T1.2)
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
   version           SMALLINT NOT NULL DEFAULT 1,
@@ -44,6 +46,8 @@ CREATE TABLE list_value (
   parameter_value_list_id BIGINT NOT NULL,
   ordinal                 INTEGER NOT NULL,
   description             VARCHAR,                 -- #2286
+  semantic_link           VARCHAR,                 -- optional SKOS concept IRI for this member — turns a
+                                                   -- value-list into a controlled codelist; cold, inert (fitness 2b/T1.2)
   -- typed native member value — same scalar kind set as value_scalar
   -- (VMP Part 2); value_kind is the extensible tag (Decision 4: no CHECK
   -- enum so future kinds are additive without migration):

@@ -177,7 +177,49 @@ UNION ALL
 SELECT 'entity_class_display_mode', 'mode=' || display_mode_id || ',class=' || entity_class_id,
        'entity_class', entity_class_id
 FROM entity_class_display_mode WHERE valid_to_commit IS NULL
-  AND entity_class_id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL);
+  AND entity_class_id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL)
+UNION ALL
+-- run FK intent to versioned entity / alternative (deviation D1; Decision 13).
+-- run is append-only so all its rows are "current"; the commit columns are
+-- real FKs enforced at the table, only these two versioned targets fall here.
+SELECT 'run', 'id=' || id, 'entity', tool_entity_id
+FROM run
+  WHERE tool_entity_id NOT IN (SELECT id FROM entity WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'run', 'id=' || id, 'alternative', result_alternative_id
+FROM run
+  WHERE result_alternative_id NOT IN (SELECT id FROM alternative WHERE valid_to_commit IS NULL);
+
+-- semantic_annotation FK intent (deviation D1; fitness 2b): the polymorphic
+-- (object_type, object_id) reference cannot be an engine FK, so each object
+-- type with a clean stable id is checked against its table's current rows. A
+-- dangling term mapping is surfaced, never blocked (express-never-assert).
+-- object_type values with no clean id (e.g. 'class_dimension', keyed via
+-- object_subkey) are validated by writer convention, not here.
+CREATE VIEW audit_dangling_semantic_ref AS
+SELECT 'entity_class' AS object_type, object_id, term_iri
+FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'entity_class'
+  AND object_id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'parameter_definition', object_id, term_iri
+FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'parameter_definition'
+  AND object_id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'entity', object_id, term_iri
+FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'entity'
+  AND object_id NOT IN (SELECT id FROM entity WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'unit', object_id, term_iri
+FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'unit'
+  AND object_id NOT IN (SELECT id FROM units_of_measure WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'parameter_value_list', object_id, term_iri
+FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'parameter_value_list'
+  AND object_id NOT IN (SELECT id FROM parameter_value_list WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'list_value', object_id, term_iri
+FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'list_value'
+  AND object_id NOT IN (SELECT id FROM list_value WHERE valid_to_commit IS NULL);
 
 -- Entity-name uniqueness across a class-set's members (#2364, Decision 5 —
 -- cross-table, so a view rather than an index).
@@ -267,6 +309,7 @@ WITH child_stats AS (
     UNION ALL SELECT axis_id, pos FROM axis_period
     UNION ALL SELECT axis_id, pos FROM axis_label
     UNION ALL SELECT axis_id, pos FROM axis_integer
+    UNION ALL SELECT axis_id, pos FROM axis_float
     UNION ALL SELECT DISTINCT axis_id, pos FROM axis_time_pattern
   )
   GROUP BY axis_id
@@ -281,6 +324,9 @@ nonmono AS (   -- sortable kinds must be strictly increasing (CF rule)
     UNION ALL
     SELECT axis_id, start_ts >= lead(start_ts) OVER (PARTITION BY axis_id ORDER BY pos)
     FROM axis_period
+    UNION ALL
+    SELECT axis_id, coord >= lead(coord) OVER (PARTITION BY axis_id ORDER BY pos)
+    FROM axis_float
   ) WHERE bad
 )
 -- materialized kinds: child rows must exist, count = length, pos tile 0..length-1
@@ -290,6 +336,7 @@ FROM axis a
 LEFT JOIN child_stats cs ON cs.axis_id = a.id
 WHERE ((a.kind = 'datetime' AND a.p_start_ts IS NULL)
     OR (a.kind = 'integer' AND a.p_start_int IS NULL)
+    OR (a.kind = 'float' AND a.p_start_dbl IS NULL)
     OR a.kind IN ('period', 'label', 'time_pattern'))
   AND (coalesce(cs.n, 0) <> a.length OR cs.pmin <> 0
        OR cs.pmax <> a.length - 1 OR cs.ndist <> cs.n)
@@ -307,12 +354,18 @@ SELECT a.id, a.kind, a.length, 'parametric integer axis missing p_step_int'
 FROM axis a
 WHERE a.kind = 'integer' AND a.p_start_int IS NOT NULL AND a.p_step_int IS NULL
 UNION ALL
+SELECT a.id, a.kind, a.length, 'parametric float axis missing/invalid p_step_dbl'
+FROM axis a
+WHERE a.kind = 'float' AND a.p_start_dbl IS NOT NULL
+  AND (a.p_step_dbl IS NULL OR a.p_step_dbl <= 0)   -- <=0 breaks strict-increasing
+UNION ALL
 -- parametric XOR materialized
 SELECT a.id, a.kind, a.length, 'parametric fields and child rows both populated'
 FROM axis a
 JOIN child_stats cs ON cs.axis_id = a.id
 WHERE (a.kind = 'datetime' AND a.p_start_ts IS NOT NULL)
-   OR (a.kind = 'integer' AND a.p_start_int IS NOT NULL);
+   OR (a.kind = 'integer' AND a.p_start_int IS NOT NULL)
+   OR (a.kind = 'float' AND a.p_start_dbl IS NOT NULL);
 
 -- Long-tier positions must fall inside the bound axis (critique F3: an
 -- out-of-range iN_pos previously vanished from every audit and rendered a
@@ -389,23 +442,54 @@ WHERE valid_to_commit IS NULL AND content_retained
           WHEN 'string' THEN v_str IS NOT NULL
           WHEN 'date_time' THEN v_datetime IS NOT NULL
           WHEN 'duration' THEN v_dur_months IS NOT NULL AND v_dur_micros IS NOT NULL
-        END);
+        END)
+UNION ALL
+-- array tier (owner decision H): the populated payload column must agree with
+-- the declared value_kind (values => float, values_int => int). value_array
+-- carries no value_kind of its own — the XOR CHECK guarantees exactly one
+-- payload but cannot check it against the declaration; this branch does.
+SELECT 'value_array', va.entity_id, va.parameter_definition_id, va.alternative_id, pt.value_kind
+FROM value_array va
+JOIN parameter_type pt
+  ON pt.parameter_definition_id = va.parameter_definition_id AND pt.valid_to_commit IS NULL
+WHERE (pt.value_kind = 'float' AND va.values_int IS NOT NULL)
+   OR (pt.value_kind = 'int'   AND va.values     IS NOT NULL);
 
 -- Array-integrity: len(values) = product of axis lengths; no NULL cells
 -- (canonicalization step 1); pruning metadata honest.
 CREATE VIEW audit_array_integrity AS
 SELECT va.entity_id, va.parameter_definition_id, va.alternative_id,
-       len(va.values) AS actual_len,
+       coalesce(len(va.values), len(va.values_int)) AS actual_len,
        (a1.length * coalesce(a2.length, 1) * coalesce(a3.length, 1) * coalesce(a4.length, 1)) AS expected_len
 FROM value_array va
 JOIN axis a1 ON a1.id = va.axis1_id
 LEFT JOIN axis a2 ON a2.id = va.axis2_id
 LEFT JOIN axis a3 ON a3.id = va.axis3_id
 LEFT JOIN axis a4 ON a4.id = va.axis4_id
-WHERE len(va.values) <> (a1.length * coalesce(a2.length, 1) * coalesce(a3.length, 1) * coalesce(a4.length, 1))
-   OR len(list_filter(va.values, x -> x IS NULL)) > 0
-   OR (va.v_min IS NOT NULL AND va.v_min <> list_aggregate(va.values, 'min'))
-   OR (va.v_max IS NOT NULL AND va.v_max <> list_aggregate(va.values, 'max'));
+WHERE coalesce(len(va.values), len(va.values_int)) <> (a1.length * coalesce(a2.length, 1) * coalesce(a3.length, 1) * coalesce(a4.length, 1))
+   OR len(list_filter(coalesce(va.values, []) , x -> x IS NULL)) > 0
+   OR len(list_filter(coalesce(va.values_int, []), x -> x IS NULL)) > 0
+   OR (va.v_min IS NOT NULL AND va.values     IS NOT NULL AND va.v_min <> list_aggregate(va.values, 'min'))
+   OR (va.v_max IS NOT NULL AND va.values     IS NOT NULL AND va.v_max <> list_aggregate(va.values, 'max'))
+   OR (va.v_min IS NOT NULL AND va.values_int IS NOT NULL AND va.v_min <> list_aggregate(va.values_int, 'min'))
+   OR (va.v_max IS NOT NULL AND va.values_int IS NOT NULL AND va.v_max <> list_aggregate(va.values_int, 'max'));
+
+-- Retained-row payload XOR (critique F5): value_array_hist / definition_value_array
+-- drop the live-table XOR CHECK (stubs legitimately null BOTH payloads), so a
+-- content-retained / non-stub row carrying both-or-neither payload is otherwise
+-- unguarded at rest. The live value_array XOR catches such a row the moment it
+-- would re-enter live state; this closes the at-rest hole. One row per offender.
+CREATE VIEW audit_array_payload_xor AS
+SELECT 'value_array_hist' AS src_table,
+       'entity=' || entity_id || ',pd=' || parameter_definition_id
+         || ',alt=' || alternative_id || ',v=' || version AS src_key
+FROM value_array_hist
+WHERE content_retained AND ((values IS NULL) = (values_int IS NULL))
+UNION ALL
+SELECT 'definition_value_array',
+       'pd=' || parameter_definition_id || ',' || slot
+FROM definition_value_array
+WHERE content_retained AND ((values IS NULL) = (values_int IS NULL));
 
 -- Index-accelerator audit: long-tier denormalized iN_dt/iN_num columns must
 -- agree with the bound axis at iN_pos (derived, never authoritative).
@@ -433,7 +517,7 @@ LEFT JOIN axis_position p ON p.axis_id = d.axis_id AND p.pos = d.pos
 WHERE p.axis_id IS NULL   -- unrenderable position (critique F3)
    OR (p.kind IN ('datetime', 'period') AND (d.acc_dt IS DISTINCT FROM p.ts OR d.acc_num IS NOT NULL))
    OR (p.kind = 'integer' AND (d.acc_num IS DISTINCT FROM p.num OR d.acc_dt IS NOT NULL))
-   OR (p.kind IN ('label', 'time_pattern') AND (d.acc_dt IS NOT NULL OR d.acc_num IS NOT NULL));
+   OR (p.kind IN ('label', 'time_pattern', 'float') AND (d.acc_dt IS NOT NULL OR d.acc_num IS NOT NULL));
 
 -- Cross-tier duplicate audit (critique #5): no key triple current in more
 -- than one tier — guards buggy tier transitions.
@@ -488,7 +572,8 @@ SELECT lower(name) AS name, count(*) AS n, list(value) AS conflicting_values
 FROM metadata
 WHERE valid_to_commit IS NULL
   AND lower(name) IN ('schema_version', 'template_name', 'template_version',
-                      'template_content_hash', 'presentation')
+                      'template_content_hash', 'presentation',
+                      'semantic_context', 'conforms_to')  -- single-valued reserved keys (fitness 2b)
 GROUP BY lower(name)
 HAVING count(*) > 1;
 
@@ -513,6 +598,19 @@ UNION ALL
 SELECT NULL::BIGINT, group_entity_id
 FROM membership_base_flat
 WHERE group_entity_id = member_entity_id;
+
+-- Refinement (realizes) cycles (Decision 13, option (c) sibling of the
+-- membership-cycle audit): the coarse->fine fixpoint terminates on a cycle
+-- via the distinct UNION, but a cycle is a modelling error worth surfacing.
+-- Flattens the refinement DAG and reports any entity reachable from itself.
+CREATE VIEW audit_realizes_cycle AS
+WITH RECURSIVE reach(coarse_id, fine_id) AS (
+  SELECT coarse_id, fine_id FROM realizes_edge
+  UNION
+  SELECT r.coarse_id, e.fine_id
+  FROM reach r JOIN realizes_edge e ON e.coarse_id = r.fine_id
+)
+SELECT coarse_id AS entity_id FROM reach WHERE coarse_id = fine_id;
 
 -- ---------------------------------------------------------------------------
 -- History audits (these two read superseded/_hist rows by definition —
@@ -622,7 +720,7 @@ SELECT 'value_array (+_hist)',
        count(*),
        round(count(*)::DOUBLE / greatest((SELECT count(*) FROM value_array) + count(*), 1), 3),
        count(*)::DOUBLE / greatest((SELECT count(*) FROM value_array) + count(*), 1) > 0.30,
-       'hist payload cells: ' || coalesce(sum(len(values)), 0)
+       'hist payload cells: ' || coalesce(sum(coalesce(len(values), len(values_int))), 0)
 FROM value_array_hist
 UNION ALL
 -- one pass over the narrow tables (critique M8: the union used to run twice)
@@ -648,6 +746,7 @@ FROM (
     UNION ALL SELECT valid_to_commit FROM definition_value_array
     UNION ALL SELECT valid_to_commit FROM display_mode
     UNION ALL SELECT valid_to_commit FROM entity_class_display_mode
+    UNION ALL SELECT valid_to_commit FROM semantic_annotation
   )
 )
 UNION ALL

@@ -88,8 +88,9 @@ CREATE INDEX ix_value_long_triple
 -- the `_hist` twin. One row per value; rank = number of non-NULL axes;
 -- `values` is flattened row-major in declared dimension order, length =
 -- product of axis lengths (audited), contains no NULLs (canonicalization
--- step 1). Float-only: dense-numeric is the entire performance case (VMP
--- Part 3; the `values_int` sibling column is the additive door, not built).
+-- step 1). Float OR int payload: dense-numeric is the entire performance case
+-- (VMP Part 3); the `values_int` sibling column (VMP Part 3 reserved door) now
+-- carries dense INTEGER arrays without long-tier row explosion.
 CREATE TABLE value_array (
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
@@ -100,8 +101,12 @@ CREATE TABLE value_array (
   axis2_id BIGINT REFERENCES axis(id),
   axis3_id BIGINT REFERENCES axis(id),
   axis4_id BIGINT REFERENCES axis(id),
-  values   DOUBLE[] NOT NULL,
-  v_min DOUBLE, v_max DOUBLE,        -- per-row pruning metadata (Timescale lesson, VMP Part 3)
+  values     DOUBLE[],                -- dense float payload; NULL iff values_int populated
+  values_int BIGINT[],                -- dense INTEGER payload (VMP Part 3 door): categorical
+                                      -- rasters (land-use/soil/Köppen), integer masks/series
+  CHECK ((values IS NULL) != (values_int IS NULL)),  -- exactly one populated (current table only)
+  v_min DOUBLE, v_max DOUBLE,        -- per-row pruning metadata (Timescale lesson, VMP Part 3);
+                                      -- DOUBLE for both kinds (int min/max cast when exact, else NULL)
   PRIMARY KEY (entity_id, parameter_definition_id, alternative_id)   -- uniqueness of the triple, engine-enforced (VMP Part 2)
 );
 
@@ -121,7 +126,8 @@ CREATE TABLE value_array_hist (
   axis2_id BIGINT,
   axis3_id BIGINT,
   axis4_id BIGINT,
-  values   DOUBLE[],                 -- NULL when content_retained = FALSE (stub)
+  values     DOUBLE[],                -- NULL when content_retained = FALSE (stub)
+  values_int BIGINT[],                -- sibling; NULL for float rows or stubs (NO XOR: stubs null both)
   v_min DOUBLE, v_max DOUBLE,
   valid_to_commit          BIGINT NOT NULL,
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
@@ -201,7 +207,8 @@ CREATE TABLE definition_value_array (
   axis2_id BIGINT REFERENCES axis(id),
   axis3_id BIGINT REFERENCES axis(id),
   axis4_id BIGINT REFERENCES axis(id),
-  values   DOUBLE[],
+  values     DOUBLE[],
+  values_int BIGINT[],                -- default/prefill int-array payload; XOR is writer-enforced (no twin)
   v_min DOUBLE, v_max DOUBLE,
   cp BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_definition_id END) VIRTUAL,
   cs VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN slot END) VIRTUAL

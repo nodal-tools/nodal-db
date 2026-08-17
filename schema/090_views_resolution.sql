@@ -145,6 +145,26 @@ SELECT * FROM flat;
 -- member's own row is a barrier to propagation through it. Absent both,
 -- the class's active_by_default applies (which is why clients must not
 -- write rows restating the default, #3010).
+-- Refinement edges (Decision 13, multifidelity_entity_linking §7): the same
+-- real thing at two resolutions (ESM plant -> its power-system components).
+-- A `realizes` link is an ordinary 2-D relationship entity (position 1 =
+-- coarse, position 2 = fine); its class is self-marking by the reserved name
+-- prefix `realizes` (marker convention, zero schema change). Structural and
+-- scenario-independent (current rows only) — it does NOT read
+-- entity_activation_resolved, so there is no view cycle. This is a structural
+-- resolution, never a value transform: capacity->P_max stays tool-side
+-- (invariant 2). Bags are left free (not guarded) — the dedicated typed
+-- class is the marker.
+CREATE VIEW realizes_edge AS
+SELECT ee1.element_entity_id AS coarse_id,
+       ee2.element_entity_id AS fine_id
+FROM entity r
+JOIN entity_class ec ON ec.id = r.entity_class_id AND ec.valid_to_commit IS NULL
+                    AND lower(ec.name) LIKE 'realizes%'
+JOIN entity_element ee1 ON ee1.entity_id = r.id AND ee1.position = 1 AND ee1.valid_to_commit IS NULL
+JOIN entity_element ee2 ON ee2.entity_id = r.id AND ee2.position = 2 AND ee2.valid_to_commit IS NULL
+WHERE r.valid_to_commit IS NULL;
+
 CREATE VIEW entity_activation_own AS
 SELECT sa.scenario_id, ea.entity_id, ea.active, sa.rank
 FROM entity_alternative ea
@@ -155,21 +175,40 @@ WHERE ea.valid_to_commit IS NULL
 QUALIFY row_number() OVER (
   PARTITION BY sa.scenario_id, ea.entity_id ORDER BY sa.rank DESC) = 1;
 
+-- Deactivation edges for the pass-2 fixpoint (Decision 13 option (c)): the
+-- ONE directed "deactivates" graph, unifying two edge kinds so the recursive
+-- CTE needs a single recursive term (DuckDB allows only one). Membership
+-- edges are scenario-scoped; realizes edges are scenario-independent
+-- (structural), so they apply in every current scenario — inactive coarse
+-- deactivates fine identically in each. Both are the same edge type in the
+-- same graph (multifidelity_entity_linking §7.2).
+CREATE VIEW deact_edge AS
+SELECT scenario_id, group_entity_id AS from_id, member_entity_id AS to_id
+FROM membership_resolved WHERE included
+UNION ALL
+SELECT sc.id, re.coarse_id, re.fine_id
+FROM realizes_edge re
+CROSS JOIN scenario sc WHERE sc.valid_to_commit IS NULL;
+
 CREATE VIEW entity_activation_resolved AS
 WITH RECURSIVE deact(scenario_id, entity_id) AS (
-  -- seeds: entities whose own resolved row deactivates them
+  -- seeds: entities whose own resolved row deactivates them. Note: a
+  -- default-inactive entity (active_by_default=FALSE, no own row) is NOT a
+  -- seed, so it does not propagate deactivation to members/fine children —
+  -- intentional, matching membership and #3010 (don't restate the default);
+  -- only an explicit deactivation propagates.
   SELECT scenario_id, entity_id FROM entity_activation_own WHERE NOT active
-  UNION   -- distinct fixpoint = cycle guard
-  -- propagate group -> resolved members lacking their own row (own wins)
-  SELECT m.scenario_id, m.member_entity_id
+  UNION   -- distinct fixpoint = cycle guard (terminates membership AND realizes cycles)
+  -- propagate deactivation along either edge kind, to targets lacking their
+  -- own resolved row (own wins — the propagation barrier).
+  SELECT de.scenario_id, de.to_id
   FROM deact d
-  JOIN membership_resolved m
-    ON m.scenario_id = d.scenario_id
-   AND m.group_entity_id = d.entity_id
-   AND m.included
+  JOIN deact_edge de
+    ON de.scenario_id = d.scenario_id
+   AND de.from_id = d.entity_id
   WHERE NOT EXISTS (SELECT 1 FROM entity_activation_own o
-                    WHERE o.scenario_id = m.scenario_id
-                      AND o.entity_id = m.member_entity_id)
+                    WHERE o.scenario_id = de.scenario_id
+                      AND o.entity_id = de.to_id)
 )
 SELECT s.id AS scenario_id, e.id AS entity_id,
        CASE WHEN own.entity_id IS NOT NULL THEN own.active

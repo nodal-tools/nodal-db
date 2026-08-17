@@ -8,7 +8,7 @@
 
 CREATE TABLE axis (
   id           BIGINT PRIMARY KEY DEFAULT nextval('seq_axis'),
-  kind         VARCHAR NOT NULL,      -- VMP Part 1 enum: datetime|period|label|integer|time_pattern; additive, no CHECK
+  kind         VARCHAR NOT NULL,      -- VMP Part 1 enum: datetime|period|label|integer|time_pattern|float; additive, no CHECK
   length       INTEGER NOT NULL CHECK (length >= 1),
   content_hash UBIGINT NOT NULL,      -- dedup ACCELERATOR, deliberately NOT unique (critique #7)
   -- parametric forms — regular datetime/integer axes MUST be stored
@@ -19,8 +19,17 @@ CREATE TABLE axis (
   p_step_micros BIGINT,
   p_start_int   BIGINT,
   p_step_int    BIGINT,
+  p_start_dbl   DOUBLE,               -- parametric float axis (kind 'float'); start coordinate
+  p_step_dbl    DOUBLE,               -- parametric float step; strictly increasing => p_step_dbl > 0
   calendar     VARCHAR,               -- expressed, never asserted (VMP Part 1); hash input
-  timezone     VARCHAR                -- expressed, never asserted; hash input
+  timezone     VARCHAR,               -- expressed, never asserted; hash input
+  crs          VARCHAR,               -- coordinate reference system id (e.g. 'EPSG:4326'); expressed,
+                                      -- never asserted (no projection/transform math); hash input;
+                                      -- meaningful for float coordinate axes, NULL for all others
+  -- reject NaN. NOTE: `x = x` does NOT work — DuckDB uses a TOTAL order where
+  -- NaN = NaN is TRUE (critique F1, probe-confirmed 1.4.4). isnan() is the
+  -- correct predicate; isnan(NULL) is NULL so a non-float axis's NULLs pass.
+  CHECK (NOT isnan(p_start_dbl) AND NOT isnan(p_step_dbl))
 );
 CREATE INDEX axis_hash ON axis (content_hash);
 
@@ -69,6 +78,21 @@ CREATE TABLE axis_integer (
   axis_id BIGINT NOT NULL REFERENCES axis(id),
   pos     INTEGER NOT NULL CHECK (pos >= 0),
   num     BIGINT NOT NULL,
+  PRIMARY KEY (axis_id, pos)
+);
+
+-- Irregular real-valued coordinate axes; must be strictly increasing (writer-
+-- checked — the datetime/integer-axis precedent, VMP Part 1; audited by
+-- audit_axis_integrity). coord is DOUBLE; NaN forbidden (CHECK: NOT isnan —
+-- critique F1, DuckDB total order has NaN = NaN), -0.0 writer-normalized to
+-- +0.0 (canonical-encoding rule, VMP Part 9). Homes: vertical levels,
+-- spectral/frequency bands, lookup/rating/dose-response curve domains,
+-- irregular lat/lon, numeric brackets.
+CREATE TABLE axis_float (
+  axis_id BIGINT NOT NULL REFERENCES axis(id),
+  pos     INTEGER NOT NULL CHECK (pos >= 0),
+  coord   DOUBLE NOT NULL CHECK (NOT isnan(coord)),   -- reject NaN (critique F1: `coord = coord`
+                                                      -- is a no-op — DuckDB total order has NaN = NaN)
   PRIMARY KEY (axis_id, pos)
 );
 

@@ -56,6 +56,9 @@ CREATE VIEW display_mode_current AS
   SELECT * EXCLUDE (cur_id, cur_name) FROM display_mode WHERE valid_to_commit IS NULL;
 CREATE VIEW entity_class_display_mode_current AS
   SELECT * EXCLUDE (cur_dm, cur_ec) FROM entity_class_display_mode WHERE valid_to_commit IS NULL;
+CREATE VIEW semantic_annotation_current AS
+  SELECT * EXCLUDE (cur_id) FROM semantic_annotation WHERE valid_to_commit IS NULL;
+-- (no _current view for `run`: append-only, every row is current — 055_provenance.sql)
 
 -- value tiers (VMP Part 5 "Reading history": current = one predicate)
 CREATE VIEW value_scalar_current AS

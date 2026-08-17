@@ -20,43 +20,58 @@ CREATE VIEW axis_position AS
 SELECT x.id AS axis_id, x.kind, x.pos, x.pos AS ordinal,
        x.p_start_ts + to_months(x.p_step_months * x.pos) + to_microseconds(x.p_step_micros * x.pos) AS ts,
        NULL::TIMESTAMP AS end_ts, NULL::BIGINT AS num, NULL::VARCHAR AS label,
-       NULL::DOUBLE AS years_presented
+       NULL::DOUBLE AS years_presented, NULL::DOUBLE AS coord
 FROM (SELECT a.id, a.kind, a.p_start_ts, a.p_step_months, a.p_step_micros,
              unnest(range(a.length))::INTEGER AS pos
       FROM axis a
       WHERE a.kind = 'datetime' AND a.p_start_ts IS NOT NULL) x
 UNION ALL
 -- materialized (irregular) datetime
-SELECT a.id, a.kind, d.pos, d.pos, d.ts, NULL, NULL, NULL, NULL
+SELECT a.id, a.kind, d.pos, d.pos, d.ts, NULL, NULL, NULL, NULL, NULL
 FROM axis a JOIN axis_datetime d ON d.axis_id = a.id
 WHERE a.kind = 'datetime' AND a.p_start_ts IS NULL
 UNION ALL
 -- parametric integer
 SELECT x.id, x.kind, x.pos, x.pos, NULL, NULL,
-       x.p_start_int + x.p_step_int * x.pos, NULL, NULL
+       x.p_start_int + x.p_step_int * x.pos, NULL, NULL, NULL
 FROM (SELECT a.id, a.kind, a.p_start_int, a.p_step_int,
              unnest(range(a.length))::INTEGER AS pos
       FROM axis a
       WHERE a.kind = 'integer' AND a.p_start_int IS NOT NULL) x
 UNION ALL
 -- materialized (irregular) integer (deviation D4)
-SELECT a.id, a.kind, i.pos, i.pos, NULL, NULL, i.num, NULL, NULL
+SELECT a.id, a.kind, i.pos, i.pos, NULL, NULL, i.num, NULL, NULL, NULL
 FROM axis a JOIN axis_integer i ON i.axis_id = a.id
 WHERE a.kind = 'integer' AND a.p_start_int IS NULL
 UNION ALL
 -- periods: explicit stored [start, end) bounds (critique #10)
-SELECT a.id, a.kind, p.pos, p.pos, p.start_ts, p.end_ts, NULL, NULL, p.years_presented
+SELECT a.id, a.kind, p.pos, p.pos, p.start_ts, p.end_ts, NULL, NULL, p.years_presented, NULL
 FROM axis a JOIN axis_period p ON p.axis_id = a.id
 UNION ALL
 -- labels: stored ordinal, scoped to the axis (GDX anti-lesson)
-SELECT a.id, a.kind, l.pos, l.ordinal, NULL, NULL, NULL, l.label, NULL
+SELECT a.id, a.kind, l.pos, l.ordinal, NULL, NULL, NULL, l.label, NULL, NULL
 FROM axis a JOIN axis_label l ON l.axis_id = a.id
 UNION ALL
 -- time patterns: terms of one position render as one unioned pattern text
 SELECT a.id, a.kind, t.pos, any_value(t.ordinal), NULL, NULL, NULL,
-       string_agg(t.unit || t.range_start || '-' || t.range_end, ',' ORDER BY t.term_no), NULL
+       string_agg(t.unit || t.range_start || '-' || t.range_end, ',' ORDER BY t.term_no), NULL, NULL
 FROM axis a JOIN axis_time_pattern t ON t.axis_id = a.id
-GROUP BY a.id, a.kind, t.pos;
+GROUP BY a.id, a.kind, t.pos
+UNION ALL
+-- parametric float: coord = p_start_dbl + p_step_dbl*pos (THE expression the
+-- writer uses to test bit-exact regularity — parametric-first, VMP Part 4 §3.3)
+SELECT x.id, x.kind, x.pos, x.pos AS ordinal,
+       NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::VARCHAR, NULL::DOUBLE,
+       x.p_start_dbl + x.p_step_dbl * x.pos AS coord
+FROM (SELECT a.id, a.kind, a.p_start_dbl, a.p_step_dbl,
+             unnest(range(a.length))::INTEGER AS pos
+      FROM axis a
+      WHERE a.kind = 'float' AND a.p_start_dbl IS NOT NULL) x
+UNION ALL
+-- materialized (irregular) float
+SELECT a.id, a.kind, f.pos, f.pos, NULL, NULL, NULL, NULL, NULL, f.coord
+FROM axis a JOIN axis_float f ON f.axis_id = a.id
+WHERE a.kind = 'float' AND a.p_start_dbl IS NULL;
 
 -- Array tier decoded to cells: row-major flat index -> per-dimension
 -- positions (rank is metadata over flattened storage — VMP Part 3).
@@ -64,13 +79,16 @@ GROUP BY a.id, a.kind, t.pos;
 -- in one SELECT, so the cell value arrives with its flat position and no
 -- per-cell list_extract runs (measured ~4x faster than vals[flat_pos + 1]).
 CREATE VIEW value_array_cells AS
+-- float payloads
 SELECT entity_id, parameter_definition_id, alternative_id,
        axis1_id, axis2_id, axis3_id, axis4_id,
        (flat_pos // (n2 * n3 * n4))::INTEGER        AS i1_pos,
        ((flat_pos // (n3 * n4)) % n2)::INTEGER      AS i2_pos,
        ((flat_pos // n4) % n3)::INTEGER             AS i3_pos,
        (flat_pos % n4)::INTEGER                     AS i4_pos,
-       v                                            AS v_float
+       'float'                                      AS value_kind,
+       v                                            AS v_float,
+       NULL::BIGINT                                 AS v_int
 FROM (
   SELECT va.entity_id, va.parameter_definition_id, va.alternative_id,
          va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id,
@@ -83,6 +101,32 @@ FROM (
   LEFT JOIN axis a2 ON a2.id = va.axis2_id
   LEFT JOIN axis a3 ON a3.id = va.axis3_id
   LEFT JOIN axis a4 ON a4.id = va.axis4_id
+  WHERE va.values IS NOT NULL
+)
+UNION ALL
+-- int payloads (same zip-unnest decode over values_int)
+SELECT entity_id, parameter_definition_id, alternative_id,
+       axis1_id, axis2_id, axis3_id, axis4_id,
+       (flat_pos // (n2 * n3 * n4))::INTEGER        AS i1_pos,
+       ((flat_pos // (n3 * n4)) % n2)::INTEGER      AS i2_pos,
+       ((flat_pos // n4) % n3)::INTEGER             AS i3_pos,
+       (flat_pos % n4)::INTEGER                     AS i4_pos,
+       'int'                                        AS value_kind,
+       NULL::DOUBLE                                 AS v_float,
+       v                                            AS v_int
+FROM (
+  SELECT va.entity_id, va.parameter_definition_id, va.alternative_id,
+         va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id,
+         coalesce(a2.length, 1) AS n2,
+         coalesce(a3.length, 1) AS n3,
+         coalesce(a4.length, 1) AS n4,
+         unnest(va.values_int) AS v,
+         unnest(range(len(va.values_int))) AS flat_pos
+  FROM value_array va
+  LEFT JOIN axis a2 ON a2.id = va.axis2_id
+  LEFT JOIN axis a3 ON a3.id = va.axis3_id
+  LEFT JOIN axis a4 ON a4.id = va.axis4_id
+  WHERE va.values_int IS NOT NULL
 );
 
 -- The tier-unifying cell view: current rows of all three tiers in one
@@ -107,9 +151,9 @@ SELECT entity_id, parameter_definition_id, alternative_id, 'long',
 FROM value_long WHERE valid_to_commit IS NULL
 UNION ALL
 SELECT entity_id, parameter_definition_id, alternative_id, 'array',
-       'float', axis1_id, axis2_id, axis3_id, axis4_id,
+       value_kind, axis1_id, axis2_id, axis3_id, axis4_id,
        i1_pos, i2_pos, i3_pos, i4_pos,
-       v_float, NULL, NULL, NULL, NULL, NULL, NULL
+       v_float, v_int, NULL, NULL, NULL, NULL, NULL
 FROM value_array_cells;
 
 -- Fully rendered long rows: cells joined to axis_position per dimension.
@@ -133,13 +177,13 @@ CREATE VIEW value_rows AS
 SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
        c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
        NULL::VARCHAR AS idx1_text, NULL::TIMESTAMP AS idx1_ts, NULL::TIMESTAMP AS idx1_end_ts,
-       NULL::BIGINT AS idx1_num, NULL::INTEGER AS idx1_ordinal,
+       NULL::BIGINT AS idx1_num, NULL::INTEGER AS idx1_ordinal, NULL::DOUBLE AS idx1_coord,
        NULL::VARCHAR AS idx2_text, NULL::TIMESTAMP AS idx2_ts, NULL::TIMESTAMP AS idx2_end_ts,
-       NULL::BIGINT AS idx2_num, NULL::INTEGER AS idx2_ordinal,
+       NULL::BIGINT AS idx2_num, NULL::INTEGER AS idx2_ordinal, NULL::DOUBLE AS idx2_coord,
        NULL::VARCHAR AS idx3_text, NULL::TIMESTAMP AS idx3_ts, NULL::TIMESTAMP AS idx3_end_ts,
-       NULL::BIGINT AS idx3_num, NULL::INTEGER AS idx3_ordinal,
+       NULL::BIGINT AS idx3_num, NULL::INTEGER AS idx3_ordinal, NULL::DOUBLE AS idx3_coord,
        NULL::VARCHAR AS idx4_text, NULL::TIMESTAMP AS idx4_ts, NULL::TIMESTAMP AS idx4_end_ts,
-       NULL::BIGINT AS idx4_num, NULL::INTEGER AS idx4_ordinal,
+       NULL::BIGINT AS idx4_num, NULL::INTEGER AS idx4_ordinal, NULL::DOUBLE AS idx4_coord,
        c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
 FROM value_cells c
 WHERE c.tier = 'scalar'
@@ -148,10 +192,10 @@ UNION ALL
 -- and is caught by audit_axis_integrity / audit_position_range, never dropped)
 SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
        c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
-       p1.label, p1.ts, p1.end_ts, p1.num, p1.ordinal,
-       NULL::VARCHAR, NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::INTEGER,
-       NULL::VARCHAR, NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::INTEGER,
-       NULL::VARCHAR, NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::INTEGER,
+       p1.label, p1.ts, p1.end_ts, p1.num, p1.ordinal, p1.coord,
+       NULL::VARCHAR, NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::INTEGER, NULL::DOUBLE,
+       NULL::VARCHAR, NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::INTEGER, NULL::DOUBLE,
+       NULL::VARCHAR, NULL::TIMESTAMP, NULL::TIMESTAMP, NULL::BIGINT, NULL::INTEGER, NULL::DOUBLE,
        c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
 FROM value_cells c
 LEFT JOIN axis_position p1 ON p1.axis_id = c.axis1_id AND p1.pos = c.i1_pos
@@ -160,10 +204,10 @@ UNION ALL
 -- rank 2-4: full four-way rendering
 SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
        c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
-       p1.label, p1.ts, p1.end_ts, p1.num, p1.ordinal,
-       p2.label, p2.ts, p2.end_ts, p2.num, p2.ordinal,
-       p3.label, p3.ts, p3.end_ts, p3.num, p3.ordinal,
-       p4.label, p4.ts, p4.end_ts, p4.num, p4.ordinal,
+       p1.label, p1.ts, p1.end_ts, p1.num, p1.ordinal, p1.coord,
+       p2.label, p2.ts, p2.end_ts, p2.num, p2.ordinal, p2.coord,
+       p3.label, p3.ts, p3.end_ts, p3.num, p3.ordinal, p3.coord,
+       p4.label, p4.ts, p4.end_ts, p4.num, p4.ordinal, p4.coord,
        c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
 FROM value_cells c
 LEFT JOIN axis_position p1 ON p1.axis_id = c.axis1_id AND p1.pos = c.i1_pos
@@ -191,6 +235,7 @@ SELECT e.name AS entity, al.name AS alternative, vr.tier, vr.value_kind,
        vr.idx1_ts, vr.idx2_ts, vr.idx3_ts, vr.idx4_ts,
        vr.idx1_num, vr.idx2_num, vr.idx3_num, vr.idx4_num,
        vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
+       vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
        vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime,
        vr.v_dur_months, vr.v_dur_micros
 FROM value_rows vr
@@ -215,7 +260,7 @@ WITH pd_pick AS (
 )
 SELECT va.entity_id, va.alternative_id,
        va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id,
-       va.values, va.v_min, va.v_max
+       va.values, va.values_int, va.v_min, va.v_max
 FROM value_array va
 JOIN pd_pick ON pd_pick.id = va.parameter_definition_id;
 

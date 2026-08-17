@@ -105,6 +105,11 @@ CREATE MACRO entity_class_display_mode_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_dm, cur_ec) FROM entity_class_display_mode
 WHERE valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+CREATE MACRO semantic_annotation_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_id) FROM semantic_annotation
+WHERE valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+-- (no _asof macro for `run`: append-only, reconstructed by input_commit_id)
+
 -- value tiers as of commit c
 CREATE MACRO value_scalar_asof(c) AS TABLE
 SELECT * EXCLUDE (ce, cp, ca) FROM value_scalar
@@ -118,12 +123,12 @@ WHERE valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c
 -- (VMP Part 5). Column shapes normalized to the hist layout.
 CREATE MACRO value_array_asof(c) AS TABLE
 SELECT entity_id, parameter_definition_id, alternative_id, valid_from_commit,
-       version, axis1_id, axis2_id, axis3_id, axis4_id, values, v_min, v_max,
+       version, axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max,
        NULL::BIGINT AS valid_to_commit, TRUE AS content_retained
 FROM value_array WHERE valid_from_commit <= c
 UNION ALL
 SELECT entity_id, parameter_definition_id, alternative_id, valid_from_commit,
-       version, axis1_id, axis2_id, axis3_id, axis4_id, values, v_min, v_max,
+       version, axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max,
        valid_to_commit, content_retained
 FROM value_array_hist
 WHERE valid_from_commit <= c AND valid_to_commit > c;

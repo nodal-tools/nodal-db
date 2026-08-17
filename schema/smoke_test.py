@@ -128,6 +128,37 @@ def axis_period(con, periods):
     return aid
 
 
+def axis_float_parametric(con, start, step, n):   # regular real-valued grid
+    key = f"float|parametric|{start}|{step}|{n}||"
+    h, ids = _axis_lookup(con, "float", key)
+    for aid in ids:                      # content verification (dedup)
+        row = con.execute(
+            "SELECT p_start_dbl, p_step_dbl, length FROM axis WHERE id = ?", [aid]).fetchone()
+        if row == (start, step, n):
+            return aid
+    aid = nextval(con, "seq_axis")
+    con.execute(
+        "INSERT INTO axis (id, kind, length, content_hash, p_start_dbl, p_step_dbl)"
+        " VALUES (?, 'float', ?, ?, ?, ?)", [aid, n, h, start, step])
+    return aid
+
+
+def axis_float(con, coords):             # irregular, materialized
+    key = "float|" + "|".join(str(c) for c in coords) + "||"
+    h, ids = _axis_lookup(con, "float", key)
+    for aid in ids:
+        got = [r[0] for r in con.execute(
+            "SELECT coord FROM axis_float WHERE axis_id = ? ORDER BY pos", [aid]).fetchall()]
+        if got == list(coords):
+            return aid
+    aid = nextval(con, "seq_axis")
+    con.execute("INSERT INTO axis (id, kind, length, content_hash) VALUES (?, 'float', ?, ?)",
+                [aid, len(coords), h])
+    for pos, c in enumerate(coords):
+        con.execute("INSERT INTO axis_float (axis_id, pos, coord) VALUES (?, ?, ?)", [aid, pos, c])
+    return aid
+
+
 # --- write protocol (VMP Part 5): close-out + insert on from/to tiers;
 # SQL-side pre-image copy on the array tier. Caller opens the transaction.
 def write_scalar(con, c, e, p, a, kind, col, value):
@@ -147,8 +178,13 @@ def write_scalar(con, c, e, p, a, kind, col, value):
         [e, p, a, c, ver, kind, value])
 
 
-def write_array(con, c, e, p, a, axes, values):
+def write_array(con, c, e, p, a, axes, values, int_kind=False):
     axes = (axes + [None] * 4)[:4]
+    # route payload: exactly one of values/values_int populated (XOR CHECK);
+    # v_min/v_max are DOUBLE for both kinds (int cast is exact at demo scale)
+    fvals = None if int_kind else values
+    ivals = values if int_kind else None
+    vmin, vmax = float(min(values)), float(max(values))
     cur = con.execute(
         "SELECT version FROM value_array WHERE entity_id=? AND parameter_definition_id=?"
         " AND alternative_id=?", [e, p, a]).fetchone()
@@ -158,17 +194,19 @@ def write_array(con, c, e, p, a, axes, values):
             "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array"
             " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
             [c, e, p, a])
+        # set BOTH payload columns so the inactive one is NULLed on a kind switch
+        # (critique F4 — else the live XOR CHECK rejects the UPDATE)
         con.execute(
             "UPDATE value_array SET valid_from_commit=?, version=?, axis1_id=?, axis2_id=?,"
-            " axis3_id=?, axis4_id=?, values=?, v_min=?, v_max=?"
+            " axis3_id=?, axis4_id=?, values=?, values_int=?, v_min=?, v_max=?"
             " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-            [c, cur[0] + 1, *axes, values, min(values), max(values), e, p, a])
+            [c, cur[0] + 1, *axes, fvals, ivals, vmin, vmax, e, p, a])
     else:
         con.execute(
             "INSERT INTO value_array (entity_id, parameter_definition_id, alternative_id,"
             " valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id, values,"
-            " v_min, v_max) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
-            [e, p, a, c, *axes, values, min(values), max(values)])
+            " values_int, v_min, v_max) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [e, p, a, c, *axes, fvals, ivals, vmin, vmax])
 
 
 def write_long_cell(con, c, e, p, a, axes, poss, kind, col, value, accels=None):
@@ -348,6 +386,57 @@ def main():
            "display_mode_id, entity_class_id, display_status, display_order,"
            " font_color, background_color, valid_from_commit",
            [creator, unit, "greyed_out", 7, "FF0000", "00FF00", c2])
+
+    # --- fitness round 2 additions -------------------------------------------
+    # semantic seams (T1.2): a QUDT quantity-kind on MW, a codelist member IRI
+    con.execute("UPDATE units_of_measure SET quantity_kind_link = ? WHERE id = ?",
+                ["http://qudt.org/vocab/quantitykind/Power", mw])
+    carrier = nextval(con, "seq_parameter_value_list")
+    insert("parameter_value_list", "id, name, valid_from_commit", [carrier, "carrier", c2])
+    elec = nextval(con, "seq_list_value")
+    con.execute("INSERT INTO list_value (id, parameter_value_list_id, ordinal, value_kind,"
+                " v_str, semantic_link, valid_from_commit) VALUES (?, ?, 1, 'str', ?, ?, ?)",
+                [elec, carrier, "electricity",
+                 "http://openenergy-platform.org/ontology/oeo/OEO_00000139", c2])
+
+    # provenance (Decision 13): a tool entity produced an output alternative
+    tool_cls = new_class("tool")
+    ce_tool = new_entity(tool_cls, "capacity_expansion")
+    ce_out = nextval(con, "seq_alternative")
+    insert("alternative", "id, name, valid_from_commit", [ce_out, "ce_out", c2])
+    run_id = nextval(con, "seq_run")
+    insert("run", "id, tool_entity_id, result_alternative_id, input_commit_id,"
+           " produced_at_commit_id, solver, status",
+           [run_id, ce_tool, ce_out, c2, c2, "highs", "optimal"])
+
+    # realizes refinement (Decision 13 option c): a coarse plant realized by a
+    # fine component; deactivating the plant must propagate to the component.
+    plant_cls = new_class("power_plant")
+    comp_cls = new_class("component")
+    plant_1 = new_entity(plant_cls, "plant_1")
+    gen_1 = new_entity(comp_cls, "gen_1")
+    realizes_cls = new_class("realizes_plant")  # reserved-name marker prefix
+    con.execute("INSERT INTO entity_class_dimension (entity_class_id, position,"
+                " dimension_class_id, valid_from_commit) VALUES (?, 1, ?, ?), (?, 2, ?, ?)",
+                [realizes_cls, plant_cls, c2, realizes_cls, comp_cls, c2])
+    r_link = new_entity(realizes_cls, "plant_1__gen_1")
+    insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
+           [r_link, 1, plant_1, c2])
+    insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
+           [r_link, 2, gen_1, c2])
+    insert("entity_alternative", "entity_id, alternative_id, active, valid_from_commit",
+           [plant_1, high, False, c2])  # plant off in `high` (=> s1)
+
+    # semantic_annotation (T1.4): crosswalk objects to external ontology terms
+    for otype, oid, rel, iri, vocab in [
+        ("entity_class", node, "closeMatch", "cim:ConnectivityNode", "CIM16"),
+        ("unit", mw, "qudt:hasQuantityKind", "http://qudt.org/vocab/quantitykind/Power", "QUDT"),
+        ("list_value", elec, "exactMatch",
+         "http://openenergy-platform.org/ontology/oeo/OEO_00000139", "OEO")]:
+        sa = nextval(con, "seq_semantic_annotation")
+        con.execute("INSERT INTO semantic_annotation (id, object_type, object_id, relation,"
+                    " term_iri, vocabulary, valid_from_commit) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [sa, otype, oid, rel, iri, vocab, c2])
     con.execute("COMMIT")
 
     # ---- checks -----------------------------------------------------------
@@ -478,11 +567,12 @@ def main():
 
     # ---- audits -----------------------------------------------------------
     for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
-                 "audit_type_conformance", "audit_index_accelerator",
-                 "audit_cross_tier_duplicate", "audit_membership_cycle",
+                 "audit_type_conformance", "audit_index_accelerator", "audit_axis_integrity",
+                 "audit_array_payload_xor", "audit_cross_tier_duplicate", "audit_membership_cycle",
                  "audit_class_set_entity_name_dup", "audit_element_class_mismatch",
                  "audit_value_class_mismatch", "audit_value_list_membership",
-                 "audit_scenario_empty", "audit_required_class_empty"]:
+                 "audit_scenario_empty", "audit_required_class_empty",
+                 "audit_realizes_cycle", "audit_dangling_semantic_ref"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"{view} clean", n == 0, f"n={n}")
 
@@ -532,6 +622,53 @@ def main():
           n == 1, f"n={n}")
     con.execute("DELETE FROM entity_class_display_mode WHERE entity_class_id = 99999")
 
+    # ---- fitness round 2 additions: round-trip + FK-intent -----------------
+    # semantic seams (T1.2)
+    qk = one("SELECT quantity_kind_link FROM units_of_measure WHERE id = ?", mw)[0]
+    check("semantic seam: MW unit carries a QUDT quantity-kind IRI",
+          qk == "http://qudt.org/vocab/quantitykind/Power", str(qk))
+    sl = one("SELECT semantic_link FROM list_value WHERE id = ?", elec)[0]
+    check("semantic seam: list_value member carries a concept IRI",
+          sl is not None and "OEO" in sl, str(sl))
+
+    # provenance run (Decision 13)
+    rr = one("SELECT solver, status, input_commit_id FROM run WHERE id = ?", run_id)
+    check("run: provenance row round-trips (solver/status/input commit)",
+          rr == ("highs", "optimal", c2), str(rr))
+    bad_run = nextval(con, "seq_run")
+    con.execute("INSERT INTO run (id, tool_entity_id, result_alternative_id, input_commit_id)"
+                " VALUES (?, 99999, ?, ?)", [bad_run, ce_out, c2])
+    n = one("SELECT count(*) FROM audit_dangling_ref WHERE src_table = 'run'"
+            " AND ref_table = 'entity' AND ref_id = 99999")[0]
+    check("run: tool_entity_id at a missing entity fires audit_dangling_ref", n == 1, f"n={n}")
+    con.execute("DELETE FROM run WHERE id = ?", [bad_run])
+
+    # realizes propagation (Decision 13 option c): plant off in `high` => s1
+    ra1 = {e: (a, src) for e, a, src in allrows(
+        "SELECT entity_id, active, active_source FROM entity_activation_resolved"
+        " WHERE scenario_id = ?", s1)}
+    check("realizes: coarse plant deactivated by its own row in s1",
+          ra1.get(plant_1) == (False, "own"), str(ra1.get(plant_1)))
+    check("realizes: deactivation propagates coarse->fine (gen_1 inactive in s1)",
+          ra1.get(gen_1) == (False, "propagated"), str(ra1.get(gen_1)))
+    ra0 = {e: a for e, a in allrows(
+        "SELECT entity_id, active FROM entity_activation_resolved WHERE scenario_id = ?", s0)}
+    check("realizes: fine stays active where coarse is active (gen_1 on in s0)",
+          ra0.get(gen_1) is True, str(ra0.get(gen_1)))
+
+    # semantic_annotation (T1.4)
+    n = one("SELECT count(*) FROM semantic_annotation_current WHERE object_type = 'unit'"
+            " AND object_id = ? AND relation = 'qudt:hasQuantityKind'", mw)[0]
+    check("semantic_annotation: unit->QUDT crosswalk round-trips", n == 1, f"n={n}")
+    sa_bad = nextval(con, "seq_semantic_annotation")
+    con.execute("INSERT INTO semantic_annotation (id, object_type, object_id, term_iri,"
+                " valid_from_commit) VALUES (?, 'entity_class', 99999, 'x:bad', ?)", [sa_bad, c2])
+    n = one("SELECT count(*) FROM audit_dangling_semantic_ref WHERE object_type = 'entity_class'"
+            " AND object_id = 99999")[0]
+    check("semantic_annotation: annotation at a missing object fires audit_dangling_semantic_ref",
+          n == 1, f"n={n}")
+    con.execute("DELETE FROM semantic_annotation WHERE id = ?", [sa_bad])
+
     # =======================================================================
     # Hostile-data regression checks: every DDL-critique finding (F1..F10 +
     # minors) gets a check that would have caught it. Corruption is planted
@@ -549,6 +686,12 @@ def main():
         except duckdb.ConstraintException:
             con.execute("ROLLBACK")
             check(name, True)
+
+    # run temporal coherence: produced_at (c2) before input (c3) is rejected
+    expect_constraint(
+        "run: produced_at before input commit is rejected (temporal coherence)",
+        "INSERT INTO run (id, tool_entity_id, result_alternative_id, input_commit_id,"
+        " produced_at_commit_id) VALUES (900001, ?, ?, ?, ?)", [ce_tool, ce_out, c3, c2])
 
     # ---- F7: alternative id 0 collides with the D3 base-membership sentinel
     expect_constraint(
@@ -727,6 +870,118 @@ def main():
     n = one("SELECT count(*) FROM audit_type_conformance")[0]
     check("F9: extended type-conformance audit accepts the new kinds", n == 0, f"n={n}")
 
+    # ---- float coordinate axis + values_int (float_axis_crs_int_plan §9) -----
+    con.execute("BEGIN")
+    cfa = new_commit(con, "float axis + values_int additions")
+    level_par = new_pd(node, "level_profile")   # rank-1 float array (declared float -> values)
+    new_type(level_par, "float", 1, [("level", "float")], expected="array")
+    band_par = new_pd(node, "band_response")
+    new_type(band_par, "float", 1, [("band", "float")], expected="array")
+    landuse = new_pd(node, "land_use")          # rank-1 int array (declared int -> values_int)
+    new_type(landuse, "int", 1, [("level", "float")], expected="array")
+
+    # (1) parametric float grid (vertical levels 0..50) shared by two entities
+    ax_lvl = axis_float_parametric(con, 0.0, 10.0, 6)
+    write_array(con, cfa, node_a, level_par, base, [ax_lvl], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    write_array(con, cfa, node_b, level_par, base, [ax_lvl], [6.0, 5.0, 4.0, 3.0, 2.0, 1.0])
+    # (2) irregular materialized float axis (spectral bands, µm)
+    ax_band = axis_float(con, [0.40, 0.55, 0.70, 2.10])
+    write_array(con, cfa, node_a, band_par, base, [ax_band], [0.9, 0.8, 0.7, 0.2])
+    # (3) dense int array (land-use classes) on the 6-level grid
+    write_array(con, cfa, node_a, landuse, base, [ax_lvl], [11, 22, 33, 22, 11, 44], int_kind=True)
+    con.execute("COMMIT")
+
+    ax_lvl2 = axis_float_parametric(con, 0.0, 10.0, 6)   # dedup hit
+    check("float axis: parametric grid dedups to one axis object", ax_lvl == ax_lvl2,
+          f"{ax_lvl} vs {ax_lvl2}")
+    nfloat = one("SELECT count(*) FROM axis WHERE kind = 'float'"
+                 " AND p_start_dbl = 0.0 AND p_step_dbl = 10.0 AND length = 6")[0]
+    check("float axis: one parametric float axis minted for the shared grid", nfloat == 1, f"n={nfloat}")
+    lvl0 = one("SELECT idx1_coord, v_float FROM read_parameter('node', 'level_profile')"
+               " WHERE entity = 'node_a' AND idx1_coord = 0.0")
+    lvl5 = one("SELECT v_float FROM read_parameter('node', 'level_profile')"
+               " WHERE entity = 'node_a' AND idx1_coord = 50.0")
+    check("float axis: parametric coord = p_start_dbl + p_step_dbl*pos renders (0.0->1.0, 50.0->6.0)",
+          lvl0 == (0.0, 1.0) and lvl5 == (6.0,), f"{lvl0} / {lvl5}")
+
+    coords = [r[0] for r in allrows(
+        "SELECT idx1_coord FROM read_parameter('node', 'band_response')"
+        " WHERE entity = 'node_a' ORDER BY idx1_ordinal")]
+    check("float axis: irregular axis_float coords round-trip (read_parameter/value_rows idx1_coord)",
+          coords == [0.40, 0.55, 0.70, 2.10], str(coords))
+
+    lu = allrows("SELECT value_kind, v_int, v_float FROM read_parameter('node', 'land_use')"
+                 " WHERE entity = 'node_a' ORDER BY idx1_coord")
+    check("values_int: dense int array reads back (value_kind='int', v_int cells, v_float NULL)",
+          [r[0] for r in lu] == ['int'] * 6
+          and [r[1] for r in lu] == [11, 22, 33, 22, 11, 44]
+          and all(r[2] is None for r in lu), str(lu))
+    lut = one("SELECT tier FROM value_keys WHERE entity_id = ? AND parameter_definition_id = ?",
+              node_a, landuse)
+    check("values_int: int array lands in the array tier", lut == ('array',), str(lut))
+    di = one("SELECT values_int FROM read_parameter_dense('node', 'land_use')")
+    check("values_int: read_parameter_dense returns the int payload",
+          di == ([11, 22, 33, 22, 11, 44],), str(di))
+    for view in ["audit_axis_integrity", "audit_array_integrity", "audit_index_accelerator",
+                 "audit_type_conformance", "audit_array_payload_xor"]:
+        n = one(f"SELECT count(*) FROM {view}")[0]
+        check(f"float/int additions: {view} clean", n == 0, f"n={n}")
+
+    # ---- float axis / values_int hostile checks (float_axis_crs_int_plan §6) --
+    # non-monotonic float axis fires the monotonicity audit
+    con.execute("BEGIN")
+    ax_fbad = nextval(con, "seq_axis")
+    con.execute("INSERT INTO axis (id, kind, length, content_hash) VALUES (?, 'float', 2, 46)", [ax_fbad])
+    con.execute("INSERT INTO axis_float (axis_id, pos, coord) VALUES (?, 0, 0.70), (?, 1, 0.40)",
+                [ax_fbad, ax_fbad])
+    con.execute("COMMIT")
+    probs = {p for (p,) in allrows("SELECT problem FROM audit_axis_integrity WHERE axis_id = ?", ax_fbad)}
+    check("float hostile: non-monotonic axis_float fires audit_axis_integrity",
+          "sortable axis children not strictly increasing" in probs, str(probs))
+    con.execute("DELETE FROM axis_float WHERE axis_id = ?", [ax_fbad])
+    con.execute("DELETE FROM axis WHERE id = ?", [ax_fbad])
+
+    # NaN coord rejected by the entry CHECK — critique F1 REGRESSION: `coord = coord`
+    # would have ADMITTED NaN in DuckDB (NaN = NaN is TRUE); NOT isnan() must reject.
+    ax_fnan = nextval(con, "seq_axis")
+    con.execute("INSERT INTO axis (id, kind, length, content_hash) VALUES (?, 'float', 1, 47)", [ax_fnan])
+    expect_constraint(
+        "float hostile/F1: NaN coord REJECTED by axis_float CHECK (NOT isnan)",
+        "INSERT INTO axis_float (axis_id, pos, coord) VALUES (?, 0, 'nan'::DOUBLE)", [ax_fnan])
+    con.execute("DELETE FROM axis WHERE id = ?", [ax_fnan])
+    # NaN parametric field on axis rejected by the axis CHECK too
+    expect_constraint(
+        "float hostile/F1: NaN p_step_dbl REJECTED by axis CHECK (NOT isnan)",
+        "INSERT INTO axis (id, kind, length, content_hash, p_start_dbl, p_step_dbl)"
+        " VALUES (nextval('seq_axis'), 'float', 4, 50, 0.0, 'nan'::DOUBLE)")
+
+    # both / neither payload rejected by the value_array XOR CHECK
+    expect_constraint(
+        "values_int hostile: both payloads populated rejected by XOR CHECK",
+        "INSERT INTO value_array (entity_id, parameter_definition_id, alternative_id,"
+        " valid_from_commit, version, axis1_id, values, values_int)"
+        " VALUES (?, ?, ?, ?, 1, ?, [1.0], [1])", [node_c, demand, base, c3, ax_f])
+    expect_constraint(
+        "values_int hostile: neither payload populated rejected by XOR CHECK",
+        "INSERT INTO value_array (entity_id, parameter_definition_id, alternative_id,"
+        " valid_from_commit, version, axis1_id, values, values_int)"
+        " VALUES (?, ?, ?, ?, 1, ?, NULL, NULL)", [node_c, demand, base, c3, ax_f])
+
+    # parametric float with missing / zero p_step_dbl fires the completeness audit
+    con.execute("BEGIN")
+    ax_fns = nextval(con, "seq_axis")   # p_step_dbl NULL
+    con.execute("INSERT INTO axis (id, kind, length, content_hash, p_start_dbl)"
+                " VALUES (?, 'float', 4, 48, 0.0)", [ax_fns])
+    ax_fzs = nextval(con, "seq_axis")   # zero step (breaks strict-increasing)
+    con.execute("INSERT INTO axis (id, kind, length, content_hash, p_start_dbl, p_step_dbl)"
+                " VALUES (?, 'float', 4, 49, 0.0, 0.0)", [ax_fzs])
+    con.execute("COMMIT")
+    probs = {p for (p,) in allrows("SELECT problem FROM audit_axis_integrity"
+                                   " WHERE axis_id IN (?, ?)", ax_fns, ax_fzs)}
+    check("float hostile: parametric float with missing/zero p_step_dbl fires audit",
+          probs == {"parametric float axis missing/invalid p_step_dbl"}, str(probs))
+    con.execute("DELETE FROM axis WHERE id IN (?, ?)", [ax_fns, ax_fzs])
+
     # ---- F10 gap: time_pattern axis round-trip through the long tier
     con.execute("BEGIN")
     c6 = new_commit(con, "F10: time-pattern indexed parameter")
@@ -900,7 +1155,9 @@ def main():
                  "audit_element_arity", "audit_value_class_mismatch",
                  "audit_value_list_membership", "audit_scenario_empty",
                  "audit_required_class_empty", "audit_axis_integrity",
-                 "audit_position_range", "audit_metadata_reserved_dup"]:
+                 "audit_array_payload_xor", "audit_position_range",
+                 "audit_metadata_reserved_dup",
+                 "audit_realizes_cycle", "audit_dangling_semantic_ref"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"final: {view} clean after hostile section", n == 0, f"n={n}")
 

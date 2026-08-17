@@ -23,6 +23,8 @@ CREATE SEQUENCE seq_axis;
 CREATE SEQUENCE seq_axis_label;
 CREATE SEQUENCE seq_display_mode;
 -- (no seq for entity_class_display_mode: composite-keyed link table)
+CREATE SEQUENCE seq_run;                 -- provenance keystone (Decision 13, run table)
+CREATE SEQUENCE seq_semantic_annotation; -- polymorphic ontology crosswalk (fitness 2b)
 
 -- The commit table (SDP Part 1 `commit`): append-only and immutable — the one
 -- exception to the mutable-table from/to pattern. max(id) doubles as the
@@ -41,6 +43,14 @@ CREATE TABLE commit (
 -- template name/version/content hash), the shared authored presentation slot
 -- (Decision 7: one JSON document under one reserved key), and schema_version
 -- (replaces alembic_version) are reserved keys with no link row.
+-- Fitness round 2b adds semantic/interop reserved keys (convention only, no
+-- new table): `semantic_context` (JSON-LD @context / CURIE-prefix map that
+-- expands the IRIs stored in semantic_link / quantity_kind_link / term_iri),
+-- `conforms_to` (DCTERMS profile IRI the dataset claims), plus the agreed
+-- Frictionless/oemetadata `licenses` / per-source `sourceLicenses`,
+-- role-typed `contributors`, and dataset `version` keys. JSON-valued keys
+-- ride the single `value` VARCHAR as a JSON document, like `presentation`.
+-- Full catalogue: ddl_sketch.md §4.1.
 -- Mutable table -> from/to-commit pattern (VMP Part 5 "Scope of
 -- record-per-commit"); one-current per id via generated-column unique index
 -- (specs/versioning_from_to_date_research.md trick — partial indexes are

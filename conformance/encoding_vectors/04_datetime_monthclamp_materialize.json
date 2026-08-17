@@ -1,0 +1,31 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        980899200000000,
+        983318400000000,
+        985737600000000,
+        988416000000000
+      ],
+      "type": "DatetimeMaterialized"
+    },
+    "length": 4
+  },
+  "description": "H1(b) month-clamp DIVERGE -> MATERIALIZE: iterated [Jan31,Feb28,Mar28,Apr28] not reproduced by single-multiply (1 month,0)",
+  "expected_canonical_hex": "080000006461746574696d65010400000000006060641f7c030000e0eea7527e030000607deb8580030000009288f5820300",
+  "expected_hash_u64": 17676723785334099873,
+  "regularity": {
+    "coords": [
+      980899200000000,
+      983318400000000,
+      985737600000000,
+      988416000000000
+    ],
+    "expect_parametric": false,
+    "kind": "Datetime",
+    "step": {
+      "micros": 0,
+      "months": 1
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "axis": {
+    "body": {
+      "start": 0.0,
+      "step": 0.25,
+      "type": "FloatParametric"
+    },
+    "length": 4
+  },
+  "description": "float parametric: start=0.0 step=0.25 length=4 -> [0,0.25,0.5,0.75], all exact",
+  "expected_canonical_hex": "05000000666c6f61740004000000000000000000000000000000000000d03f",
+  "expected_hash_u64": 5141806615262534775,
+  "regularity": {
+    "coords": [
+      0.0,
+      0.25,
+      0.5,
+      0.75
+    ],
+    "expect_parametric": true,
+    "kind": "Float"
+  }
+}

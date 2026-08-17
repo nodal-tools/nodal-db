@@ -1,0 +1,28 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "end_ts": 1580515200000000,
+          "start_ts": 1577836800000000,
+          "years_presented": 1.0
+        },
+        {
+          "end_ts": 1583020800000000,
+          "start_ts": 1580515200000000,
+          "years_presented": null
+        },
+        {
+          "end_ts": 1585699200000000,
+          "start_ts": 1583020800000000,
+          "years_presented": 0.5
+        }
+      ],
+      "type": "Period"
+    },
+    "length": 3
+  },
+  "description": "period axis, explicit [start,end) bounds, per-row mixed years_presented (present, absent, present)",
+  "expected_canonical_hex": "06000000706572696f640103000000000040fac1089b050000e00e5f789d050001000000000000f03f00e00e5f789d050000c074c0bf9f05000000c074c0bf9f05000060895d2fa2050001000000000000e03f",
+  "expected_hash_u64": 1763074644436217869
+}

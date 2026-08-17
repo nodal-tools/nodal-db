@@ -1,0 +1,8 @@
+{
+  "description": "rejected-NaN: a NaN float coord MUST make the encoder error, never hash (spec 3.3.1)",
+  "encode_error": true,
+  "axis": {
+    "length": 1,
+    "body": { "type": "FloatMaterialized", "coords": [ 0.0 ] }
+  }
+}

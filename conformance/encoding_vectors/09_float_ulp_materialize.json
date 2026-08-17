@@ -1,0 +1,29 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0.0,
+        0.1,
+        0.2,
+        0.3000000000000001,
+        0.4
+      ],
+      "type": "FloatMaterialized"
+    },
+    "length": 5
+  },
+  "description": "H3 ULP-divergence -> MATERIALIZE: [0,0.1,0.2, 0.3000000000000001, 0.4]; pos3 is 1 ULP off 0.0+0.1*3, so start+step*pos does NOT reproduce",
+  "expected_canonical_hex": "05000000666c6f617401050000000000000000000000009a9999999999b93f9a9999999999c93f353333333333d33f9a9999999999d93f",
+  "expected_hash_u64": 7475701235315248505,
+  "regularity": {
+    "coords": [
+      0.0,
+      0.1,
+      0.2,
+      0.3000000000000001,
+      0.4
+    ],
+    "expect_parametric": false,
+    "kind": "Float"
+  }
+}

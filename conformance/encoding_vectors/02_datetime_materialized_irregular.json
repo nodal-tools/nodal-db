@@ -1,0 +1,16 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        1577836800000000,
+        1577840400000000,
+        1592213400000000
+      ],
+      "type": "DatetimeMaterialized"
+    },
+    "length": 3
+  },
+  "description": "datetime materialized: irregular timestamps that no single (start,step) reproduces",
+  "expected_canonical_hex": "080000006461746574696d650103000000000040fac1089b050000e48d98099b050000161d121ca80500",
+  "expected_hash_u64": 18117040920274664456
+}

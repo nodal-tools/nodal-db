@@ -1,0 +1,19 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0,
+        2,
+        3
+      ],
+      "type": "IntegerMaterialized"
+    },
+    "length": 3,
+    "properties": {
+      "calendar": "noleap"
+    }
+  },
+  "description": "NON-DEDUP GROUP: base integer body + calendar=noleap",
+  "expected_canonical_hex": "07000000696e746567657201030000000101060000006e6f6c656170000000000000000002000000000000000300000000000000",
+  "expected_hash_u64": 18029621249060710084
+}

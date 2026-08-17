@@ -1,0 +1,15 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        -0.0,
+        1.0
+      ],
+      "type": "FloatMaterialized"
+    },
+    "length": 2
+  },
+  "description": "-0.0 normalization: float materialized [-0.0, 1.0]; -0.0 MUST encode as +0.0 (0x00..00)",
+  "expected_canonical_hex": "05000000666c6f61740102000000000000000000000000000000000000f03f",
+  "expected_hash_u64": 2757463833524788100
+}

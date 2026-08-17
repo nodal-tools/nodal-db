@@ -1,0 +1,30 @@
+{
+  "axis": {
+    "body": {
+      "start_ts": 980899200000000,
+      "step": {
+        "micros": 0,
+        "months": 1
+      },
+      "type": "DatetimeParametric"
+    },
+    "length": 4
+  },
+  "description": "H1(a) month-clamp REPRODUCE -> PARAMETRIC: [Jan31,Feb28,Mar31,Apr30], start=Jan31 step=(1 month,0), month-bearing duration",
+  "expected_canonical_hex": "080000006461746574696d65000400000000006060641f7c0300010000000000000000000000",
+  "expected_hash_u64": 15602189814026607834,
+  "regularity": {
+    "coords": [
+      980899200000000,
+      983318400000000,
+      985996800000000,
+      988588800000000
+    ],
+    "expect_parametric": true,
+    "kind": "Datetime",
+    "step": {
+      "micros": 0,
+      "months": 1
+    }
+  }
+}

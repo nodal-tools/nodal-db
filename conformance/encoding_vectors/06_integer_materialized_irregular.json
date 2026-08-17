@@ -1,0 +1,27 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0,
+        5,
+        11,
+        15
+      ],
+      "type": "IntegerMaterialized"
+    },
+    "length": 4
+  },
+  "description": "integer materialized: [0,5,11,15] non-constant difference -> irregular",
+  "expected_canonical_hex": "07000000696e7465676572010400000000000000000000000005000000000000000b000000000000000f00000000000000",
+  "expected_hash_u64": 10053812208988041385,
+  "regularity": {
+    "coords": [
+      0,
+      5,
+      11,
+      15
+    ],
+    "expect_parametric": false,
+    "kind": "Integer"
+  }
+}

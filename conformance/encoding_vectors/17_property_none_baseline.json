@@ -1,0 +1,16 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0,
+        2,
+        3
+      ],
+      "type": "IntegerMaterialized"
+    },
+    "length": 3
+  },
+  "description": "NON-DEDUP GROUP: base integer body, no properties (empty property block, single 0x00 byte)",
+  "expected_canonical_hex": "07000000696e7465676572010300000000000000000000000002000000000000000300000000000000",
+  "expected_hash_u64": 8194677074618467790
+}

@@ -9,6 +9,7 @@ publish = false
 duckdb = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
+unicode-normalization = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

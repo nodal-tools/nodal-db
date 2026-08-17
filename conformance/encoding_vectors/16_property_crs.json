@@ -1,0 +1,19 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0,
+        2,
+        3
+      ],
+      "type": "IntegerMaterialized"
+    },
+    "length": 3,
+    "properties": {
+      "crs": "EPSG:4326"
+    }
+  },
+  "description": "NON-DEDUP GROUP: base integer body + crs=EPSG:4326",
+  "expected_canonical_hex": "07000000696e74656765720103000000010309000000455053473a34333236000000000000000002000000000000000300000000000000",
+  "expected_hash_u64": 9132869126483790573
+}

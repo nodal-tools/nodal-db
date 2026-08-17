@@ -1,0 +1,38 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "ordinal": 1,
+          "terms": [
+            {
+              "range_end": 3,
+              "range_start": 1,
+              "unit": "M"
+            },
+            {
+              "range_end": 17,
+              "range_start": 9,
+              "unit": "h"
+            }
+          ]
+        },
+        {
+          "ordinal": 2,
+          "terms": [
+            {
+              "range_end": 5,
+              "range_start": 1,
+              "unit": "WD"
+            }
+          ]
+        }
+      ],
+      "type": "TimePattern"
+    },
+    "length": 2
+  },
+  "description": "time_pattern axis: two positions, first has 2 terms (union), constant per-pos ordinal; terms ascending term_no",
+  "expected_canonical_hex": "0c00000074696d655f7061747465726e0102000000000100000002000000010000004d01000300010000006809001100020000000100000002000000574401000500",
+  "expected_hash_u64": 13316759017218111449
+}

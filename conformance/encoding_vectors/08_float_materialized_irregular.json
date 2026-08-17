@@ -1,0 +1,17 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0.0,
+        0.5,
+        1.5,
+        10.0
+      ],
+      "type": "FloatMaterialized"
+    },
+    "length": 4
+  },
+  "description": "float materialized: irregular strictly-increasing coords",
+  "expected_canonical_hex": "05000000666c6f61740104000000000000000000000000000000000000e03f000000000000f83f0000000000002440",
+  "expected_hash_u64": 11681835913395707388
+}

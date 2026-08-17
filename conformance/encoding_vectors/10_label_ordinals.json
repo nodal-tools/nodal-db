@@ -1,0 +1,25 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "label": "high",
+          "ordinal": 20
+        },
+        {
+          "label": "low",
+          "ordinal": 10
+        },
+        {
+          "label": "mid",
+          "ordinal": 15
+        }
+      ],
+      "type": "Label"
+    },
+    "length": 3
+  },
+  "description": "label axis with non-trivial ordinals: physical pos order differs from semantic ordinal",
+  "expected_canonical_hex": "050000006c6162656c0103000000001400000004000000686967680a000000030000006c6f770f000000030000006d6964",
+  "expected_hash_u64": 2970426163089183614
+}

@@ -1,0 +1,17 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "label": "é",
+          "ordinal": 1
+        }
+      ],
+      "type": "Label"
+    },
+    "length": 1
+  },
+  "description": "NFC edge case: label 'e'+U+0301 (decomposed, 3 bytes) MUST normalize to precomposed U+00E9 (bytes C3 A9, len prefix 2)",
+  "expected_canonical_hex": "050000006c6162656c0101000000000100000002000000c3a9",
+  "expected_hash_u64": 4598673749796162997
+}

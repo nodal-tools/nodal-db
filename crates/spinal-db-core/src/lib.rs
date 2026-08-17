@@ -11,4 +11,4 @@
 pub const MINIMUM_DUCKDB: (u32, u32) = (1, 4);
 
 /// Canonical byte encoding + 64-bit content hash (Phase 1).
-pub mod encoding {}
+pub mod encoding;

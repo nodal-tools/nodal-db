@@ -1,0 +1,23 @@
+{
+  "axis": {
+    "body": {
+      "start": 0,
+      "step": 5,
+      "type": "IntegerParametric"
+    },
+    "length": 4
+  },
+  "description": "integer parametric: start=0 step=5 length=4 -> [0,5,10,15]",
+  "expected_canonical_hex": "07000000696e746567657200040000000000000000000000000500000000000000",
+  "expected_hash_u64": 1324955970558145511,
+  "regularity": {
+    "coords": [
+      0,
+      5,
+      10,
+      15
+    ],
+    "expect_parametric": true,
+    "kind": "Integer"
+  }
+}

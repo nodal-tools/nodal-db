@@ -1,0 +1,16 @@
+{
+  "axis": {
+    "body": {
+      "start_ts": 1577836800000000,
+      "step": {
+        "micros": 3600000000,
+        "months": 0
+      },
+      "type": "DatetimeParametric"
+    },
+    "length": 24
+  },
+  "description": "datetime parametric: 24h hourly grid from 2020-01-01, micros-only step (month-bearing=0)",
+  "expected_canonical_hex": "080000006461746574696d650018000000000040fac1089b05000000000000a493d600000000",
+  "expected_hash_u64": 16820818339860931418
+}

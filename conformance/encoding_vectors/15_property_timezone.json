@@ -1,0 +1,19 @@
+{
+  "axis": {
+    "body": {
+      "coords": [
+        0,
+        2,
+        3
+      ],
+      "type": "IntegerMaterialized"
+    },
+    "length": 3,
+    "properties": {
+      "timezone": "Europe/Helsinki"
+    }
+  },
+  "description": "NON-DEDUP GROUP: base integer body + timezone=Europe/Helsinki",
+  "expected_canonical_hex": "07000000696e7465676572010300000001020f0000004575726f70652f48656c73696e6b69000000000000000002000000000000000300000000000000",
+  "expected_hash_u64": 13174196679649653427
+}

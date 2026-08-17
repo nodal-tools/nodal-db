@@ -1,0 +1,38 @@
+{
+  "name": "tier transition scalar -> long (old tier closed, new tier starts at its own v1)",
+  "key": [17, 27, 37],
+  "steps": [
+    {
+      "op": { "scalar_float": { "v": 1.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": null, "retained": true, "v_float": 1.0 }
+        ]
+      }
+    },
+    {
+      "op": { "scalar_float": { "v": 2.0 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "v_float": 1.0 },
+          { "version": 2, "valid_to_step": null, "retained": true, "v_float": 2.0 }
+        ]
+      }
+    },
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 7.0 }, { "pos": 2, "value": 9.0 } ] } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 2, "retained": true, "v_float": 1.0 },
+          { "version": 2, "valid_to_step": 3, "retained": true, "v_float": 2.0 }
+        ],
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": null, "retained": true, "v_float": 7.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": null, "retained": true, "v_float": 9.0 }
+        ],
+        "array": [],
+        "array_hist": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "name": "tier transition long -> array (every live cell closed, new tier starts at its own v1)",
+  "key": [21, 31, 41],
+  "steps": [
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 10.0 }, { "pos": 2, "value": 30.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": null, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": null, "retained": true, "v_float": 30.0 }
+        ]
+      }
+    },
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 11.0 }, { "pos": 1, "value": 20.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": 2, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 1, "version": 1, "valid_to_step": null, "retained": true, "v_float": 20.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": 2, "retained": true, "v_float": 30.0 },
+          { "i1_pos": 0, "version": 2, "valid_to_step": null, "retained": true, "v_float": 11.0 }
+        ]
+      }
+    },
+    {
+      "op": { "array_float": { "start": 0, "step": 1, "length": 3, "values": [7.0, 8.0, 9.0] } },
+      "expect": {
+        "array": [
+          { "version": 1, "v_min": 7.0, "v_max": 9.0, "first": 7.0 }
+        ],
+        "array_hist": [],
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": 2, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 1, "version": 1, "valid_to_step": 3, "retained": true, "v_float": 20.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": 2, "retained": true, "v_float": 30.0 },
+          { "i1_pos": 0, "version": 2, "valid_to_step": 3, "retained": true, "v_float": 11.0 }
+        ],
+        "scalar": []
+      }
+    }
+  ]
+}

@@ -130,14 +130,67 @@ pub enum ShapedData {
     Long(Vec<LongRow>),
 }
 
-/// Outcome summary of a write. The pure pipeline fills `tier` and the counts it
-/// can see; axis dedup / row-write totals are completed by the history protocol
-/// chunk (VMP Part 5).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A machine-readable warning surfaced to the caller of the public write API
+/// (`api::write_parameter`). The founding case (decision B,
+/// `rust_impl_session_decisions.md`) is name-resolution auto-create: a referent
+/// named in the write did not exist and was created, which the caller MUST be
+/// able to detect programmatically — never a mere log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WarningKind {
+    /// A named referent (entity_class / parameter_definition / alternative /
+    /// entity) was auto-created because name resolution found no current row.
+    AutoCreated,
+}
+
+/// One structured warning. `object_type` is the referent table
+/// (`"entity_class"`, `"parameter_definition"`, `"alternative"`, `"entity"`),
+/// `name` the resolved name, `id` the id assigned to the created row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Warning {
+    pub kind: WarningKind,
+    pub object_type: String,
+    pub name: String,
+    pub id: i64,
+}
+
+/// The aggregate result of one `api::write_parameter` call (plan Part 3
+/// `types`: "tiers touched, rows written, axes reused/created, commit id"),
+/// plus the machine-readable auto-create warnings (decision B). Owned and
+/// FFI-friendly. One report covers every per-entity value written by the call.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WriteReport {
-    pub tier: Option<Tier>,
-    pub rows: usize,
-    pub axes: usize,
+    /// The commit id stamped on every row this call wrote (the validity edge).
+    pub commit_id: i64,
+    /// Distinct per-entity values written (one canonicalized value per entity).
+    pub values_written: usize,
+    /// Physical rows inserted/replaced as current across all values.
+    pub rows_written: usize,
+    /// Physical rows closed out / moved to a `_hist` twin across all values.
+    pub rows_closed: usize,
+    /// New `axis` rows inserted while resolving axes for this call.
+    pub axes_created: usize,
+    /// Existing `axis` rows reused (content-verified) for this call.
+    pub axes_reused: usize,
+    /// Distinct tiers touched (first-seen order).
+    pub tiers: Vec<Tier>,
+    /// Machine-readable warnings (auto-create, decision B).
+    pub warnings: Vec<Warning>,
+}
+
+impl WriteReport {
+    /// Fold one per-value [`WriteOutcome`] into the aggregate.
+    pub fn absorb(&mut self, o: &WriteOutcome) {
+        self.values_written += 1;
+        self.rows_written += o.rows_written;
+        self.rows_closed += o.rows_closed;
+        self.axes_created += o.axes_created;
+        self.axes_reused += o.axes_reused;
+        if let Some(t) = o.tier {
+            if !self.tiers.contains(&t) {
+                self.tiers.push(t);
+            }
+        }
+    }
 }
 
 /// The full result of one `history::write_value` / `history::delete_value` call
@@ -159,12 +212,3 @@ pub struct WriteOutcome {
     pub axes_reused: usize,
 }
 
-impl From<&WriteOutcome> for WriteReport {
-    fn from(o: &WriteOutcome) -> Self {
-        WriteReport {
-            tier: o.tier,
-            rows: o.rows_written,
-            axes: o.axes_created + o.axes_reused,
-        }
-    }
-}

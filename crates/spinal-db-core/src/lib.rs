@@ -43,3 +43,9 @@ pub mod axis;
 /// The history write protocol: from/to close-out, array `_hist` pre-image,
 /// version counter, retention, tier transitions (Phase 3a, VMP Part 5).
 pub mod history;
+
+/// The public Arrow-in write path: `write_parameter` / `read_parameter`
+/// (Phase 3b, VMP Parts 3-6). Ties name-resolution (auto-create, decision B),
+/// declared-type lookup, canon, tier, axis dedup, and history into one atomic,
+/// retried commit.
+pub mod api;

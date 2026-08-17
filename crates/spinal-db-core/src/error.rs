@@ -54,9 +54,24 @@ pub enum DbError {
     #[error("write conflict: transaction still lost the race after {attempts} retries")]
     Conflict { attempts: u32 },
 
+    /// The public write API (`api::write_parameter`) was handed a batch it
+    /// cannot interpret — wrong column count, a non-string entity column, an
+    /// unsupported Arrow type for a dimension or the value column, etc. A
+    /// caller-facing contract error, never a stack trace.
+    #[error("write_parameter: {0}")]
+    Api(String),
+
     #[error(transparent)]
     Duckdb(#[from] duckdb::Error),
 
     #[error(transparent)]
     Encode(#[from] EncodeError),
+
+    /// A canonicalization-pipeline error surfaced through the write path.
+    #[error(transparent)]
+    Canon(#[from] crate::canon::CanonError),
+
+    /// An Arrow compute/project error while slicing the write batch per entity.
+    #[error(transparent)]
+    Arrow(#[from] duckdb::arrow::error::ArrowError),
 }

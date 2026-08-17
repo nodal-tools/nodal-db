@@ -1,0 +1,20 @@
+{
+  "description": "rank-2 2x3 row-major (non-square: transpose bug caught). Last dim (length 3) varies fastest.",
+  "declared_dims": [
+    { "position": 1, "kind": "Integer" },
+    { "position": 2, "kind": "Integer" }
+  ],
+  "axes": [
+    { "length": 2, "positions": [0, 1] },
+    { "length": 3, "positions": [0, 1, 2] }
+  ],
+  "values": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+  "expected": [
+    { "index": [0, 0], "value": 10.0 },
+    { "index": [0, 1], "value": 11.0 },
+    { "index": [0, 2], "value": 12.0 },
+    { "index": [1, 0], "value": 13.0 },
+    { "index": [1, 1], "value": 14.0 },
+    { "index": [1, 2], "value": 15.0 }
+  ]
+}

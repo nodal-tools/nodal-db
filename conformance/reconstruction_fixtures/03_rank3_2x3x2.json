@@ -1,0 +1,28 @@
+{
+  "description": "rank-3 2x3x2 row-major (transpose bug caught). Value == flat index; last dim toggles every step, middle every 2, first every 6.",
+  "declared_dims": [
+    { "position": 1, "kind": "Integer" },
+    { "position": 2, "kind": "Integer" },
+    { "position": 3, "kind": "Integer" }
+  ],
+  "axes": [
+    { "length": 2, "positions": [0, 1] },
+    { "length": 3, "positions": [0, 1, 2] },
+    { "length": 2, "positions": [0, 1] }
+  ],
+  "values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+  "expected": [
+    { "index": [0, 0, 0], "value": 0.0 },
+    { "index": [0, 0, 1], "value": 1.0 },
+    { "index": [0, 1, 0], "value": 2.0 },
+    { "index": [0, 1, 1], "value": 3.0 },
+    { "index": [0, 2, 0], "value": 4.0 },
+    { "index": [0, 2, 1], "value": 5.0 },
+    { "index": [1, 0, 0], "value": 6.0 },
+    { "index": [1, 0, 1], "value": 7.0 },
+    { "index": [1, 1, 0], "value": 8.0 },
+    { "index": [1, 1, 1], "value": 9.0 },
+    { "index": [1, 2, 0], "value": 10.0 },
+    { "index": [1, 2, 1], "value": 11.0 }
+  ]
+}

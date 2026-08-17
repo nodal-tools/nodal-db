@@ -1,0 +1,16 @@
+{
+  "description": "rank-1 sanity: flat payload maps 1:1 to positions 0..n-1",
+  "declared_dims": [
+    { "position": 1, "kind": "Integer" }
+  ],
+  "axes": [
+    { "length": 4, "positions": [0, 1, 2, 3] }
+  ],
+  "values": [10.0, 20.0, 30.0, 40.0],
+  "expected": [
+    { "index": [0], "value": 10.0 },
+    { "index": [1], "value": 20.0 },
+    { "index": [2], "value": 30.0 },
+    { "index": [3], "value": 40.0 }
+  ]
+}

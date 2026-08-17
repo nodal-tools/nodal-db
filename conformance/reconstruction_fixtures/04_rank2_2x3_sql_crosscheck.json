@@ -1,0 +1,21 @@
+{
+  "description": "rank-2 2x3 also expanded through the SQL value_array_cells view: Rust reconstruction MUST equal the DuckDB read-view expansion (row-major agreement, spec 2.1).",
+  "sql_crosscheck": true,
+  "declared_dims": [
+    { "position": 1, "kind": "Integer" },
+    { "position": 2, "kind": "Integer" }
+  ],
+  "axes": [
+    { "length": 2, "positions": [0, 1] },
+    { "length": 3, "positions": [0, 1, 2] }
+  ],
+  "values": [1.5, 2.5, 3.5, 4.5, 5.5, 6.5],
+  "expected": [
+    { "index": [0, 0], "value": 1.5 },
+    { "index": [0, 1], "value": 2.5 },
+    { "index": [0, 2], "value": 3.5 },
+    { "index": [1, 0], "value": 4.5 },
+    { "index": [1, 1], "value": 5.5 },
+    { "index": [1, 2], "value": 6.5 }
+  ]
+}

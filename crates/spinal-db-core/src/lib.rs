@@ -24,6 +24,10 @@ pub mod canon;
 /// The tier decision — pipeline step 4 (Phase 2, VMP Part 3).
 pub mod tier;
 
+/// Array-tier reconstruction: dense flat `DOUBLE[]` -> logical long rows, the
+/// inverse of `tier` (Phase 2, VMP Part 3; `spec/reconstruction.md`).
+pub mod reconstruct;
+
 /// One error type for the DB-facing layer (Phase 2b).
 pub mod error;
 

@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+# Versions are pinned once here and referenced from each crate via
+# `workspace = true`. The de-risk spike (Phase 0) gates the duckdb-rs choice:
+# its bundled DuckDB must be >= 1.4 (the line the schema was verified on).
+# arrow is intentionally NOT listed here — it is consumed only through
+# `duckdb::arrow` so exactly one arrow major is ever in the tree (risk R2).
+[workspace.dependencies]
+duckdb = { version = "1.4", features = ["bundled"] }
+thiserror = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tempfile = "3"

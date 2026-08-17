@@ -23,6 +23,12 @@
 //! array / long. Ordinal domains for label dimensions arrive by the in-process
 //! `domains` arg and/or Arrow field metadata `spinal:label_domain` (a JSON array
 //! of the ordered labels) — decision D, both channels.
+//!
+//! ## Concurrency contract
+//! Safe to call from multiple threads and processes on one DB file: writes are
+//! serialized, in-process by `conn`'s per-path lock (api critique F1) and
+//! cross-process by DuckDB's file lock. Connections stay per-operation
+//! (CLAUDE.md invariant 1) — never shared, never long-lived.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -70,6 +76,13 @@ pub fn write_parameter(
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
+    // Referent names must be non-empty (critique F5): a caller-contract
+    // problem is caught here, never as a raw CHECK error mid-transaction.
+    for (what, name) in [("class", class), ("parameter", parameter), ("alternative", alternative)] {
+        if name.trim().is_empty() {
+            return Err(DbError::Api(format!("{what} name must be non-empty")));
+        }
+    }
     let ncols = batch.num_columns();
     if ncols < 2 {
         return Err(DbError::Api(format!(
@@ -79,6 +92,11 @@ pub fn write_parameter(
     let rank = ncols - 2;
     if rank > 4 {
         return Err(DbError::Api(format!("declared rank {rank} exceeds the cap of 4")));
+    }
+    // An empty batch writes nothing — reject before it can auto-create
+    // referents or burn a commit (critique F8).
+    if batch.num_rows() == 0 {
+        return Err(DbError::Api("empty batch: no rows to write".into()));
     }
 
     // --- Pure, DB-independent preparation (safe to compute once; the retried
@@ -100,6 +118,25 @@ pub fn write_parameter(
     // domain for a label dimension the arg did not cover (decision D).
     let domains = effective_domains(&batch, &inferred, domains)?;
 
+    // Tz-bearing timestamp columns are accepted — a Timestamp(µs, tz) is a
+    // well-defined instant, stored as the UTC-µs instant unchanged — but never
+    // silently: each gets a TimezoneNormalized warning (critique F6).
+    let mut tz_warnings: Vec<Warning> = Vec::new();
+    for i in 1..ncols {
+        let field = batch.schema().field(i).clone();
+        if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) = field.data_type() {
+            tz_warnings.push(Warning {
+                kind: WarningKind::TimezoneNormalized {
+                    column: field.name().clone(),
+                    tz: tz.to_string(),
+                },
+                object_type: "column".into(),
+                name: field.name().clone(),
+                id: 0,
+            });
+        }
+    }
+
     // The per-entity row masks and the dims+value sub-batch (entity col dropped).
     let entity_arr = batch
         .column(0)
@@ -115,11 +152,24 @@ pub fn write_parameter(
             return Err(DbError::Api(format!("null entity name in row {row}")));
         }
         let name = entity_arr.value(row).to_string();
-        let idx = *slot.entry(name.clone()).or_insert_with(|| {
+        if name.trim().is_empty() {
+            return Err(DbError::Api(format!("empty entity name in row {row}")));
+        }
+        // Dedup by the same fold DB resolution uses (`lower(name)`; ASCII per
+        // the #2373 charset) so case-aliases cannot double-write one entity.
+        // Aliased spellings are ambiguous, not mergeable (critique F3).
+        let idx = *slot.entry(name.to_ascii_lowercase()).or_insert_with(|| {
             names.push(name.clone());
             masks.push(vec![false; nrows]);
             names.len() - 1
         });
+        if names[idx] != name {
+            return Err(DbError::Api(format!(
+                "entity names {:?} and {name:?} resolve to the same entity \
+                 (name resolution is case-insensitive); use one spelling per batch",
+                names[idx]
+            )));
+        }
         masks[idx][row] = true;
     }
     let project: Vec<usize> = (1..ncols).collect();
@@ -132,6 +182,7 @@ pub fn write_parameter(
         let mut cache = AxisCache::new();
         let mut report = WriteReport {
             commit_id,
+            warnings: tz_warnings.clone(),
             ..Default::default()
         };
 
@@ -159,7 +210,7 @@ pub fn write_parameter(
 
         for (name, mask) in names.iter().zip(masks.iter()) {
             let entity_id =
-                resolve_entity(conn, commit_id, class_id, name, &mut report.warnings)?;
+                resolve_entity(conn, commit_id, class_id, class, name, &mut report.warnings)?;
             let sub = filter_record_batch(&sub_all, &BooleanArray::from(mask.clone()))?;
             let value = canonicalize(&sub, &declared, value_kind, &domains)?;
             let key = ValueKey {
@@ -351,6 +402,7 @@ fn resolve_entity(
     conn: &Connection,
     commit_id: i64,
     class_id: i64,
+    class: &str,
     name: &str,
     warnings: &mut Vec<Warning>,
 ) -> Result<i64, DbError> {
@@ -361,6 +413,20 @@ fn resolve_entity(
         name,
     )? {
         return Ok(id);
+    }
+    // Never auto-create into an N-D class (critique F10): an N-D entity's
+    // identity is its member tuple, which the batch does not carry — a hollow
+    // member-less entity would be a trap, not a convenience.
+    let ndims: i64 = conn.query_row(
+        "SELECT count(*) FROM entity_class_dimension WHERE cur_c = ?",
+        params![class_id],
+        |r| r.get(0),
+    )?;
+    if ndims > 0 {
+        return Err(DbError::Api(format!(
+            "cannot auto-create entity {name:?} in {ndims}-dimensional class {class:?}: \
+             an N-D entity needs explicit membership (entity_element rows); create it first"
+        )));
     }
     let id: i64 = conn.query_row(
         "INSERT INTO entity (entity_class_id, name, valid_from_commit) VALUES (?, ?, ?) RETURNING id",
@@ -396,12 +462,22 @@ fn resolve_parameter(
         class_id,
         name,
     )? {
-        // Existing definition: read the declared type from the DB. If it somehow
-        // has no parameter_type row yet, materialize one from the batch.
+        // Existing definition: read the declared type from the DB and hold the
+        // batch to it (critique F2/F4/F11). If it somehow has no parameter_type
+        // row yet, materialize one from the batch — never silently (F7).
         match read_declared_type(conn, pd_id)? {
-            Some(declared) => Ok((pd_id, declared)),
+            Some(db_decl) => {
+                validate_declared(name, &db_decl, inferred, value_kind)?;
+                Ok((pd_id, db_decl.shape))
+            }
             None => {
-                create_parameter_type(conn, commit_id, pd_id, inferred, value_kind)?;
+                let pt_id = create_parameter_type(conn, commit_id, pd_id, inferred, value_kind)?;
+                warnings.push(Warning {
+                    kind: WarningKind::AutoCreated,
+                    object_type: "parameter_type".into(),
+                    name: name.into(),
+                    id: pt_id,
+                });
                 Ok((pd_id, inferred_declared(inferred)))
             }
         }
@@ -433,46 +509,113 @@ fn inferred_declared(inferred: &[(String, IndexKind)]) -> DeclaredType {
     }
 }
 
-/// Read a definition's declared dimensions from `parameter_type` /
+/// A definition's declared type as stored in the DB: the `parameter_type.
+/// value_kind` tag, the dimension names in declared order, and the
+/// `(position, kind)` shape canon consumes.
+struct DbDeclared {
+    value_kind: String,
+    dim_names: Vec<String>,
+    shape: DeclaredType,
+}
+
+/// Hold the batch to an EXISTING declaration (critique F2/F4/F11): rank, the
+/// stored `value_kind` tag, and the dimension names in declared order must all
+/// match — a mismatch is a loud caller-contract error, never silent drift.
+fn validate_declared(
+    parameter: &str,
+    db: &DbDeclared,
+    inferred: &[(String, IndexKind)],
+    value_kind: ValueKind,
+) -> Result<(), DbError> {
+    let declared_rank = db.shape.rank();
+    if declared_rank != inferred.len() {
+        return Err(DbError::Api(format!(
+            "parameter {parameter:?}: batch has rank {} but the declared type has rank {declared_rank}",
+            inferred.len()
+        )));
+    }
+    let batch_kind = if inferred.is_empty() { value_kind.tag() } else { "indexed" };
+    if db.value_kind != batch_kind {
+        return Err(DbError::Api(format!(
+            "parameter {parameter:?}: declared value_kind is {:?} but the batch carries {batch_kind:?}",
+            db.value_kind
+        )));
+    }
+    for (i, ((batch_name, _), declared_name)) in inferred.iter().zip(&db.dim_names).enumerate() {
+        if !batch_name.eq_ignore_ascii_case(declared_name) {
+            return Err(DbError::Api(format!(
+                "parameter {parameter:?}: dimension column {i} is named {batch_name:?} but the \
+                 declared dimension at position {} is {declared_name:?} \
+                 (dim columns must carry the declared names in declared order)",
+                i + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read a definition's declared type from `parameter_type` /
 /// `parameter_type_dimension`. `None` means no current `parameter_type` row.
-fn read_declared_type(conn: &Connection, pd_id: i64) -> Result<Option<DeclaredType>, DbError> {
-    let pt_id: Option<i64> = match conn.query_row(
-        "SELECT id FROM parameter_type \
-         WHERE parameter_definition_id = ? AND valid_to_commit IS NULL",
-        params![pd_id],
-        |r| r.get::<_, i64>(0),
-    ) {
-        Ok(id) => Some(id),
-        Err(duckdb::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
+/// Deterministic by construction (critique F9): more than one current row, or
+/// declared positions that are not exactly `1..=rank` (both reachable only via
+/// import/hand edits), are refused loudly. Contiguity is also what lets
+/// `effective_domains` key metadata label domains by column order — column `i`
+/// is exactly declared position `i + 1`.
+fn read_declared_type(conn: &Connection, pd_id: i64) -> Result<Option<DbDeclared>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, value_kind FROM parameter_type \
+         WHERE parameter_definition_id = ? AND valid_to_commit IS NULL ORDER BY id",
+    )?;
+    let pts: Vec<(i64, String)> = stmt
+        .query_map(params![pd_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let (pt_id, value_kind) = match pts.len() {
+        0 => return Ok(None),
+        1 => pts.into_iter().next().unwrap(),
+        n => {
+            return Err(DbError::Api(format!(
+                "parameter_definition {pd_id} has {n} current parameter_type rows: \
+                 the declaration is ambiguous (import/hand-edit damage; close out all but one)"
+            )))
+        }
     };
-    let Some(pt_id) = pt_id else { return Ok(None) };
 
     let mut stmt = conn.prepare(
-        "SELECT position, kind FROM parameter_type_dimension \
+        "SELECT position, dimension_name, kind FROM parameter_type_dimension \
          WHERE parameter_type_id = ? AND valid_to_commit IS NULL ORDER BY position",
     )?;
     let mut positions: Vec<(u8, IndexKind)> = Vec::new();
+    let mut dim_names: Vec<String> = Vec::new();
     let rows = stmt.query_map(params![pt_id], |r| {
-        Ok((r.get::<_, i8>(0)?, r.get::<_, String>(1)?))
+        Ok((r.get::<_, i8>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
     })?;
     for row in rows {
-        let (pos, kind) = row?;
+        let (pos, dname, kind) = row?;
         positions.push((pos as u8, parse_index_kind(&kind)?));
+        dim_names.push(dname);
     }
-    Ok(Some(DeclaredType { positions }))
+    for (i, (pos, _)) in positions.iter().enumerate() {
+        if *pos as usize != i + 1 {
+            return Err(DbError::Api(format!(
+                "parameter_type {pt_id}: declared dimension positions are not contiguous \
+                 1..=rank (position {pos} at index {i}; import/hand-edit damage)"
+            )));
+        }
+    }
+    Ok(Some(DbDeclared { value_kind, dim_names, shape: DeclaredType { positions } }))
 }
 
 /// Insert the `parameter_type` (+ its dimension rows) declaring the batch's
 /// shape: `value_kind = 'indexed'` for rank ≥ 1 else the measure kind tag;
-/// dimension names/kinds from the inferred columns (VMP Part 2/7).
+/// dimension names/kinds from the inferred columns (VMP Part 2/7). Returns the
+/// created `parameter_type` id.
 fn create_parameter_type(
     conn: &Connection,
     commit_id: i64,
     pd_id: i64,
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
-) -> Result<(), DbError> {
+) -> Result<i64, DbError> {
     let type_kind = if inferred.is_empty() {
         value_kind.tag()
     } else {
@@ -493,7 +636,7 @@ fn create_parameter_type(
             params![pt_id, (i + 1) as i8, dname, index_kind_tag(*kind), commit_id],
         )?;
     }
-    Ok(())
+    Ok(pt_id)
 }
 
 /// The definition's `retain_content` — VMP Part 5's primary retention lever

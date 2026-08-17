@@ -135,16 +135,25 @@ pub enum ShapedData {
 /// `rust_impl_session_decisions.md`) is name-resolution auto-create: a referent
 /// named in the write did not exist and was created, which the caller MUST be
 /// able to detect programmatically — never a mere log line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WarningKind {
     /// A named referent (entity_class / parameter_definition / alternative /
-    /// entity) was auto-created because name resolution found no current row.
+    /// entity / parameter_type) was auto-created because name resolution found
+    /// no current row.
     AutoCreated,
+    /// A tz-bearing `Timestamp(µs, tz)` batch column was accepted (api critique
+    /// F6): a tz-aware timestamp is a well-defined instant and is stored as the
+    /// UTC-µs instant unchanged, but the tz display metadata is dropped —
+    /// surfaced here so tz-aware feeds are never silently reinterpreted.
+    TimezoneNormalized { column: String, tz: String },
 }
 
-/// One structured warning. `object_type` is the referent table
-/// (`"entity_class"`, `"parameter_definition"`, `"alternative"`, `"entity"`),
-/// `name` the resolved name, `id` the id assigned to the created row.
+/// One structured warning. For [`WarningKind::AutoCreated`], `object_type` is
+/// the referent table (`"entity_class"`, `"parameter_definition"`,
+/// `"alternative"`, `"entity"`, `"parameter_type"`), `name` the resolved name,
+/// `id` the id assigned to the created row. For
+/// [`WarningKind::TimezoneNormalized`], `object_type` is `"column"`, `name`
+/// the column name, and `id` is 0 (no row was created).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warning {
     pub kind: WarningKind,

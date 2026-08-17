@@ -65,6 +65,9 @@ pub fn apply_schema_from(conn: &Connection, dir: &Path) -> Result<(), DbError> {
 /// crate-resolved `schema_dir()`). Opens read-write, applies, closes — the
 /// `init` primitive tests and the CLI share.
 pub fn init_schema(db_path: &Path) -> Result<(), DbError> {
+    // Same in-process per-path serialization as every other open (conn F1).
+    let lock = crate::conn::path_lock(db_path);
+    let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = Connection::open(db_path)?;
     apply_schema_from(&conn, &schema_dir())?;
     conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;

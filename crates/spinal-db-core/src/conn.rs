@@ -13,13 +13,23 @@
 //!   option once churn/compaction lands (VMP Part 5).
 //! - [`with_read`] opens a fresh read-only connection, runs, and closes; the
 //!   commit-cookie poll (#2252) is itself one such per-operation read.
+//! - **In-process serialization (api critique F1):** DuckDB's file lock
+//!   excludes other *processes* only — two threads of one process opening the
+//!   same file get two independent database instances whose commits silently
+//!   diverge (lost or chimerically merged writes). Every open-use-close in
+//!   this library therefore first takes a process-global per-path lock
+//!   ([`path_lock`]), mirroring in-process the exclusion the file lock gives
+//!   cross-process. Connections stay per-operation — this serializes them,
+//!   it never shares them.
 //!
 //! NOTE for Phase 3 (documented, not implemented here): the write-conflict
 //! retry loop the history protocol needs must match the DuckDB **1.5.5**
 //! wording `Conflict on tuple deletion!` (1.4.4 said `Conflict on update!`),
 //! so a robust matcher keys on the `Conflict` substring, not the full phrase.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -34,6 +44,26 @@ use crate::MINIMUM_DUCKDB;
 const MAX_ATTEMPTS: u32 = 8;
 const BACKOFF_START: Duration = Duration::from_millis(20);
 const BACKOFF_CAP: Duration = Duration::from_millis(500);
+
+/// Process-global registry of per-path serialization locks (api critique F1).
+static PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// The in-process serialization lock for one DB path, keyed by the
+/// canonicalized path so symlink/relative aliases of one file share one lock.
+/// For a not-yet-created file the parent directory is canonicalized instead.
+pub(crate) fn path_lock(db_path: &Path) -> Arc<Mutex<()>> {
+    let key = db_path.canonicalize().unwrap_or_else(|_| {
+        match (db_path.parent().and_then(|d| d.canonicalize().ok()), db_path.file_name()) {
+            (Some(dir), Some(name)) => dir.join(name),
+            _ => db_path.to_path_buf(),
+        }
+    });
+    let mut map = PATH_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    map.entry(key).or_default().clone()
+}
 
 /// Is this the DuckDB "another connection holds the lock" error? Matched on the
 /// stable substring (`Could not set lock`) that both the RW-vs-RW and the
@@ -109,6 +139,10 @@ fn run_txn_once<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> Result
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
+    // In-process per-path serialization (critique F1): held across the whole
+    // open-use-close so a sibling thread can never hold a second instance.
+    let lock = path_lock(db_path);
+    let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
     assert_min_version(&conn)?;
 
@@ -191,6 +225,10 @@ pub fn with_read<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
 where
     F: FnOnce(&Connection) -> Result<T, DbError>,
 {
+    // Reads serialize too (critique F1): an in-process RO instance open during
+    // a write has the same dual-instance hazard as a second writer.
+    let lock = path_lock(db_path);
+    let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadOnly)?;
     let result = f(&conn);
     // Close regardless of the closure outcome so no RO handle lingers.

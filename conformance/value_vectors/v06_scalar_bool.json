@@ -1,0 +1,16 @@
+{
+  "description": "scalar bool value; value_kind 'bool', measure one byte 0x01 true (§9.5), tier byte 0x00",
+  "key": {
+    "entity_id": 4,
+    "parameter_definition_id": 5,
+    "alternative_id": 6
+  },
+  "content": {
+    "type": "Scalar",
+    "value": {
+      "Bool": true
+    }
+  },
+  "expected_canonical_hex": "04000000000000000500000000000000060000000000000004000000626f6f6c0000010101",
+  "expected_hash_u64": 6031466925247609485
+}

@@ -112,6 +112,14 @@ def _shape(axis_hashes: list) -> bytes:
     return out
 
 
+# Tier tag byte (spec §9.3 step 3): explicit discriminator so scalar / array /
+# long encodings can never byte-collide (the value-side analogue of the axis
+# form byte §5.2). Emitted right after the value_kind tag, before the shape.
+_TIER_SCALAR = 0x00
+_TIER_ARRAY = 0x01
+_TIER_LONG = 0x02
+
+
 def encode_value(key: dict, content: dict) -> bytes:
     out = _i64(key["entity_id"]) + _i64(key["parameter_definition_id"]) + _i64(key["alternative_id"])
     t = content["type"]
@@ -119,11 +127,13 @@ def encode_value(key: dict, content: dict) -> bytes:
         sv = content["value"]
         tag, _ = _scalar_variant(sv)
         out += _string(_VALUE_KIND_TAG[tag])
+        out += _u8(_TIER_SCALAR)
         out += _shape([])
         out += _component_block([(1, _measure_bytes(sv))])
         return out
     if t == "Array":
         out += _string("float")
+        out += _u8(_TIER_ARRAY)
         out += _shape(content["axis_hashes"])
         payload = _u32(len(content["values"]))
         for x in content["values"]:
@@ -132,6 +142,7 @@ def encode_value(key: dict, content: dict) -> bytes:
         return out
     if t == "Long":
         out += _string(_VALUE_KIND_TAG[content["value_kind"]])
+        out += _u8(_TIER_LONG)
         out += _shape(content["axis_hashes"])
         cells = content["cells"]
         out += _u32(len(cells))
@@ -147,10 +158,28 @@ def content_hash(data: bytes) -> int:
     return xxhash.xxh3_64_intdigest(data, seed=0)
 
 
+def _inject_nan(content: dict) -> dict:
+    """Mirror the Rust runner: put a NaN into the scalar float measure (§3.3.1)."""
+    sv = content["value"]
+    if "Float" in sv:
+        sv["Float"] = float("nan")
+    else:
+        raise AssertionError("encode_error value vector needs a scalar Float measure")
+    return content
+
+
 def check_vector(path: pathlib.Path) -> bool:
     vector = json.loads(path.read_text())
     name = path.name
     desc = vector.get("description", "")
+
+    if vector.get("encode_error"):
+        try:
+            encode_value(vector["key"], _inject_nan(vector["content"]))
+        except ValueError:
+            return True
+        raise AssertionError(f"{name}: NaN value must be rejected, not encoded ({desc})")
+
     got = encode_value(vector["key"], vector["content"])
     got_hex = got.hex()
     got_hash = content_hash(got)

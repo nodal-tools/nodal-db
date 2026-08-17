@@ -1,0 +1,16 @@
+{
+  "description": "scalar date_time value (spec §12 footgun): value_kind is 'date_time' (underscore), NOT the 'datetime' axis-kind tag (§5.1.2); measure is i64 µs (§3.2), tier byte 0x00",
+  "key": {
+    "entity_id": 11,
+    "parameter_definition_id": 22,
+    "alternative_id": 33
+  },
+  "content": {
+    "type": "Scalar",
+    "value": {
+      "DateTime": 1704067200000000
+    }
+  },
+  "expected_canonical_hex": "0b000000000000001600000000000000210000000000000009000000646174655f74696d650000010100202110d70d0600",
+  "expected_hash_u64": 4526131927392089414
+}

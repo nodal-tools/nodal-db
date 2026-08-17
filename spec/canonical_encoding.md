@@ -626,12 +626,23 @@ string of a single canonicalized value is the concatenation:
    `date_time` spelling (underscore) is the **value_kind** tag, distinct from
    the `datetime` **axis-kind** tag (§5.1.2 footgun). For a Tier-A array the tag
    is `float` (the Tier-A rule is float-valued).
-3. **Shape block** (OPEN-7) — a **`u8` rank** (the number of axes; `0` for a
+3. **Tier tag** — a single `u8` discriminating the physical tier: `0x00`
+   **scalar** (rank 0), `0x01` **array** (Tier A, dense float payload), `0x02`
+   **long** (Tier L). Emitted immediately after the `value_kind` tag and before
+   the shape block. This is the value-side analogue of the axis **form byte**
+   (§5.2): it exists so a scalar, array, and long encoding can never
+   byte-collide, **independent of any coincidence** in the shape/measure block.
+   Without it, an array and a long value differ only by the *structure* of the
+   following block (a component block vs a `u32` cell count) — injectivity across
+   tiers would rest on a structural coincidence rather than an explicit byte, the
+   same gap the axis form byte closes (OPEN-4). New tiers take new tag values,
+   append-only, without disturbing existing ones.
+4. **Shape block** (OPEN-7) — a **`u8` rank** (the number of axes; `0` for a
    rank-0 scalar), then that many **axis content hashes** (`u64` little-endian
    each, spec §2), in declared-dimension order. This is the position/shape
    context: the value is bound to the exact axis objects it indexes. A scalar
    emits rank `0` and no hashes.
-4. **Measure block** — per tier:
+5. **Measure block** — per tier:
    - **scalar**: one **component block** (below) carrying the slot-1 measure;
    - **array** (Tier A): one **component block** whose slot-1 bytes are a `u32`
      element-count prefix then each canonical DOUBLE, row-major flattened in
@@ -690,8 +701,8 @@ step 1) is what makes an absent component contribute nothing.
 9.6. **Value equality = key + shape + measure (OPEN-7 [resolved]).** jkiviluo
 (2026-08-17) closed OPEN-7 **against** the measure-only reading: the value
 encoding **does** fold in the identity key (§9.3 step 1) and the position/shape
-context — axis content hashes (§9.3 step 3) and, for the long tier, per-cell
-positions (§9.3 step 4). Two values are "equal" iff they share key, shape, and
+context — axis content hashes (§9.3 step 4) and, for the long tier, per-cell
+positions (§9.3 step 5). Two values are "equal" iff they share key, shape, and
 measure. Rationale (recorded in `specs/rust_impl_session_decisions.md`): the
 conservative, collision-avoiding default; the only thing given up is a future
 cross-key value-dedup, which is not a use case. The component-wise /
@@ -714,7 +725,7 @@ mismatch). It is required for injectivity, so it stays.
 **OPEN-7 [resolved — jkiviluo, 2026-08-17].** The value encoding carries the
 axis/key context. The measure-only alternative was **rejected**: the value
 encoding folds in the identity key (§9.3 step 1) and the position/shape (axis
-content hashes + per-cell long positions, §9.3 steps 3-4), with the measure
+content hashes + per-cell long positions, §9.3 steps 4-5), with the measure
 still encoded component-wise / populated-columns-only (§9.4). "Two values are
 equal" therefore means same key, same shape, same measure — the conservative,
 collision-avoiding notion — for history diffs and any future value-level content

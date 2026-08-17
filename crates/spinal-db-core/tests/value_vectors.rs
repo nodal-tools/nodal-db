@@ -18,8 +18,10 @@ struct VVector {
     description: String,
     key: ValueKey,
     content: ContentSpec,
-    expected_canonical_hex: String,
-    expected_hash_u64: u64,
+    #[serde(default)]
+    encode_error: bool,
+    expected_canonical_hex: Option<String>,
+    expected_hash_u64: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +75,24 @@ fn value_vectors_match() {
         let raw = fs::read_to_string(path).expect("read vector");
         let v: VVector = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
 
+        // NaN-reject vector: the encoder MUST error. JSON has no NaN literal, so
+        // inject one into the scalar float measure the vector declares (mirrors
+        // the axis NaN-reject runner in encoding_vectors.rs).
+        if v.encode_error {
+            let nan_measure = match &v.content {
+                ContentSpec::Scalar {
+                    value: ScalarValue::Float(_),
+                } => ScalarValue::Float(f64::NAN),
+                _ => panic!("{name}: encode_error vector needs a scalar Float measure"),
+            };
+            assert!(
+                encode_value(&v.key, &ValueContent::Scalar(&nan_measure)).is_err(),
+                "{name}: NaN value must be rejected, not hashed ({})",
+                v.description
+            );
+            continue;
+        }
+
         // Build the borrowing ValueContent from the owned spec.
         let cells_owned: Vec<(Vec<i32>, ScalarValue)>;
         let content = match &v.content {
@@ -102,15 +122,22 @@ fn value_vectors_match() {
         };
 
         let bytes = encode_value(&v.key, &content).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let want_hex = v
+            .expected_canonical_hex
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: committed vector is missing expected_canonical_hex"));
         assert_eq!(
             to_hex(&bytes),
-            v.expected_canonical_hex,
+            want_hex,
             "{name}: canonical bytes ({})",
             v.description
         );
+        let want_hash = v
+            .expected_hash_u64
+            .unwrap_or_else(|| panic!("{name}: committed vector is missing expected_hash_u64"));
         assert_eq!(
             content_hash(&bytes),
-            v.expected_hash_u64,
+            want_hash,
             "{name}: content hash ({})",
             v.description
         );

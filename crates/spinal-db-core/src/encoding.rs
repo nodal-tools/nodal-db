@@ -497,11 +497,21 @@ fn encode_measure(m: &ScalarValue) -> Result<Vec<u8>, EncodeError> {
     Ok(b)
 }
 
+/// The tier tag byte (spec §9.3 step 3): an explicit discriminator so a scalar,
+/// array, and long encoding can never byte-collide, independent of any structural
+/// coincidence in the shape/measure block. This is the value-side analogue of the
+/// axis form byte (§5.2). Emitted right after the `value_kind` tag, before the
+/// shape block.
+const TIER_SCALAR: u8 = 0x00;
+const TIER_ARRAY: u8 = 0x01;
+const TIER_LONG: u8 = 0x02;
+
 /// The canonical byte string of a single value (spec §9, OPEN-7). Layout:
 ///   1. key: entity_id, parameter_definition_id, alternative_id (`i64` LE each);
 ///   2. `value_kind` tag (string, §3.4);
-///   3. shape: rank `u8` + axis content hashes (`u64` LE each), §9 OPEN-7;
-///   4. measure block, per tier:
+///   3. tier tag byte (§9.3 step 3): scalar `0x00`, array `0x01`, long `0x02`;
+///   4. shape: rank `u8` + axis content hashes (`u64` LE each), §9 OPEN-7;
+///   5. measure block, per tier:
 ///      - scalar: one component block (slot 1) of the measure;
 ///      - array:  one component block whose slot-1 bytes are a `u32` element
 ///        count then each canonical DOUBLE, row-major (§9.5);
@@ -517,6 +527,7 @@ pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, E
     match content {
         ValueContent::Scalar(m) => {
             push_string(&mut out, m.kind().tag());
+            out.push(TIER_SCALAR);
             push_shape(&mut out, &[]);
             push_component_block(&mut out, &[(1u8, encode_measure(m)?)]);
         }
@@ -525,6 +536,7 @@ pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, E
             values,
         } => {
             push_string(&mut out, ValueKind::Float.tag());
+            out.push(TIER_ARRAY);
             push_shape(&mut out, axis_hashes);
             let mut payload = Vec::new();
             payload.extend_from_slice(&(values.len() as u32).to_le_bytes());
@@ -539,6 +551,7 @@ pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, E
             cells,
         } => {
             push_string(&mut out, value_kind.tag());
+            out.push(TIER_LONG);
             push_shape(&mut out, axis_hashes);
             out.extend_from_slice(&(cells.len() as u32).to_le_bytes());
             for (positions, m) in *cells {
@@ -579,7 +592,7 @@ mod value_tests {
         let mut both = Vec::new();
         push_component_block(&mut both, &[(1, measure), (2, vec![0xCC])]);
         assert_eq!(both, [2u8, 1u8, 0xAA, 0xBB, 2u8, 0xCC]);
-        assert!(both.starts_with(&[]) && both != only_slot1);
+        assert_ne!(both, only_slot1);
     }
 
     #[test]

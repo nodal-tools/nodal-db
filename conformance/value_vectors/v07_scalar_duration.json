@@ -1,0 +1,19 @@
+{
+  "description": "scalar duration value; single logical component carried as the (months:i32, micros:i64) pair (§3.5, §9.5), tier byte 0x00",
+  "key": {
+    "entity_id": 7,
+    "parameter_definition_id": 8,
+    "alternative_id": 9
+  },
+  "content": {
+    "type": "Scalar",
+    "value": {
+      "Duration": {
+        "months": 14,
+        "micros": 3600000000
+      }
+    }
+  },
+  "expected_canonical_hex": "070000000000000008000000000000000900000000000000080000006475726174696f6e000001010e00000000a493d600000000",
+  "expected_hash_u64": 12736629409224310649
+}

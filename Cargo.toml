@@ -2,6 +2,13 @@
 members = ["crates/*"]
 resolver = "2"
 
+# Strip symbols from dev/test binaries. The bundled DuckDB static lib carries
+# heavy debuginfo, which bloats every DuckDB-linked test binary to ~GB and has
+# repeatedly filled this (tight) disk. We don't need symbol-level backtraces for
+# the conformance/spike tests; stripping keeps target/ sustainable.
+[profile.dev]
+strip = true
+
 # Versions are pinned once here and referenced from each crate via
 # `workspace = true`. The de-risk spike (Phase 0) gates the duckdb-rs choice:
 # its bundled DuckDB must be >= 1.4 (the line the schema was verified on).

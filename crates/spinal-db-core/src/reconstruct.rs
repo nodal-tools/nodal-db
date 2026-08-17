@@ -68,6 +68,44 @@ pub fn reconstruct(axis_lengths: &[usize], values: &[f64]) -> Result<Vec<LongRow
     Ok(rows)
 }
 
+/// Expand one **dense wire row** (`spec/arrow_ipc_bulk_format.md` §6.1–6.3)
+/// into `(coordinate tuple, value)` pairs: the write-direction inverse of the
+/// read-side [`reconstruct`], under the same row-major law (spec
+/// `reconstruction.md` §2 — last dimension varies fastest).
+///
+/// `dim_lists[i]` is dimension `i`'s coordinates in the producer's axis order
+/// (pairing-only — the core re-derives stored axes afterwards, spec §6.3);
+/// `values` is the flat row-major payload, `len(values) = ∏ len(dim_lists)`.
+///
+/// Not a third implementation of the layout law: the flat-index → position
+/// decomposition is **delegated to [`reconstruct`]** and only mapped through
+/// the coordinate lists, so this cannot drift from the read side (CLAUDE.md
+/// invariant 2). Validated against `conformance/reconstruction_fixtures/*`
+/// in the inverse direction by `tests/reconstruction_fixtures.rs`.
+pub fn expand_dense_row<C: Clone>(
+    dim_lists: &[Vec<C>],
+    values: &[f64],
+) -> Result<Vec<(Vec<C>, f64)>, ReconstructError> {
+    let lengths: Vec<usize> = dim_lists.iter().map(Vec::len).collect();
+    let rows = reconstruct(&lengths, values)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let coords: Vec<C> = r
+                .positions
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| dim_lists[i][p as usize].clone())
+                .collect();
+            let v = match r.value {
+                ScalarValue::Float(x) => x,
+                _ => unreachable!("reconstruct emits float measures"),
+            };
+            (coords, v)
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +130,23 @@ mod tests {
     #[test]
     fn length_mismatch_is_rejected() {
         assert!(reconstruct(&[2, 3], &[1.0, 2.0]).is_err());
+    }
+
+    #[test]
+    fn expand_dense_row_maps_coords_row_major() {
+        // 2x3, labelled coords: expansion pairs the payload with coordinate
+        // tuples exactly as reconstruct pairs it with positions.
+        let dims = vec![vec!["a", "b"], vec!["x", "y", "z"]];
+        let out = expand_dense_row(&dims, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        assert_eq!(out[0], (vec!["a", "x"], 1.0));
+        assert_eq!(out[1], (vec!["a", "y"], 2.0)); // NOT ("b","x") (column-major)
+        assert_eq!(out[3], (vec!["b", "x"], 4.0));
+        assert_eq!(out[5], (vec!["b", "z"], 6.0));
+    }
+
+    #[test]
+    fn expand_dense_row_rejects_length_mismatch() {
+        let dims = vec![vec![0i64, 1], vec![0i64, 1, 2]];
+        assert!(expand_dense_row(&dims, &[1.0, 2.0]).is_err());
     }
 }

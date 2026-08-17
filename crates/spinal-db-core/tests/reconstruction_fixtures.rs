@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use duckdb::Connection;
 use serde::Deserialize;
 
-use spinal_db_core::reconstruct::reconstruct;
+use spinal_db_core::reconstruct::{expand_dense_row, reconstruct};
 use spinal_db_core::types::ScalarValue;
 
 #[derive(Deserialize)]
@@ -34,7 +34,6 @@ struct Fixture {
 struct AxisSpec {
     length: usize,
     #[serde(default)]
-    #[allow(dead_code)]
     positions: Vec<i64>,
 }
 
@@ -109,6 +108,68 @@ fn reconstruction_fixtures_match() {
         files.len(),
         crosschecked
     );
+}
+
+/// The same fixtures run in the INVERSE (write) direction
+/// (spec/arrow_ipc_bulk_format.md §6.3): treat each fixture's axes as a dense
+/// wire row's coordinate lists, expand via `expand_dense_row`, and require the
+/// (coordinate tuple, value) pairs to be exactly the fixture's expected long
+/// rows mapped through the coordinate lists — then round-trip: the expansion's
+/// positions must be `reconstruct`'s positions bit-for-bit.
+#[test]
+fn reconstruction_fixtures_expand_inverse_direction() {
+    for path in fixture_files() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let raw = fs::read_to_string(&path).expect("read fixture");
+        let fx: Fixture = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+
+        // Coordinate lists: the fixture's explicit axis positions (fall back to
+        // 0..length for any fixture that omits them).
+        let dim_lists: Vec<Vec<i64>> = fx
+            .axes
+            .iter()
+            .map(|a| {
+                if a.positions.is_empty() {
+                    (0..a.length as i64).collect()
+                } else {
+                    assert_eq!(a.positions.len(), a.length, "{name}: axis positions vs length");
+                    a.positions.clone()
+                }
+            })
+            .collect();
+
+        let expanded = expand_dense_row(&dim_lists, &fx.values)
+            .unwrap_or_else(|e| panic!("{name}: expand failed: {e} ({})", fx.description));
+        assert_eq!(expanded.len(), fx.expected.len(), "{name}: cell count");
+
+        // Round-trip through reconstruct(): the read side's positions must pair
+        // with exactly the coordinates the expansion emitted.
+        let lengths: Vec<usize> = fx.axes.iter().map(|a| a.length).collect();
+        let rows = reconstruct(&lengths, &fx.values).expect("reconstruct");
+
+        for (k, ((coords, v), want)) in expanded.iter().zip(fx.expected.iter()).enumerate() {
+            let want_coords: Vec<i64> = want
+                .index
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| dim_lists[i][p as usize])
+                .collect();
+            assert_eq!(coords, &want_coords, "{name}: cell {k} coords ({})", fx.description);
+            assert_eq!(
+                v.to_bits(),
+                want.value.to_bits(),
+                "{name}: cell {k} value ({})",
+                fx.description
+            );
+            let rt: Vec<i64> = rows[k]
+                .positions
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| dim_lists[i][p as usize])
+                .collect();
+            assert_eq!(coords, &rt, "{name}: cell {k} expand/reconstruct round-trip");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

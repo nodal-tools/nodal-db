@@ -48,6 +48,20 @@ use crate::types::{
     DeclaredType, IndexKind, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
 
+/// One ingest segment: a `(class, parameter, alternative)` target plus its
+/// logical-long batches and label domains (`spec/arrow_ipc_bulk_format.md`
+/// §2.2/§4). The batches are treated as ONE logical table (concatenated);
+/// dense wire rows are expanded to logical-long *before* they reach here
+/// (spec §6.3 — the importer expands, the core canonicalizes).
+#[derive(Clone, Debug)]
+pub struct Segment {
+    pub class: String,
+    pub parameter: String,
+    pub alternative: String,
+    pub batches: Vec<RecordBatch>,
+    pub domains: Vec<LabelDomain>,
+}
+
 /// Write one parameter (all its per-entity values for one alternative) from a
 /// logical-long Arrow batch. See the module docs for the batch column contract.
 ///
@@ -59,6 +73,9 @@ use crate::types::{
 /// whole on a write-write conflict (VMP Part 5).
 ///
 /// `user` / `message` stamp the `commit` row this call creates.
+///
+/// A thin single-segment wrapper over [`ingest_segments`] (spec OPEN-Q3-6):
+/// the per-parameter body is shared, the transaction shape is identical.
 #[allow(clippy::too_many_arguments)]
 pub fn write_parameter(
     db: &Path,
@@ -71,18 +88,156 @@ pub fn write_parameter(
     user: &str,
     message: &str,
 ) -> Result<WriteReport, DbError> {
+    ingest_segments(
+        db,
+        vec![Segment {
+            class: class.to_string(),
+            parameter: parameter.to_string(),
+            alternative: alternative.to_string(),
+            batches: vec![batch],
+            domains: domains.to_vec(),
+        }],
+        user,
+        message,
+        opts,
+    )
+}
+
+/// Ingest one or more segments in ONE atomic, conflict-retried transaction
+/// with ONE `commit` row covering every value written
+/// (`spec/arrow_ipc_bulk_format.md` §9.2, OPEN-Q3-6: whole-invocation
+/// atomicity — all segments commit or nothing persists). This is the core
+/// entry point behind `spinal-db import`; [`write_parameter`] is its
+/// single-segment wrapper.
+///
+/// Preparation (batch validation, entity dedup, domain merge) is pure and runs
+/// once, up front; on a write-write conflict `conn::with_write_txn_retrying`
+/// re-executes the whole multi-segment closure against a fresh transaction and
+/// a fresh `commit` row, so no DB state read before the conflict is reused.
+/// `opts` applies to every segment (`--force-replace` is container-wide).
+pub fn ingest_segments(
+    db: &Path,
+    segments: Vec<Segment>,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
     // Every commit must carry a real author; message is the caller's choice
     // (may be empty) — jkiviluo 2026-08-18.
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
+    if segments.is_empty() {
+        return Err(DbError::Api("no segments to ingest".into()));
+    }
+    // Two same-commit writes to one (class, parameter, alternative) key have no
+    // defined history semantics (spec §4.2, E7 class); compare by the same
+    // `lower()` fold every core name resolver applies.
+    let mut seen: HashMap<(String, String, String), ()> = HashMap::new();
+    for s in &segments {
+        let key = (
+            s.class.to_ascii_lowercase(),
+            s.parameter.to_ascii_lowercase(),
+            s.alternative.to_ascii_lowercase(),
+        );
+        if seen.insert(key, ()).is_some() {
+            return Err(DbError::Api(format!(
+                "duplicate target {}:{} (alternative {:?}) across segments \
+                 (target comparison is case-insensitive)",
+                s.class, s.parameter, s.alternative
+            )));
+        }
+    }
+
+    // --- Pure, DB-independent preparation (computed once; the retried closure
+    // below re-does only the DB-touching work). ---
+    let multi = segments.len() > 1;
+    let prepared: Vec<PreparedSegment> = segments
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            prepare_segment(s).map_err(|e| {
+                if multi {
+                    // Name the failing segment (spec §9.1: errors name the
+                    // segment by ordinal and class:parameter).
+                    DbError::Api(format!("segment {} ({}:{}): {e}", i + 1, s.class, s.parameter))
+                } else {
+                    e
+                }
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    // --- The atomic, retried commit. Everything below re-reads/re-creates DB
+    // state inside a fresh transaction on each retry (VMP Part 5), so the axis
+    // cache is built HERE, not outside (a rollback must not leave stale ids). ---
+    with_write_txn_retrying(db, user, message, |conn, commit_id| {
+        // One axis cache across all segments: axes are immutable and
+        // content-verified, so cross-segment reuse within one txn is sound.
+        let mut cache = AxisCache::new();
+        let mut report = WriteReport {
+            commit_id,
+            ..Default::default()
+        };
+        for (i, p) in prepared.iter().enumerate() {
+            write_prepared(conn, commit_id, p, opts, &mut cache, &mut report).map_err(|e| {
+                // Name the failing segment (spec §9.1) — but never rewrap a raw
+                // DuckDB error: the conflict-retry loop keys on its variant
+                // (`conn::is_conflict`), and an Api wrapper would break retry.
+                if multi && !matches!(e, DbError::Duckdb(_)) {
+                    DbError::Api(format!("segment {} ({}:{}): {e}", i + 1, p.class, p.parameter))
+                } else {
+                    e
+                }
+            })?;
+        }
+        Ok(report)
+    })
+}
+
+/// The pure, DB-independent part of one segment's write: batch-contract
+/// validation, kind inference, domain merge, tz warnings, and the per-entity
+/// row masks. Everything here is safe to compute once outside the retried
+/// transaction (it touches no DB state).
+struct PreparedSegment {
+    class: String,
+    parameter: String,
+    alternative: String,
+    value_kind: ValueKind,
+    inferred: Vec<(String, IndexKind)>,
+    domains: Vec<LabelDomain>,
+    tz_warnings: Vec<Warning>,
+    /// Distinct entity names, first-seen order, case-insensitively deduped.
+    names: Vec<String>,
+    /// Per-entity row masks over the concatenated batch.
+    masks: Vec<Vec<bool>>,
+    /// The dims+value sub-batch (entity column dropped).
+    sub_all: RecordBatch,
+}
+
+fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     // Referent names must be non-empty (critique F5): a caller-contract
     // problem is caught here, never as a raw CHECK error mid-transaction.
-    for (what, name) in [("class", class), ("parameter", parameter), ("alternative", alternative)] {
+    for (what, name) in [
+        ("class", seg.class.as_str()),
+        ("parameter", seg.parameter.as_str()),
+        ("alternative", seg.alternative.as_str()),
+    ] {
         if name.trim().is_empty() {
             return Err(DbError::Api(format!("{what} name must be non-empty")));
         }
     }
+    // A segment's batches are one logical table (spec §2.3); an empty segment
+    // writes nothing — reject before it can auto-create referents or burn a
+    // commit (critique F8).
+    if seg.batches.is_empty() {
+        return Err(DbError::Api("empty batch: no rows to write".into()));
+    }
+    let batch = if seg.batches.len() == 1 {
+        seg.batches[0].clone()
+    } else {
+        concat_batches(&seg.batches[0].schema(), &seg.batches)?
+    };
     let ncols = batch.num_columns();
     if ncols < 2 {
         return Err(DbError::Api(format!(
@@ -93,14 +248,9 @@ pub fn write_parameter(
     if rank > 4 {
         return Err(DbError::Api(format!("declared rank {rank} exceeds the cap of 4")));
     }
-    // An empty batch writes nothing — reject before it can auto-create
-    // referents or burn a commit (critique F8).
     if batch.num_rows() == 0 {
         return Err(DbError::Api("empty batch: no rows to write".into()));
     }
-
-    // --- Pure, DB-independent preparation (safe to compute once; the retried
-    // closure below re-does only the DB-touching work). ---
 
     // Measure kind from the value column's Arrow type.
     let value_kind = measure_kind(batch.schema().field(ncols - 1).data_type())?;
@@ -116,7 +266,7 @@ pub fn write_parameter(
 
     // Effective label domains: the in-process arg, plus any Arrow field-metadata
     // domain for a label dimension the arg did not cover (decision D).
-    let domains = effective_domains(&batch, &inferred, domains)?;
+    let domains = effective_domains(&batch, &inferred, &seg.domains)?;
 
     // Tz-bearing timestamp columns are accepted — a Timestamp(µs, tz) is a
     // well-defined instant, stored as the UTC-µs instant unchanged — but never
@@ -175,54 +325,69 @@ pub fn write_parameter(
     let project: Vec<usize> = (1..ncols).collect();
     let sub_all = batch.project(&project)?;
 
-    // --- The atomic, retried commit. Everything below re-reads/re-creates DB
-    // state inside a fresh transaction on each retry (VMP Part 5), so the axis
-    // cache is built HERE, not outside (a rollback must not leave stale ids). ---
-    with_write_txn_retrying(db, user, message, |conn, commit_id| {
-        let mut cache = AxisCache::new();
-        let mut report = WriteReport {
-            commit_id,
-            warnings: tz_warnings.clone(),
-            ..Default::default()
-        };
-
-        let class_id = resolve_entity_class(conn, commit_id, class, &mut report.warnings)?;
-        let (pd_id, declared) = resolve_parameter(
-            conn,
-            commit_id,
-            class_id,
-            parameter,
-            &inferred,
-            value_kind,
-            &mut report.warnings,
-        )?;
-        let retain_content = read_retain_content(conn, pd_id)?;
-        let alt_id = resolve_alternative(conn, commit_id, alternative, &mut report.warnings)?;
-
-        // Fold the definition's retain_content into retain_override unless the
-        // caller already overrode it (VMP Part 5 primary retention lever): else a
-        // write to a retain_content=FALSE definition would silently keep payloads.
-        let effective_retain = opts.retain_override.unwrap_or(retain_content);
-        let resolved_opts = WriteOptions {
-            force_replace: opts.force_replace,
-            retain_override: Some(effective_retain),
-        };
-
-        for (name, mask) in names.iter().zip(masks.iter()) {
-            let entity_id =
-                resolve_entity(conn, commit_id, class_id, class, name, &mut report.warnings)?;
-            let sub = filter_record_batch(&sub_all, &BooleanArray::from(mask.clone()))?;
-            let value = canonicalize(&sub, &declared, value_kind, &domains)?;
-            let key = ValueKey {
-                entity_id,
-                parameter_definition_id: pd_id,
-                alternative_id: alt_id,
-            };
-            let outcome = write_value(conn, commit_id, key, &value, &mut cache, &resolved_opts)?;
-            report.absorb(&outcome);
-        }
-        Ok(report)
+    Ok(PreparedSegment {
+        class: seg.class.clone(),
+        parameter: seg.parameter.clone(),
+        alternative: seg.alternative.clone(),
+        value_kind,
+        inferred,
+        domains,
+        tz_warnings,
+        names,
+        masks,
+        sub_all,
     })
+}
+
+/// One segment's DB-touching write sequence (resolve → validate → canon → tier
+/// → axis → history), run inside the caller's open transaction. Callable N
+/// times per transaction — this is what makes multi-segment ingest one commit.
+fn write_prepared(
+    conn: &Connection,
+    commit_id: i64,
+    p: &PreparedSegment,
+    opts: WriteOptions,
+    cache: &mut AxisCache,
+    report: &mut WriteReport,
+) -> Result<(), DbError> {
+    report.warnings.extend(p.tz_warnings.iter().cloned());
+
+    let class_id = resolve_entity_class(conn, commit_id, &p.class, &mut report.warnings)?;
+    let (pd_id, declared) = resolve_parameter(
+        conn,
+        commit_id,
+        class_id,
+        &p.parameter,
+        &p.inferred,
+        p.value_kind,
+        &mut report.warnings,
+    )?;
+    let retain_content = read_retain_content(conn, pd_id)?;
+    let alt_id = resolve_alternative(conn, commit_id, &p.alternative, &mut report.warnings)?;
+
+    // Fold the definition's retain_content into retain_override unless the
+    // caller already overrode it (VMP Part 5 primary retention lever): else a
+    // write to a retain_content=FALSE definition would silently keep payloads.
+    let effective_retain = opts.retain_override.unwrap_or(retain_content);
+    let resolved_opts = WriteOptions {
+        force_replace: opts.force_replace,
+        retain_override: Some(effective_retain),
+    };
+
+    for (name, mask) in p.names.iter().zip(p.masks.iter()) {
+        let entity_id =
+            resolve_entity(conn, commit_id, class_id, &p.class, name, &mut report.warnings)?;
+        let sub = filter_record_batch(&p.sub_all, &BooleanArray::from(mask.clone()))?;
+        let value = canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
+        let key = ValueKey {
+            entity_id,
+            parameter_definition_id: pd_id,
+            alternative_id: alt_id,
+        };
+        let outcome = write_value(conn, commit_id, key, &value, cache, &resolved_opts)?;
+        report.absorb(&outcome);
+    }
+    Ok(())
 }
 
 /// Read a written parameter back for one class/parameter/alternative into a

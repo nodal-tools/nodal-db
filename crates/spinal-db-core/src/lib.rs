@@ -23,3 +23,15 @@ pub mod canon;
 
 /// The tier decision — pipeline step 4 (Phase 2, VMP Part 3).
 pub mod tier;
+
+/// One error type for the DB-facing layer (Phase 2b).
+pub mod error;
+
+/// Apply `schema/*.sql` in numbered order (Phase 2b, `build.py` in Rust).
+pub mod schema_init;
+
+/// Connection discipline: open-write-close / open-read-close (Phase 2b, VMP Part 6).
+pub mod conn;
+
+/// Content-verified axis dedup persistence (Phase 2b, VMP Part 4).
+pub mod axis;

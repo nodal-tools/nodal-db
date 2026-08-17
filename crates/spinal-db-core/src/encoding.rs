@@ -106,7 +106,9 @@ pub enum EncodeError {
 
 impl CanonicalAxis {
     /// The `axis.kind` tag for this axis (spec §5.1.1). ASCII, so NFC-invariant.
-    fn kind_tag(&self) -> &'static str {
+    /// Public so the DB-facing `axis` dedup module can populate `axis.kind` and
+    /// filter candidate rows without a second copy of the tag strings.
+    pub fn kind_tag(&self) -> &'static str {
         match self.body {
             AxisBody::DatetimeParametric { .. } | AxisBody::DatetimeMaterialized { .. } => {
                 "datetime"

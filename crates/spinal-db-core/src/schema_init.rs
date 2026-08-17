@@ -65,11 +65,33 @@ pub fn apply_schema_from(conn: &Connection, dir: &Path) -> Result<(), DbError> {
 /// crate-resolved `schema_dir()`). Opens read-write, applies, closes — the
 /// `init` primitive tests and the CLI share.
 pub fn init_schema(db_path: &Path) -> Result<(), DbError> {
+    init_schema_from_dir(db_path, &schema_dir())
+}
+
+/// Build a fresh database at `db_path` applying the numbered schema files from
+/// an explicit directory (the CLI `init --schema-dir` dev override, plan Q4).
+pub fn init_schema_from_dir(db_path: &Path, dir: &Path) -> Result<(), DbError> {
     // Same in-process per-path serialization as every other open (conn F1).
     let lock = crate::conn::path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = Connection::open(db_path)?;
-    apply_schema_from(&conn, &schema_dir())?;
+    apply_schema_from(&conn, dir)?;
+    conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
+    Ok(())
+}
+
+/// Build a fresh database at `db_path` from in-memory `(file name, sql)`
+/// sources, applied in lexical name order — the compile-time-embedded schema
+/// path of the CLI `init` verb (plan Q4: `include_str!` embedding).
+pub fn init_schema_from_sources(db_path: &Path, sources: &[(&str, &str)]) -> Result<(), DbError> {
+    let lock = crate::conn::path_lock(db_path);
+    let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let conn = Connection::open(db_path)?;
+    let mut sorted: Vec<&(&str, &str)> = sources.iter().collect();
+    sorted.sort_by_key(|(name, _)| *name);
+    for (_, sql) in sorted {
+        conn.execute_batch(sql)?;
+    }
     conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
     Ok(())
 }

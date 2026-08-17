@@ -12,13 +12,26 @@ strip = true
 # Versions are pinned once here and referenced from each crate via
 # `workspace = true`. The de-risk spike (Phase 0) gates the duckdb-rs choice:
 # its bundled DuckDB must be >= 1.4 (the line the schema was verified on).
-# arrow is intentionally NOT listed here — it is consumed only through
-# `duckdb::arrow` so exactly one arrow major is ever in the tree (risk R2).
+# arrow is normally consumed only through `duckdb::arrow` so exactly one arrow
+# major is ever in the tree (risk R2) — with ONE sanctioned exception, the
+# direct pinned `arrow` line below (R2 partially re-opened; see its comment).
 [workspace.dependencies]
 # duckdb-rs versions its crate to encode the bundled DuckDB release; 1.10505.0
 # bundles DuckDB 1.5.5. The bundled DuckDB must stay >= 1.4 (the line the
 # schema was verified on).
+# MATCHED-BUMP REQUIRED: any duckdb-rs bump that changes the re-exported arrow
+# version REQUIRES bumping the `arrow` pin below to the identical version.
 duckdb = { version = "1.10505.0", features = ["bundled"] }
+# R2 partially re-opened (spec/arrow_ipc_bulk_format.md §2.4, critique F12):
+# the `spinal-db import` boundary needs arrow's IPC reader/writer, which
+# `duckdb::arrow` does NOT re-export (duckdb pulls arrow without the `ipc`
+# feature). This direct dependency is pinned EXACTLY (=58.4.0) to the arrow
+# version duckdb 1.10505.0 re-exports so cargo unifies both into ONE crate —
+# type identity is proven at compile time in spinal-db-cli (an IPC-read
+# RecordBatch crosses into the core's duckdb::arrow-typed API with no
+# conversion). A duckdb-rs bump is therefore a two-line, version-locked
+# affair: bump duckdb, bump this pin to match.
+arrow = { version = "=58.4.0", default-features = false, features = ["ipc", "ipc_compression"] }
 thiserror = "2.0.20"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 # NFC normalization. Pinned to =0.1.24 because that release's tables are

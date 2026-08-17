@@ -5,6 +5,12 @@
 //! HANDOFF §6.6, overriding the plan's separate-crate proposal). Real
 //! implementation lands in Phases 1-3.
 
+/// Re-export of the one `duckdb` (and thus the one `duckdb::arrow`) this
+/// library is built against, so downstream crates (the CLI, tests) can name
+/// the exact same types the public API uses — the compile-time anchor of the
+/// R2 one-arrow-version rule.
+pub use duckdb;
+
 /// Minimum bundled DuckDB version the schema semantics were verified on.
 /// Mirrors `schema/build.py`'s `MINIMUM_DUCKDB`. Asserted at connection open
 /// (see the Phase-0 spike) and, later, by `conn`.

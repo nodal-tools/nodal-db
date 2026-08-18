@@ -1,11 +1,14 @@
 # Arrow-IPC bulk import format — normative specification
 
-> **DRAFT — pending jkiviluo sign-off (Q3).** Every judgment call is marked
-> `OPEN-Q3-n` inline and collected in §11 for morning review. Nothing here is
-> frozen until sign-off; this document then becomes the SemVer'd interface of
-> §3.3 door 3 (`language_and_architecture_research.md`).
+> **SIGNED OFF — jkiviluo, 2026-08-18.** All `OPEN-Q3-1..9` judgment calls
+> are resolved as recommended (see §11 for the resolution notes and two
+> clarifications folded in). This document is now **format version 1.0**, the
+> SemVer'd interface of §3.3 door 3 (`language_and_architecture_research.md`).
+> Not yet public — it goes public only when the DB itself does (jkiviluo:
+> "this will not be public before it is stable"), so pre-1.0-public changes
+> may still land under the §3.2 versioning rule.
 
-Status: draft normative spec, 2026-08-18. This is the wire format ingested by
+Status: normative spec v1.0, signed off 2026-08-18. This is the wire format ingested by
 `spinal-db import` (`rust_implementation_plan.md` Part 4; work-queue item 2),
 the **declared write boundary for all non-core clients** — Julia/SpineOpt
 today, any R/Rust/other tool tomorrow (`value_model_plan.md` (VMP) Part 8
@@ -708,6 +711,30 @@ after the fix.
 ---
 
 ## 11. Decisions for jkiviluo (collected OPEN-Q3 markers)
+
+> **RESOLVED — jkiviluo, 2026-08-18: all of OPEN-Q3-1..9 signed off as
+> recommended below.** Three clarifications captured during sign-off:
+> - **Q3-1 (file layout):** accepting Arrow's file layout later is *additive*
+>   — a reader-side widening (sniff the `ARROW1` magic), safe as a minor under
+>   §3.2; existing stream files are unaffected. 1.0 is stream-only to keep the
+>   first importer small.
+> - **Q3-6 (transaction granularity):** ONE import invocation = ONE
+>   all-or-nothing DB transaction/commit; the invocation is atomic and cannot
+>   half-succeed. The **connecting tool chooses the transaction boundary** by
+>   choosing how finely it batches its `import` calls: import once at run-end =
+>   all-or-nothing (a mid-run producer crash loses everything, because nothing
+>   was imported yet); import per solve/rolling-window = each window durably
+>   committed before the next, so partial progress survives a later crash.
+>   SpineOpt already emits Arrow per rolling window, so per-window import is the
+>   natural granularity.
+> - **Q3-8 (dense completeness + NaN):** "dense = every cell populated" is
+>   *our* one-canonical-form rule, not an Arrow limitation (Arrow lists could
+>   hold null slots); holey data uses `long`. NaN is banned because
+>   `NaN != NaN` and NaN has many bit patterns, which break value equality,
+>   dedup, and the content hash; "missing" is expressed as absence/NULL, never
+>   a stored NaN. Same additive-later logic as Q3-1 applies to Q3-8's reserved
+>   `List<Int64>` and Q3-9's REE support: widening accepted inputs is a safe
+>   minor; the 1.0 "reject" stance fails loudly rather than silently.
 
 - **OPEN-Q3-1 — container = IPC *stream* format, file format rejected**
   (§2.1). *Rec:* stream only — Arrow.jl's append path (SpineOpt's rolling

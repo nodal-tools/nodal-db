@@ -130,6 +130,21 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
     )
     .expect("insert parametric float axis");
 
+    // ---- float, FMA-divergence axis (vector 21 parameters) -----------------
+    // start -4675.83329566021, step 7006.486065829911 (>0), length 6. At pos 5
+    // the pinned non-FMA `start + (step*pos)` = 0x40dda52635cbf3d8, whereas a
+    // fused multiply-add gives 0x40dda52635cbf3d7 (1 ULP lower). This axis is
+    // the standing cross-engine guard that DuckDB does NOT FMA-contract §10.2.
+    let fma_start: f64 = -4675.83329566021;
+    let fma_step: f64 = 7006.486065829911;
+    let fma_len: i32 = 6;
+    conn.execute(
+        "INSERT INTO axis (id, kind, length, content_hash, p_start_dbl, p_step_dbl)
+         VALUES (108, 'float', ?, 0, ?, ?)",
+        duckdb::params![fma_len, fma_start, fma_step],
+    )
+    .expect("insert FMA-divergence float axis");
+
     // ---- datetime hourly: µs-exact vs Rust datetime_coord ------------------
     let got = read_datetime_coords(&conn, 101);
     assert_eq!(got.len(), dt_hourly_len as usize, "hourly row count");
@@ -180,5 +195,30 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
             coord.to_bits(),
             want.to_bits()
         );
+    }
+
+    // ---- float FMA-divergence: DuckDB MUST agree with non-FMA, NOT FMA ------
+    let got = read_float_coords(&conn, 108);
+    assert_eq!(got.len(), fma_len as usize, "FMA-axis row count");
+    for (pos, coord) in got {
+        let want = fma_start + fma_step * (pos as f64); // non-FMA (§10.2)
+        assert_eq!(
+            coord.to_bits(),
+            want.to_bits(),
+            "FMA-axis pos {pos}: DuckDB {coord:?} (bits {:#018x}) != Rust non-FMA {want:?} (bits {:#018x}) — DuckDB FMA-contraction?",
+            coord.to_bits(),
+            want.to_bits()
+        );
+        if pos == 5 {
+            // The pinned divergence: DuckDB agrees with the two-rounding value
+            // (0x40dda52635cbf3d8) and MUST differ from the fused result.
+            let via_fma = fma_step.mul_add(pos as f64, fma_start);
+            assert_eq!(coord.to_bits(), 0x40dda52635cbf3d8_u64, "FMA-axis pos 5: DuckDB drifted from the spec-pinned non-FMA bits");
+            assert_ne!(
+                coord.to_bits(),
+                via_fma.to_bits(),
+                "FMA-axis pos 5: DuckDB matched the FUSED multiply-add — it began FMA-contracting (spec §10.2 drift)"
+            );
+        }
     }
 }

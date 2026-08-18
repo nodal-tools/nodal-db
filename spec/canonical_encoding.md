@@ -826,11 +826,19 @@ axis is **not** regular and MUST be materialized (`form = 0x01`). This makes
 the store decision itself a deterministic function pinned by §10.2.
 
 10.4. **A ULP-divergence fixture is REQUIRED in the conformance vectors**
-(HANDOFF §6.7 F3): a coordinate set that is "almost regular" — reproduced by
-`start + step*pos` at every position except one, which is off by one ULP — must
-appear as a vector asserting the axis materializes (does NOT collapse to
-parametric). This is the regression that catches an FMA-contracting or
-wrong-operand-order implementation.
+(HANDOFF §6.7 F3), in two complementary forms:
+- an "almost regular" coordinate set — reproduced by `start + step*pos` at every
+  position except one, which is off by one ULP — appearing as a vector asserting
+  the axis materializes (does NOT collapse to parametric)
+  (`09_float_ulp_materialize.json`); and
+- an **FMA-discriminating** fixture with `start ≠ 0` where `start + (step*pos)`
+  and `fma(step, pos, start)` genuinely differ by 1 ULP at some position
+  (`21_float_fma_divergence_parametric.json`). This is the one that catches an
+  FMA-contracting or wrong-operand-order implementation: with `start = 0` a fused
+  and a two-rounding evaluation coincide (`fma(step,pos,0) == step*pos`), so a
+  `start = 0` fixture does **not** exercise the no-FMA pin. The fixture pins the
+  bit-exact non-FMA result at the divergent position and asserts the two
+  evaluations differ, so a reconstruction that used `mul_add` fails loudly.
 
 10.5. **A cross-engine bit-exactness fixture is REQUIRED (H3a).** Because §10.1
 asserts the SQL `axis_position` view and the Rust writer agree bit-for-bit but

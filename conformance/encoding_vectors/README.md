@@ -24,6 +24,8 @@ Each `*.json` file is one object:
 | `expected_canonical_hex` | string | the canonical byte string, lower-case hex (absent iff `encode_error`) |
 | `expected_hash_u64` | number | XXH3-64/seed-0 of those bytes, as an unsigned 64-bit decimal (absent iff `encode_error`) |
 | `regularity` | object (optional) | a parametric-first *store decision* assertion (§7.1, §10) |
+| `fma_divergence` | object (optional) | an FMA-discrimination pin (§10.2/§10.4): `{ start, step, pos, expected_bits, fma_bits }`. The runner asserts `start + (step*pos)` (two roundings) equals `expected_bits` and that `mul_add` gives the differing `fma_bits`, so an FMA-contracting reconstruction fails loudly (`21_float_fma_divergence_parametric.json`) |
+| `notes` | string (optional) | provenance / show-your-work; ignored by both runners |
 
 ### `axis`
 

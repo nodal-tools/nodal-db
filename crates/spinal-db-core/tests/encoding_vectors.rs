@@ -35,6 +35,26 @@ struct Vector {
     expected_hash_u64: Option<u64>,
     #[serde(default)]
     regularity: Option<Regularity>,
+    #[serde(default)]
+    fma_divergence: Option<FmaDivergence>,
+}
+
+/// An FMA-divergence pin (spec §10.2/§10.4): a `(start, step, pos)` triple whose
+/// pinned non-FMA reconstruction `start + (step * pos)` differs by 1 ULP from a
+/// fused multiply-add. `expected_bits` is the REQUIRED non-FMA result; `fma_bits`
+/// is what a wrong (FMA-contracting) implementation would produce.
+#[derive(Deserialize)]
+struct FmaDivergence {
+    start: f64,
+    step: f64,
+    pos: u32,
+    expected_bits: String,
+    fma_bits: String,
+}
+
+fn parse_bits(s: &str) -> u64 {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    u64::from_str_radix(s, 16).unwrap_or_else(|e| panic!("bad bit literal {s:?}: {e}"))
 }
 
 /// A parametric-first store-decision assertion (spec §7.1, §10).
@@ -114,6 +134,38 @@ fn encoding_vectors_match() {
                 got, want,
                 "{name}: store decision mismatch ({})",
                 vector.description
+            );
+        }
+
+        // FMA-divergence pin (spec §10.2/§10.4): the pinned non-FMA reconstruction
+        // `start + (step * pos)` MUST equal `expected_bits`, and a fused
+        // multiply-add MUST give a different value — so an implementation that
+        // (wrongly) contracted to an FMA would fail here loudly.
+        if let Some(fd) = &vector.fma_divergence {
+            let expected = parse_bits(&fd.expected_bits);
+            let fma = parse_bits(&fd.fma_bits);
+            // Multiply first, then add: two separately-rounded ops (§10.2),
+            // and the pos->f64 cast is exact. This is the code under test.
+            let got = fd.start + fd.step * (fd.pos as f64);
+            assert_eq!(
+                got.to_bits(),
+                expected,
+                "{name}: non-FMA reconstruction drift at pos {} ({})",
+                fd.pos,
+                vector.description
+            );
+            // `f64::mul_add` is a guaranteed single-rounding fused op; it MUST
+            // land on `fma_bits`, proving the fixture genuinely discriminates
+            // FMA (the two results differ, so a correct impl cannot use it).
+            let via_fma = fd.step.mul_add(fd.pos as f64, fd.start);
+            assert_eq!(
+                via_fma.to_bits(),
+                fma,
+                "{name}: mul_add did not reproduce the pinned FMA value"
+            );
+            assert_ne!(
+                expected, fma,
+                "{name}: fixture does not discriminate FMA (results identical)"
             );
         }
 

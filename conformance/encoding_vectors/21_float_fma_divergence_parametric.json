@@ -1,0 +1,33 @@
+{
+  "axis": {
+    "body": {
+      "start": -4675.83329566021,
+      "step": 7006.486065829911,
+      "type": "FloatParametric"
+    },
+    "length": 6
+  },
+  "description": "F3 FMA-divergence PIN: a genuinely regular parametric float axis whose non-FMA reconstruction start+(step*pos) differs from a fused multiply-add by 1 ULP at pos=5. A correct (non-FMA/RNE/start+(step*pos)) writer stores it PARAMETRIC (expect_parametric=true); an FMA-contracting or wrong-operand-order writer computes 0x40dda52635cbf3d7 at pos 5, fails to reproduce coord[5]=0x40dda52635cbf3d8, and would MATERIALIZE instead -> store-decision mismatch (dedup split). Unlike vector 09 (start=0.0, where fma(step,pos,0)==step*pos so FMA and non-FMA agree), this fixture actually discriminates FMA because start!=0.",
+  "expected_canonical_hex": "05000000666c6f61740006000000008048dd52d543b2c02c6bcf6e7c5ebb40",
+  "expected_hash_u64": 6491753118690742202,
+  "regularity": {
+    "coords": [
+      -4675.83329566021,
+      2330.6527701697014,
+      9337.138835999613,
+      16343.624901829524,
+      23350.110967659435,
+      30356.59703348935
+    ],
+    "expect_parametric": true,
+    "kind": "Float"
+  },
+  "fma_divergence": {
+    "start": -4675.83329566021,
+    "step": 7006.486065829911,
+    "pos": 5,
+    "expected_bits": "0x40dda52635cbf3d8",
+    "fma_bits": "0x40dda52635cbf3d7"
+  },
+  "notes": "Constructed deterministically (seed 12345 brute search, spec/canonical_encoding.md sec 10.2): start=-4675.83329566021 (0xc0b243d552dd4880), step=7006.486065829911 (0x40bb5e7c6ecf6b2c, >0 so strictly ascending). coord[5] non-FMA = -4675.83329566021 + (7006.486065829911 * 5.0) = 30356.59703348935 (0x40dda52635cbf3d8) with two separate roundings; fma(step,5,start) single-rounds to 0x40dda52635cbf3d7 (1 ULP lower). DuckDB 1.5.5 axis_position returns the non-FMA 0x...d8 (verified), matching this pin; roundtrip_duckdb.rs is the standing cross-engine guard."
+}

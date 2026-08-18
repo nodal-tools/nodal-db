@@ -215,6 +215,62 @@ fn dense_float_writes_array_tier_and_reads_back() {
     assert_eq!(vals, vec![1.5, 2.5, 3.5]);
 }
 
+/// NaN-as-VALUE (spec §3.3.1): a dense rank-1 float grid where ONE cell is NaN
+/// stays on the **Array tier** (a NaN is a present value, not absence, so the
+/// grid is still full Cartesian — it is NOT forced into the long tier), and the
+/// NaN round-trips at its position with every other value exact. This is the
+/// whole point of the value-half NaN reopening.
+#[test]
+fn dense_float_with_nan_stays_array_tier_and_round_trips() {
+    let (_dir, db) = fresh_db();
+
+    // Six coords → a full rank-1 Cartesian grid; the cell at coord 2 is NaN.
+    let coords = [0i64, 1, 2, 3, 4, 5];
+    let vals = [10.0, 20.0, f64::NAN, 40.0, 50.0, 60.0];
+    let report = write_parameter(
+        &db,
+        "node",
+        "profile",
+        "Base",
+        indexed_float_batch("node_1", "step", &coords, &vals),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "nan array write",
+    )
+    .expect("write");
+
+    // (a) tier == Array, NOT Long: the NaN cell is present, so the grid is
+    // still a complete Cartesian float grid.
+    assert_eq!(
+        report.tiers,
+        vec![Tier::Array],
+        "a NaN-bearing dense float grid must stay on the array tier"
+    );
+    assert_eq!(report.values_written, 1);
+
+    // (b) read-back preserves the NaN at coord 2 and every other value exactly.
+    let got = read_parameter(&db, "node", "profile", "Base").expect("read");
+    assert_eq!(got.num_rows(), 6);
+    for t in col_str(&got, "tier") {
+        assert_eq!(t, Some("array".into()));
+    }
+    let coords_back = col_i64(&got, "idx1_num");
+    let vals_back = col_f64(&got, "v_float");
+    let by_coord: std::collections::HashMap<i64, f64> = coords_back
+        .into_iter()
+        .zip(vals_back)
+        .map(|(c, v)| (c.unwrap(), v.unwrap()))
+        .collect();
+    assert_eq!(by_coord.len(), 6);
+    assert_eq!(by_coord[&0], 10.0);
+    assert_eq!(by_coord[&1], 20.0);
+    assert!(by_coord[&2].is_nan(), "the NaN survives the round-trip at coord 2");
+    assert_eq!(by_coord[&3], 40.0);
+    assert_eq!(by_coord[&4], 50.0);
+    assert_eq!(by_coord[&5], 60.0);
+}
+
 #[test]
 fn sparse_int_writes_long_tier_and_reads_back() {
     let (_dir, db) = fresh_db();

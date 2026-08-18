@@ -618,8 +618,10 @@ fn microsecond_target(tag: &str, field: &Field) -> Result<Option<DataType>> {
 }
 
 /// Normalize one long-form batch (§5): dictionary decode, type gate for dims
-/// (§5.2) and value (§5.3), s/ms→µs upcast, NaN rejection (§5.3.1),
-/// label-domain presence (§7.2). Field metadata is preserved throughout.
+/// (§5.2) and value (§5.3), s/ms→µs upcast, label-domain presence (§7.2).
+/// Field metadata is preserved throughout. A NaN VALUE is a legal stored value
+/// (§5.3.1) — the core canonicalizes it; only NaN axis/coordinate floats are
+/// rejected, and no dimension column here is float.
 fn normalize_long_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 2 {
@@ -676,30 +678,13 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         cols.push(col);
     }
 
-    // §5.3.1: NaN is rejected before the core call, naming row and entity.
-    if let Some(vals) = cols[ncols - 1].as_any().downcast_ref::<Float64Array>() {
-        for row in 0..vals.len() {
-            if !vals.is_null(row) && vals.value(row).is_nan() {
-                bail!(
-                    "E6: {tag}: NaN value in row {row}{} — NaN can never be stored; \
-                     absence is a NULL cell, not a NaN (§5.3.1)",
-                    entity_at(&cols[0], row)
-                );
-            }
-        }
-    }
+    // §5.3.1: a NaN VALUE is accepted — it is a real stored value the core
+    // canonicalizes (to one quiet NaN), not absence (absence is a NULL cell).
+    // Only NaN in an axis/coordinate float is illegal, and no dimension column
+    // here is float, so nothing is rejected on the NaN axis at this boundary.
 
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols).map_err(|e| anyhow!("E6: {tag}: {e}"))
-}
-
-fn entity_at(entity_col: &ArrayRef, row: usize) -> String {
-    entity_col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .filter(|a| !a.is_null(row))
-        .map(|a| format!(" (entity {:?})", a.value(row)))
-        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +861,10 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             dim_lists.push(coords);
         }
 
-        // The flat payload; nulls and NaN are forbidden (§6.4, §5.3.1).
+        // The flat payload; nulls are forbidden (a null cell would be absence,
+        // which dense form cannot express — §6.4). A NaN cell, by contrast, is a
+        // real stored value the core canonicalizes (§5.3.1): dense stays a
+        // complete grid, so a NaN keeps the entity on the array tier.
         if value_list.is_null(row) {
             bail!("E6: {tag}: null value list in dense row {row} (entity {ent:?}) (§6.4)");
         }
@@ -890,14 +878,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                      a null cell has no meaning in dense form; use long (§6.4)"
                 );
             }
-            let v = vals.value(k);
-            if v.is_nan() {
-                bail!(
-                    "E6: {tag}: NaN payload cell {k} in dense row {row} (entity {ent:?}) — \
-                     NaN-as-absent padding is forbidden; use long form (§6.4, §5.3.1)"
-                );
-            }
-            payload.push(v);
+            payload.push(vals.value(k));
         }
 
         // Row-major expansion via the core helper (§6.3) — the same law as

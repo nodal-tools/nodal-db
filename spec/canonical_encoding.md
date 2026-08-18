@@ -125,33 +125,71 @@ little-endian**, after the following canonicalization:
   `-0.0` MUST be encoded as `+0.0` (`0x0000000000000000`). This mirrors the
   writer-side `-0.0 → +0.0` rule for `axis_float.coord` and `years_presented`
   (VMP Part 9; `schema/040_axes.sql`).
-- **NaN is forbidden.** A NaN value MUST be rejected at the writer boundary
-  before encoding (the DDL enforces `NOT isnan(...)` on `p_start_dbl`,
-  `p_step_dbl`, `coord`; see the critique-F1 note in `040_axes.sql` — DuckDB's
-  total order makes `x = x` true for NaN, so `isnan()` is the only correct
-  predicate). The encoder MUST NOT emit bytes for a NaN; encountering one is a
-  programming error, not an encodable value.
+- **NaN is split by role (see §3.3.3):**
+  - For **axis** floats (`p_start_dbl`, `p_step_dbl`, `axis_float.coord`,
+    `years_presented`) NaN is **forbidden**: it MUST be rejected at the writer
+    boundary before encoding (the DDL enforces `NOT isnan(...)`; see the
+    critique-F1 note in `040_axes.sql` — DuckDB's total order makes `x = x` true
+    for NaN, so `isnan()` is the only correct predicate). The encoder MUST NOT
+    emit bytes for a NaN axis float; encountering one is a programming error, not
+    an encodable coordinate. Axis coordinates must be orderable/parametric, and
+    NaN has no ordering.
+  - For **value** floats (`v_float`; the array payloads `value_scalar.v_float`,
+    `value_long.v_float`, `value_array.values`) NaN is a **legal stored value**,
+    canonicalized to the **single quiet-NaN bit pattern `0x7ff8000000000000`**
+    (positive quiet NaN, zero payload). Every incoming NaN — whatever its
+    sign/quiet/payload bits, signaling or not — MUST encode as these same 8
+    bytes, exactly analogous to `-0.0 → +0.0`.
 - All other values (including the two infinities and subnormals) are encoded
   verbatim as their binary64 bytes.
 
 3.3.2. There is exactly **one** canonical bit pattern per encodable value:
-positive zero for both zeros, and no NaN at all. This guarantees byte equality
-tracks numeric equality for every representable coordinate/value.
+positive zero for both zeros; for *value* floats the one quiet NaN
+`0x7ff8000000000000` for every NaN; for *axis* floats no NaN at all. Byte
+equality therefore tracks numeric equality for every representable
+coordinate/value. **Deliberate, justified exception for the value-NaN
+canonicalization:** collapsing every NaN bit pattern to one is a many-to-one map
+(like `-0.0 → +0.0`), so byte-equality of two values with NaN measures no longer
+tracks *IEEE* `==` (`NaN != NaN`). This is intentional and safe because (a) it
+tracks DuckDB's **total order**, under which `NaN = NaN` is TRUE and every NaN
+collates equal (critique F1, probe-confirmed) — so the canonical form is exactly
+the equality the engine itself uses; and (b) there is **no cross-key value
+dedup** (OPEN-7: the value encoding folds in key + shape, and value equality is
+used only for history diffs and any future value-level content hash, never to
+merge two distinct values), so a one-canonical-NaN rule cannot cause a wrong
+merge. The exception does not apply to axes, where NaN cannot arise.
 
-3.3.3. **Enforcement boundary — axis vs value (M2).** For *axis* float columns
-(`p_start_dbl`, `p_step_dbl`, `axis_float.coord`) the DDL enforces `NOT
-isnan(...)` and the writer applies `-0.0 → +0.0`, so the invariant is
-belt-and-suspenders. For *value* float columns (`v_float`; the array payloads
-`value_scalar.…`, `value_long.v_float`, `value_array.values`) there is **no DB
-CHECK** — DuckDB cannot cheaply express `NOT isnan` over a `DOUBLE[]` and the
-scalar/long float columns were deliberately left unconstrained. The NaN-reject
-and `-0.0`-normalize rules of §3.3.1 are therefore enforced **only at the Rust
-writer boundary** for values, before encoding. This is a load-bearing
-asymmetry: a value that bypasses the writer (it must not — `CLAUDE.md`
-invariant 2) could smuggle a NaN or `-0.0` into storage that no CHECK would
-catch. Implementations SHOULD back the writer rule with a periodic **audit
-view** over the value tiers (mirroring `audit_axis_integrity` for axes) so a
-smuggled NaN/`-0.0` is at least detectable after the fact.
+3.3.3. **Role split — axis rejects NaN, value canonicalizes it (M2).** NaN
+handling is deliberately asymmetric by role:
+- **Axis floats** (`p_start_dbl`, `p_step_dbl`, `axis_float.coord`,
+  `years_presented`): NaN is **rejected**. The DDL enforces `NOT isnan(...)` and
+  the writer applies `-0.0 → +0.0`, so the invariant is belt-and-suspenders. An
+  axis coordinate must be orderable; NaN is not. **Axis encoding bytes are
+  unchanged by this amendment** — the axis conformance vectors, including the
+  axis NaN-reject vector, still pass byte-for-byte.
+- **Value floats** (`v_float`; `value_array.values`, `value_long.v_float`,
+  `value_scalar.v_float`): NaN is a **legal stored value**, canonicalized to
+  `0x7ff8000000000000` at the Rust writer boundary before encoding, and stored
+  as that same quiet NaN (DuckDB preserves NaN through `DOUBLE`, `DOUBLE[]`, and
+  Arrow export — probe-confirmed). There is **no DB CHECK** on the value float
+  columns — DuckDB cannot cheaply express `NOT isnan` over a `DOUBLE[]` and these
+  columns were deliberately left unconstrained — so both the `-0.0 → +0.0`
+  normalization and the NaN canonicalization are enforced **only at the Rust
+  writer boundary** for values (`CLAUDE.md` invariant 2). A value that bypasses
+  the writer could store a non-canonical `-0.0` or a non-canonical NaN bit
+  pattern that no CHECK would catch; implementations SHOULD back the writer rule
+  with a periodic **audit view** over the value tiers (mirroring
+  `audit_axis_integrity`) so a smuggled non-canonical `-0.0`/NaN is detectable
+  after the fact. This asymmetry is the point: a NaN cell is **present, not
+  absent** (absence is NULL/omission, VMP Part 3 step 1), so a NaN-bearing dense
+  grid stays a complete Cartesian grid and keeps the efficient **array tier**
+  instead of being rejected or demoted to the long tier.
+
+> **Amendment note (pre-freeze, pre-public).** §3.3.1–§3.3.3 reopen the *value*
+> half of the original NaN ban (values now permit a canonicalized NaN; axes are
+> unchanged). This is a deliberate pre-freeze change made before any public
+> database exists; no stored hashes change for axes, and the value encoding has
+> no persisted `content_hash` column yet (§9.2), so no corpus is rehashed.
 
 ### 3.4. Strings
 
@@ -861,7 +899,8 @@ per-`pos` ordinal** (§7.7.3); `calendar`/`timezone`/`crs` variants proving
 non-dedup (§6, §11.2) **including a case-only difference proving
 case-sensitivity** (§3.4.3); month-bearing vs micros-only durations (§3.5);
 NFC edge cases against the frozen Unicode 16.0.0 table (§3.4); `-0.0`
-normalization and rejected-NaN (§3.3); and value encodings for each
+normalization, the **rejected axis NaN** and the **canonicalized value NaN**
+(`0x7ff8000000000000`, §3.3); and value encodings for each
 `value_kind` (incl. the `date_time`/`datetime` spelling pair, §5.1.2) and array
 `values`/`values_int` (§9), with a fixture proving a NULL slot-2 component
 leaves the hash unchanged (§9.4, §8) and one proving the property-count /

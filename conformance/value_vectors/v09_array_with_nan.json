@@ -1,0 +1,24 @@
+{
+  "description": "Tier-A dense float array mixing real values with a NaN: the NaN payload element canonicalizes in place to 0x7ff8000000000000, so a NaN-bearing dense grid stays an array-tier value (spec §3.3.1). nan_at injects the NaN at flat index 1.",
+  "key": {
+    "entity_id": 1,
+    "parameter_definition_id": 2,
+    "alternative_id": 3
+  },
+  "content": {
+    "type": "Array",
+    "axis_hashes": [
+      16820818339860931418
+    ],
+    "values": [
+      1.5,
+      0.0,
+      3.5
+    ]
+  },
+  "nan_at": [
+    1
+  ],
+  "expected_canonical_hex": "01000000000000000200000000000000030000000000000005000000666c6f617401015a63c9da288d6fe9010103000000000000000000f83f000000000000f87f0000000000000c40",
+  "expected_hash_u64": 3736020599838800386
+}

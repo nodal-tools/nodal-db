@@ -98,9 +98,11 @@ pub struct CanonicalAxis {
 /// The encoder rejects a value it must not serialize.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EncodeError {
-    /// A NaN reached the encoder. NaN is forbidden (spec §3.3.1); it must be
-    /// rejected at the writer boundary, never hashed.
-    #[error("NaN is not an encodable value (spec §3.3.1)")]
+    /// A NaN reached an **axis** float (spec §3.3.1). Axis coordinates must be
+    /// orderable/parametric, and NaN has no ordering, so a NaN axis float is
+    /// rejected at the writer boundary, never hashed. (VALUE floats, by
+    /// contrast, canonicalize NaN — see [`NanPolicy`].)
+    #[error("NaN is not an encodable axis value (spec §3.3.1)")]
     NanForbidden,
 }
 
@@ -140,11 +142,39 @@ fn push_string(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(bytes);
 }
 
-/// A canonical `DOUBLE` (spec §3.3): NaN rejected, `-0.0` normalized to `+0.0`,
-/// then the 8 IEEE-754 binary64 bytes little-endian.
-fn push_double(out: &mut Vec<u8>, x: f64) -> Result<(), EncodeError> {
+/// The one canonical quiet-NaN bit pattern for VALUE floats (spec §3.3.1):
+/// positive quiet NaN, zero payload. Every NaN value — whatever its incoming
+/// sign/quiet/payload bits — canonicalizes to this single pattern, exactly
+/// analogous to the `-0.0 → +0.0` normalization, so byte-equality stays
+/// well-defined for values (one canonical pattern per value, NaN included).
+pub const CANONICAL_NAN_BITS: u64 = 0x7ff8000000000000;
+
+/// How the double-canonicalizer treats a NaN, split by role (spec §3.3.3):
+/// axes reject it (no ordering); values canonicalize it (a NaN is a real
+/// stored value). This is the whole axis-vs-value asymmetry in one flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NanPolicy {
+    /// AXIS floats (`p_start_dbl`, `p_step_dbl`, `coord`, `years_presented`):
+    /// a NaN is a programming error at the writer boundary — reject it.
+    Reject,
+    /// VALUE floats (`v_float`; the `DOUBLE[]` array payload; long-tier
+    /// `v_float`): canonicalize every NaN to [`CANONICAL_NAN_BITS`].
+    Canonicalize,
+}
+
+/// A canonical `DOUBLE` (spec §3.3): `-0.0` normalized to `+0.0`; a NaN either
+/// rejected (axis, [`NanPolicy::Reject`]) or canonicalized to the one quiet NaN
+/// (value, [`NanPolicy::Canonicalize`]); then the 8 IEEE-754 binary64 bytes
+/// little-endian.
+fn push_double(out: &mut Vec<u8>, x: f64, nan: NanPolicy) -> Result<(), EncodeError> {
     if x.is_nan() {
-        return Err(EncodeError::NanForbidden);
+        return match nan {
+            NanPolicy::Reject => Err(EncodeError::NanForbidden),
+            NanPolicy::Canonicalize => {
+                out.extend_from_slice(&CANONICAL_NAN_BITS.to_le_bytes());
+                Ok(())
+            }
+        };
     }
     // `-0.0 == 0.0` is true, so this catches every negative-zero bit pattern.
     let canon = if x == 0.0 { 0.0_f64 } else { x };
@@ -210,8 +240,8 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             }
         }
         AxisBody::FloatParametric { start, step } => {
-            push_double(&mut out, *start)?;
-            push_double(&mut out, *step)?;
+            push_double(&mut out, *start, NanPolicy::Reject)?;
+            push_double(&mut out, *step, NanPolicy::Reject)?;
         }
         AxisBody::FloatMaterialized { coords } => {
             debug_assert_eq!(
@@ -220,7 +250,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
                 "length must equal materialized coord count (spec §5.3)"
             );
             for c in coords {
-                push_double(&mut out, *c)?;
+                push_double(&mut out, *c, NanPolicy::Reject)?;
             }
         }
         AxisBody::Label { positions } => {
@@ -246,7 +276,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
                 match p.years_presented {
                     Some(y) => {
                         out.push(0x01);
-                        push_double(&mut out, y)?;
+                        push_double(&mut out, y, NanPolicy::Reject)?;
                     }
                     None => out.push(0x00),
                 }
@@ -486,7 +516,8 @@ fn push_shape(out: &mut Vec<u8>, axis_hashes: &[u64]) {
 fn encode_measure(m: &ScalarValue) -> Result<Vec<u8>, EncodeError> {
     let mut b = Vec::new();
     match m {
-        ScalarValue::Float(x) => push_double(&mut b, *x)?,
+        // VALUE float: NaN is a real stored value, canonicalized (spec §3.3.1).
+        ScalarValue::Float(x) => push_double(&mut b, *x, NanPolicy::Canonicalize)?,
         ScalarValue::Int(n) => b.extend_from_slice(&n.to_le_bytes()),
         ScalarValue::Bool(v) => b.push(if *v { 0x01 } else { 0x00 }),
         ScalarValue::Str(s) => push_string(&mut b, s),
@@ -543,7 +574,8 @@ pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, E
             let mut payload = Vec::new();
             payload.extend_from_slice(&(values.len() as u32).to_le_bytes());
             for x in *values {
-                push_double(&mut payload, *x)?;
+                // VALUE array payload: NaN canonicalized, never rejected (§3.3.1).
+                push_double(&mut payload, *x, NanPolicy::Canonicalize)?;
             }
             push_component_block(&mut out, &[(1u8, payload)]);
         }
@@ -595,6 +627,52 @@ mod value_tests {
         push_component_block(&mut both, &[(1, measure), (2, vec![0xCC])]);
         assert_eq!(both, [2u8, 1u8, 0xAA, 0xBB, 2u8, 0xCC]);
         assert_ne!(both, only_slot1);
+    }
+
+    #[test]
+    fn value_encoder_canonicalizes_any_nan_to_the_one_pattern() {
+        // A VALUE float NaN is canonicalized to 0x7ff8000000000000 (spec §3.3.1),
+        // analogous to -0.0 → +0.0. Even a signaling / alternate-payload NaN bit
+        // pattern collapses to the one canonical quiet NaN, so byte-equality
+        // stays well-defined for values (one canonical pattern per value).
+        let key = ValueKey {
+            entity_id: 1,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        // A signaling NaN (top mantissa bit clear) with a non-zero payload, and
+        // the sign bit set — as different from the canonical pattern as a NaN gets.
+        let weird = f64::from_bits(0xfff0_0000_0000_0001);
+        assert!(weird.is_nan(), "fixture must be a NaN bit pattern");
+        let a = encode_value(&key, &ValueContent::Scalar(&ScalarValue::Float(weird))).unwrap();
+        let b = encode_value(&key, &ValueContent::Scalar(&ScalarValue::Float(f64::NAN))).unwrap();
+        assert_eq!(a, b, "every NaN bit pattern must encode identically");
+        // The last 8 bytes are the measure: the canonical quiet-NaN pattern, LE.
+        assert_eq!(
+            &a[a.len() - 8..],
+            &CANONICAL_NAN_BITS.to_le_bytes(),
+            "value NaN must encode as 0x7ff8000000000000"
+        );
+        // And it does NOT error (the whole point — values keep the array tier).
+        assert!(encode_value(&key, &ValueContent::Scalar(&ScalarValue::Float(f64::NAN))).is_ok());
+    }
+
+    #[test]
+    fn axis_encoder_still_rejects_nan() {
+        // The axis path is UNCHANGED: a NaN coordinate has no ordering and is
+        // rejected (spec §3.3.1). This is the load-bearing axis-vs-value split.
+        let axis = crate::encoding::CanonicalAxis {
+            length: 1,
+            properties: Default::default(),
+            body: crate::encoding::AxisBody::FloatMaterialized {
+                coords: vec![f64::NAN],
+            },
+        };
+        assert_eq!(
+            crate::encoding::encode_axis(&axis),
+            Err(EncodeError::NanForbidden),
+            "a NaN axis coordinate must still be rejected"
+        );
     }
 
     #[test]

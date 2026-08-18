@@ -409,12 +409,14 @@ fn zero_row_segment_is_e6() {
     assert_eq!(classes, 0, "no auto-create from a zero-row segment");
 }
 
-/// NaN can never be stored: rejected before the core call, naming the row
-/// (spec §5.3.1).
+/// A NaN VALUE is a real stored value (spec §5.3.1): it is accepted,
+/// canonicalized by the core, and — being a present cell, not absence — keeps a
+/// dense float grid on the Array tier, round-tripping as NaN at its position.
 #[test]
-fn nan_float_value_is_e6() {
+fn nan_float_value_is_stored_on_array_tier() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
+    // coords {0, 1} form a full rank-1 Cartesian float grid; one cell is NaN.
     let file = write_file(
         dir.path(),
         "nan.arrows",
@@ -422,11 +424,25 @@ fn nan_float_value_is_e6() {
     );
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert_error_leaves_db_untouched(&db, &out, "E6");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("NaN"),
-        "error must name the NaN"
-    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let conn = Connection::open(&db).unwrap();
+    // A NaN cell is PRESENT, so the grid stays Cartesian → Array tier, NOT Long.
+    let arrays: i64 = conn.query_row("SELECT count(*) FROM value_array", [], |r| r.get(0)).unwrap();
+    let longs: i64 = conn.query_row("SELECT count(*) FROM value_long", [], |r| r.get(0)).unwrap();
+    assert_eq!((arrays, longs), (1, 0), "NaN-bearing dense grid stays on the array tier");
+    // Round-trip: payload is [1.0, NaN] in flat (position) order.
+    let payload: Vec<f64> = conn
+        .prepare("SELECT unnest(values) AS v FROM value_array")
+        .unwrap()
+        .query_map([], |r| r.get::<_, f64>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    assert_eq!(payload.len(), 2);
+    assert_eq!(payload[0], 1.0, "position 0 preserved exactly");
+    assert!(payload[1].is_nan(), "the NaN survives the round-trip at position 1");
 }
 
 /// Critique F1 regression: a batch body whose LAST 8 BYTES coincidentally

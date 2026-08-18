@@ -24,7 +24,7 @@ Each `*.json`:
 | `description` | string | what the vector exercises |
 | `key` | object | `{entity_id, parameter_definition_id, alternative_id}` (i64) |
 | `content` | object | the value content, tagged by `type` (below) |
-| `encode_error` | bool (optional) | if `true`, the encoder MUST error: the runners inject a NaN into the declared scalar `Float` measure and assert rejection (§3.3.1). Such a vector omits the `expected_*` fields |
+| `nan_at` | [int] (optional) | flat measure indices set to NaN before encoding (JSON has no NaN literal): index 0 = a `Scalar` float measure; element index into an `Array` payload. The value encoder **canonicalizes** each NaN to `0x7ff8000000000000` — the one quiet NaN, analogous to `-0.0 → +0.0` (§3.3.1) — it does **not** reject it (unlike the axis encoder). The `expected_*` fields reflect the canonicalized value |
 | `expected_canonical_hex` | string | canonical bytes, lower-case hex |
 | `expected_hash_u64` | number | XXH3-64/seed-0 of those bytes, unsigned decimal |
 

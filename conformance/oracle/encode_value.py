@@ -65,10 +65,19 @@ def _string(s: str) -> bytes:
     return _u32(len(b)) + b
 
 
+# The one canonical quiet-NaN bit pattern for VALUE floats (spec §3.3.1):
+# positive quiet NaN, zero payload. Analogous to -0.0 -> +0.0, this makes
+# byte-equality well-defined for values (one canonical pattern per value).
+_CANONICAL_NAN_BITS = 0x7FF8000000000000
+
+
 def _double(x: float) -> bytes:
-    if isinstance(x, float) and math.isnan(x):
-        raise ValueError("NaN is not an encodable value (spec §3.3.1)")
+    """§3.3 VALUE double: NaN canonicalized to the one quiet NaN, -0.0 -> +0.0,
+    then 8 IEEE-754 binary64 bytes LE. (The AXIS oracle, encode_axis.py, still
+    REJECTS NaN — the deliberate axis-vs-value split, §3.3.3.)"""
     x = float(x)
+    if math.isnan(x):
+        return struct.pack("<Q", _CANONICAL_NAN_BITS)
     if x == 0.0:
         x = 0.0
     return struct.pack("<d", x)
@@ -158,13 +167,21 @@ def content_hash(data: bytes) -> int:
     return xxhash.xxh3_64_intdigest(data, seed=0)
 
 
-def _inject_nan(content: dict) -> dict:
-    """Mirror the Rust runner: put a NaN into the scalar float measure (§3.3.1)."""
-    sv = content["value"]
-    if "Float" in sv:
-        sv["Float"] = float("nan")
+def _apply_nan_at(content: dict, indices: list) -> dict:
+    """Inject NaN into the measure at the given flat indices before encoding
+    (JSON has no NaN literal). A Scalar float's sole measure is index 0; an
+    Array's payload is indexed by element. Mirrors the Rust value_vectors runner
+    so both oracles encode the same NaN-bearing value (§3.3.1)."""
+    t = content["type"]
+    if t == "Scalar":
+        if "Float" not in content["value"]:
+            raise AssertionError("nan_at on a Scalar needs a Float measure")
+        content["value"]["Float"] = float("nan")
+    elif t == "Array":
+        for i in indices:
+            content["values"][i] = float("nan")
     else:
-        raise AssertionError("encode_error value vector needs a scalar Float measure")
+        raise AssertionError(f"nan_at not supported for content type {t!r}")
     return content
 
 
@@ -173,14 +190,12 @@ def check_vector(path: pathlib.Path) -> bool:
     name = path.name
     desc = vector.get("description", "")
 
-    if vector.get("encode_error"):
-        try:
-            encode_value(vector["key"], _inject_nan(vector["content"]))
-        except ValueError:
-            return True
-        raise AssertionError(f"{name}: NaN value must be rejected, not encoded ({desc})")
+    content = vector["content"]
+    nan_at = vector.get("nan_at")
+    if nan_at is not None:
+        content = _apply_nan_at(content, nan_at)
 
-    got = encode_value(vector["key"], vector["content"])
+    got = encode_value(vector["key"], content)
     got_hex = got.hex()
     got_hash = content_hash(got)
 

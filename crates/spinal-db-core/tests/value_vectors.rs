@@ -18,8 +18,12 @@ struct VVector {
     description: String,
     key: ValueKey,
     content: ContentSpec,
+    /// Flat measure indices to set to NaN before encoding (JSON has no NaN
+    /// literal). A Scalar float's measure is index 0; an Array's payload is
+    /// indexed by element. The VALUE encoder canonicalizes each NaN to
+    /// 0x7ff8000000000000 (spec §3.3.1) — it accepts NaN, never rejects it.
     #[serde(default)]
-    encode_error: bool,
+    nan_at: Vec<usize>,
     expected_canonical_hex: Option<String>,
     expected_hash_u64: Option<u64>,
 }
@@ -75,35 +79,40 @@ fn value_vectors_match() {
         let raw = fs::read_to_string(path).expect("read vector");
         let v: VVector = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
 
-        // NaN-reject vector: the encoder MUST error. JSON has no NaN literal, so
-        // inject one into the scalar float measure the vector declares (mirrors
-        // the axis NaN-reject runner in encoding_vectors.rs).
-        if v.encode_error {
-            let nan_measure = match &v.content {
-                ContentSpec::Scalar {
-                    value: ScalarValue::Float(_),
-                } => ScalarValue::Float(f64::NAN),
-                _ => panic!("{name}: encode_error vector needs a scalar Float measure"),
-            };
-            assert!(
-                encode_value(&v.key, &ValueContent::Scalar(&nan_measure)).is_err(),
-                "{name}: NaN value must be rejected, not hashed ({})",
-                v.description
-            );
-            continue;
-        }
-
-        // Build the borrowing ValueContent from the owned spec.
+        // Build the borrowing ValueContent from the owned spec, injecting NaN at
+        // any `nan_at` indices first (the value encoder canonicalizes it — it
+        // does NOT reject, unlike the axis encoder in encoding_vectors.rs).
+        let scalar_owned: ScalarValue;
+        let values_owned: Vec<f64>;
         let cells_owned: Vec<(Vec<i32>, ScalarValue)>;
         let content = match &v.content {
-            ContentSpec::Scalar { value } => ValueContent::Scalar(value),
+            ContentSpec::Scalar { value } => {
+                scalar_owned = if v.nan_at.is_empty() {
+                    value.clone()
+                } else {
+                    match value {
+                        ScalarValue::Float(_) => ScalarValue::Float(f64::NAN),
+                        _ => panic!("{name}: nan_at on a Scalar needs a Float measure"),
+                    }
+                };
+                ValueContent::Scalar(&scalar_owned)
+            }
             ContentSpec::Array {
                 axis_hashes,
                 values,
-            } => ValueContent::Array {
-                axis_hashes,
-                values,
-            },
+            } => {
+                values_owned = {
+                    let mut vv = values.clone();
+                    for &i in &v.nan_at {
+                        vv[i] = f64::NAN;
+                    }
+                    vv
+                };
+                ValueContent::Array {
+                    axis_hashes,
+                    values: &values_owned,
+                }
+            }
             ContentSpec::Long {
                 value_kind,
                 axis_hashes,

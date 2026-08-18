@@ -387,16 +387,22 @@ MAJOR door (§3.4).
 `Duration`/`Interval` type is accepted — §1.3; `INTERVAL` appears nowhere
 in the system, VMP Part 8 res. 7.)
 
-5.3.1. **Float value semantics (critique F7).** For `Float64` values, in
-both forms: **NaN is rejected** (E6) — the canonical encoding forbids NaN
-outright (canonical_encoding §3.3.1: the writer boundary rejects it; the
-DDL enforces `NOT isnan` where it can), so a NaN can never be stored and
-the importer MUST surface the rejection *before* the core call, naming row
-and entity. In particular, **NaN-as-absent padding is forbidden**: absence
-is a NULL value cell (`long`, §5.4) or an unemitted cell — never a NaN.
-**±Inf are legal stored values.** **−0.0 is accepted** on the wire and
-normalized to `+0.0` by the core's writer boundary (canonical_encoding
-§3.3.1) — producers need not pre-normalize.
+5.3.1. **Float value semantics (critique F7; NaN value amendment).** For
+`Float64` values, in both forms: **NaN is an accepted stored value.** A NaN
+value float is canonicalized by the core's writer boundary to the one quiet
+NaN `0x7ff8000000000000` (canonical_encoding §3.3.1, value half) and stored
+as such — the importer passes it through unrejected. This is a v1.0
+pre-public amendment (allowed under §3.2's additive-later / reader-safe rule):
+the *value* half of the original NaN ban is reopened; the *axis* half is
+unchanged (a NaN in a dimension/coordinate column is still illegal, but no
+value-column NaN is). **NaN is still NOT absence:** absence is a NULL value
+cell (`long`, §5.4) or an unemitted cell — a NaN is a real value, not a hole,
+so **NaN-as-absent padding remains forbidden** in the sense that a producer
+must not use NaN to *mean* "missing"; and a dense grid stays a **complete
+grid** whether or not a cell is NaN (a NaN cell keeps the entity on the array
+tier — canonical_encoding §3.3.3). **±Inf are legal stored values.** **−0.0
+is accepted** on the wire and normalized to `+0.0` by the core's writer
+boundary — producers need not pre-normalize.
 
 5.4. **Null rules** (mirror the core exactly): a null in the `entity` column
 or any dimension column → E6 (index positions must be present — canon.rs).
@@ -476,10 +482,14 @@ dim lists, list slots, and value-list slots (E6/E8). Absence is expressed by
 not being rectangular, and "not rectangular" is exactly what `long` is for
 (NULL-elimination happens producer-side by simply not emitting the cell).
 A null *cell* in a dense payload has no defined meaning and MUST NOT be
-given one. **NaN is not absence either** (critique F7): a producer padding
-a ragged block with NaN to make it rectangular is emitting illegal values —
-every NaN is rejected per §5.3.1 — and MUST use `long` form for that entity
-instead. Each entity MUST appear in at most one row per segment (E6).
+given one. **NaN is not absence, but it IS a legal value** (critique F7; NaN
+value amendment, §5.3.1): a NaN payload cell is stored (canonicalized to the
+one quiet NaN), so a dense block that legitimately contains NaN values is
+fine and stays on the array tier. What remains forbidden is using NaN to
+*mean* absence — a producer must not pad a **ragged** block with NaN to fake
+rectangularity; genuinely absent cells make the block non-rectangular and
+MUST use `long` form (where absence is simply an unemitted cell). Each entity
+MUST appear in at most one row per segment (E6).
 
 6.5. **Payload type is `List<Float64>` only in 1.0** (**OPEN-Q3-8**). The
 dense wire form exists for the bulk-float result workload; int/bool/string
@@ -564,7 +574,7 @@ fixtures; text is free, class is not):
 | E3 | `spinal:format_version` missing/unparseable, MAJOR unsupported, or segments disagree | per segment, before writes |
 | E4 | required metadata key missing; unknown `spinal:form` value; alternative conflict/absence (§4.3) | per segment |
 | E5 | **warning, not error**: unknown `spinal:` key (§3.2) | logged, import continues |
-| E6 | malformed payload: wrong/unsupported Arrow type (incl. `Timestamp(Nanosecond)`, §5.2.1; run-end encoding, §2.4), rank > 4, null where forbidden, NaN float value (§5.3.1), zero-row segment (§2.3), misplaced `entity`/`value` column name (§5.1.1), missing/invalid `spinal:label_domain` or present label not in domain (§7), duplicate dense entity, rank-0 duplicate entity (§5.4), trailing garbage between segments, core-surfaced canonicalization errors | per batch/row |
+| E6 | malformed payload: wrong/unsupported Arrow type (incl. `Timestamp(Nanosecond)`, §5.2.1; run-end encoding, §2.4), rank > 4, null where forbidden (a NaN VALUE is **not** an error — §5.3.1), zero-row segment (§2.3), misplaced `entity`/`value` column name (§5.1.1), missing/invalid `spinal:label_domain` or present label not in domain (§7), duplicate dense entity, rank-0 duplicate entity (§5.4), trailing garbage between segments, core-surfaced canonicalization errors | per batch/row |
 | E7 | duplicate `(class, parameter, alternative)` target across segments, compared case-insensitively (§4.2) | container validation |
 | E8 | dense length ≠ product of dim-list lengths; duplicate entry within a dim list (§6.2) | per row |
 | E9 | database busy / write-write conflict with retry budget exhausted (core `with_write_txn_retrying`) | commit |
@@ -729,12 +739,15 @@ after the fix.
 >   natural granularity.
 > - **Q3-8 (dense completeness + NaN):** "dense = every cell populated" is
 >   *our* one-canonical-form rule, not an Arrow limitation (Arrow lists could
->   hold null slots); holey data uses `long`. NaN is banned because
->   `NaN != NaN` and NaN has many bit patterns, which break value equality,
->   dedup, and the content hash; "missing" is expressed as absence/NULL, never
->   a stored NaN. Same additive-later logic as Q3-1 applies to Q3-8's reserved
->   `List<Int64>` and Q3-9's REE support: widening accepted inputs is a safe
->   minor; the 1.0 "reject" stance fails loudly rather than silently.
+>   hold null slots); holey data uses `long`. **NaN-value amendment (post-Q3):**
+>   the original "NaN banned" stance is superseded for *values* — a NaN value is
+>   now accepted and canonicalized to one quiet NaN (`0x7ff8000000000000`),
+>   which restores well-defined value equality (the many-bit-pattern /
+>   `NaN != NaN` hazard is removed by collapsing to one pattern, aligned with
+>   DuckDB's total order; no cross-key value dedup relies on it — see
+>   canonical_encoding §3.3). "Missing" is still absence/NULL, never a stored
+>   NaN. Same additive-later logic as Q3-1 applies to Q3-8's reserved
+>   `List<Int64>` and Q3-9's REE support.
 
 - **OPEN-Q3-1 — container = IPC *stream* format, file format rejected**
   (§2.1). *Rec:* stream only — Arrow.jl's append path (SpineOpt's rolling
@@ -805,10 +818,12 @@ after the fix.
   is the constraint.
 - **OPEN-Q3-8 — dense payload `List<Float64>` only in 1.0** (§6.5). *Rec:*
   float-only — the only producer workload is bulk float results; `List<Int64>`
-  reserved as a minor door. Float semantics are now pinned (critique F7,
-  §5.3.1/§6.4): NaN rejected (E6, aligned with canonical_encoding's NaN
-  ban), NaN-as-absent padding forbidden, ±Inf legal, −0.0 normalized by the
-  core. *Alt:* admit all measure kinds as lists now.
+  reserved as a minor door. Float semantics are now pinned (critique F7 +
+  NaN-value amendment, §5.3.1/§6.4): a **NaN value is accepted and
+  canonicalized** to `0x7ff8000000000000` (aligned with canonical_encoding
+  §3.3's reopened value half), NaN-as-*absence* padding still forbidden (a NaN
+  is a value, not a hole), ±Inf legal, −0.0 normalized by the core. *Alt:*
+  admit all measure kinds as lists now.
 - **OPEN-Q3-9 — importer MUST accept dictionary encoding + ZSTD and
   LZ4_FRAME buffer compression; REE forbidden and MUST-rejected** (§2.4;
   critique F15 hardened MAY-reject to MUST-reject so importability is not
@@ -838,6 +853,14 @@ R2 mitigation must be amended for the importer's direct
 
 ## 12. Revision log
 
+- **2026-08-18 (NaN-value amendment)** — reopened the **value** half of the
+  NaN ban (jkiviluo decision). A NaN VALUE is now **accepted** and canonicalized
+  by the core to the one quiet NaN `0x7ff8000000000000`; it is no longer E6.
+  Absence is still NULL/omission (a NaN is a value, not a hole), and dense stays
+  a complete grid — a NaN cell keeps the entity on the array tier. Axis/
+  coordinate NaN is unchanged (still illegal). Updated §5.3.1, §6.4, §9.1 E6
+  table, and §11 OPEN-Q3-8. A v1.0 pre-public amendment, safe under §3.2
+  (reader-safe / additive-later); see canonical_encoding §3.3.1–§3.3.3.
 - **2026-08-18 (draft v2)** — applied the adversarial critique
   `specs/arrow_ipc_bulk_format_critique.md` (findings F1–F17, empirical
   verifications against arrow-rs 58.4.0 / PyArrow 25.0.1 / Arrow.jl 2.8.1).

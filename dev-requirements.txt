@@ -1,0 +1,7 @@
+# Python dev/CI deps for the DuckDB schema smoke suite and the conformance
+# oracles that `cargo test` shells out to. Install into a project venv:
+#   python3 -m venv .venv && .venv/bin/pip install -r dev-requirements.txt
+# (or `just venv`). DuckDB is pinned to the engine version the Rust core
+# bundles, so the smoke suite and any file it writes are storage-compatible.
+duckdb==1.5.5
+xxhash

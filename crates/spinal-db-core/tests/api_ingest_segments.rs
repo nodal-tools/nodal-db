@@ -132,6 +132,10 @@ fn failing_late_segment_rolls_back_the_whole_ingest() {
 /// (50k rows) ingests correctly through the per-entity row-index lists —
 /// O(rows) grouping, where the boolean masks these replaced were
 /// O(entities × rows). A correctness-at-scale pin, not a benchmark.
+///
+/// Slow (~45 s debug): tiered out of the quick gate. Runs in `just full`
+/// (`cargo test -- --include-ignored`) before a release.
+#[ignore = "slow: pre-release tier; run via `just full` / --include-ignored"]
 #[test]
 fn thousand_entity_segment_ingests_correctly() {
     const ENTITIES: usize = 1000;

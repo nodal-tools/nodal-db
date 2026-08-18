@@ -33,8 +33,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use duckdb::arrow::array::{Array, BooleanArray, StringArray};
-use duckdb::arrow::compute::{concat_batches, filter_record_batch};
+use duckdb::arrow::array::{Array, StringArray, UInt32Array};
+use duckdb::arrow::compute::{concat_batches, take_record_batch};
 use duckdb::arrow::datatypes::{DataType, TimeUnit};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{params, Connection};
@@ -200,7 +200,7 @@ pub fn ingest_segments(
 
 /// The pure, DB-independent part of one segment's write: batch-contract
 /// validation, kind inference, domain merge, tz warnings, and the per-entity
-/// row masks. Everything here is safe to compute once outside the retried
+/// row-index lists. Everything here is safe to compute once outside the retried
 /// transaction (it touches no DB state).
 struct PreparedSegment {
     class: String,
@@ -212,8 +212,10 @@ struct PreparedSegment {
     tz_warnings: Vec<Warning>,
     /// Distinct entity names, first-seen order, case-insensitively deduped.
     names: Vec<String>,
-    /// Per-entity row masks over the concatenated batch.
-    masks: Vec<Vec<bool>>,
+    /// Per-entity row indices into the concatenated batch, ascending (i.e.
+    /// original row order). O(nrows) total, vs O(entities × nrows) for the
+    /// boolean masks these replace (critique F4).
+    rows: Vec<Vec<u32>>,
     /// The dims+value sub-batch (entity column dropped).
     sub_all: RecordBatch,
 }
@@ -290,7 +292,8 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         }
     }
 
-    // The per-entity row masks and the dims+value sub-batch (entity col dropped).
+    // The per-entity row-index lists and the dims+value sub-batch (entity col
+    // dropped).
     let entity_arr = batch
         .column(0)
         .as_any()
@@ -299,7 +302,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     let nrows = batch.num_rows();
     let mut slot: HashMap<String, usize> = HashMap::new();
     let mut names: Vec<String> = Vec::new();
-    let mut masks: Vec<Vec<bool>> = Vec::new();
+    let mut rows: Vec<Vec<u32>> = Vec::new();
     for row in 0..nrows {
         if entity_arr.is_null(row) {
             return Err(DbError::Api(format!("null entity name in row {row}")));
@@ -313,7 +316,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         // Aliased spellings are ambiguous, not mergeable (critique F3).
         let idx = *slot.entry(name.to_ascii_lowercase()).or_insert_with(|| {
             names.push(name.clone());
-            masks.push(vec![false; nrows]);
+            rows.push(Vec::new());
             names.len() - 1
         });
         if names[idx] != name {
@@ -323,7 +326,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
                 names[idx]
             )));
         }
-        masks[idx][row] = true;
+        rows[idx].push(row as u32);
     }
     let project: Vec<usize> = (1..ncols).collect();
     let sub_all = batch.project(&project)?;
@@ -337,7 +340,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         domains,
         tz_warnings,
         names,
-        masks,
+        rows,
         sub_all,
     })
 }
@@ -377,10 +380,10 @@ fn write_prepared(
         retain_override: Some(effective_retain),
     };
 
-    for (name, mask) in p.names.iter().zip(p.masks.iter()) {
+    for (name, idx) in p.names.iter().zip(p.rows.iter()) {
         let entity_id =
             resolve_entity(conn, commit_id, class_id, &p.class, name, &mut report.warnings)?;
-        let sub = filter_record_batch(&p.sub_all, &BooleanArray::from(mask.clone()))?;
+        let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
         let value = canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
         let key = ValueKey {
             entity_id,

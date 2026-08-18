@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use duckdb::arrow::array::{ArrayRef, Float64Array, StringArray};
+use duckdb::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
 use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
@@ -126,6 +126,76 @@ fn failing_late_segment_rolls_back_the_whole_ingest() {
     assert_eq!(count(&db, "SELECT count(*) FROM entity_class"), 0, "rolled back");
     assert_eq!(count(&db, "SELECT count(*) FROM value_scalar"), 0, "rolled back");
     assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only");
+}
+
+/// Scale pin (critique F4): one segment holding 1000 entities × 50 rows each
+/// (50k rows) ingests correctly through the per-entity row-index lists —
+/// O(rows) grouping, where the boolean masks these replaced were
+/// O(entities × rows). A correctness-at-scale pin, not a benchmark.
+#[test]
+fn thousand_entity_segment_ingests_correctly() {
+    const ENTITIES: usize = 1000;
+    const STEPS: usize = 50;
+    let (_dir, db) = fresh_db();
+
+    // Rank-1 int-indexed float rows, entity-major; cell value = e * STEPS + s.
+    let mut ents: Vec<String> = Vec::with_capacity(ENTITIES * STEPS);
+    let mut coords: Vec<i64> = Vec::with_capacity(ENTITIES * STEPS);
+    let mut vals: Vec<f64> = Vec::with_capacity(ENTITIES * STEPS);
+    for e in 0..ENTITIES {
+        for s in 0..STEPS {
+            ents.push(format!("unit_{e:04}"));
+            coords.push(s as i64);
+            vals.push((e * STEPS + s) as f64);
+        }
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("step", DataType::Int64, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(ents)) as ArrayRef,
+            Arc::new(Int64Array::from(coords)) as ArrayRef,
+            Arc::new(Float64Array::from(vals)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+
+    let report = ingest_segments(
+        &db,
+        vec![seg("unit", "flow", "Base", batch)],
+        "tester",
+        "scale pin",
+        WriteOptions::default(),
+    )
+    .expect("ingest");
+    assert_eq!(report.values_written, ENTITIES);
+
+    let got = read_parameter(&db, "unit", "flow", "Base").expect("read");
+    assert_eq!(got.num_rows(), ENTITIES * STEPS);
+
+    // Spot-check two entities' cells by (idx1_num → v_float).
+    let sch = got.schema();
+    let ent = got.column(sch.index_of("entity").unwrap())
+        .as_any().downcast_ref::<StringArray>().unwrap();
+    let coord = got.column(sch.index_of("idx1_num").unwrap())
+        .as_any().downcast_ref::<Int64Array>().unwrap();
+    let val = got.column(sch.index_of("v_float").unwrap())
+        .as_any().downcast_ref::<Float64Array>().unwrap();
+    for e in [0usize, ENTITIES - 1] {
+        let target = format!("unit_{e:04}");
+        let mut cells: Vec<(i64, f64)> = (0..got.num_rows())
+            .filter(|&r| ent.value(r) == target)
+            .map(|r| (coord.value(r), val.value(r)))
+            .collect();
+        cells.sort_by_key(|c| c.0);
+        let want: Vec<(i64, f64)> =
+            (0..STEPS).map(|s| (s as i64, (e * STEPS + s) as f64)).collect();
+        assert_eq!(cells, want, "entity {target}");
+    }
 }
 
 #[test]

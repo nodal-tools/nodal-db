@@ -15,3 +15,13 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+# The pre-freeze benchmark gate (plan Part 5 deliverable 4): `cargo bench`.
+# `test = false` is load-bearing — the gate builds a ~150 MB synthetic DB
+# through the core write path (minutes of wall time), which must never run
+# under `cargo test --workspace` (criterion's --test smoke mode included).
+[[bench]]
+name = "gate"
+harness = false
+test = false

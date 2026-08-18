@@ -101,6 +101,21 @@ their cost is inside these numbers, not separately measurable here.
    multi-row inserts, plus a set-based version computation) is
    logical-model-neutral and is REQUIRED before SpineOpt-scale long-tier
    writes.
+
+   **RESOLVED — physical batching landed (logical model untouched).**
+   `write_long` now issues ONE per-key `GROUP BY i*_pos` version scan (instead
+   of a per-cell `MAX(version)` probe) and writes all cells with chunked
+   multi-row `INSERT`s reusing one prepared statement per 512-row chunk (instead
+   of a per-cell prepare/execute). Both run inside the same write transaction, so
+   conflict-retry and rollback atomicity are unchanged; column values incl. the
+   `make_timestamp` accelerator binds and NaN canonicalization are byte-identical.
+   Measured on the focused `long_write` micro-bench (drives `history::write_value`
+   directly, no CHECKPOINT / `api` overhead — this machine, release):
+
+   | 8 760-cell op | before (per-cell) | after (batched) | per-cell before → after |
+   |---|---|---|---|
+   | first-write | 26.5 s | 2.11 s | 3.03 ms → **0.24 ms** (~12.6×) |
+   | replace cycle | 29.5 s | 2.42 s | 3.37 ms → **0.28 ms** (~12.2×) |
 2. **Per-entity write cost did not melt away in release.** The ~44 ms/entity
    DEBUG fact (F4 scale test, array tier) measures **82 ms/entity in release
    end-to-end** for the same 1000 × 8760 shape — the dominant cost is the
@@ -127,3 +142,9 @@ their cost is inside these numbers, not separately measurable here.
 builds the DB in a `spinal-bench-<pid>` tempdir, removed at end of run (stale
 dirs swept at start). `[[bench]] test = false` keeps all of this out of
 `cargo test --workspace`.
+
+`cargo bench -p spinal-db-core --bench long_write` runs the focused long-tier
+write micro-bench (`benches/long_write.rs`): NO synthetic DB — it drives
+`history::write_value` directly on a fresh schema DB, isolating per-cell
+long-tier write cost (alarm #1 above). Two 8 760-cell shapes: `long_insert_8760`
+(fresh key, pure batched insert) and `long_replace_8760` (close-out + reinsert).

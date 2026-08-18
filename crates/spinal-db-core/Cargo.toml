@@ -25,3 +25,11 @@ criterion = { workspace = true }
 name = "gate"
 harness = false
 test = false
+
+# Focused long-tier write micro-bench (RESULTS.md alarm #1). No synthetic DB;
+# drives `history::write_value` directly. `test = false` keeps it out of
+# `cargo test --workspace` like the gate.
+[[bench]]
+name = "long_write"
+harness = false
+test = false

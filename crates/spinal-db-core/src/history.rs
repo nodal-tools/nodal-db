@@ -36,6 +36,8 @@
 //! `content_retained = FALSE` with the payload columns nulled — so the prior
 //! content is not preserved (VMP Part 5 retention).
 
+use std::collections::HashMap;
+
 use duckdb::types::Value;
 use duckdb::{params, Connection};
 
@@ -399,66 +401,184 @@ fn write_long(
         0
     };
 
+    // Physical batching (RESULTS.md alarm #1): the former per-cell `MAX(version)`
+    // probe is replaced by ONE set-based query returning the current per-position
+    // max, from which each cell's next version is computed in Rust. Long-tier
+    // versions are per-cell (a key can hold pos0 at v2, pos1 at v1); canon
+    // guarantees the cells of one write carry distinct position tuples, so this
+    // snapshot (taken AFTER close-out, BEFORE any insert) yields exactly the
+    // versions the per-cell probe did — each position advances independently.
+    let cur_versions = current_long_versions(conn, key)?;
+
+    // Encode every cell's row params up front, tracking the max new version.
     let mut max_version = 0u16;
+    let mut rows_params: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
     for row in rows {
         let pos = pad4_pos(&row.positions);
-        let version = next_version_long_cell(conn, key, &pos)?;
+        let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
         max_version = max_version.max(version);
-
-        // Per-dimension index accelerators, derived from the bound axis at the
-        // cell's position (audited by audit_index_accelerator; never authoritative).
-        let mut dt = [None::<i64>; 4];
-        let mut num = [None::<i64>; 4];
-        for (d, ax) in axes.iter().enumerate() {
-            let (a_dt, a_num) = accel(ax, pos[d]);
-            dt[d] = a_dt;
-            num[d] = a_num;
-        }
-        let ax = |d: usize| axis_ids.get(d).copied();
-        let vc = VCols::of(&row.value);
-        conn.execute(
-            "INSERT INTO value_long \
-               (entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
-                axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, \
-                i1_dt, i1_num, i2_dt, i2_num, i3_dt, i3_num, i4_dt, i4_num, \
-                value_kind, v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                     make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, \
-                     ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)",
-            params![
-                key.entity_id,
-                key.parameter_definition_id,
-                key.alternative_id,
-                c,
-                version as i16,
-                ax(0),
-                ax(1),
-                ax(2),
-                ax(3),
-                pos[0],
-                pos[1],
-                pos[2],
-                pos[3],
-                dt[0],
-                num[0],
-                dt[1],
-                num[1],
-                dt[2],
-                num[2],
-                dt[3],
-                num[3],
-                vc.kind,
-                vc.f,
-                vc.i,
-                vc.b,
-                vc.s,
-                vc.dt,
-                vc.dm,
-                vc.du,
-            ],
-        )?;
+        rows_params.push(long_row_params(key, c, version, axis_ids, axes, &pos, &row.value));
     }
+
+    // Batched multi-row INSERT (replaces the per-cell prepare/execute). Issued on
+    // the caller's connection inside the open write transaction — no autocommit,
+    // no separate connection; a write-write conflict or any error surfaces here
+    // or at COMMIT exactly as before, and ROLLBACK unwinds every batched row, so
+    // conflict-retry and crash atomicity are unchanged.
+    insert_long_rows(conn, &rows_params)?;
+
     Ok((max_version, rows.len(), closed))
+}
+
+/// The current per-position `MAX(version)` for every position tuple the key
+/// already holds (live OR superseded — versioning spans both, as the former
+/// per-cell probe did: no `valid_to_commit` filter). One scan per key replaces
+/// one probe per cell (RESULTS.md alarm #1).
+fn current_long_versions(conn: &Connection, key: &ValueKey) -> Result<HashMap<[i32; 4], u16>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT i1_pos, i2_pos, i3_pos, i4_pos, MAX(version)::INTEGER \
+         FROM value_long \
+         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
+         GROUP BY i1_pos, i2_pos, i3_pos, i4_pos",
+    )?;
+    let mut map = HashMap::new();
+    let iter = stmt.query_map(
+        params![key.entity_id, key.parameter_definition_id, key.alternative_id],
+        |r| {
+            let pos = [
+                r.get::<_, i32>(0)?,
+                r.get::<_, i32>(1)?,
+                r.get::<_, i32>(2)?,
+                r.get::<_, i32>(3)?,
+            ];
+            let v: i32 = r.get(4)?;
+            Ok((pos, v as u16))
+        },
+    )?;
+    for row in iter {
+        let (pos, v) = row?;
+        map.insert(pos, v);
+    }
+    Ok(map)
+}
+
+/// Rows per batched `value_long` INSERT. Chunked so the per-statement placeholder
+/// count stays bounded (≤ CHUNK × 29); one prepared statement is reused across
+/// all full-width chunks, so 8 760 cells cost ~17 prepares instead of 8 760.
+const LONG_INSERT_CHUNK: usize = 512;
+
+/// Insert the pre-encoded long-cell rows with as few statement prepares as
+/// possible: a single reused prepared statement for the full-width chunks, plus
+/// one tail statement for the remainder. All executes run on `conn` inside the
+/// caller's transaction.
+fn insert_long_rows(conn: &Connection, rows_params: &[Vec<Value>]) -> Result<(), DbError> {
+    if rows_params.is_empty() {
+        return Ok(());
+    }
+    let full = rows_params.len() / LONG_INSERT_CHUNK;
+    if full > 0 {
+        let sql = long_insert_sql(LONG_INSERT_CHUNK);
+        let mut stmt = conn.prepare(&sql)?;
+        for chunk in rows_params.chunks_exact(LONG_INSERT_CHUNK) {
+            stmt.execute(duckdb::params_from_iter(chunk.iter().flatten()))?;
+        }
+    }
+    let rem = &rows_params[full * LONG_INSERT_CHUNK..];
+    if !rem.is_empty() {
+        let sql = long_insert_sql(rem.len());
+        conn.execute(&sql, duckdb::params_from_iter(rem.iter().flatten()))?;
+    }
+    Ok(())
+}
+
+/// A multi-row `value_long` INSERT with `n` row templates. Column order and the
+/// `make_timestamp(?)` binds for the timestamp columns are identical to the
+/// former per-cell statement — same 29 columns, `content_retained` left to its
+/// TRUE default.
+fn long_insert_sql(n: usize) -> String {
+    const ROW: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                        make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, \
+                        ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)";
+    let mut s = String::with_capacity(320 + n * (ROW.len() + 1));
+    s.push_str(
+        "INSERT INTO value_long \
+           (entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
+            axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, \
+            i1_dt, i1_num, i2_dt, i2_num, i3_dt, i3_num, i4_dt, i4_num, \
+            value_kind, v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
+         VALUES ",
+    );
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(ROW);
+    }
+    s
+}
+
+/// One long cell's 29 bind values, in the column order of [`long_insert_sql`].
+/// The timestamp columns bind their raw µs (wrapped by `make_timestamp(?)` in
+/// the SQL); the value columns come straight from [`VCols`], so the encoder
+/// path — including its NaN canonicalization — is untouched.
+fn long_row_params(
+    key: &ValueKey,
+    c: i64,
+    version: u16,
+    axis_ids: &[i64],
+    axes: &[CanonicalAxis],
+    pos: &[i32; 4],
+    value: &ScalarValue,
+) -> Vec<Value> {
+    // Per-dimension index accelerators, derived from the bound axis at the
+    // cell's position (audited by audit_index_accelerator; never authoritative).
+    let mut dt = [None::<i64>; 4];
+    let mut num = [None::<i64>; 4];
+    for (d, ax) in axes.iter().enumerate() {
+        let (a_dt, a_num) = accel(ax, pos[d]);
+        dt[d] = a_dt;
+        num[d] = a_num;
+    }
+    let vc = VCols::of(value);
+    let mut p: Vec<Value> = Vec::with_capacity(29);
+    p.push(Value::BigInt(key.entity_id));
+    p.push(Value::BigInt(key.parameter_definition_id));
+    p.push(Value::BigInt(key.alternative_id));
+    p.push(Value::BigInt(c));
+    p.push(Value::SmallInt(version as i16));
+    push_axis4(&mut p, axis_ids);
+    for &ip in pos {
+        p.push(Value::Int(ip));
+    }
+    for d in 0..4 {
+        p.push(opt_bigint(dt[d]));
+        p.push(opt_bigint(num[d]));
+    }
+    p.push(Value::Text(vc.kind.to_string()));
+    p.push(opt_double(vc.f));
+    p.push(opt_bigint(vc.i));
+    p.push(opt_bool(vc.b));
+    p.push(opt_text(vc.s));
+    p.push(opt_bigint(vc.dt));
+    p.push(opt_int(vc.dm));
+    p.push(opt_bigint(vc.du));
+    p
+}
+
+fn opt_bigint(v: Option<i64>) -> Value {
+    v.map(Value::BigInt).unwrap_or(Value::Null)
+}
+fn opt_int(v: Option<i32>) -> Value {
+    v.map(Value::Int).unwrap_or(Value::Null)
+}
+fn opt_double(v: Option<f64>) -> Value {
+    v.map(Value::Double).unwrap_or(Value::Null)
+}
+fn opt_bool(v: Option<bool>) -> Value {
+    v.map(Value::Boolean).unwrap_or(Value::Null)
+}
+fn opt_text(v: Option<String>) -> Value {
+    v.map(Value::Text).unwrap_or(Value::Null)
 }
 
 fn close_out_long(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -> Result<usize, DbError> {
@@ -477,25 +597,6 @@ fn close_out_long(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -> 
         sql,
         params![c, key.entity_id, key.parameter_definition_id, key.alternative_id],
     )?)
-}
-
-fn next_version_long_cell(conn: &Connection, key: &ValueKey, pos: &[i32; 4]) -> Result<u16, DbError> {
-    let v: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) + 1 FROM value_long \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-           AND i1_pos=? AND i2_pos=? AND i3_pos=? AND i4_pos=?",
-        params![
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id,
-            pos[0],
-            pos[1],
-            pos[2],
-            pos[3]
-        ],
-        |r| r.get(0),
-    )?;
-    Ok(v as u16)
 }
 
 // ---------------------------------------------------------------------------

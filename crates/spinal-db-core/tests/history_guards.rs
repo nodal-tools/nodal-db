@@ -17,7 +17,7 @@ use spinal_db_core::error::DbError;
 use spinal_db_core::history::write_value;
 use spinal_db_core::schema_init::init_schema;
 use spinal_db_core::types::{
-    ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions,
+    LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions,
 };
 
 fn fresh_db() -> (tempfile::TempDir, PathBuf) {
@@ -95,6 +95,76 @@ fn retrying_wrapper_happy_path_writes_value() {
         )
         .unwrap();
     assert_eq!(v, 42.0);
+}
+
+#[test]
+fn batched_long_cells_bump_versions_independently() {
+    // Batching edge (RESULTS.md alarm #1 fix): the one-query-per-key version
+    // computation must still advance each cell's version independently when the
+    // cells of a single write sit at DIFFERENT current versions. A three-write
+    // sequence drives pos0 to v3 and pos1 to v2 within one batched insert:
+    //   1. write {0,1}            -> pos0 v1, pos1 v1  (both live)
+    //   2. write {0}              -> close both; reinsert pos0 v2; pos1 stays dead v1
+    //   3. write {0,1}            -> close pos0 v2; reinsert pos0 v3, pos1 v2
+    // The last write inserts two cells whose next versions differ (3 vs 2).
+    let (_dir, path) = fresh_db();
+    let key = ValueKey {
+        entity_id: 55,
+        parameter_definition_id: 65,
+        alternative_id: 75,
+    };
+
+    let long = |cells: &[(i32, f64)]| CanonicalValue {
+        tier: Tier::Long,
+        value_kind: ValueKind::Float,
+        axes: vec![CanonicalAxis {
+            length: 2,
+            properties: AxisProperties::default(),
+            body: AxisBody::IntegerParametric { start: 0, step: 1 },
+        }],
+        shape: ShapedData::Long(
+            cells
+                .iter()
+                .map(|&(pos, value)| LongRow {
+                    positions: vec![pos],
+                    value: ScalarValue::Float(value),
+                })
+                .collect(),
+        ),
+    };
+
+    for cells in [
+        vec![(0i32, 10.0f64), (1, 20.0)],
+        vec![(0, 11.0)],
+        vec![(0, 12.0), (1, 21.0)],
+    ] {
+        let v = long(&cells);
+        with_write_txn(&path, "t", "batch-versions", |conn, c| {
+            let mut cache = AxisCache::new();
+            write_value(conn, c, key, &v, &mut cache, &WriteOptions::default())
+        })
+        .expect("long write");
+    }
+
+    let conn = Connection::open(&path).unwrap();
+    // Live rows: pos0 at v3 = 12.0, pos1 at v2 = 21.0 — independent bumps.
+    let live: Vec<(i32, i16, f64)> = conn
+        .prepare(
+            "SELECT i1_pos, version, v_float FROM value_long \
+             WHERE entity_id=55 AND valid_to_commit IS NULL ORDER BY i1_pos",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(live, vec![(0, 3, 12.0), (1, 2, 21.0)], "per-cell version continuity");
+
+    // The append-only tiling audit must stay clean across the batched writes.
+    let tiling: i64 = conn
+        .query_row("SELECT count(*) FROM audit_history_tiling", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tiling, 0, "audit_history_tiling must be empty");
 }
 
 #[test]

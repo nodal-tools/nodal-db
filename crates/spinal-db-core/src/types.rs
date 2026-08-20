@@ -146,6 +146,17 @@ pub enum WarningKind {
     /// UTC-µs instant unchanged, but the tz display metadata is dropped —
     /// surfaced here so tz-aware feeds are never silently reinterpreted.
     TimezoneNormalized { column: String, tz: String },
+    /// A [`DeleteKey`](crate::api::DeleteKey) named a referent that has no
+    /// current row (case-insensitive lookup missed at `level` —
+    /// `"entity_class"` / `"parameter_definition"` / `"alternative"` /
+    /// `"entity"`); the key was skipped, never a hard error. `key_index` is the
+    /// key's position in the caller's `deletes` vec, so the caller maps a skip
+    /// back to its source key (delete critique MINOR-3).
+    UnknownReferent { key_index: usize, level: String },
+    /// A [`DeleteKey`](crate::api::DeleteKey) fully resolved but held no live
+    /// value; the delete was a no-op. `key_index` is the key's position in the
+    /// caller's `deletes` vec (delete critique MINOR-3).
+    NothingToDelete { key_index: usize },
 }
 
 /// One structured warning. For [`WarningKind::AutoCreated`], `object_type` is
@@ -198,6 +209,19 @@ impl WriteReport {
             if !self.tiers.contains(&t) {
                 self.tiers.push(t);
             }
+        }
+    }
+
+    /// Fold one `history::delete_value` [`WriteOutcome`] into the aggregate.
+    /// A delete writes no new current row and touches no tier, so this only
+    /// folds `rows_closed` and — because a no-op delete (no live value) closes
+    /// nothing — counts a "value deleted" in `values_written` **only** when it
+    /// actually closed ≥1 row (delete design §1; keeps the write-path [`absorb`]
+    /// untouched). Never pushes to `tiers` (a delete's tier is `None`).
+    pub fn absorb_delete(&mut self, o: &WriteOutcome) {
+        self.rows_closed += o.rows_closed;
+        if o.rows_closed > 0 {
+            self.values_written += 1;
         }
     }
 }

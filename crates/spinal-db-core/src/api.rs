@@ -43,7 +43,7 @@ use crate::axis::AxisCache;
 use crate::canon::{canonicalize, LabelDomain};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
-use crate::history::write_value;
+use crate::history::{delete_value, write_value};
 use crate::types::{
     DeclaredType, IndexKind, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
@@ -122,13 +122,54 @@ pub fn ingest_segments(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
+    // A pure-write ingest is a `commit_changes` with no deletes (delete design
+    // MAJOR-2): the write path and the retried-commit shape are shared, so
+    // writes-only and writes+deletes cannot drift.
+    commit_changes(db, segments, Vec::new(), user, message, opts)
+}
+
+/// A typed delete target: one `(class, parameter, alternative, entity)` value,
+/// all four given by NAME (resolved case-insensitively, never auto-created).
+/// Carries no value, so there is nothing to canonicalize — deletes ride plain
+/// owned strings, not the Arrow/`Segment` machinery (delete design §4c).
+#[derive(Clone, Debug)]
+pub struct DeleteKey {
+    pub class: String,
+    pub parameter: String,
+    pub alternative: String,
+    pub entity: String,
+}
+
+/// Commit writes AND deletes in ONE atomic, conflict-retried transaction under a
+/// single `commit` row (delete design MAJOR-2). This is the primary write-path
+/// entry: [`ingest_segments`] is the writes-only wrapper and [`delete_values`]
+/// the deletes-only wrapper. The combined entry exists because
+/// `history::write_value` is non-idempotent — splitting an editor save into two
+/// core calls means a failed second call re-inflates versions on the whole-save
+/// retry. Running both halves in one closure makes the save atomic.
+///
+/// Segments are prepared (validated, deduped) up front, purely; deletes are
+/// validated + deduped up front too. Then, inside one retried closure and under
+/// one `commit_id`, the prepared writes run FIRST, then each `DeleteKey` is
+/// resolved (case-insensitive, lookup-only — never auto-created) and closed out
+/// via `history::delete_value`. A missing referent or already-absent value is a
+/// machine-readable [`Warning`] + skip, never a hard error (delete design §2).
+/// Non-empty `user`; empty segments AND empty deletes ⇒ [`DbError::Api`].
+pub fn commit_changes(
+    db: &Path,
+    segments: Vec<Segment>,
+    deletes: Vec<DeleteKey>,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
     // Every commit must carry a real author; message is the caller's choice
     // (may be empty) — jkiviluo 2026-08-18.
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
-    if segments.is_empty() {
-        return Err(DbError::Api("no segments to ingest".into()));
+    if segments.is_empty() && deletes.is_empty() {
+        return Err(DbError::Api("nothing to do: no segments and no deletes".into()));
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
     // defined history semantics (spec §4.2, E7 class); compare by the same
@@ -170,6 +211,10 @@ pub fn ingest_segments(
             })
         })
         .collect::<Result<_, _>>()?;
+    // Deletes: validate non-empty components + reject fold-colliding distinct
+    // spellings, dedupe identical keys — the original index rides along so
+    // warnings map back to the caller's `deletes` vec (delete design MINOR-3/4).
+    let prepared_deletes = prepare_deletes(&deletes)?;
 
     // --- The atomic, retried commit. Everything below re-reads/re-creates DB
     // state inside a fresh transaction on each retry (VMP Part 5), so the axis
@@ -194,8 +239,180 @@ pub fn ingest_segments(
                 }
             })?;
         }
+        // Deletes resolve + close out AFTER the writes, under the same commit —
+        // one atomic invocation (delete design MAJOR-2).
+        for (key_index, dk) in &prepared_deletes {
+            apply_delete(conn, commit_id, *key_index, dk, opts, &mut report)?;
+        }
         Ok(report)
     })
+}
+
+/// Delete (append-only close-out) each named value in ONE atomic, conflict-
+/// retried commit — the deletes-only wrapper over [`commit_changes`]. Missing
+/// referents and already-absent values are machine-readable warnings and
+/// skipped, never a hard error (delete design §2).
+pub fn delete_values(
+    db: &Path,
+    keys: Vec<DeleteKey>,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
+    commit_changes(db, Vec::new(), keys, user, message, opts)
+}
+
+/// Validate delete keys purely (no DB): every component non-empty, and — over
+/// the full 4-tuple folded to `lower()` — reject fold-colliding distinct
+/// spellings (a caller-contract ambiguity, mirroring the write path's entity
+/// dedup, critique MINOR-4) while silently deduping exact-identical keys. The
+/// surviving keys carry their original `deletes`-vec index so a warning maps
+/// back to the caller's key (MINOR-3).
+fn prepare_deletes(keys: &[DeleteKey]) -> Result<Vec<(usize, DeleteKey)>, DbError> {
+    let mut seen: HashMap<(String, String, String, String), usize> = HashMap::new();
+    let mut out: Vec<(usize, DeleteKey)> = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        for (what, name) in [
+            ("class", k.class.as_str()),
+            ("parameter", k.parameter.as_str()),
+            ("alternative", k.alternative.as_str()),
+            ("entity", k.entity.as_str()),
+        ] {
+            if name.trim().is_empty() {
+                return Err(DbError::Api(format!(
+                    "delete key {i}: {what} name must be non-empty"
+                )));
+            }
+        }
+        let fold = (
+            k.class.to_lowercase(),
+            k.parameter.to_lowercase(),
+            k.alternative.to_lowercase(),
+            k.entity.to_lowercase(),
+        );
+        match seen.get(&fold) {
+            Some(&j) => {
+                // Same folded target seen before: identical spelling is a
+                // harmless duplicate (dedupe); a distinct spelling is an
+                // ambiguous case-alias — reject (critique MINOR-4).
+                let prev = &out.iter().find(|(pi, _)| *pi == j).unwrap().1;
+                let same_spelling = prev.class == k.class
+                    && prev.parameter == k.parameter
+                    && prev.alternative == k.alternative
+                    && prev.entity == k.entity;
+                if !same_spelling {
+                    return Err(DbError::Api(format!(
+                        "delete keys {j} and {i} resolve to the same value \
+                         (name resolution is case-insensitive); use one spelling"
+                    )));
+                }
+            }
+            None => {
+                seen.insert(fold, i);
+                out.push((i, k.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve one `DeleteKey` (lookup-only, case-insensitive — never auto-create)
+/// and close out its live value under `commit_id`. A missing referent short-
+/// circuits to an [`WarningKind::UnknownReferent`] + skip; a fully-resolved key
+/// with no live value yields [`WarningKind::NothingToDelete`]. Retention obeys
+/// the definition's `retain_content` unless the caller overrode it — identical
+/// to the write path (`api.rs` `write_prepared`).
+fn apply_delete(
+    conn: &Connection,
+    commit_id: i64,
+    key_index: usize,
+    dk: &DeleteKey,
+    opts: WriteOptions,
+    report: &mut WriteReport,
+) -> Result<(), DbError> {
+    let class_id = match lookup_entity_class(conn, &dk.class)? {
+        Some(id) => id,
+        None => return Ok(unknown(report, key_index, "entity_class", &dk.class)),
+    };
+    let pd_id = match lookup_parameter(conn, class_id, &dk.parameter)? {
+        Some(id) => id,
+        None => return Ok(unknown(report, key_index, "parameter_definition", &dk.parameter)),
+    };
+    let alt_id = match lookup_alternative(conn, &dk.alternative)? {
+        Some(id) => id,
+        None => return Ok(unknown(report, key_index, "alternative", &dk.alternative)),
+    };
+    let entity_id = match lookup_entity(conn, class_id, &dk.entity)? {
+        Some(id) => id,
+        None => return Ok(unknown(report, key_index, "entity", &dk.entity)),
+    };
+
+    // Fold the definition's retain_content into retain_override unless the
+    // caller already overrode it — else a delete on a retain_content=FALSE
+    // definition would silently keep the closed-out payload (VMP Part 5).
+    let effective_retain = opts.retain_override.unwrap_or(read_retain_content(conn, pd_id)?);
+    let resolved_opts = WriteOptions {
+        force_replace: opts.force_replace,
+        retain_override: Some(effective_retain),
+    };
+    let key = ValueKey {
+        entity_id,
+        parameter_definition_id: pd_id,
+        alternative_id: alt_id,
+    };
+    let outcome = delete_value(conn, commit_id, key, &resolved_opts)?;
+    report.absorb_delete(&outcome);
+    if outcome.rows_closed == 0 {
+        report.warnings.push(Warning {
+            kind: WarningKind::NothingToDelete { key_index },
+            object_type: "value".into(),
+            name: format!("{}:{}/{}/{}", dk.class, dk.parameter, dk.alternative, dk.entity),
+            id: 0,
+        });
+    }
+    Ok(())
+}
+
+/// Push an [`WarningKind::UnknownReferent`] for a lookup miss at `level`.
+fn unknown(report: &mut WriteReport, key_index: usize, level: &str, name: &str) {
+    report.warnings.push(Warning {
+        kind: WarningKind::UnknownReferent {
+            key_index,
+            level: level.into(),
+        },
+        object_type: level.into(),
+        name: name.into(),
+        id: 0,
+    });
+}
+
+// Lookup-only resolvers: the FIRST branch of each write-path resolver (§2), via
+// `opt_id` — the case-insensitive current-row lookup, minus the auto-create tail.
+
+fn lookup_entity_class(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(conn, "SELECT id FROM entity_class WHERE cur_name = lower(?)", -1, name)
+}
+
+fn lookup_alternative(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(conn, "SELECT id FROM alternative WHERE cur_name = lower(?)", -1, name)
+}
+
+fn lookup_parameter(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(
+        conn,
+        "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
+        class_id,
+        name,
+    )
+}
+
+fn lookup_entity(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(
+        conn,
+        "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)",
+        class_id,
+        name,
+    )
 }
 
 /// The pure, DB-independent part of one segment's write: batch-contract

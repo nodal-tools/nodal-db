@@ -196,6 +196,14 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 "warning: timezone-normalized column {column:?} (tz {tz}); \
                  stored as the UTC-µs instants unchanged"
             ),
+            // Import never issues deletes, but the match is exhaustive: surface
+            // these consistently if the shared write path ever emits one.
+            WarningKind::UnknownReferent { key_index, level } => println!(
+                "warning: unknown {level} for delete key {key_index} (skipped)"
+            ),
+            WarningKind::NothingToDelete { key_index } => println!(
+                "warning: nothing to delete for key {key_index} (no live value)"
+            ),
         }
     }
     Ok(())

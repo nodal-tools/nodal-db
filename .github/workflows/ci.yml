@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Don't pile up runs on a fast-moving branch: newer push cancels the older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # duckdb-rs compiles bundled DuckDB from source (minutes); cache it.
+      - uses: Swatinem/rust-cache@v2
+
+      # Quick gate, half 1: Rust core. Matches `cargo test --workspace`
+      # locally — slow `#[ignore]` tests stay out of this tier.
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # Quick gate, half 2: schema smoke (expects 144/144). DuckDB pinned to
+      # the line the schema is verified on (CLAUDE.md: DuckDB 1.5.5).
+      - name: schema smoke test
+        run: |
+          pip install duckdb==1.5.5
+          python schema/smoke_test.py

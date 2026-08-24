@@ -23,11 +23,11 @@ strip = true
 # version REQUIRES bumping the `arrow` pin below to the identical version.
 duckdb = { version = "1.10505.0", features = ["bundled"] }
 # R2 partially re-opened (spec/arrow_ipc_bulk_format.md §2.4, critique F12):
-# the `spinal-db import` boundary needs arrow's IPC reader/writer, which
+# the `nodal-db import` boundary needs arrow's IPC reader/writer, which
 # `duckdb::arrow` does NOT re-export (duckdb pulls arrow without the `ipc`
 # feature). This direct dependency is pinned EXACTLY (=58.4.0) to the arrow
 # version duckdb 1.10505.0 re-exports so cargo unifies both into ONE crate —
-# type identity is proven at compile time in spinal-db-cli (an IPC-read
+# type identity is proven at compile time in nodal-db-cli (an IPC-read
 # RecordBatch crosses into the core's duckdb::arrow-typed API with no
 # conversion). A duckdb-rs bump is therefore a two-line, version-locked
 # affair: bump duckdb, bump this pin to match.

@@ -1,8 +1,8 @@
-# spinal-db developer task runner.
+# nodal-db developer task runner.
 #
 # Tiered testing (see README "Testing tiers"):
 #   just            quick gate  — every push: workspace tests (slow ones skipped) + schema smoke
-#   just t <args>   targeted    — pass cargo-test args, e.g. `just t -p spinal-db-core canon`
+#   just t <args>   targeted    — pass cargo-test args, e.g. `just t -p nodal-db-core canon`
 #   just full       release gate — everything incl. #[ignore] slow tests + benches
 #
 # DB inspection commands live in the README ("Inspecting a database").
@@ -20,7 +20,7 @@ test:
     {{py}} schema/smoke_test.py
 
 # Targeted run — forwards any args to `cargo test`.
-# e.g. `just t -p spinal-db-core canon`  /  `just t --test api_write_parameter`
+# e.g. `just t -p nodal-db-core canon`  /  `just t --test api_write_parameter`
 t *ARGS:
     cargo test {{ARGS}}
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the spinal_db schema into a DuckDB file.
+"""Build the nodal_db schema into a DuckDB file.
 
 Usage: python build.py TARGET.duckdb [--force]
 

@@ -9,7 +9,7 @@
 > may still land under the §3.2 versioning rule.
 
 Status: normative spec v1.0, signed off 2026-08-18. This is the wire format ingested by
-`spinal-db import` (`rust_implementation_plan.md` Part 4; work-queue item 2),
+`nodal-db import` (`rust_implementation_plan.md` Part 4; work-queue item 2),
 the **declared write boundary for all non-core clients** — Julia/SpineOpt
 today, any R/Rust/other tool tomorrow (`value_model_plan.md` (VMP) Part 8
 decision 2; `julia_writer_strategy_research.md` §4 option i, §5). Producers
@@ -20,7 +20,7 @@ deserializes it and calls the one Rust core — it **never re-canonicalizes**
 The key words **MUST**, **MUST NOT**, **SHALL**, **SHOULD**, and **MAY** are
 used as in RFC 2119.
 
-Authoritative inputs: `crates/spinal-db-core/src/api.rs` (the
+Authoritative inputs: `crates/nodal-db-core/src/api.rs` (the
 `write_parameter` batch contract this format feeds); VMP Part 6 (interchange
 encoding: logical long + `(entity, axes, array)` forms) and Part 8 decision 2;
 `julia_writer_strategy_research.md` (the producer's workload);
@@ -103,7 +103,7 @@ round-trip conformance test must account for it. Implementation note: in
 arrow-ipc 58 the importer's resume-at-position loop MUST use the plain
 `StreamReader::try_new` (or one shared reader) — `try_new_buffered` reads
 ahead past the segment boundary and breaks the loop.
-*Alternative:* one target per file, `spinal-db import <file>...` accepting
+*Alternative:* one target per file, `nodal-db import <file>...` accepting
 multiple file arguments in one invocation/transaction. Functionally
 equivalent but pushes the multiplicity into the filesystem and the command
 line; kept as the fallback if concatenated streams turn out to fight some
@@ -546,7 +546,7 @@ the domain.
 
 ## 8. Importer↔CLI seam (informative summary, normative where flagged)
 
-8.1. Per the Part-4 sketch, `spinal-db import <file> --db <path>` with
+8.1. Per the Part-4 sketch, `nodal-db import <file> --db <path>` with
 `--alternative` (see §4.3), `--message` (commit message; may be empty),
 `--force-replace` (maps to `WriteOptions.force_replace` for **all** segments)
 and `[--class] [--parameter]`. With the segmented container carrying targets,
@@ -635,7 +635,7 @@ the single sanctioned exception, and it must be visible in the output).
 A SpineOpt-style rolling-run result container with two segments: a rank-2
 long segment (flows per unit__node over stochastic scenario × time) and a
 rank-1 dense segment (an 8 760-cell price series, shown truncated).
-Invocation: `spinal-db import results.arrows --db model.sdb --alternative
+Invocation: `nodal-db import results.arrows --db model.sdb --alternative
 run_2026-08-18 --message "yearly dispatch"`.
 
 **Segment 1** — stream 1 of the file. Schema:

@@ -1,7 +1,7 @@
-# spinal-db
+# nodal-db
 
 A planning-scale parameter database: a DuckDB schema plus an all-Rust core
-(canonicalizing writer library, `spinal-db` CLI) for storing model inputs,
+(canonicalizing writer library, `nodal-db` CLI) for storing model inputs,
 scenarios, and aggregated outputs. See `CONTRIBUTING.md` for the spec workflow
 and `spec/` for the normative contract (canonical encoding, reconstruction,
 the Arrow-IPC bulk format).
@@ -12,7 +12,7 @@ Managed with [`just`](https://github.com/casey/just); recipes in `justfile`.
 
 | Command | Tier | What runs |
 |---|---|---|
-| `just t <args>` | targeted | forwards to `cargo test`, e.g. `just t -p spinal-db-core canon` |
+| `just t <args>` | targeted | forwards to `cargo test`, e.g. `just t -p nodal-db-core canon` |
 | `just` (or `just test`) | quick gate | `cargo test --workspace` (slow `#[ignore]` tests skipped) + schema smoke |
 | `just full` | release gate | the above **with** `--include-ignored` slow tests + `cargo bench` |
 
@@ -31,8 +31,8 @@ open a 1.5.5 file with a storage-version error.
 First make one to look at (or point the commands at any `.duckdb` file):
 
 ```bash
-cargo run -p spinal-db-cli -- init /tmp/demo.duckdb
-# ... then `spinal-db import` some data, or inspect a smoke/test DB.
+cargo run -p nodal-db-cli -- init /tmp/demo.duckdb
+# ... then `nodal-db import` some data, or inspect a smoke/test DB.
 ```
 
 ### Easiest: the project venv (guaranteed version-matched, no install)
@@ -82,4 +82,4 @@ SELECT * FROM "commit" ORDER BY id;              -- the write/version history (u
 ```
 
 Note: `cargo test` builds throwaway DBs in tempdirs (gone after the run) — use
-`spinal-db init` / `import` to make a persistent file to browse.
+`nodal-db init` / `import` to make a persistent file to browse.

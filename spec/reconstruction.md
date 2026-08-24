@@ -3,8 +3,8 @@
 Status: **normative**, written 2026-08-17. Deliverable 2 of the conformance
 suite (`specs/rust_implementation_plan.md` Part 5). Companion data:
 `conformance/reconstruction_fixtures/*.json`; runner
-`crates/spinal-db-core/tests/reconstruction_fixtures.rs`; Rust implementation
-`crates/spinal-db-core/src/reconstruct.rs`.
+`crates/nodal-db-core/tests/reconstruction_fixtures.rs`; Rust implementation
+`crates/nodal-db-core/src/reconstruct.rs`.
 
 This document pins the mapping between the **array tier's flat payload** and the
 **logical long form** (index-tuple → value). It is the inverse of what the
@@ -103,7 +103,7 @@ back as a clean (but transposed) array. The corruption is silent.
 column-major producer (a native Julia/Fortran writer emitting a raw buffer) MUST
 transpose its array to row-major **before** ingest — equivalently, permute the
 declared dimensions to reverse order, or materialize the payload by iterating
-the last declared dimension fastest. The `spinal-db import` Arrow-IPC boundary
+the last declared dimension fastest. The `nodal-db import` Arrow-IPC boundary
 carries logical `(entity, dim.., value)` long rows or an explicitly declared
 dense payload; it never accepts an unlabelled column-major buffer. No writer
 path may store a column-major buffer as-is.

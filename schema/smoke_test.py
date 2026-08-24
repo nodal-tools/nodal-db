@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke test for the spinal_db DDL sketch.
+"""Smoke test for the nodal_db DDL sketch.
 
 Builds the schema into a scratch file, populates a small demo model
 (including the two worked examples from value_model_plan.md Part 2), and

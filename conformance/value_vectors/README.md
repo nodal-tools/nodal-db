@@ -5,10 +5,10 @@ Language-neutral test vectors for the **value** canonical byte encoding and its
 implementation MUST reproduce `expected_canonical_hex` and `expected_hash_u64`
 byte-for-byte. Runners:
 
-- `crates/spinal-db-core/tests/value_vectors.rs` — the Rust `encode_value`;
+- `crates/nodal-db-core/tests/value_vectors.rs` — the Rust `encode_value`;
 - `conformance/oracle/encode_value.py` — an independent Python re-encoder that
   re-derives the same bytes and XXH3-64/seed-0 hash from the spec, sharing no
-  code with Rust (run in CI by `crates/spinal-db-core/tests/python_oracle.rs`).
+  code with Rust (run in CI by `crates/nodal-db-core/tests/python_oracle.rs`).
 
 OPEN-7 (jkiviluo, 2026-08-17): the value encoding folds in the identity **key**
 (entity/parameter/alternative) and the position/**shape** (axis content hashes +

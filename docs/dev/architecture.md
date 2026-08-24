@@ -16,9 +16,9 @@ Expected initial subsystems (per the decided Rust + egui architecture,
   LIST columns / shared time-grid dimension), scenario resolution as views.
 - Interchange: Arrow in memory, Arrow IPC on any wire; public API is
   Arrow-in/Arrow-out.
-- Application layer: Rust writer library + `spinal-db` CLI; PyO3/maturin
+- Application layer: Rust writer library + `nodal-db` CLI; PyO3/maturin
   Python skin for FlexTool/engine interop; Python consumers read views
   directly via `duckdb` (no bindings needed).
 - Editor: egui-based FlexTool-profile DB editor (tables, entity graph
-  view, plotting) — separate `spinal-editor` repo when work starts.
+  view, plotting) — separate `nodal-editor` repo when work starts.
 - Toolbox integration: project-item plugin exposing the DB URL as a resource.

@@ -4,8 +4,8 @@ Language-neutral fixtures for the array (dense) tier's **flat `DOUBLE[]` payload
 → logical long table** mapping, as pinned by `spec/reconstruction.md`. Any
 implementation (the Rust core, the SQL read view, a future engine skin) MUST
 reproduce `expected` exactly. Authoritative runner:
-`crates/spinal-db-core/tests/reconstruction_fixtures.rs`; Rust implementation:
-`crates/spinal-db-core/src/reconstruct.rs`.
+`crates/nodal-db-core/tests/reconstruction_fixtures.rs`; Rust implementation:
+`crates/nodal-db-core/src/reconstruct.rs`.
 
 The canonical layout is **row-major in declared-dimension order** (C order: the
 last declared dimension varies fastest). The non-square shapes (2×3, 2×3×2)
@@ -27,7 +27,7 @@ Each `*.json` file is one object:
 
 ### `IndexKind`
 
-Matches `spinal_db_core::types::IndexKind`: `Datetime`, `Integer`, `Label`,
+Matches `nodal_db_core::types::IndexKind`: `Datetime`, `Integer`, `Label`,
 `Period`, `TimePattern`. The reconstruction mapping is kind-agnostic (positions
 are 0-based integers into the axis); the kind is carried only so a fixture reads
 as a concrete parameter shape.

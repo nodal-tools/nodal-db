@@ -5,7 +5,7 @@
 -- metadata key.
 
 INSERT INTO commit (user, message)
-VALUES ('spinal_db', 'bootstrap: schema creation');
+VALUES ('nodal_db', 'bootstrap: schema creation');
 
 INSERT INTO alternative (id, name, description, valid_from_commit)
 VALUES (nextval('seq_alternative'), 'Base', 'Default alternative',

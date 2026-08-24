@@ -1,0 +1,22 @@
+[package]
+name = "nodal-db-cli"
+version = "0.0.0"
+edition = "2021"
+license = "EUPL-1.2"
+publish = false
+
+[[bin]]
+name = "nodal-db"
+path = "src/main.rs"
+
+[dependencies]
+nodal-db-core = { path = "../nodal-db-core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+# Direct arrow for IPC only — pinned =58.4.0 to duckdb's re-export (risk R2;
+# see the workspace Cargo.toml comment: duckdb bumps require a matched bump).
+arrow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

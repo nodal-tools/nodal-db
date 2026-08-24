@@ -5,11 +5,11 @@ Language-neutral test vectors for the axis canonical byte encoding and the
 implementation (the Rust core, the SQL side, a future Python/engine skin) MUST
 reproduce `expected_canonical_hex` and `expected_hash_u64` byte-for-byte for
 each vector. The authoritative runner is
-`crates/spinal-db-core/tests/encoding_vectors.rs`.
+`crates/nodal-db-core/tests/encoding_vectors.rs`.
 
 Value encodings (spec §9) are **not** covered here — they live in
 `conformance/value_vectors/` (OPEN-7 resolved 2026-08-17; runner
-`crates/spinal-db-core/tests/value_vectors.rs`, oracle
+`crates/nodal-db-core/tests/value_vectors.rs`, oracle
 `conformance/oracle/encode_value.py`).
 
 ## Vector schema
@@ -77,10 +77,10 @@ path**, because a self-regenerating oracle would let a spec-divergent encoder
 edit stay green (it would just overwrite its own goldens). Two independent
 implementations must agree on these bytes:
 
-- `crates/spinal-db-core/tests/encoding_vectors.rs` — the Rust encoder;
+- `crates/nodal-db-core/tests/encoding_vectors.rs` — the Rust encoder;
 - `conformance/oracle/encode_axis.py` — an independent Python re-encoder that
   re-derives the same bytes and XXH3-64 hash from the spec, sharing no code with
-  Rust (run in CI by `crates/spinal-db-core/tests/python_oracle.rs`).
+  Rust (run in CI by `crates/nodal-db-core/tests/python_oracle.rs`).
 
 Changing a golden is a **rehash-class event** (spec §2.4): edit the JSON by hand
 against the spec, then confirm BOTH the Rust runner and the Python oracle agree

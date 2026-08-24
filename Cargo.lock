@@ -1038,6 +1038,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodal-db-cli"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "clap",
+ "nodal-db-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "nodal-db-core"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "duckdb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "unicode-normalization",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1433,32 +1459,6 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
-
-[[package]]
-name = "spinal-db-cli"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "serde_json",
- "spinal-db-core",
- "tempfile",
-]
-
-[[package]]
-name = "spinal-db-core"
-version = "0.0.0"
-dependencies = [
- "criterion",
- "duckdb",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "unicode-normalization",
- "xxhash-rust",
-]
 
 [[package]]
 name = "strsim"

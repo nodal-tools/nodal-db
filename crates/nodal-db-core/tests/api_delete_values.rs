@@ -17,7 +17,7 @@ use duckdb::Connection;
 use nodal_db_core::api::{
     commit_changes, delete_values, read_parameter, write_parameter, DeleteKey, Segment,
 };
-use nodal_db_core::schema_init::init_schema;
+use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WarningKind, WriteOptions};
 
 // --- batch builders --------------------------------------------------------
@@ -133,7 +133,8 @@ fn dk(class: &str, parameter: &str, alternative: &str, entity: &str) -> DeleteKe
 fn fresh_db() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("delete.duckdb");
-    init_schema(&db).expect("schema");
+    // D3: seed `Base` explicitly (a fresh DB no longer bootstraps it).
+    init_schema_with_default(&db, Some("Base")).expect("schema");
     (dir, db)
 }
 
@@ -405,6 +406,7 @@ fn combined_write_and_delete_one_commit() {
         &db,
         vec![seg("node", "demand", "Base", scalar_batch("node_2", 9.0))], // write
         vec![dk("node", "demand", "Base", "node_1")],                     // delete
+        vec![],                                                           // no object deletes
         "t",
         "atomic save",
         o(),
@@ -445,6 +447,7 @@ fn combined_error_rolls_back_whole_invocation() {
             seg("node", "level_param", "Base", undomained_label_batch("node_1")),
         ],
         vec![dk("node", "demand", "Base", "node_1")], // queued delete, never reached
+        vec![],                                       // no object deletes
         "t",
         "must roll back",
         o(),

@@ -321,7 +321,10 @@ def main():
     new_type(ladder, "indexed", 3,
              [("field", "label"), ("period", "period"), ("tier", "integer")], expected="array")
 
-    base = con.execute("SELECT id FROM alternative WHERE name = 'Base'").fetchone()[0]
+    # D3: a fresh DB no longer bootstraps a `Base` alternative — the smoke
+    # seeds it itself (mirroring the `high` insert below), same as any client.
+    base = nextval(con, "seq_alternative")
+    insert("alternative", "id, name, valid_from_commit", [base, "Base", c2])
     high = nextval(con, "seq_alternative")
     insert("alternative", "id, name, valid_from_commit", [high, "high", c2])
     s0 = nextval(con, "seq_scenario")

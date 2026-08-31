@@ -182,13 +182,19 @@ UNION ALL
 -- run FK intent to versioned entity / alternative (deviation D1; Decision 13).
 -- run is append-only so all its rows are "current"; the commit columns are
 -- real FKs enforced at the table, only these two versioned targets fall here.
+-- Change-model ruling 2 (object_delete plan §10): a run leg to a CLOSED-OUT
+-- (not absent) entity/alternative is coherent as-of — provenance intentionally
+-- outlives the object it references, and object-delete cascade never touches
+-- run. So these two legs test membership against ALL versions of the target
+-- (no `valid_to_commit IS NULL` filter): they fire only on a TRULY-ABSENT id
+-- (one that never existed / corruption), not on a deliberately deleted one.
 SELECT 'run', 'id=' || id, 'entity', tool_entity_id
 FROM run
-  WHERE tool_entity_id NOT IN (SELECT id FROM entity WHERE valid_to_commit IS NULL)
+  WHERE tool_entity_id NOT IN (SELECT id FROM entity)
 UNION ALL
 SELECT 'run', 'id=' || id, 'alternative', result_alternative_id
 FROM run
-  WHERE result_alternative_id NOT IN (SELECT id FROM alternative WHERE valid_to_commit IS NULL);
+  WHERE result_alternative_id NOT IN (SELECT id FROM alternative);
 
 -- semantic_annotation FK intent (deviation D1; fitness 2b): the polymorphic
 -- (object_type, object_id) reference cannot be an engine FK, so each object

@@ -10,7 +10,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{ingest_segments, read_parameter, Segment};
-use nodal_db_core::schema_init::init_schema;
+use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::WriteOptions;
 
 fn scalar_batch(entity: &str, v: f64) -> RecordBatch {
@@ -61,7 +61,8 @@ fn seg(class: &str, parameter: &str, alternative: &str, batch: RecordBatch) -> S
 fn fresh_db() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("ingest.duckdb");
-    init_schema(&db).expect("schema");
+    // D3: seed `Base` explicitly (a fresh DB no longer bootstraps it).
+    init_schema_with_default(&db, Some("Base")).expect("schema");
     (dir, db)
 }
 

@@ -15,7 +15,7 @@ use duckdb::Connection;
 
 use nodal_db_core::api::{read_parameter, write_parameter};
 use nodal_db_core::canon::LabelDomain;
-use nodal_db_core::schema_init::init_schema;
+use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{Tier, WarningKind, WriteOptions};
 
 // --- batch builders --------------------------------------------------------
@@ -127,7 +127,10 @@ fn col_i64(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
 fn fresh_db() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("api.duckdb");
-    init_schema(&db).expect("schema");
+    // Seed `Base` so the first write to it does not emit an AutoCreated warning
+    // (decision D3: a fresh DB no longer bootstraps `Base`; tests that assert on
+    // a clean first Base write seed it explicitly).
+    init_schema_with_default(&db, Some("Base")).expect("schema");
     (dir, db)
 }
 

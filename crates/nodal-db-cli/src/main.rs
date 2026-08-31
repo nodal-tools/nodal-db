@@ -49,6 +49,11 @@ enum Command {
     Init {
         /// Path of the DuckDB file to create.
         db: PathBuf,
+        /// Seed one default alternative with this name (decision D3). Omitted ⇒
+        /// no alternative is seeded (the value write path auto-creates on first
+        /// use); the DB is never implicitly given a `Base`.
+        #[arg(long)]
+        alternative: Option<String>,
         /// Dev override: apply schema/*.sql from a directory instead of the
         /// compile-time-embedded schema. Without a value, uses the repo's
         /// schema/ directory as resolved by the core.
@@ -97,7 +102,7 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { db, schema_dir } => {
+        Command::Init { db, alternative, schema_dir } => {
             // Refuse an existing database (CLI critique F6): the schema applies
             // file-by-file under autocommit, so re-applying onto existing state
             // fails partway and can leave a mixed state. Only an absent or
@@ -109,13 +114,23 @@ fn main() -> anyhow::Result<()> {
                     db.display()
                 );
             }
+            let default_alt = alternative.as_deref();
             match schema_dir {
-                None => nodal_db_core::schema_init::init_schema_from_sources(&db, EMBEDDED_SCHEMA)?,
-                Some(None) => nodal_db_core::schema_init::init_schema_from_dir(
+                None => nodal_db_core::schema_init::init_schema_from_sources_with_default(
+                    &db,
+                    EMBEDDED_SCHEMA,
+                    default_alt,
+                )?,
+                Some(None) => nodal_db_core::schema_init::init_schema_from_dir_with_default(
                     &db,
                     &nodal_db_core::schema_init::schema_dir(),
+                    default_alt,
                 )?,
-                Some(Some(dir)) => nodal_db_core::schema_init::init_schema_from_dir(&db, &dir)?,
+                Some(Some(dir)) => {
+                    nodal_db_core::schema_init::init_schema_from_dir_with_default(
+                        &db, &dir, default_alt,
+                    )?
+                }
             }
             println!("initialized {}", db.display());
             Ok(())

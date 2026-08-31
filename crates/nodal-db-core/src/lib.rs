@@ -55,3 +55,9 @@ pub mod history;
 /// declared-type lookup, canon, tier, axis dedup, and history into one atomic,
 /// retried commit.
 pub mod api;
+
+/// Object deletion: structural close-out of an object row (+ dependents) inside
+/// the same atomic commit as value writes/deletes (object_delete plan §2-§4).
+/// A single leg registry drives the cascade, the RESTRICT report, and the
+/// read-only preview.
+pub mod object_delete;

@@ -195,6 +195,11 @@ pub struct WriteReport {
     pub tiers: Vec<Tier>,
     /// Machine-readable warnings (auto-create, decision B).
     pub warnings: Vec<Warning>,
+    /// Per-request outcomes of any object deletes in this commit (empty for
+    /// pure value writes/deletes). Additive field (object_delete plan §1) — a
+    /// structured result, not a warning, so the CLI's exhaustive `WarningKind`
+    /// match is untouched.
+    pub object_deletes: Vec<ObjectDeleteOutcome>,
 }
 
 impl WriteReport {
@@ -243,5 +248,134 @@ pub struct WriteOutcome {
     pub axes_created: usize,
     /// Existing `axis` rows reused (content-verified dedup) for this value.
     pub axes_reused: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Object deletion (object_delete plan §1). Names, not ids — the core resolves
+// (lookup-only, case-insensitive, never auto-created), exactly like DeleteKey.
+// ---------------------------------------------------------------------------
+
+/// Which object kind a delete targets (object_delete plan §1). P1 implements
+/// `Alternative` only; the other variants are defined now so the enum (and the
+/// leg registry) is complete for P2/P3/P4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ObjectKind {
+    Entity,
+    Parameter,
+    Alternative,
+    Class,
+}
+
+impl ObjectKind {
+    /// A lowercase tag for messages/reports.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ObjectKind::Entity => "entity",
+            ObjectKind::Parameter => "parameter",
+            ObjectKind::Alternative => "alternative",
+            ObjectKind::Class => "class",
+        }
+    }
+}
+
+/// How to address the target object (object_delete plan §1, §6). Two channels
+/// for an N-D entity: its own unique `Name`, or its identifying `Elements`
+/// tuple. Keeping it an enum (not two `Option`s) makes the "exactly one
+/// channel" contract unrepresentable-when-wrong. P1 exercises only `Name`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectRef {
+    Name(String),
+    /// Element entity NAMES in declared-dimension order (only valid for an
+    /// `Entity` in an N-D class; resolved in P3).
+    Elements(Vec<String>),
+}
+
+/// A typed object-delete target (object_delete plan §1). `class` is REQUIRED
+/// for `Entity`/`Parameter` (both are per-class) and None for
+/// `Alternative`/`Class` (addressed by their own globally-unique name).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectDeleteKey {
+    pub kind: ObjectKind,
+    pub class: Option<String>,
+    pub target: ObjectRef,
+}
+
+/// Cascade opt-in per request (object_delete plan §1, decision D1). This is the
+/// REPORT CONTRACT, never a guard:
+///   cascade:false ⇒ if the object has any dependent, close out NOTHING for
+///                   this key and return `Restricted{blockers}`; if it has
+///                   none, delete the bare object and return `Deleted{empty}`.
+///   cascade:true  ⇒ close out the object + all dependents and return
+///                   `Deleted{counts}`.
+/// The core never refuses a cascade:true request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectDeleteOpts {
+    pub cascade: bool,
+}
+
+/// Per-dependent-table close-out count (object_delete plan §1).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableCount {
+    pub table: String,
+    pub rows: usize,
+}
+
+/// What a cascade closed out (object_delete plan §1). `object_rows` counts the
+/// target object row(s) (and, for entity/parameter/class, its identity rows);
+/// `per_table` is the machine-readable dependent breakdown; `total_rows` is the
+/// precomputed headline (object_rows + Σ per_table.rows).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CascadeCounts {
+    pub object_rows: usize,
+    pub per_table: Vec<TableCount>,
+    pub total_rows: usize,
+}
+
+/// One RESTRICT blocker (object_delete plan §1): a dependent table still
+/// referencing the target, with a bounded sample of rendered identifiers for
+/// the editor's red-block breakdown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocker {
+    pub table: String,
+    pub column: String,
+    pub count: usize,
+    pub sample: Vec<String>,
+}
+
+/// The outcome for one object-delete request (object_delete plan §1). No
+/// `residual_danglers` (change-model ruling 2: a `run` leg to a closed-out —
+/// not absent — object is coherent as-of, fixed by the audit-view change, not
+/// by a report field).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectDeleteResult {
+    Deleted { closed_out: CascadeCounts },
+    Restricted { blockers: Vec<Blocker> },
+    /// Target did not resolve, or already closed out, or was created in this
+    /// same commit (the `valid_from < commit_id` guard matched nothing) —
+    /// folded into one variant so an idempotent whole-save retry is safe (D4).
+    NotFound,
+}
+
+/// One request's outcome, mapped back to the caller's staged item by
+/// `key_index` (object_delete plan §1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectDeleteOutcome {
+    pub key_index: usize,
+    pub kind: ObjectKind,
+    pub result: ObjectDeleteResult,
+}
+
+/// Read-only preview of ONE object delete (object_delete plan §3, decision D6).
+/// Carries BOTH framings of the same dependency set so the editor renders the
+/// cascade preview or the restrict block from one call. The commit-time
+/// `ObjectDeleteOutcome` is authoritative; this is a best-effort snapshot
+/// (critique C5 — a concurrent writer can still move the counts).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectDeletePreview {
+    pub key_index: usize,
+    pub kind: ObjectKind,
+    pub found: bool,
+    pub cascade: CascadeCounts,
+    pub blockers: Vec<Blocker>,
 }
 

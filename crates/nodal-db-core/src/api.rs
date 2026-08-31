@@ -44,8 +44,10 @@ use crate::canon::{canonicalize, LabelDomain};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::history::{delete_value, write_value};
+use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
 use crate::types::{
-    DeclaredType, IndexKind, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
+    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview, ValueKey,
+    ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -125,7 +127,7 @@ pub fn ingest_segments(
     // A pure-write ingest is a `commit_changes` with no deletes (delete design
     // MAJOR-2): the write path and the retried-commit shape are shared, so
     // writes-only and writes+deletes cannot drift.
-    commit_changes(db, segments, Vec::new(), user, message, opts)
+    commit_changes(db, segments, Vec::new(), Vec::new(), user, message, opts)
 }
 
 /// A typed delete target: one `(class, parameter, alternative, entity)` value,
@@ -155,10 +157,21 @@ pub struct DeleteKey {
 /// via `history::delete_value`. A missing referent or already-absent value is a
 /// machine-readable [`Warning`] + skip, never a hard error (delete design §2).
 /// Non-empty `user`; empty segments AND empty deletes ⇒ [`DbError::Api`].
+///
+/// `object_deletes` (object_delete plan §2) join the SAME atomic commit, applied
+/// AFTER value writes and value deletes: a coord closed by a staged value delete
+/// is no longer live when an object cascade runs (not double-closed, not
+/// double-counted — D5), and a later phase's class delete can compose over
+/// already-settled value state. Each is resolved lookup-only and closed under
+/// the `valid_from < commit_id` guard; per-request outcomes land in
+/// `report.object_deletes`. Empty segments AND deletes AND object_deletes ⇒
+/// [`DbError::Api`].
+#[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
     segments: Vec<Segment>,
     deletes: Vec<DeleteKey>,
+    object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
     user: &str,
     message: &str,
     opts: WriteOptions,
@@ -168,8 +181,10 @@ pub fn commit_changes(
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
-    if segments.is_empty() && deletes.is_empty() {
-        return Err(DbError::Api("nothing to do: no segments and no deletes".into()));
+    if segments.is_empty() && deletes.is_empty() && object_deletes.is_empty() {
+        return Err(DbError::Api(
+            "nothing to do: no segments, no deletes, no object deletes".into(),
+        ));
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
     // defined history semantics (spec §4.2, E7 class); compare by the same
@@ -215,6 +230,10 @@ pub fn commit_changes(
     // spellings, dedupe identical keys — the original index rides along so
     // warnings map back to the caller's `deletes` vec (delete design MINOR-3/4).
     let prepared_deletes = prepare_deletes(&deletes)?;
+    // Object deletes: validate (class-presence rules, blank names) + dedupe
+    // fold-colliding requests up front, carrying the caller index (object_delete
+    // plan §2). Pure — no DB touched.
+    let prepared_object_deletes = prepare_object_deletes(&object_deletes)?;
 
     // --- The atomic, retried commit. Everything below re-reads/re-creates DB
     // state inside a fresh transaction on each retry (VMP Part 5), so the axis
@@ -244,6 +263,12 @@ pub fn commit_changes(
         for (key_index, dk) in &prepared_deletes {
             apply_delete(conn, commit_id, *key_index, dk, opts, &mut report)?;
         }
+        // Object deletes run LAST, under the same commit_id (object_delete plan
+        // §2): every close-out is guarded by `valid_from < commit_id`, so a row
+        // this commit created is never closed (would trip the span CHECK).
+        for p in &prepared_object_deletes {
+            apply_object_delete(conn, commit_id, p, &mut report)?;
+        }
         Ok(report)
     })
 }
@@ -259,7 +284,44 @@ pub fn delete_values(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(db, Vec::new(), keys, user, message, opts)
+    commit_changes(db, Vec::new(), keys, Vec::new(), user, message, opts)
+}
+
+/// Delete (append-only close-out) one or more OBJECTS in ONE atomic, conflict-
+/// retried commit — the objects-only wrapper over [`commit_changes`]
+/// (object_delete plan §2). Each request is a typed [`ObjectDeleteKey`] plus its
+/// [`ObjectDeleteOpts`] (the `cascade` report contract). Missing / already-closed
+/// / same-commit-created targets yield [`crate::types::ObjectDeleteResult::NotFound`]
+/// in `report.object_deletes`, never a hard error.
+pub fn delete_objects(
+    db: &Path,
+    object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
+    commit_changes(db, Vec::new(), Vec::new(), object_deletes, user, message, opts)
+}
+
+/// Read-only preview of each object delete (object_delete plan §3, decision D6):
+/// what a `cascade:true` would close out (`cascade`) and what a `cascade:false`
+/// would block on (`blockers`) — the SAME dependency rows in two framings,
+/// driven by the SAME leg registry the commit path uses, so preview and commit
+/// cannot drift by *implementation*. It is nonetheless a best-effort snapshot:
+/// the commit-time [`crate::types::ObjectDeleteOutcome`] is authoritative, and a
+/// concurrent writer between preview and commit can still move the counts
+/// (critique C5). Runs under one fresh RO connection, opened and closed per call
+/// (CLAUDE.md invariant 1) — cheap enough to call every frame the dialog is open.
+pub fn preview_object_deletes(
+    db: &Path,
+    keys: Vec<ObjectDeleteKey>,
+) -> Result<Vec<ObjectDeletePreview>, DbError> {
+    with_read(db, |conn| {
+        keys.iter()
+            .enumerate()
+            .map(|(i, k)| preview_one(conn, i, k))
+            .collect()
+    })
 }
 
 /// Validate delete keys purely (no DB): every component non-empty, and — over
@@ -389,15 +451,19 @@ fn unknown(report: &mut WriteReport, key_index: usize, level: &str, name: &str) 
 // Lookup-only resolvers: the FIRST branch of each write-path resolver (§2), via
 // `opt_id` — the case-insensitive current-row lookup, minus the auto-create tail.
 
-fn lookup_entity_class(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+pub(crate) fn lookup_entity_class(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
     opt_id(conn, "SELECT id FROM entity_class WHERE cur_name = lower(?)", -1, name)
 }
 
-fn lookup_alternative(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+pub(crate) fn lookup_alternative(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
     opt_id(conn, "SELECT id FROM alternative WHERE cur_name = lower(?)", -1, name)
 }
 
-fn lookup_parameter(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
+pub(crate) fn lookup_parameter(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+) -> Result<Option<i64>, DbError> {
     opt_id(
         conn,
         "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
@@ -406,7 +472,7 @@ fn lookup_parameter(conn: &Connection, class_id: i64, name: &str) -> Result<Opti
     )
 }
 
-fn lookup_entity(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
+pub(crate) fn lookup_entity(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
     opt_id(
         conn,
         "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)",

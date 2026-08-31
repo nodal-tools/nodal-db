@@ -282,7 +282,7 @@ impl ObjectKind {
 /// for an N-D entity: its own unique `Name`, or its identifying `Elements`
 /// tuple. Keeping it an enum (not two `Option`s) makes the "exactly one
 /// channel" contract unrepresentable-when-wrong. P1 exercises only `Name`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectRef {
     Name(String),
     /// Element entity NAMES in declared-dimension order (only valid for an
@@ -293,7 +293,7 @@ pub enum ObjectRef {
 /// A typed object-delete target (object_delete plan §1). `class` is REQUIRED
 /// for `Entity`/`Parameter` (both are per-class) and None for
 /// `Alternative`/`Class` (addressed by their own globally-unique name).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectDeleteKey {
     pub kind: ObjectKind,
     pub class: Option<String>,

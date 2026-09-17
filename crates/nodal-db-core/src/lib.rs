@@ -61,3 +61,8 @@ pub mod api;
 /// A single leg registry drives the cascade, the RESTRICT report, and the
 /// read-only preview.
 pub mod object_delete;
+
+/// Physical repack (Sense A): rebuild the DB file into a fresh, densely-packed
+/// one that reclaims dead blocks while preserving ALL logical content, then
+/// atomically swap it in (`specs/compaction_DESIGN.md`).
+pub mod compaction;

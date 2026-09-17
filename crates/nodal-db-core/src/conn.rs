@@ -75,7 +75,11 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
 /// Open a connection in the given access mode, retrying with bounded backoff
 /// while the file is locked by another connection (surfaced as [`DbError::Busy`]).
 /// `Config` is not `Clone`, so it is rebuilt per attempt (cheap).
-fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connection, DbError> {
+///
+/// `pub(crate)` so [`crate::compaction`] can open the source read-only itself
+/// (it already holds [`path_lock`] for the whole repack and must NOT re-take it
+/// via [`with_read`], which would deadlock the non-reentrant per-path mutex).
+pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connection, DbError> {
     let mut backoff = BACKOFF_START;
     for attempt in 1..=MAX_ATTEMPTS {
         let config = Config::default().access_mode(mode.clone())?;

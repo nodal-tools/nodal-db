@@ -398,7 +398,7 @@ def main():
     insert("parameter_value_list", "id, name, valid_from_commit", [carrier, "carrier", c2])
     elec = nextval(con, "seq_list_value")
     con.execute("INSERT INTO list_value (id, parameter_value_list_id, ordinal, value_kind,"
-                " v_str, semantic_link, valid_from_commit) VALUES (?, ?, 1, 'str', ?, ?, ?)",
+                " v_str, semantic_link, valid_from_commit) VALUES (?, ?, 1, 'string', ?, ?, ?)",
                 [elec, carrier, "electricity",
                  "http://openenergy-platform.org/ontology/oeo/OEO_00000139", c2])
 
@@ -929,6 +929,59 @@ def main():
                  "audit_type_conformance", "audit_array_payload_xor"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"float/int additions: {view} clean", n == 0, f"n={n}")
+
+    # ---- D2(a) declared allowed-type SETS: set-aware audits -------------------
+    # (template_ir_plan §3.3 / VMP Part 7 as amended 2026-09-18: parameter_type
+    # is multi-row — a declared allowed-type set; the writer enforces
+    # exactly-one-member instantiation at entry, and these views must judge a
+    # value against the SET, not against an arbitrary single row.)
+    con.execute("BEGIN")
+    cd2 = new_commit(con, "D2(a): multi-type declaration + one value per member check")
+    mixed = new_pd(node, "mixed_profile")     # declared SET: float(array) + int(long)
+    new_type(mixed, "float", 1, [("level", "float")], expected="array")
+    new_type(mixed, "int", 1, [("level", "float")], expected="long")
+    write_array(con, cd2, node_b, mixed, base, [ax_lvl], [7, 8, 9, 7, 8, 9], int_kind=True)
+    con.execute("COMMIT")
+    n = one("SELECT count(*) FROM audit_type_conformance WHERE parameter_definition_id = ?",
+            mixed)[0]
+    check("D2(a): array payload matching SOME declared member is clean"
+          " (no false positive against the coexisting float member)", n == 0, f"n={n}")
+    ti = allrows("SELECT actual_tier FROM audit_tier_intent WHERE parameter_definition_id = ?",
+                 mixed)
+    check("D2(a): actual tier matching ONE member's expected_tier is clean"
+          " (no row-multiplication over the set)", ti == [], str(ti))
+    # negative control: a payload matching NO declared member still fires — the
+    # set-aware rewrite must not have made the array branch vacuous.
+    con.execute("BEGIN")
+    cneg = new_commit(con, "D2(a): negative control, int payload on a float-only set")
+    fonly = new_pd(node, "floats_only")
+    new_type(fonly, "float", 1, [("level", "float")], expected="array")
+    write_array(con, cneg, node_b, fonly, base, [ax_lvl], [1, 2, 3, 4, 5, 6], int_kind=True)
+    con.execute("COMMIT")
+    rows = allrows("SELECT src_table, value_kind FROM audit_type_conformance"
+                   " WHERE parameter_definition_id = ?", fonly)
+    check("D2(a): payload matching NO declared member fires audit_type_conformance",
+          rows == [("value_array", "int")], str(rows))
+    con.execute("DELETE FROM value_array WHERE parameter_definition_id = ?", [fonly])
+    # defaults leg (critique m5): a definition-scoped default violating the
+    # definition's own value list is now visible; fixing it clears the audit.
+    fuel = new_pd(commodity, "fuel_carrier")
+    con.execute("UPDATE parameter_definition SET parameter_value_list_id = ?"
+                " WHERE id = ?", [carrier, fuel])
+    con.execute("BEGIN")
+    cdef = new_commit(con, "D2(a): default off the value list")
+    con.execute("INSERT INTO definition_value_scalar (parameter_definition_id, slot,"
+                " valid_from_commit, version, value_kind, v_str)"
+                " VALUES (?, 'default_value', ?, 1, 'string', 'hydrogen')", [fuel, cdef])
+    con.execute("COMMIT")
+    rows = allrows("SELECT src_table, parameter_definition_id"
+                   " FROM audit_value_list_membership")
+    check("D2(a)/m5: a default violating its value list fires the defaults leg",
+          rows == [("definition_value_scalar:default_value", fuel)], str(rows))
+    con.execute("UPDATE definition_value_scalar SET v_str = 'electricity'"
+                " WHERE parameter_definition_id = ?", [fuel])
+    n = one("SELECT count(*) FROM audit_value_list_membership")[0]
+    check("D2(a)/m5: a default on the list is clean", n == 0, f"n={n}")
 
     # ---- float axis / values_int hostile checks (float_axis_crs_int_plan §6) --
     # non-monotonic float axis fires the monotonicity audit

@@ -605,10 +605,14 @@ fn empty_batch_is_rejected_without_side_effects() {
     assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only");
 }
 
-/// F9: schema-permitted declaration damage (two current parameter_type rows;
-/// non-contiguous dimension positions) is refused, never read nondeterministically.
+/// F9 (updated for D2(a) set semantics): schema-permitted declaration damage is
+/// refused, never read nondeterministically. Multiple current parameter_type
+/// rows are now the LEGAL declared-set state — what is refused is a set whose
+/// members are indistinguishable (here: two identical `(float, 0)` rows, so
+/// exactly-one-member matching is impossible) and non-contiguous dimension
+/// positions.
 #[test]
-fn ambiguous_or_noncontiguous_declarations_are_refused() {
+fn indistinguishable_or_noncontiguous_declarations_are_refused() {
     let (_dir, db) = fresh_db();
     {
         let conn = Connection::open(&db).unwrap();
@@ -662,8 +666,12 @@ fn ambiguous_or_noncontiguous_declarations_are_refused() {
     }
     let o = WriteOptions::default();
     let err = write_parameter(&db, "node", "dup", "Base", scalar_batch("n", 1.0), &[], o, "t", "m")
-        .expect_err("ambiguous declaration must be refused");
-    assert!(err.to_string().contains("parameter_type rows"), "unexpected: {err}");
+        .expect_err("indistinguishable declaration must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("indistinguishable") && msg.contains("parameter_type rows"),
+        "unexpected: {msg}"
+    );
     let err = write_parameter(
         &db, "node", "gap", "Base",
         indexed_float_batch("n", "step", &[0, 1], &[1.0, 2.0]), &[], o, "t", "m",
@@ -728,6 +736,215 @@ fn rank_mismatch_names_the_parameter_and_counts_ranks() {
         msg.contains("\"profile\"") && msg.contains("rank 0") && msg.contains("rank 1"),
         "unexpected: {msg}"
     );
+}
+
+// --- declared allowed-type sets (D2(a), template_ir_plan §3.3) -------------
+
+/// Rank-1 datetime-indexed float batch (naive µs timestamps).
+fn datetime_indexed_batch(entity: &str, dim: &str, coords: &[i64], vals: &[f64]) -> RecordBatch {
+    let n = coords.len();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new(dim, DataType::Timestamp(TimeUnit::Microsecond, None), false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let ent = Arc::new(StringArray::from(vec![entity; n])) as ArrayRef;
+    let d = Arc::new(TimestampMicrosecondArray::from(coords.to_vec())) as ArrayRef;
+    let val = Arc::new(Float64Array::from(vals.to_vec())) as ArrayRef;
+    RecordBatch::try_new(schema, vec![ent, d, val]).unwrap()
+}
+
+/// Declare `class.param` with an explicit allowed-type SET via SQL against the
+/// bootstrap commit — the template loader's eventual job. Each member is
+/// `(value_kind, dims)`; rank derives as `dims.len()` (rank = the type's own
+/// dimensionality, duplicates across members legal).
+fn declare_definition(
+    db: &std::path::Path,
+    class: &str,
+    param: &str,
+    members: &[(&str, &[(&str, &str)])],
+) {
+    let conn = Connection::open(db).unwrap();
+    let cls: i64 = conn
+        .query_row(
+            "INSERT INTO entity_class (name, valid_from_commit) VALUES (?, 1) RETURNING id",
+            duckdb::params![class],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let pd: i64 = conn
+        .query_row(
+            "INSERT INTO parameter_definition (entity_class_id, name, valid_from_commit) \
+             VALUES (?, ?, 1) RETURNING id",
+            duckdb::params![cls, param],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for (kind, dims) in members {
+        let pt: i64 = conn
+            .query_row(
+                "INSERT INTO parameter_type (parameter_definition_id, value_kind, rank, valid_from_commit) \
+                 VALUES (?, ?, ?, 1) RETURNING id",
+                duckdb::params![pd, kind, dims.len() as i8],
+                |r| r.get(0),
+            )
+            .unwrap();
+        for (pos, (dname, dkind)) in dims.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO parameter_type_dimension \
+                   (parameter_type_id, position, dimension_name, kind, valid_from_commit) \
+                 VALUES (?, ?, ?, ?, 1)",
+                duckdb::params![pt, (pos + 1) as i8, dname, dkind],
+            )
+            .unwrap();
+        }
+    }
+    conn.close().unwrap();
+}
+
+/// D2(a) acceptance: a definition declaring the set {scalar float, 1-D
+/// integer-indexed map} accepts a value of EACH member type — the batch binds
+/// to the member it instantiates, the tier rule applies per value unchanged —
+/// and the set is never auto-materialized over (count stays 2).
+#[test]
+fn multi_type_set_accepts_each_declared_member() {
+    let (_dir, db) = fresh_db();
+    declare_definition(&db, "unit", "availability", &[
+        ("float", &[]),
+        ("indexed", &[("step", "integer")]),
+    ]);
+    let o = WriteOptions::default();
+
+    // Member 1: scalar float.
+    let r1 = write_parameter(
+        &db, "unit", "availability", "Base", scalar_batch("u1", 0.95), &[], o, "t", "scalar member",
+    )
+    .expect("scalar member write");
+    assert_eq!(r1.tiers, vec![Tier::Scalar]);
+    assert!(
+        !r1.warnings.iter().any(|w| w.object_type == "parameter_type"),
+        "no parameter_type materialization against a declared set: {:?}",
+        r1.warnings
+    );
+
+    // Member 2: 1-D integer-indexed map (another alternative — the union is
+    // per value; a full grid of floats lands on the array tier as ever).
+    let r2 = write_parameter(
+        &db, "unit", "availability", "hourly",
+        indexed_float_batch("u1", "step", &[0, 1, 2], &[0.9, 0.8, 0.7]), &[], o, "t",
+        "indexed member",
+    )
+    .expect("indexed member write");
+    assert_eq!(r2.tiers, vec![Tier::Array], "tier rule unchanged per value");
+
+    // Both read back at their member shapes.
+    let got = read_parameter(&db, "unit", "availability", "Base").expect("read scalar");
+    assert_eq!(col_f64(&got, "v_float"), vec![Some(0.95)]);
+    let got = read_parameter(&db, "unit", "availability", "hourly").expect("read indexed");
+    assert_eq!(got.num_rows(), 3);
+
+    // The declared set is untouched: still exactly the two declared rows.
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM parameter_type WHERE valid_to_commit IS NULL"),
+        2
+    );
+}
+
+/// D2(a) rejection: a batch instantiating NO declared member is refused with an
+/// error naming the allowed set, and the writer never widens the set (no new
+/// parameter_type rows appear).
+#[test]
+fn multi_type_set_rejects_nonmember_and_never_widens() {
+    let (_dir, db) = fresh_db();
+    declare_definition(&db, "unit", "availability", &[
+        ("float", &[]),
+        ("indexed", &[("step", "integer")]),
+    ]);
+    let o = WriteOptions::default();
+
+    // Non-member measure kind (string scalar).
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("value", DataType::Utf8, false),
+    ]));
+    let strs = RecordBatch::try_new(schema, vec![
+        Arc::new(StringArray::from(vec!["u1"])) as ArrayRef,
+        Arc::new(StringArray::from(vec!["high"])) as ArrayRef,
+    ])
+    .unwrap();
+    let err = write_parameter(&db, "unit", "availability", "Base", strs, &[], o, "t", "m")
+        .expect_err("non-member kind must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("string") && msg.contains("float rank 0") && msg.contains("step"),
+        "the error must name the batch kind and the full allowed set: {msg}"
+    );
+
+    // Non-member dimension name at a declared rank.
+    let err = write_parameter(
+        &db, "unit", "availability", "Base",
+        indexed_float_batch("u1", "season", &[0, 1], &[1.0, 2.0]), &[], o, "t", "m",
+    )
+    .expect_err("non-member dim name must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("season") && msg.contains("step"), "unexpected: {msg}");
+
+    // Non-member rank (rank 2 vs declared {0, 1}).
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("step", DataType::Int64, false),
+        Field::new("layer", DataType::Int64, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let rank2 = RecordBatch::try_new(schema, vec![
+        Arc::new(StringArray::from(vec!["u1"])) as ArrayRef,
+        Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+        Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+        Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+    ])
+    .unwrap();
+    let err = write_parameter(&db, "unit", "availability", "Base", rank2, &[], o, "t", "m")
+        .expect_err("non-member rank must be rejected");
+    assert!(err.to_string().contains("rank 2"), "unexpected: {err}");
+
+    // No widening happened on any of the rejections.
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM parameter_type"),
+        2,
+        "rejected batches must never widen the declared set"
+    );
+}
+
+/// D2(a) member matching by index KIND at equal rank (duplicate ranks are
+/// legal): {1-D datetime map, 1-D integer map} — an Int64 column binds the
+/// integer member, a Timestamp column the datetime member, deterministically.
+#[test]
+fn multi_type_same_rank_members_distinguished_by_index_kind() {
+    let (_dir, db) = fresh_db();
+    declare_definition(&db, "node", "profile", &[
+        ("indexed", &[("t", "datetime")]),
+        ("indexed", &[("t", "integer")]),
+    ]);
+    let o = WriteOptions::default();
+
+    let r1 = write_parameter(
+        &db, "node", "profile", "Base",
+        indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]), &[], o, "t", "integer member",
+    )
+    .expect("integer-indexed write");
+    assert_eq!(r1.tiers, vec![Tier::Array]);
+
+    let hour = 3_600_000_000i64;
+    let r2 = write_parameter(
+        &db, "node", "profile", "ts",
+        datetime_indexed_batch("n1", "t", &[0, hour], &[3.0, 4.0]), &[], o, "t", "datetime member",
+    )
+    .expect("datetime-indexed write");
+    assert_eq!(r2.tiers, vec![Tier::Array]);
+
+    // Both current, one per alternative; the declared set is untouched.
+    assert_eq!(count(&db, "SELECT count(*) FROM value_array"), 2);
+    assert_eq!(count(&db, "SELECT count(*) FROM parameter_type"), 2);
 }
 
 // --- decision-D metadata channel (promoted critique probes) ----------------

@@ -454,12 +454,24 @@ UNION ALL
 -- the declared value_kind (values => float, values_int => int). value_array
 -- carries no value_kind of its own — the XOR CHECK guarantees exactly one
 -- payload but cannot check it against the declaration; this branch does.
-SELECT 'value_array', va.entity_id, va.parameter_definition_id, va.alternative_id, pt.value_kind
+-- Set-aware (D2(a), template_ir_plan §3.3): a definition may declare an
+-- allowed-type SET (multi-row parameter_type); the payload kind need only
+-- match SOME current declared member, so an int payload beside a coexisting
+-- float member no longer false-positives. Fires once per offending value,
+-- reporting the actual payload kind.
+SELECT 'value_array', va.entity_id, va.parameter_definition_id, va.alternative_id,
+       CASE WHEN va.values IS NOT NULL THEN 'float' ELSE 'int' END AS value_kind
 FROM value_array va
-JOIN parameter_type pt
-  ON pt.parameter_definition_id = va.parameter_definition_id AND pt.valid_to_commit IS NULL
-WHERE (pt.value_kind = 'float' AND va.values_int IS NOT NULL)
-   OR (pt.value_kind = 'int'   AND va.values     IS NOT NULL);
+WHERE EXISTS (
+        SELECT 1 FROM parameter_type pt
+        WHERE pt.parameter_definition_id = va.parameter_definition_id
+          AND pt.valid_to_commit IS NULL AND pt.value_kind IN ('float', 'int'))
+  AND NOT EXISTS (
+        SELECT 1 FROM parameter_type pt
+        WHERE pt.parameter_definition_id = va.parameter_definition_id
+          AND pt.valid_to_commit IS NULL
+          AND ((pt.value_kind = 'float' AND va.values     IS NOT NULL)
+            OR (pt.value_kind = 'int'   AND va.values_int IS NOT NULL)));
 
 -- Array-integrity: len(values) = product of axis lengths; no NULL cells
 -- (canonicalization step 1); pruning metadata honest.
@@ -536,6 +548,11 @@ HAVING count(DISTINCT tier) > 1;
 
 -- Tier-intent audit (critique #8): actual tier differs from the type's
 -- expected_tier — surfaces raggedness at write time, never enforces.
+-- Set-aware (D2(a), template_ir_plan §3.3): fires only when the actual tier
+-- matches NONE of the current declared members' expected tiers — a value on
+-- any one declared member's expected tier is in-intent, so a multi-member
+-- declaration no longer row-multiplies into false positives. When none
+-- matches, one row per expectation-carrying member (the expected set, listed).
 CREATE VIEW audit_tier_intent AS
 SELECT vk.entity_id, vk.parameter_definition_id, vk.alternative_id,
        vk.tier AS actual_tier, pt.expected_tier
@@ -543,11 +560,21 @@ FROM value_keys vk
 JOIN parameter_type pt
   ON pt.parameter_definition_id = vk.parameter_definition_id
  AND pt.valid_to_commit IS NULL AND pt.expected_tier IS NOT NULL
-WHERE vk.tier <> 'scalar' AND vk.tier <> pt.expected_tier;
+WHERE vk.tier <> 'scalar'
+  AND NOT EXISTS (
+        SELECT 1 FROM parameter_type pt2
+        WHERE pt2.parameter_definition_id = vk.parameter_definition_id
+          AND pt2.valid_to_commit IS NULL AND pt2.expected_tier = vk.tier);
 
--- Value-list membership (writer-checked at entry, audited here).
+-- Value-list membership (writer-checked at entry, audited here). Two legs:
+-- entity-scoped scalar values, and definition-scoped scalar defaults/prefills
+-- (D2(a) bundle, template_ir_plan §3.3.4 / critique m5: a template-declared
+-- DEFAULT violating its own value list — the exact authoring typo a loader
+-- exists to catch — was previously invisible). Definition-scoped rows carry
+-- no entity/alternative; src_table names the slot instead.
 CREATE VIEW audit_value_list_membership AS
-SELECT vs.entity_id, vs.parameter_definition_id, vs.alternative_id, vs.value_kind
+SELECT 'value_scalar' AS src_table,
+       vs.entity_id, vs.parameter_definition_id, vs.alternative_id, vs.value_kind
 FROM value_scalar vs
 JOIN parameter_definition pd
   ON pd.id = vs.parameter_definition_id AND pd.valid_to_commit IS NULL
@@ -564,7 +591,28 @@ WHERE vs.valid_to_commit IS NULL AND vs.content_retained
         OR (vs.value_kind = 'string' AND lv.v_str = vs.v_str)
         OR (vs.value_kind = 'date_time' AND lv.v_datetime = vs.v_datetime)
         OR (vs.value_kind = 'duration' AND lv.v_dur_months = vs.v_dur_months
-                                       AND lv.v_dur_micros = vs.v_dur_micros)));
+                                       AND lv.v_dur_micros = vs.v_dur_micros)))
+UNION ALL
+SELECT 'definition_value_scalar:' || dv.slot AS src_table,
+       NULL::BIGINT AS entity_id, dv.parameter_definition_id,
+       NULL::BIGINT AS alternative_id, dv.value_kind
+FROM definition_value_scalar dv
+JOIN parameter_definition pd
+  ON pd.id = dv.parameter_definition_id AND pd.valid_to_commit IS NULL
+ AND pd.parameter_value_list_id IS NOT NULL
+WHERE dv.valid_to_commit IS NULL AND dv.content_retained
+  AND NOT EXISTS (
+    SELECT 1 FROM list_value lv
+    WHERE lv.parameter_value_list_id = pd.parameter_value_list_id
+      AND lv.valid_to_commit IS NULL
+      AND lv.value_kind = dv.value_kind
+      AND ((dv.value_kind = 'float' AND lv.v_float = dv.v_float)
+        OR (dv.value_kind = 'int' AND lv.v_int = dv.v_int)
+        OR (dv.value_kind = 'bool' AND lv.v_bool = dv.v_bool)
+        OR (dv.value_kind = 'string' AND lv.v_str = dv.v_str)
+        OR (dv.value_kind = 'date_time' AND lv.v_datetime = dv.v_datetime)
+        OR (dv.value_kind = 'duration' AND lv.v_dur_months = dv.v_dur_months
+                                       AND lv.v_dur_micros = dv.v_dur_micros)));
 
 -- Reserved single-valued metadata keys must not fork (critique F5): the
 -- carried Spine (lower(name), value) uniqueness constrains duplicates of a

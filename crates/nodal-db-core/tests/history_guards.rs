@@ -80,7 +80,7 @@ fn retrying_wrapper_happy_path_writes_value() {
     };
     let outcome = with_write_txn_retrying(&path, "t", "retry-happy", |conn, c| {
         let mut cache = AxisCache::new();
-        write_value(conn, c, key, &value, &mut cache, &WriteOptions::default())
+        write_value(conn, c, key, &value, &mut cache, &WriteOptions::default(), None)
     })
     .expect("retrying write succeeds");
     assert_eq!(outcome.tier, Some(Tier::Scalar));
@@ -141,7 +141,7 @@ fn batched_long_cells_bump_versions_independently() {
         let v = long(&cells);
         with_write_txn(&path, "t", "batch-versions", |conn, c| {
             let mut cache = AxisCache::new();
-            write_value(conn, c, key, &v, &mut cache, &WriteOptions::default())
+            write_value(conn, c, key, &v, &mut cache, &WriteOptions::default(), None)
         })
         .expect("long write");
     }

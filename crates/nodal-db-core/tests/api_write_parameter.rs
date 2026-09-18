@@ -588,6 +588,12 @@ fn materializing_parameter_type_for_existing_definition_warns() {
     assert_eq!(w.name, "p");
     assert!(w.id > 0);
     assert_eq!(count(&db, "SELECT count(*) FROM parameter_type"), 1);
+    // D11: the auto-materialize path binds the freshly created member row.
+    assert_eq!(
+        count(&db, "SELECT parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL"),
+        w.id,
+        "the written value binds the materialized parameter_type"
+    );
 }
 
 /// F8: a zero-row batch is refused with no side effects — no auto-creates, no
@@ -757,13 +763,14 @@ fn datetime_indexed_batch(entity: &str, dim: &str, coords: &[i64], vals: &[f64])
 /// Declare `class.param` with an explicit allowed-type SET via SQL against the
 /// bootstrap commit — the template loader's eventual job. Each member is
 /// `(value_kind, dims)`; rank derives as `dims.len()` (rank = the type's own
-/// dimensionality, duplicates across members legal).
+/// dimensionality, duplicates across members legal). Returns the created
+/// `parameter_type` ids in declaration order (the D11 bindings values persist).
 fn declare_definition(
     db: &std::path::Path,
     class: &str,
     param: &str,
     members: &[(&str, &[(&str, &str)])],
-) {
+) -> Vec<i64> {
     let conn = Connection::open(db).unwrap();
     let cls: i64 = conn
         .query_row(
@@ -780,6 +787,7 @@ fn declare_definition(
             |r| r.get(0),
         )
         .unwrap();
+    let mut pt_ids = Vec::with_capacity(members.len());
     for (kind, dims) in members {
         let pt: i64 = conn
             .query_row(
@@ -798,8 +806,10 @@ fn declare_definition(
             )
             .unwrap();
         }
+        pt_ids.push(pt);
     }
     conn.close().unwrap();
+    pt_ids
 }
 
 /// D2(a) acceptance: a definition declaring the set {scalar float, 1-D
@@ -809,7 +819,7 @@ fn declare_definition(
 #[test]
 fn multi_type_set_accepts_each_declared_member() {
     let (_dir, db) = fresh_db();
-    declare_definition(&db, "unit", "availability", &[
+    let pts = declare_definition(&db, "unit", "availability", &[
         ("float", &[]),
         ("indexed", &[("step", "integer")]),
     ]);
@@ -847,6 +857,18 @@ fn multi_type_set_accepts_each_declared_member() {
     assert_eq!(
         count(&db, "SELECT count(*) FROM parameter_type WHERE valid_to_commit IS NULL"),
         2
+    );
+
+    // D11: each value row persists the id of the member it instantiated.
+    assert_eq!(
+        count(&db, "SELECT parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL"),
+        pts[0],
+        "the scalar value binds the scalar-float member"
+    );
+    assert_eq!(
+        count(&db, "SELECT parameter_type_id FROM value_array"),
+        pts[1],
+        "the indexed value binds the 1-D map member"
     );
 }
 
@@ -921,7 +943,7 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
 #[test]
 fn multi_type_same_rank_members_distinguished_by_index_kind() {
     let (_dir, db) = fresh_db();
-    declare_definition(&db, "node", "profile", &[
+    let pts = declare_definition(&db, "node", "profile", &[
         ("indexed", &[("t", "datetime")]),
         ("indexed", &[("t", "integer")]),
     ]);
@@ -945,6 +967,97 @@ fn multi_type_same_rank_members_distinguished_by_index_kind() {
     // Both current, one per alternative; the declared set is untouched.
     assert_eq!(count(&db, "SELECT count(*) FROM value_array"), 2);
     assert_eq!(count(&db, "SELECT count(*) FROM parameter_type"), 2);
+
+    // D11: each row binds the member its index KIND matched.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT va.parameter_type_id FROM value_array va \
+             JOIN alternative a ON a.id = va.alternative_id WHERE a.cur_name = 'base'",
+        ),
+        pts[1],
+        "the Int64-indexed row binds the integer member"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT va.parameter_type_id FROM value_array va \
+             JOIN alternative a ON a.id = va.alternative_id WHERE a.cur_name = 'ts'",
+        ),
+        pts[0],
+        "the Timestamp-indexed row binds the datetime member"
+    );
+}
+
+/// D2(a)/D11 read contract, pinned (080_views_read.sql): two same-rank
+/// same-index-kind members differing only in dimension NAME ([t: integer] vs
+/// [step: integer]) are legal (distinguishable at entry by name) and both
+/// writable. Every writer-produced row persists the member it bound to
+/// (D11 `parameter_type_id`), so member attribution IS exact on the tables —
+/// but the read macro's index columns remain positional (idxN_*), never
+/// dimension-named, and the macro does not (yet) expose the binding: a client
+/// wanting per-row dimension names resolves them via the persisted binding,
+/// not from the macro output. The blanket rename by definition alone stays
+/// well-defined only when all current members agree on the name vector per
+/// (rank, kind) signature; NULL-binding rows (pre-D11 / out-of-contract) are
+/// unattributable. This test documents that contract.
+#[test]
+fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
+    let (_dir, db) = fresh_db();
+    let pts = declare_definition(&db, "node", "usage", &[
+        ("indexed", &[("t", "integer")]),
+        ("indexed", &[("step", "integer")]),
+    ]);
+    let o = WriteOptions::default();
+
+    // Both members writable, each bound by its dimension name at entry.
+    write_parameter(
+        &db, "node", "usage", "Base",
+        indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]), &[], o, "t", "t member",
+    )
+    .expect("t-member write");
+    write_parameter(
+        &db, "node", "usage", "alt2",
+        indexed_float_batch("n1", "step", &[10, 20], &[3.0, 4.0]), &[], o, "t", "step member",
+    )
+    .expect("step-member write");
+    assert_eq!(count(&db, "SELECT count(*) FROM value_array"), 2, "both rows land");
+
+    // CAN distinguish: by alternative and axis content, on the positional
+    // integer index column.
+    let base = read_parameter(&db, "node", "usage", "Base").expect("read Base");
+    let mut c: Vec<i64> = col_i64(&base, "idx1_num").into_iter().flatten().collect();
+    c.sort_unstable();
+    assert_eq!(c, vec![0, 1]);
+    let alt2 = read_parameter(&db, "node", "usage", "alt2").expect("read alt2");
+    let mut c: Vec<i64> = col_i64(&alt2, "idx1_num").into_iter().flatten().collect();
+    c.sort_unstable();
+    assert_eq!(c, vec![10, 20]);
+
+    // The read macro exposes no dimension-named column and no binding column —
+    // per-row member attribution goes through the persisted binding instead.
+    assert!(base.schema().index_of("t").is_err(), "index columns are positional, not named");
+    assert!(alt2.schema().index_of("step").is_err(), "index columns are positional, not named");
+
+    // D11: the tables carry the exact member binding for each row.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT va.parameter_type_id FROM value_array va \
+             JOIN alternative a ON a.id = va.alternative_id WHERE a.cur_name = 'base'",
+        ),
+        pts[0],
+        "the row written at dims [t] binds the t member"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT va.parameter_type_id FROM value_array va \
+             JOIN alternative a ON a.id = va.alternative_id WHERE a.cur_name = 'alt2'",
+        ),
+        pts[1],
+        "the row written at dims [step] binds the step member"
+    );
 }
 
 // --- decision-D metadata channel (promoted critique probes) ----------------

@@ -876,12 +876,15 @@ def main():
     # ---- float coordinate axis + values_int (float_axis_crs_int_plan §9) -----
     con.execute("BEGIN")
     cfa = new_commit(con, "float axis + values_int additions")
-    level_par = new_pd(node, "level_profile")   # rank-1 float array (declared float -> values)
-    new_type(level_par, "float", 1, [("level", "float")], expected="array")
+    # Canonical rank>=1 declarations are value_kind='indexed' (030_parameters:
+    # "scalar kinds or 'indexed'" — the writer's convention; the payload
+    # measure kind lives on the value rows, not on the declaration).
+    level_par = new_pd(node, "level_profile")   # rank-1 float array (values payload)
+    new_type(level_par, "indexed", 1, [("level", "float")], expected="array")
     band_par = new_pd(node, "band_response")
-    new_type(band_par, "float", 1, [("band", "float")], expected="array")
-    landuse = new_pd(node, "land_use")          # rank-1 int array (declared int -> values_int)
-    new_type(landuse, "int", 1, [("level", "float")], expected="array")
+    new_type(band_par, "indexed", 1, [("band", "float")], expected="array")
+    landuse = new_pd(node, "land_use")          # rank-1 int array (values_int payload)
+    new_type(landuse, "indexed", 1, [("level", "float")], expected="array")
 
     # (1) parametric float grid (vertical levels 0..50) shared by two entities
     ax_lvl = axis_float_parametric(con, 0.0, 10.0, 6)
@@ -937,30 +940,31 @@ def main():
     # value against the SET, not against an arbitrary single row.)
     con.execute("BEGIN")
     cd2 = new_commit(con, "D2(a): multi-type declaration + one value per member check")
-    mixed = new_pd(node, "mixed_profile")     # declared SET: float(array) + int(long)
-    new_type(mixed, "float", 1, [("level", "float")], expected="array")
-    new_type(mixed, "int", 1, [("level", "float")], expected="long")
+    mixed = new_pd(node, "mixed_profile")     # declared SET: two 'indexed' members,
+    # distinguishable by their dimension tuples, with different expected tiers.
+    new_type(mixed, "indexed", 1, [("level", "float")], expected="array")
+    new_type(mixed, "indexed", 1, [("t", "datetime")], expected="long")
     write_array(con, cd2, node_b, mixed, base, [ax_lvl], [7, 8, 9, 7, 8, 9], int_kind=True)
     con.execute("COMMIT")
     n = one("SELECT count(*) FROM audit_type_conformance WHERE parameter_definition_id = ?",
             mixed)[0]
-    check("D2(a): array payload matching SOME declared member is clean"
-          " (no false positive against the coexisting float member)", n == 0, f"n={n}")
+    check("D2(a): array payload licensed by an 'indexed' member is clean", n == 0, f"n={n}")
     ti = allrows("SELECT actual_tier FROM audit_tier_intent WHERE parameter_definition_id = ?",
                  mixed)
     check("D2(a): actual tier matching ONE member's expected_tier is clean"
           " (no row-multiplication over the set)", ti == [], str(ti))
-    # negative control: a payload matching NO declared member still fires — the
-    # set-aware rewrite must not have made the array branch vacuous.
+    # negative control (the pre-D2(a) whitewash false negative, closed): an
+    # array payload on a definition whose declared set licenses NO array at
+    # all (a scalar-only 'int' member) must fire the array branch.
     con.execute("BEGIN")
-    cneg = new_commit(con, "D2(a): negative control, int payload on a float-only set")
-    fonly = new_pd(node, "floats_only")
-    new_type(fonly, "float", 1, [("level", "float")], expected="array")
+    cneg = new_commit(con, "D2(a): negative control, array payload on a scalar-only set")
+    fonly = new_pd(node, "scalar_only")
+    new_type(fonly, "int", 0)
     write_array(con, cneg, node_b, fonly, base, [ax_lvl], [1, 2, 3, 4, 5, 6], int_kind=True)
     con.execute("COMMIT")
     rows = allrows("SELECT src_table, value_kind FROM audit_type_conformance"
                    " WHERE parameter_definition_id = ?", fonly)
-    check("D2(a): payload matching NO declared member fires audit_type_conformance",
+    check("D2(a): array payload on a set licensing no array fires audit_type_conformance",
           rows == [("value_array", "int")], str(rows))
     con.execute("DELETE FROM value_array WHERE parameter_definition_id = ?", [fonly])
     # defaults leg (critique m5): a definition-scoped default violating the
@@ -982,6 +986,41 @@ def main():
                 " WHERE parameter_definition_id = ?", [fuel])
     n = one("SELECT count(*) FROM audit_value_list_membership")[0]
     check("D2(a)/m5: a default on the list is clean", n == 0, f"n={n}")
+
+    # ---- D11 (2026-09-18): persisted member binding (parameter_type_id) ------
+    # Column exists on all seven payload tables (the probe fails loudly if any
+    # is missing); every smoke-written row is unbound (NULL — the smoke writes
+    # by hand, below the entry check; the Rust writer always binds).
+    nonnull = one(
+        "SELECT count(*) FROM ("
+        " SELECT parameter_type_id FROM value_scalar"
+        " UNION ALL SELECT parameter_type_id FROM value_long"
+        " UNION ALL SELECT parameter_type_id FROM value_array"
+        " UNION ALL SELECT parameter_type_id FROM value_array_hist"
+        " UNION ALL SELECT parameter_type_id FROM definition_value_scalar"
+        " UNION ALL SELECT parameter_type_id FROM definition_value_long"
+        " UNION ALL SELECT parameter_type_id FROM definition_value_array)"
+        " WHERE parameter_type_id IS NOT NULL")[0]
+    check("D11: parameter_type_id exists on all seven payload tables"
+          " (all NULL before any bound write)", nonnull == 0, f"n={nonnull}")
+    n = one("SELECT count(*) FROM audit_dangling_ref WHERE ref_table = 'parameter_type'"
+            " AND src_table LIKE 'value%'")[0]
+    check("D11: NULL bindings are silent in the referential audit", n == 0, f"n={n}")
+    # A binding to ANOTHER definition's member is damage and fires; rebinding
+    # to the row's own definition's member clears it.
+    wrong_pt = one("SELECT id FROM parameter_type WHERE parameter_definition_id = ?", inflow)[0]
+    con.execute("UPDATE value_scalar SET parameter_type_id = ?"
+                " WHERE parameter_definition_id = ? AND valid_to_commit IS NULL",
+                [wrong_pt, demand])
+    n = one("SELECT count(*) FROM audit_dangling_ref WHERE ref_table = 'parameter_type'"
+            " AND src_table = 'value_scalar'")[0]
+    check("D11: a cross-definition binding fires the referential audit", n >= 1, f"n={n}")
+    own_pt = one("SELECT id FROM parameter_type WHERE parameter_definition_id = ?", demand)[0]
+    con.execute("UPDATE value_scalar SET parameter_type_id = ?"
+                " WHERE parameter_definition_id = ? AND valid_to_commit IS NULL",
+                [own_pt, demand])
+    n = one("SELECT count(*) FROM audit_dangling_ref WHERE ref_table = 'parameter_type'")[0]
+    check("D11: a same-definition binding is clean", n == 0, f"n={n}")
 
     # ---- float axis / values_int hostile checks (float_axis_crs_int_plan §6) --
     # non-monotonic float axis fires the monotonicity audit

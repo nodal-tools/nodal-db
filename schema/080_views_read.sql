@@ -220,6 +220,18 @@ WHERE c.axis2_id IS NOT NULL;
 -- tier mix. SQL macros cannot emit per-parameter dimension-name columns —
 -- the client library renames idxN to the declared dimension names from
 -- parameter_type_dimension (canonical result shape note in ddl_sketch.md).
+-- D2(a)/D11 (template_ir_plan §3.3, D11 2026-09-18): under a declared
+-- allowed-type SET, every writer-produced value row persists the member it
+-- bound to (`parameter_type_id` on the payload tables), so bound rows are
+-- EXACTLY labelable — the client resolves the row's member and renames idxN
+-- to that member's declared dimension names. The blanket rename by
+-- definition alone remains well-defined only when all current members agree
+-- on the name vector per (rank, index-kind signature). For NULL-binding rows
+-- only (pre-D11 data, out-of-contract writers) member attribution is
+-- unrecoverable — axes carry kinds, not names; clients may disambiguate such
+-- rows by rank and the populated index-kind columns (idxN_ts/idxN_num/
+-- idxN_text). These read macros do not yet expose the binding column; a
+-- later change MAY add it.
 -- The definition is resolved first so its id reaches the tier scans as a
 -- selective join filter.
 CREATE MACRO read_parameter(class_name, parameter_name) AS TABLE

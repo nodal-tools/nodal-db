@@ -56,6 +56,10 @@ fn keeps_content(opts: &WriteOptions) -> bool {
 /// Write one canonicalized value for `key` at `commit_id`, applying the full
 /// history protocol for its tier (and any tier transition from the currently
 /// live tier). Runs inside the caller's write transaction.
+/// `parameter_type_id` is the declared member the value bound to at entry
+/// (D11, 2026-09-18): the API always passes `Some` (resolve/materialize
+/// guarantees a member); `None` is for callers below the entry check (tests,
+/// out-of-contract tools) and lands as SQL NULL.
 pub fn write_value(
     conn: &Connection,
     commit_id: i64,
@@ -63,6 +67,7 @@ pub fn write_value(
     value: &CanonicalValue,
     cache: &mut AxisCache,
     opts: &WriteOptions,
+    parameter_type_id: Option<i64>,
 ) -> Result<WriteOutcome, DbError> {
     let retained = keeps_content(opts);
 
@@ -93,11 +98,18 @@ pub fn write_value(
     // --- 4. Write into the target tier. ---
     let (version, rows_written, closed_same) = match (&value.shape, target) {
         (ShapedData::Scalar(m), Tier::Scalar) => {
-            write_scalar(conn, &key, commit_id, m, same_tier_live, retained)?
+            write_scalar(conn, &key, commit_id, m, same_tier_live, retained, parameter_type_id)?
         }
-        (ShapedData::Array(vals), Tier::Array) => {
-            write_array(conn, &key, commit_id, &axis_ids, vals, same_tier_live, retained)?
-        }
+        (ShapedData::Array(vals), Tier::Array) => write_array(
+            conn,
+            &key,
+            commit_id,
+            &axis_ids,
+            vals,
+            same_tier_live,
+            retained,
+            parameter_type_id,
+        )?,
         (ShapedData::Long(rows), Tier::Long) => write_long(
             conn,
             &key,
@@ -107,6 +119,7 @@ pub fn write_value(
             rows,
             same_tier_live,
             retained,
+            parameter_type_id,
         )?,
         // canon guarantees the shape matches the tier.
         _ => unreachable!("shape/tier mismatch from canon"),
@@ -199,6 +212,7 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Tier>, DbError>
 // Scalar tier
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn write_scalar(
     conn: &Connection,
     key: &ValueKey,
@@ -206,6 +220,7 @@ fn write_scalar(
     m: &ScalarValue,
     same_tier_live: bool,
     retained: bool,
+    pt_id: Option<i64>,
 ) -> Result<(u16, usize, usize), DbError> {
     let closed = if same_tier_live {
         close_out_scalar(conn, key, c, retained)?
@@ -216,14 +231,16 @@ fn write_scalar(
     let vc = VCols::of(m);
     conn.execute(
         "INSERT INTO value_scalar \
-           (entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
+           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, \
             content_retained, value_kind, v_float, v_int, v_bool, v_str, v_datetime, \
             v_dur_months, v_dur_micros) \
-         VALUES (?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)",
         params![
             key.entity_id,
             key.parameter_definition_id,
             key.alternative_id,
+            pt_id,
             c,
             version as i16,
             vc.kind,
@@ -271,6 +288,7 @@ fn next_version_scalar(conn: &Connection, key: &ValueKey) -> Result<u16, DbError
 // Array tier
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn write_array(
     conn: &Connection,
     key: &ValueKey,
@@ -279,6 +297,7 @@ fn write_array(
     vals: &[f64],
     same_tier_live: bool,
     retained: bool,
+    pt_id: Option<i64>,
 ) -> Result<(u16, usize, usize), DbError> {
     let (vmin, vmax) = min_max(vals);
     let list_sql = list_value_sql(vals.len());
@@ -290,12 +309,13 @@ fn write_array(
         // Replace the current row in place (bump version, new payload). Both
         // payload columns are set so a stale values_int can't break the XOR.
         let sql = format!(
-            "UPDATE value_array SET valid_from_commit=?, version=?, \
+            "UPDATE value_array SET valid_from_commit=?, version=?, parameter_type_id=?, \
                axis1_id=?, axis2_id=?, axis3_id=?, axis4_id=?, \
                values={list_sql}, values_int=NULL, v_min=?, v_max=? \
              WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
         );
         let mut p: Vec<Value> = vec![Value::BigInt(c), Value::SmallInt(version as i16)];
+        p.push(pt_id.map(Value::BigInt).unwrap_or(Value::Null));
         push_axis4(&mut p, axis_ids);
         for v in vals {
             p.push(Value::Double(*v));
@@ -311,14 +331,16 @@ fn write_array(
         let version = next_version_array(conn, key)?;
         let sql = format!(
             "INSERT INTO value_array \
-               (entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
+               (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+                valid_from_commit, version, \
                 axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {list_sql}, NULL, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {list_sql}, NULL, ?, ?)"
         );
         let mut p: Vec<Value> = vec![
             Value::BigInt(key.entity_id),
             Value::BigInt(key.parameter_definition_id),
             Value::BigInt(key.alternative_id),
+            pt_id.map(Value::BigInt).unwrap_or(Value::Null),
             Value::BigInt(c),
             Value::SmallInt(version as i16),
         ];
@@ -342,10 +364,12 @@ fn copy_array_preimage(conn: &Connection, key: &ValueKey, c: i64, retained: bool
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
     } else {
         "INSERT INTO value_array_hist \
-           (entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
+           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, \
             axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
             valid_to_commit, content_retained) \
-         SELECT entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
+         SELECT entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, \
             axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, ?, FALSE \
          FROM value_array \
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
@@ -391,6 +415,7 @@ fn write_long(
     rows: &[crate::types::LongRow],
     same_tier_live: bool,
     retained: bool,
+    pt_id: Option<i64>,
 ) -> Result<(u16, usize, usize), DbError> {
     // Close out every live cell of the triple first; a cell that reappears in
     // the new value re-opens at its own (per-cell) version + 1, one absent from
@@ -417,7 +442,7 @@ fn write_long(
         let pos = pad4_pos(&row.positions);
         let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
         max_version = max_version.max(version);
-        rows_params.push(long_row_params(key, c, version, axis_ids, axes, &pos, &row.value));
+        rows_params.push(long_row_params(key, pt_id, c, version, axis_ids, axes, &pos, &row.value));
     }
 
     // Batched multi-row INSERT (replaces the per-cell prepare/execute). Issued on
@@ -463,7 +488,7 @@ fn current_long_versions(conn: &Connection, key: &ValueKey) -> Result<HashMap<[i
 }
 
 /// Rows per batched `value_long` INSERT. Chunked so the per-statement placeholder
-/// count stays bounded (≤ CHUNK × 29); one prepared statement is reused across
+/// count stays bounded (≤ CHUNK × 30); one prepared statement is reused across
 /// all full-width chunks, so 8 760 cells cost ~17 prepares instead of 8 760.
 const LONG_INSERT_CHUNK: usize = 512;
 
@@ -493,16 +518,17 @@ fn insert_long_rows(conn: &Connection, rows_params: &[Vec<Value>]) -> Result<(),
 
 /// A multi-row `value_long` INSERT with `n` row templates. Column order and the
 /// `make_timestamp(?)` binds for the timestamp columns are identical to the
-/// former per-cell statement — same 29 columns, `content_retained` left to its
-/// TRUE default.
+/// former per-cell statement — 30 columns (29 + the D11 `parameter_type_id`
+/// binding), `content_retained` left to its TRUE default.
 fn long_insert_sql(n: usize) -> String {
-    const ROW: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+    const ROW: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                         make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, \
                         ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)";
     let mut s = String::with_capacity(320 + n * (ROW.len() + 1));
     s.push_str(
         "INSERT INTO value_long \
-           (entity_id, parameter_definition_id, alternative_id, valid_from_commit, version, \
+           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, \
             axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, \
             i1_dt, i1_num, i2_dt, i2_num, i3_dt, i3_num, i4_dt, i4_num, \
             value_kind, v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
@@ -517,12 +543,14 @@ fn long_insert_sql(n: usize) -> String {
     s
 }
 
-/// One long cell's 29 bind values, in the column order of [`long_insert_sql`].
+/// One long cell's 30 bind values, in the column order of [`long_insert_sql`].
 /// The timestamp columns bind their raw µs (wrapped by `make_timestamp(?)` in
 /// the SQL); the value columns come straight from [`VCols`], so the encoder
 /// path — including its NaN canonicalization — is untouched.
+#[allow(clippy::too_many_arguments)]
 fn long_row_params(
     key: &ValueKey,
+    pt_id: Option<i64>,
     c: i64,
     version: u16,
     axis_ids: &[i64],
@@ -540,10 +568,11 @@ fn long_row_params(
         num[d] = a_num;
     }
     let vc = VCols::of(value);
-    let mut p: Vec<Value> = Vec::with_capacity(29);
+    let mut p: Vec<Value> = Vec::with_capacity(30);
     p.push(Value::BigInt(key.entity_id));
     p.push(Value::BigInt(key.parameter_definition_id));
     p.push(Value::BigInt(key.alternative_id));
+    p.push(pt_id.map(Value::BigInt).unwrap_or(Value::Null));
     p.push(Value::BigInt(c));
     p.push(Value::SmallInt(version as i16));
     push_axis4(&mut p, axis_ids);

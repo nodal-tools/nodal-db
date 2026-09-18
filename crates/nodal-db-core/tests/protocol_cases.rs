@@ -190,7 +190,7 @@ fn run_case(path: &std::path::Path) {
             let mut cache = AxisCache::new();
             match &value {
                 Some(v) => {
-                    write_value(conn, c, key, v, &mut cache, &opts)?;
+                    write_value(conn, c, key, v, &mut cache, &opts, None)?;
                 }
                 None => {
                     delete_value(conn, c, key, &opts)?;

@@ -642,7 +642,7 @@ fn write_prepared(
     report.warnings.extend(p.tz_warnings.iter().cloned());
 
     let class_id = resolve_entity_class(conn, commit_id, &p.class, &mut report.warnings)?;
-    let (pd_id, declared) = resolve_parameter(
+    let (pd_id, pt_id, declared) = resolve_parameter(
         conn,
         commit_id,
         class_id,
@@ -673,7 +673,7 @@ fn write_prepared(
             parameter_definition_id: pd_id,
             alternative_id: alt_id,
         };
-        let outcome = write_value(conn, commit_id, key, &value, cache, &resolved_opts)?;
+        let outcome = write_value(conn, commit_id, key, &value, cache, &resolved_opts, Some(pt_id))?;
         report.absorb(&outcome);
     }
     Ok(())
@@ -900,7 +900,10 @@ fn resolve_entity(
 /// `parameter_type` + `parameter_type_dimension` declaration) when absent. The
 /// declared type SET is READ FROM THE DB for an existing definition (critique
 /// S2; template_ir_plan D2(a)); only a freshly created definition takes its
-/// declared type from the batch's inferred dimensions.
+/// declared type from the batch's inferred dimensions. Returns
+/// `(pd_id, parameter_type_id, shape)` — the member id is the exactly-one
+/// binding persisted on every value row (D11, 2026-09-18); auto-created /
+/// auto-materialized declarations bind their freshly created row.
 fn resolve_parameter(
     conn: &Connection,
     commit_id: i64,
@@ -909,7 +912,7 @@ fn resolve_parameter(
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
     warnings: &mut Vec<Warning>,
-) -> Result<(i64, DeclaredType), DbError> {
+) -> Result<(i64, i64, DeclaredType), DbError> {
     if let Some(pd_id) = opt_id(
         conn,
         "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
@@ -933,11 +936,10 @@ fn resolve_parameter(
                 name: name.into(),
                 id: pt_id,
             });
-            Ok((pd_id, inferred_declared(inferred)))
+            Ok((pd_id, pt_id, inferred_declared(inferred)))
         } else {
-            let ix = validate_declared(name, pd_id, &set, inferred, value_kind)?;
-            let matched = set.into_iter().nth(ix).expect("validated index in range");
-            Ok((pd_id, matched.shape))
+            let matched = validate_declared(name, pd_id, set, inferred, value_kind)?;
+            Ok((pd_id, matched.pt_id, matched.shape))
         }
     } else {
         let pd_id: i64 = conn.query_row(
@@ -946,14 +948,14 @@ fn resolve_parameter(
             params![class_id, name, commit_id],
             |r| r.get(0),
         )?;
-        create_parameter_type(conn, commit_id, pd_id, inferred, value_kind)?;
+        let pt_id = create_parameter_type(conn, commit_id, pd_id, inferred, value_kind)?;
         warnings.push(Warning {
             kind: WarningKind::AutoCreated,
             object_type: "parameter_definition".into(),
             name: name.into(),
             id: pd_id,
         });
-        Ok((pd_id, inferred_declared(inferred)))
+        Ok((pd_id, pt_id, inferred_declared(inferred)))
     }
 }
 
@@ -968,9 +970,11 @@ fn inferred_declared(inferred: &[(String, IndexKind)]) -> DeclaredType {
 }
 
 /// One member of a definition's declared allowed-type set as stored in the DB:
-/// the `parameter_type.value_kind` tag, the dimension names in declared order,
-/// and the `(position, kind)` shape canon consumes.
+/// the `parameter_type` row id (the D11 binding persisted on value rows), the
+/// `value_kind` tag, the dimension names in declared order, and the
+/// `(position, kind)` shape canon consumes.
 struct DbDeclared {
+    pt_id: i64,
     value_kind: String,
     dim_names: Vec<String>,
     shape: DeclaredType,
@@ -1006,41 +1010,40 @@ fn batch_desc(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> String
     }
 }
 
-/// Does the batch instantiate this declared member? The full tuple must match:
-/// `value_kind` tag, rank, dimension names (case-insensitive, declared order),
-/// and per-position index kinds. Kind matching is strict: the pipeline's
-/// Arrow-derivable kinds (datetime/integer/label) map 1:1 onto column types,
-/// so a member whose kind the batch column cannot carry is simply not a match
-/// (declared `period`/`time_pattern` members stay unwritable until their long-
-/// input derivation lands — canon's `UnsupportedKind`; types.rs note).
-fn member_matches(m: &DbDeclared, inferred: &[(String, IndexKind)], batch_kind: &str) -> bool {
-    m.value_kind == batch_kind
-        && m.shape.rank() == inferred.len()
-        && inferred
-            .iter()
-            .zip(&m.dim_names)
-            .all(|((bn, _), dn)| bn.eq_ignore_ascii_case(dn))
-        && inferred
+/// The projection member matching AND set-distinguishability are both defined
+/// on (VMP Part 7 as amended 2026-09-18, D2(a)): the `value_kind` tag plus the
+/// ordered `(case-folded dimension name, index kind)` vector — rank is implied
+/// by the vector's length. One key, two uses: a batch instantiates the member
+/// whose key equals the batch's, and a set is valid iff member keys are
+/// pairwise distinct. Kind matching is strict: the pipeline's Arrow-derivable
+/// kinds (datetime/integer/label) map 1:1 onto column types, so a member whose
+/// kind the batch column cannot carry is simply not a match (declared
+/// `period`/`time_pattern` members stay unwritable until their long-input
+/// derivation lands — canon's `UnsupportedKind`; types.rs note). Tag equality
+/// is deliberately case-sensitive — the writer only ever stores lowercase
+/// tags; a case-variant is import damage, surfaced by the no-match hint.
+type MatchKey = (String, Vec<(String, IndexKind)>);
+
+fn member_key(m: &DbDeclared) -> MatchKey {
+    (
+        m.value_kind.clone(),
+        m.dim_names
             .iter()
             .zip(&m.shape.positions)
-            .all(|((_, bk), (_, dk))| bk == dk)
+            .map(|(n, (_, k))| (n.to_ascii_lowercase(), *k))
+            .collect(),
+    )
 }
 
-/// Two members are indistinguishable when they agree on the whole matching
-/// tuple (kind tag, rank, case-folded dimension names, index kinds) — no batch
-/// could instantiate exactly one of them.
-fn members_indistinguishable(a: &DbDeclared, b: &DbDeclared) -> bool {
-    a.value_kind == b.value_kind
-        && a.shape.rank() == b.shape.rank()
-        && a.dim_names
+fn batch_key(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> MatchKey {
+    let tag = if inferred.is_empty() { value_kind.tag() } else { "indexed" };
+    (
+        tag.to_string(),
+        inferred
             .iter()
-            .zip(&b.dim_names)
-            .all(|(x, y)| x.eq_ignore_ascii_case(y))
-        && a.shape
-            .positions
-            .iter()
-            .zip(&b.shape.positions)
-            .all(|((_, x), (_, y))| x == y)
+            .map(|(n, k)| (n.to_ascii_lowercase(), *k))
+            .collect(),
+    )
 }
 
 /// Hold the batch to an EXISTING declared allowed-type set (VMP Part 7 as
@@ -1050,40 +1053,58 @@ fn members_indistinguishable(a: &DbDeclared, b: &DbDeclared) -> bool {
 /// instantiating no member is rejected loudly, naming the allowed set; the
 /// writer never widens a declared set implicitly. A set whose members are not
 /// pairwise distinguishable on that tuple is itself invalid and refused
-/// (matching would be nondeterministic). Returns the index of the matched
-/// member — the member the batch binds to (its dimension kinds drive canon,
-/// its names/positions key the label domains).
+/// EAGERLY, before any matching (deliberate: a damaged declaration is never
+/// half-usable). Returns the matched member — the member the batch binds to
+/// (its dimension kinds drive canon, its names/positions key label domains).
 fn validate_declared(
     parameter: &str,
     pd_id: i64,
-    set: &[DbDeclared],
+    mut set: Vec<DbDeclared>,
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
-) -> Result<usize, DbError> {
-    for i in 0..set.len() {
-        for j in (i + 1)..set.len() {
-            if members_indistinguishable(&set[i], &set[j]) {
+) -> Result<DbDeclared, DbError> {
+    let keys: Vec<MatchKey> = set.iter().map(member_key).collect();
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            if keys[i] == keys[j] {
                 return Err(DbError::Api(format!(
                     "parameter_definition {pd_id} ({parameter:?}) declares indistinguishable \
                      current parameter_type rows ({}): exactly-one-member matching is \
                      impossible; the declaration is invalid (import/hand-edit damage; \
-                     close out the duplicates)",
+                     repair by deleting the parameter through the object-delete API \
+                     (commit_object_deletes) and re-declaring it)",
                     member_desc(&set[i])
                 )));
             }
         }
     }
-    let batch_kind = if inferred.is_empty() { value_kind.tag() } else { "indexed" };
-    if let Some(ix) = set.iter().position(|m| member_matches(m, inferred, batch_kind)) {
-        return Ok(ix);
+    let bkey = batch_key(inferred, value_kind);
+    if let Some(ix) = keys.iter().position(|k| *k == bkey) {
+        return Ok(set.swap_remove(ix));
     }
+    // Probable-damage hint: a stored tag that differs from the batch's only by
+    // case, or sits outside the known tag vocabulary, points at import/hand
+    // edits rather than a caller mistake. Matching itself stays case-sensitive.
+    const KNOWN_TAGS: [&str; 7] =
+        ["float", "int", "bool", "string", "date_time", "duration", "indexed"];
+    let damaged = set.iter().any(|m| {
+        (m.value_kind != bkey.0 && m.value_kind.eq_ignore_ascii_case(&bkey.0))
+            || !KNOWN_TAGS.contains(&m.value_kind.as_str())
+    });
+    let hint = if damaged {
+        " (note: a declared value_kind tag differs from the batch's only by case, or is \
+         outside the known tag vocabulary — probable import/hand-edit damage; tag \
+         matching is case-sensitive)"
+    } else {
+        ""
+    };
     let members: Vec<String> = set.iter().map(member_desc).collect();
     Err(DbError::Api(format!(
         "parameter {parameter:?}: batch ({}) instantiates none of the {} declared member \
          type(s): [{}]; a write never widens the declared type set — declare the new \
-         shape first (template/reconcile operation)",
+         shape first (template/reconcile operation){hint}",
         batch_desc(inferred, value_kind),
-        set.len(),
+        members.len(),
         members.join("; ")
     )))
 }
@@ -1107,15 +1128,17 @@ fn read_declared_types(conn: &Connection, pd_id: i64) -> Result<Vec<DbDeclared>,
         .query_map(params![pd_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
 
+    // One statement, prepared once, executed per member (never re-prepared in
+    // the loop).
+    let mut dim_stmt = conn.prepare(
+        "SELECT position, dimension_name, kind FROM parameter_type_dimension \
+         WHERE parameter_type_id = ? AND valid_to_commit IS NULL ORDER BY position",
+    )?;
     let mut out: Vec<DbDeclared> = Vec::with_capacity(pts.len());
     for (pt_id, value_kind) in pts {
-        let mut stmt = conn.prepare(
-            "SELECT position, dimension_name, kind FROM parameter_type_dimension \
-             WHERE parameter_type_id = ? AND valid_to_commit IS NULL ORDER BY position",
-        )?;
         let mut positions: Vec<(u8, IndexKind)> = Vec::new();
         let mut dim_names: Vec<String> = Vec::new();
-        let rows = stmt.query_map(params![pt_id], |r| {
+        let rows = dim_stmt.query_map(params![pt_id], |r| {
             Ok((r.get::<_, i8>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
         })?;
         for row in rows {
@@ -1131,7 +1154,7 @@ fn read_declared_types(conn: &Connection, pd_id: i64) -> Result<Vec<DbDeclared>,
                 )));
             }
         }
-        out.push(DbDeclared { value_kind, dim_names, shape: DeclaredType { positions } });
+        out.push(DbDeclared { pt_id, value_kind, dim_names, shape: DeclaredType { positions } });
     }
     Ok(out)
 }

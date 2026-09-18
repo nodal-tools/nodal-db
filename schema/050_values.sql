@@ -12,6 +12,11 @@ CREATE TABLE value_scalar (
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
   alternative_id           BIGINT NOT NULL,
+  parameter_type_id       BIGINT,   -- D11 (2026-09-18): the declared parameter_type member this
+                                     -- value bound to at write time (exactly-one-member instantiation,
+                                     -- VMP Part 7 as amended / template_ir_plan D11). Nullable: NULL =
+                                     -- pre-column or out-of-contract rows. FK intent view-validated
+                                     -- (audit_dangling_ref), like the key triple.
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),   -- NULL = current
   version                  SMALLINT NOT NULL,              -- 1..n per key (critique #1)
@@ -40,6 +45,7 @@ CREATE TABLE value_long (
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
   alternative_id           BIGINT NOT NULL,
+  parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),   -- NULL = current
   version                  SMALLINT NOT NULL,              -- per (triple, index tuple)
@@ -95,6 +101,7 @@ CREATE TABLE value_array (
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
   alternative_id           BIGINT NOT NULL,
+  parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   version                  SMALLINT NOT NULL,
   axis1_id BIGINT NOT NULL REFERENCES axis(id),
@@ -120,6 +127,7 @@ CREATE TABLE value_array_hist (
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
   alternative_id           BIGINT NOT NULL,
+  parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL,
   version                  SMALLINT NOT NULL,
   axis1_id BIGINT NOT NULL,
@@ -148,6 +156,7 @@ CREATE INDEX ix_value_array_hist_triple
 CREATE TABLE definition_value_scalar (
   parameter_definition_id  BIGINT NOT NULL,
   slot                     VARCHAR NOT NULL CHECK (slot IN ('default_value', 'prefill_value')),
+  parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),
   version                  SMALLINT NOT NULL,
@@ -165,6 +174,7 @@ CREATE UNIQUE INDEX one_current_def_scalar ON definition_value_scalar (cp, cs);
 CREATE TABLE definition_value_long (
   parameter_definition_id  BIGINT NOT NULL,
   slot                     VARCHAR NOT NULL CHECK (slot IN ('default_value', 'prefill_value')),
+  parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),
   version                  SMALLINT NOT NULL,
@@ -198,6 +208,7 @@ CREATE UNIQUE INDEX one_current_def_long ON definition_value_long (cp, cs, c1, c
 CREATE TABLE definition_value_array (
   parameter_definition_id  BIGINT NOT NULL,
   slot                     VARCHAR NOT NULL CHECK (slot IN ('default_value', 'prefill_value')),
+  parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),   -- from/to even on the array shape (no twin here)
   version                  SMALLINT NOT NULL,

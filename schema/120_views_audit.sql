@@ -166,6 +166,34 @@ FROM (SELECT parameter_definition_id, slot FROM definition_value_scalar WHERE va
       UNION ALL SELECT parameter_definition_id, slot FROM definition_value_array WHERE valid_to_commit IS NULL)
 WHERE parameter_definition_id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)
 UNION ALL
+-- D11 member binding (2026-09-18): a non-NULL parameter_type_id on a payload
+-- row must reference a parameter_type row of the SAME definition. Any
+-- validity — a binding to a since-closed member is legal history (narrowing);
+-- a binding to a vanished row or another definition's member is damage.
+-- NULL bindings (pre-column data, out-of-contract writers) are legal, ignored.
+SELECT 'value_scalar', 'entity=' || v.entity_id || ',pd=' || v.parameter_definition_id, 'parameter_type', v.parameter_type_id
+FROM value_scalar v WHERE v.valid_to_commit IS NULL AND v.parameter_type_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM parameter_type pt WHERE pt.id = v.parameter_type_id
+                  AND pt.parameter_definition_id = v.parameter_definition_id)
+UNION ALL
+SELECT 'value_long', 'entity=' || v.entity_id || ',pd=' || v.parameter_definition_id, 'parameter_type', v.parameter_type_id
+FROM value_long v WHERE v.valid_to_commit IS NULL AND v.parameter_type_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM parameter_type pt WHERE pt.id = v.parameter_type_id
+                  AND pt.parameter_definition_id = v.parameter_definition_id)
+UNION ALL
+SELECT 'value_array', 'entity=' || v.entity_id || ',pd=' || v.parameter_definition_id, 'parameter_type', v.parameter_type_id
+FROM value_array v WHERE v.parameter_type_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM parameter_type pt WHERE pt.id = v.parameter_type_id
+                  AND pt.parameter_definition_id = v.parameter_definition_id)
+UNION ALL
+SELECT 'definition_value', 'pd=' || parameter_definition_id || ',' || slot, 'parameter_type', parameter_type_id
+FROM (SELECT parameter_definition_id, slot, parameter_type_id FROM definition_value_scalar WHERE valid_to_commit IS NULL
+      UNION ALL SELECT parameter_definition_id, slot, parameter_type_id FROM definition_value_long WHERE valid_to_commit IS NULL
+      UNION ALL SELECT parameter_definition_id, slot, parameter_type_id FROM definition_value_array WHERE valid_to_commit IS NULL) d
+WHERE d.parameter_type_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM parameter_type pt WHERE pt.id = d.parameter_type_id
+                  AND pt.parameter_definition_id = d.parameter_definition_id)
+UNION ALL
 -- entity_class_display_mode FK intent to versioned display_mode / entity_class
 -- (deviation D1; Decision 12): lifecycle is writer-owned — closing out a class
 -- closes out its ecdm rows; a stale row lands here, never hard-blocks.
@@ -450,27 +478,35 @@ WHERE valid_to_commit IS NULL AND content_retained
           WHEN 'duration' THEN v_dur_months IS NOT NULL AND v_dur_micros IS NOT NULL
         END)
 UNION ALL
--- array tier (owner decision H): the populated payload column must agree with
--- the declared value_kind (values => float, values_int => int). value_array
--- carries no value_kind of its own — the XOR CHECK guarantees exactly one
--- payload but cannot check it against the declaration; this branch does.
--- Set-aware (D2(a), template_ir_plan §3.3): a definition may declare an
--- allowed-type SET (multi-row parameter_type); the payload kind need only
--- match SOME current declared member, so an int payload beside a coexisting
--- float member no longer false-positives. Fires once per offending value,
--- reporting the actual payload kind.
+-- array tier (owner decision H, redesigned under D2(a) — set-aware LICENSING
+-- check). value_array carries no value_kind of its own: the XOR CHECK
+-- guarantees exactly one payload but cannot check it against the declaration.
+-- Under the canonical convention a rank>=1 member's value_kind is 'indexed'
+-- (030_parameters.sql: "scalar kinds or 'indexed'"), which does NOT declare
+-- the measure kind — so this branch checks whether the definition's current
+-- declared set licenses an array payload of the populated kind AT ALL, not
+-- per-member measure agreement. It fires on:
+--   (a) an array row on a definition declaring only rank-0 members (e.g. a
+--       scalar 'int' member beside a hand-seeded values_int row — the
+--       whitewash false negative of the pre-D2(a) branch);
+--   (b) an array row on a definition with NO current declaration at all
+--       (an out-of-contract writer bypassed the auto-materialize path);
+--   (c) under legacy/explicit measure-kinded rank>=1 members ('float'/'int'
+--       at rank>=1 — a convention the writer never emits), a payload of the
+--       other measure kind.
+-- It deliberately does NOT catch a wrong-measure payload under an 'indexed'
+-- member: the declaration carries no measure kind to check against. Fires
+-- once per offending value, reporting the actual payload kind.
 SELECT 'value_array', va.entity_id, va.parameter_definition_id, va.alternative_id,
        CASE WHEN va.values IS NOT NULL THEN 'float' ELSE 'int' END AS value_kind
 FROM value_array va
-WHERE EXISTS (
-        SELECT 1 FROM parameter_type pt
-        WHERE pt.parameter_definition_id = va.parameter_definition_id
-          AND pt.valid_to_commit IS NULL AND pt.value_kind IN ('float', 'int'))
-  AND NOT EXISTS (
+WHERE NOT EXISTS (
         SELECT 1 FROM parameter_type pt
         WHERE pt.parameter_definition_id = va.parameter_definition_id
           AND pt.valid_to_commit IS NULL
-          AND ((pt.value_kind = 'float' AND va.values     IS NOT NULL)
+          AND pt.rank >= 1
+          AND (pt.value_kind = 'indexed'
+            OR (pt.value_kind = 'float' AND va.values     IS NOT NULL)
             OR (pt.value_kind = 'int'   AND va.values_int IS NOT NULL)));
 
 -- Array-integrity: len(values) = product of axis lengths; no NULL cells

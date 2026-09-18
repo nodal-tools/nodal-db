@@ -661,9 +661,10 @@ CREATE VIEW audit_metadata_reserved_dup AS
 SELECT lower(name) AS name, count(*) AS n, list(value) AS conflicting_values
 FROM metadata
 WHERE valid_to_commit IS NULL
-  AND lower(name) IN ('schema_version', 'template_name', 'template_version',
+  AND lower(name) IN ('schema_version', 'db_identity',
+                      'template_name', 'template_version',
                       'template_content_hash', 'presentation',
-                      'semantic_context', 'conforms_to')  -- single-valued reserved keys (fitness 2b)
+                      'semantic_context', 'conforms_to')  -- single-valued reserved keys (fitness 2b + interop §9)
 GROUP BY lower(name)
 HAVING count(*) > 1;
 

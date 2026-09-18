@@ -14,3 +14,16 @@ VALUES ('nodal_db', 'bootstrap: schema creation');
 INSERT INTO metadata (id, name, value, valid_from_commit)
 VALUES (nextval('seq_metadata'), 'schema_version', '0.2-ddl-critique-fixes',
         currval('seq_commit'));
+
+-- DB-identity UUID (docs/dev/schema_interop.md §9): minted ONCE here — the
+-- only writer — and stable for the lifetime of the database. Output DBs stamp
+-- "produced from input DB <identity> at commit C under scenario S" against it,
+-- so it must never be re-minted. It is DATA, not a DDL side effect: the
+-- compaction repack deletes the fresh temp's own bootstrap rows and copies the
+-- source's metadata rows verbatim, so the identity survives physical rebuilds.
+-- Read it with plain SQL:
+--   SELECT value FROM metadata
+--   WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL;
+INSERT INTO metadata (id, name, value, valid_from_commit)
+VALUES (nextval('seq_metadata'), 'db_identity', uuid()::VARCHAR,
+        currval('seq_commit'));

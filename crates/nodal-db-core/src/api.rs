@@ -702,6 +702,25 @@ pub fn read_parameter(
     })
 }
 
+/// The database's stable identity UUID — the `db_identity` reserved metadata
+/// key, minted once by `900_bootstrap.sql` at init and never changed thereafter
+/// (docs/dev/schema_interop.md §9: the anchor output DBs stamp their
+/// "produced from input DB <identity> at commit C under scenario S" provenance
+/// against). It survives reopen and compaction (the repack copies `metadata`
+/// rows as data). One fresh RO connection per call (CLAUDE.md invariant 1).
+/// Plain-SQL equivalent:
+/// `SELECT value FROM metadata WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL`.
+pub fn db_identity(db: &Path) -> Result<String, DbError> {
+    with_read(db, |conn| {
+        Ok(conn.query_row(
+            "SELECT value FROM metadata \
+             WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Arrow-type → kind mapping
 // ---------------------------------------------------------------------------

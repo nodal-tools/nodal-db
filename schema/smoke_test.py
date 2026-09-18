@@ -19,6 +19,7 @@ Part 5 by hand — they are what the client library will own.
 """
 import datetime
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -231,6 +232,24 @@ def main():
     schema_build.build(str(db), force=True)
     con = duckdb.connect(str(db))
     ts = datetime.datetime
+
+    # ---- DB-identity UUID (schema_interop.md §9): minted once at init by
+    # 900_bootstrap.sql. Captured BEFORE any writes; asserted well-formed here,
+    # distinct per init, and (at suite end) unchanged across the whole flow.
+    ident_sql = ("SELECT value FROM metadata WHERE lower(name) = 'db_identity'"
+                 " AND valid_to_commit IS NULL")
+    dbid = con.execute(ident_sql).fetchone()[0]
+    check("db_identity: minted at init with RFC-4122 shape",
+          bool(re.fullmatch(
+              r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+              dbid or "")), str(dbid))
+    twin_path = workdir / "smoke_identity_twin.duckdb"
+    schema_build.build(str(twin_path), force=True)
+    twin = duckdb.connect(str(twin_path))
+    twin_id = twin.execute(ident_sql).fetchone()[0]
+    twin.close()
+    check("db_identity: a second init mints a different identity",
+          twin_id is not None and twin_id != dbid, f"{dbid} vs {twin_id}")
 
     # ---- demo model, one commit (VMP Part 5: one transaction incl. commit row)
     con.execute("BEGIN")
@@ -1255,6 +1274,12 @@ def main():
                  "audit_realizes_cycle", "audit_dangling_semantic_ref"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"final: {view} clean after hostile section", n == 0, f"n={n}")
+
+    # ---- DB-identity: stable for the lifetime of the database — still the one
+    # current row minted at init, byte-identical after the whole smoke flow.
+    rows = allrows(ident_sql)
+    check("db_identity: single current row, unchanged across the whole suite",
+          rows == [(dbid,)], str(rows))
 
     con.close()
     n_fail = RESULTS.count(False)

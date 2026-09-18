@@ -41,8 +41,13 @@ CREATE TABLE commit (
 -- One key/value metadata table (SDP Part 1 `metadata`): dataset-level facts
 -- (#645: author, sources, licenses), template identity keys (Decision 6:
 -- template name/version/content hash), the shared authored presentation slot
--- (Decision 7: one JSON document under one reserved key), and schema_version
--- (replaces alembic_version) are reserved keys with no link row.
+-- (Decision 7: one JSON document under one reserved key), schema_version
+-- (replaces alembic_version), and db_identity (the stable DB-identity UUID,
+-- minted once by 900_bootstrap.sql and never changed — the anchor for
+-- output→input provenance stamps, schema_interop.md §9; read with
+--   SELECT value FROM metadata
+--   WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL)
+-- are reserved keys with no link row.
 -- Fitness round 2b adds semantic/interop reserved keys (convention only, no
 -- new table): `semantic_context` (JSON-LD @context / CURIE-prefix map that
 -- expands the IRIs stored in semantic_link / quantity_kind_link / term_iri),

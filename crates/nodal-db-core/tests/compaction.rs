@@ -16,7 +16,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::write_parameter;
+use nodal_db_core::api::{db_identity, write_parameter};
 use nodal_db_core::compaction::{baseline_path, compact, compact_if_needed, sweep_orphan_temps};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
@@ -218,6 +218,32 @@ fn compact_preserves_sequence_state_for_next_write() {
         v
     };
     assert_eq!(v, 42.0);
+}
+
+// --- (c) DB-identity survival -----------------------------------------------
+
+/// CRITICAL invariant (schema_interop.md §9): the DB-identity UUID is DATA,
+/// never a re-mintable DDL side effect. The repack's fresh temp mints its OWN
+/// identity via 900_bootstrap.sql; the B1 bootstrap wipe must delete it and the
+/// copy must carry the source's row verbatim — after compact the identity is
+/// byte-identical and still the single current `db_identity` row.
+#[test]
+fn compact_preserves_db_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 10);
+
+    let before = db_identity(&db).expect("identity before compact");
+    let report = compact(&db).expect("compact");
+    assert!(report.swapped);
+
+    let after = db_identity(&db).expect("identity after compact");
+    assert_eq!(before, after, "compaction must not re-mint the DB identity");
+    let n = scalar(
+        &db,
+        "SELECT count(*) FROM metadata \
+         WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",
+    );
+    assert_eq!(n, 1, "exactly one current db_identity row after compact");
 }
 
 // --- (d) schema_version mismatch rejected ----------------------------------

@@ -173,4 +173,57 @@ mod tests {
         init_schema_with_default(&base_db, Some("Base")).expect("init base");
         assert_eq!(alt_count(&base_db), 1, "Some(name) seeds exactly one alternative");
     }
+
+    /// RFC-4122 textual shape: 8-4-4-4-12 hex groups.
+    fn assert_uuid_shape(id: &str) {
+        assert_eq!(id.len(), 36, "not a UUID: {id}");
+        for (i, c) in id.chars().enumerate() {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                assert_eq!(c, '-', "not a UUID: {id}");
+            } else {
+                assert!(c.is_ascii_hexdigit(), "not a UUID: {id}");
+            }
+        }
+    }
+
+    /// DB-identity (schema_interop.md §9): every init path mints ONE fresh,
+    /// well-formed UUID per database — distinct across databases, stable
+    /// across reopens (each `api::db_identity` call is a fresh connection).
+    #[test]
+    fn db_identity_minted_unique_and_stable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a.duckdb");
+        let b = dir.path().join("b.duckdb");
+        init_schema(&a).expect("init a");
+        init_schema(&b).expect("init b");
+
+        let id_a = crate::api::db_identity(&a).expect("identity a");
+        let id_b = crate::api::db_identity(&b).expect("identity b");
+        assert_uuid_shape(&id_a);
+        assert_uuid_shape(&id_b);
+        assert_ne!(id_a, id_b, "two inits must mint two different identities");
+
+        // Stable across reopen: the getter re-opens per call.
+        assert_eq!(crate::api::db_identity(&a).expect("re-read a"), id_a);
+
+        // The embedded-sources path (the deployed CLI `init`) mints too — it
+        // applies the same 900_bootstrap.sql, just from memory.
+        let files = numbered_sql_files(&schema_dir()).expect("list schema files");
+        let named: Vec<(String, String)> = files
+            .iter()
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_str().unwrap().to_string(),
+                    fs::read_to_string(p).expect("read schema file"),
+                )
+            })
+            .collect();
+        let sources: Vec<(&str, &str)> =
+            named.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let c = dir.path().join("c.duckdb");
+        init_schema_from_sources(&c, &sources).expect("init from sources");
+        let id_c = crate::api::db_identity(&c).expect("identity c");
+        assert_uuid_shape(&id_c);
+        assert_ne!(id_c, id_a, "sources-path init mints its own identity");
+    }
 }

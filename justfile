@@ -31,7 +31,7 @@ full:
     {{py}} schema/smoke_test.py
     cargo bench
 
-# DuckDB schema smoke suite alone (153 checks).
+# DuckDB schema smoke suite alone (156 checks).
 smoke:
     {{py}} schema/smoke_test.py
 

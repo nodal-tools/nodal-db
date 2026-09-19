@@ -162,6 +162,75 @@ pub fn delete_value(
 }
 
 // ---------------------------------------------------------------------------
+// Definition-scoped default values (template loader; #1598 mirrors)
+// ---------------------------------------------------------------------------
+
+/// Write a definition-scoped scalar `default_value` (the `#1598` mirror,
+/// `definition_value_scalar`) under the same from/to close-out protocol as
+/// entity-scoped scalars: close the current row (content retained — defaults
+/// are small, low-churn authored content), insert the new one at
+/// `max(version) + 1` for the `(definition, slot)` partition. A scalar default
+/// is already canonical (rank 0: the canonicalization pipeline's NULL
+/// elimination / axis derivation / tier rule are identity — VMP Part 3), so
+/// this consumes the typed [`ScalarValue`] directly; `parameter_type_id` is
+/// the D11 binding to the rank-0 declared member the default instantiates.
+/// Returns `(rows_closed, rows_written)`; a no-change write still versions
+/// (callers diff first — the template reconcile only calls this on change).
+pub(crate) fn write_definition_default(
+    conn: &Connection,
+    commit_id: i64,
+    pd_id: i64,
+    value: &ScalarValue,
+    parameter_type_id: Option<i64>,
+) -> Result<(usize, usize), DbError> {
+    let closed = close_definition_default(conn, commit_id, pd_id)?;
+    let version: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM definition_value_scalar \
+         WHERE parameter_definition_id = ? AND slot = 'default_value'",
+        params![pd_id],
+        |r| r.get(0),
+    )?;
+    let vc = VCols::of(value);
+    conn.execute(
+        "INSERT INTO definition_value_scalar \
+           (parameter_definition_id, slot, parameter_type_id, valid_from_commit, version, \
+            content_retained, value_kind, v_float, v_int, v_bool, v_str, v_datetime, \
+            v_dur_months, v_dur_micros) \
+         VALUES (?, 'default_value', ?, ?, ?, TRUE, ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)",
+        params![
+            pd_id,
+            parameter_type_id,
+            commit_id,
+            version as i16,
+            vc.kind,
+            vc.f,
+            vc.i,
+            vc.b,
+            vc.s,
+            vc.dt,
+            vc.dm,
+            vc.du,
+        ],
+    )?;
+    Ok((closed, 1))
+}
+
+/// Close out the current scalar `default_value` row of a definition (content
+/// retained). Returns the number of rows closed (0 or 1).
+pub(crate) fn close_definition_default(
+    conn: &Connection,
+    commit_id: i64,
+    pd_id: i64,
+) -> Result<usize, DbError> {
+    Ok(conn.execute(
+        "UPDATE definition_value_scalar SET valid_to_commit = ? \
+         WHERE parameter_definition_id = ? AND slot = 'default_value' \
+           AND valid_to_commit IS NULL",
+        params![commit_id, pd_id],
+    )?)
+}
+
+// ---------------------------------------------------------------------------
 // Current-state detection
 // ---------------------------------------------------------------------------
 

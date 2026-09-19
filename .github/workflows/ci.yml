@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: '3.x'
 
-      # Quick gate, half 2: schema smoke (expects 156/156). DuckDB pinned to
+      # Quick gate, half 2: schema smoke (expects 157/157). DuckDB pinned to
       # the line the schema is verified on (CLAUDE.md: DuckDB 1.5.5).
       - name: schema smoke test
         run: |

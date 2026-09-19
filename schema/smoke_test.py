@@ -796,6 +796,17 @@ def main():
     check("F5: second current schema_version row fires audit_metadata_reserved_dup",
           dup == [("schema_version", 2)], str(dup))
     con.execute("DELETE FROM metadata WHERE value = 'CONFLICTING'")
+    # audit_rules is a reserved single-valued key too (template_ir_plan D4 —
+    # the one-string additive allowlist edit named in its Appendix)
+    con.execute("BEGIN")
+    for v in ("{}", '{"conditional_requirements": []}'):
+        con.execute("INSERT INTO metadata (id, name, value, valid_from_commit)"
+                    " VALUES (nextval('seq_metadata'), 'audit_rules', ?, ?)", [v, c3])
+    con.execute("COMMIT")
+    dup = allrows("SELECT name, n FROM audit_metadata_reserved_dup")
+    check("D4: forked audit_rules key fires audit_metadata_reserved_dup",
+          dup == [("audit_rules", 2)], str(dup))
+    con.execute("DELETE FROM metadata WHERE lower(name) = 'audit_rules'")
     check("F10: bootstrap schema_version matches build.py constant",
           one("SELECT value FROM metadata_current WHERE lower(name) = 'schema_version'")[0]
           == schema_build.SCHEMA_VERSION)

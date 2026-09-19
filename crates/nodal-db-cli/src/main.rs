@@ -1,11 +1,16 @@
 //! `nodal-db` CLI — verb dispatch (`specs/rust_implementation_plan.md`
-//! Part 4). `init` applies the schema; `import` ingests the Arrow-IPC bulk
-//! format (`spec/arrow_ipc_bulk_format.md`) through the one core
-//! canonicalizer — the CLI deserializes and expands, it NEVER
-//! re-canonicalizes (CLAUDE.md invariant 2). `migrate`/`maintain`/`template`
-//! are explicit not-implemented stubs freezing the verb surface (§3.3 door 3).
+//! Part 4). `init` applies the schema (optionally loading a template — the
+//! init-with-template path); `import` ingests the Arrow-IPC bulk format
+//! (`spec/arrow_ipc_bulk_format.md`) through the one core canonicalizer — the
+//! CLI deserializes and expands, it NEVER re-canonicalizes (CLAUDE.md
+//! invariant 2). `template` is un-frozen (template_ir_plan phase 2/3:
+//! load / plan / apply / export); `migrate`/`maintain` remain explicit
+//! not-implemented stubs reserving the verbs (§3.3 door 3) — the reconcile
+//! runner lives under `template apply` in v1 (§4.4: `migrate` becomes the
+//! full-chain runner as a later door).
 
 mod import;
+mod template;
 
 use std::path::PathBuf;
 
@@ -45,15 +50,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Apply the schema into a fresh DuckDB file.
+    /// Apply the schema into a fresh DuckDB file (optionally loading a
+    /// template — the init-with-template path).
     Init {
         /// Path of the DuckDB file to create.
         db: PathBuf,
         /// Seed one default alternative with this name (decision D3). Omitted ⇒
         /// no alternative is seeded (the value write path auto-creates on first
-        /// use); the DB is never implicitly given a `Base`.
+        /// use); the DB is never implicitly given a `Base`. A template's seed
+        /// alternative maps HERE, never to IR content (template_ir_plan §1.2).
         #[arg(long)]
         alternative: Option<String>,
+        /// Load this template (YAML or JSON IR) right after the schema.
+        #[arg(long)]
+        template: Option<PathBuf>,
+        /// Commit author for the template load; defaults to the OS username.
+        #[arg(long)]
+        user: Option<String>,
         /// Dev override: apply schema/*.sql from a directory instead of the
         /// compile-time-embedded schema. Without a value, uses the repo's
         /// schema/ directory as resolved by the core.
@@ -91,18 +104,23 @@ enum Command {
         #[arg(long)]
         force_replace: bool,
     },
-    /// Not implemented in v1 core (verb reserved).
+    /// Not implemented in v1 core (verb reserved; the v1 reconcile runner is
+    /// `template apply`).
     Migrate,
     /// Not implemented in v1 core (verb reserved).
     Maintain,
-    /// Not implemented in v1 core (verb reserved).
-    Template,
+    /// Template IR operations: load / plan / apply / export
+    /// (specs/template_ir_plan.md).
+    Template {
+        #[command(subcommand)]
+        command: template::TemplateCommand,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { db, alternative, schema_dir } => {
+        Command::Init { db, alternative, template, user, schema_dir } => {
             // Refuse an existing database (CLI critique F6): the schema applies
             // file-by-file under autocommit, so re-applying onto existing state
             // fails partway and can leave a mixed state. Only an absent or
@@ -133,6 +151,9 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             println!("initialized {}", db.display());
+            if let Some(file) = template {
+                template::load_into(&file, &db, user.as_deref())?;
+            }
             Ok(())
         }
         Command::Import {
@@ -154,8 +175,11 @@ fn main() -> anyhow::Result<()> {
             message,
             force_replace,
         }),
-        Command::Migrate => bail!("migrate: not implemented in v1 core"),
+        Command::Migrate => bail!(
+            "migrate: not implemented in v1 core (the v1 reconcile runner is \
+             `template apply`)"
+        ),
         Command::Maintain => bail!("maintain: not implemented in v1 core"),
-        Command::Template => bail!("template: not implemented in v1 core"),
+        Command::Template { command } => template::run(command),
     }
 }

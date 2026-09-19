@@ -664,7 +664,11 @@ WHERE valid_to_commit IS NULL
   AND lower(name) IN ('schema_version', 'db_identity',
                       'template_name', 'template_version',
                       'template_content_hash', 'presentation',
-                      'semantic_context', 'conforms_to')  -- single-valued reserved keys (fitness 2b + interop §9)
+                      'semantic_context', 'conforms_to',
+                      'audit_rules')  -- single-valued reserved keys (fitness 2b + interop §9;
+                                      -- audit_rules: the D4 conditional-rules document,
+                                      -- template_ir_plan §5.2 — the one-string additive edit
+                                      -- named in its Appendix)
 GROUP BY lower(name)
 HAVING count(*) > 1;
 

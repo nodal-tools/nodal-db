@@ -1,0 +1,113 @@
+# Sample vocabulary exercising every v1 IR construct (template_ir_plan §2):
+# 0-D and N-D classes up to 4-D, a class-set with TRANSPOSED N-D members (the
+# INES unit_flow shape, §8.2.2), multi-member declared type sets (D2a),
+# explicit dim names/kinds (D3), value lists (+ inferred typing §3.5), a
+# typeless definition, defaults, units (+ a dropped registry extra, D7),
+# parameter groups (D8), conditional audit rules (D4), and seed scaffolding
+# (D6) incl. an entity whose elements are themselves 2-D entities.
+#
+# Curated fixture — APPEND-ONLY for agents (CONTRIBUTING "Testing rules" #2):
+# extend by adding new documents/overlays in test code, not by rewriting this.
+template:
+  name: sample
+  version: "3"
+  description: "Loader v1 exercise template"   # no store carrier: excluded from the hash
+  role: input
+
+units:
+  - name: p_u
+    description: "per-unit fraction"
+  - name: t_CO2_per_MWh
+    quantity_kind: "http://qudt.org/vocab/quantitykind/EmissionRate"
+    description: "tonnes CO2 per MWh"
+    ucum: "t/MW.h"          # registry authoring metadata: dropped at load, warned (D7)
+
+value_lists:
+  - name: yes_no
+    members:
+      - {value: "yes", description: "Enabled."}   # quoted per the authoring guide;
+      - {value: "no"}                             #   the 1.2 parser would keep bare yes/no
+  - name: method
+    members:
+      - {value: constant_efficiency, kind: string}
+      - {value: two_point_efficiency}
+
+parameter_groups:
+  - {name: basics, color: "6fa8c7", order: 10}
+  - {name: investments, order: 20}
+
+class_sets:
+  - name: unit_flow
+    description: "Either direction of a unit-node flow."
+    members: [node__to_unit, unit__to_node]
+
+classes:
+  - name: node
+    active_by_default: false
+    parameters:
+      - name: demand
+        types: &float_or_t          # anchor: parse-time only, never survives re-emission
+          - {kind: float}
+          - {kind: indexed, dims: [{name: t, kind: datetime}]}
+        unit: p_u
+        group: basics
+        default: {kind: float, value: 0.0}
+  - name: unit
+    active_by_default: false
+    required: true
+    parameters:
+      - name: conversion_method
+        value_list: method          # no types: kind inferred from the list (§3.5)
+        default: {kind: string, value: constant_efficiency}
+        group: basics
+      - name: efficiency
+        types: [{kind: float}]
+      - name: conversion_rates
+        types: [{kind: indexed, dims: [{name: op, kind: label}]}]
+      - name: notes                 # typeless: materializes on first write (§2.2)
+  - name: upDown
+    description: "Direction enum-as-class (FlexTool fidelity, §1.2)."
+  - name: reserve
+  - name: node__to_unit
+    dimensions: [node, unit]
+  - name: unit__to_node
+    dimensions: [unit, node]        # transposed member order — must not matter
+  - name: unit_flow__unit_flow
+    dimensions:
+      - {class_set: unit_flow}
+      - {class_set: unit_flow}
+  - name: reserve__upDown__unit__node
+    display_order: 50
+    dimensions: [reserve, upDown, unit, node]
+    parameters:
+      - name: is_enabled
+        value_list: yes_no
+        default: {kind: string, value: "yes"}
+      - name: max_share
+        types: *float_or_t
+        unit: p_u
+        group: investments
+
+audit_rules:
+  conditional_requirements:
+    - class: unit
+      selector: conversion_method
+      when:
+        constant_efficiency: {require: [efficiency]}
+        two_point_efficiency: {require: [conversion_rates]}
+
+seed:
+  entities:
+    - {class: upDown, name: up}
+    - {class: upDown, name: down, description: "Downward direction."}
+    - {class: reserve, name: fcr}
+    - {class: node, name: n1}
+    - {class: unit, name: u1}
+    - {class: node__to_unit, elements: [n1, u1]}          # name defaults to n1__u1
+    - {class: unit__to_node, elements: [u1, n1]}
+    - class: unit_flow__unit_flow                          # elements are 2-D entities
+      name: flowpair                                       #   via the class-set (§8.2.2)
+      elements: [n1__u1, u1__n1]
+    - {class: reserve__upDown__unit__node, elements: [fcr, up, u1, n1]}
+  memberships:
+    - {group: {class: node, entity: n1}, member: {class: unit, entity: u1}}

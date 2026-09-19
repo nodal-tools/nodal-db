@@ -24,11 +24,14 @@ One DuckDB file is the database. Around it:
 - **`nodal-db-core`** (Rust library) — the writer library and the **single
   canonicalizer**. All writes in the whole ecosystem funnel through it.
   *Implemented.*
-- **`nodal-db` CLI** (`crates/nodal-db-cli`) — `init` (embedded schema)
-  and `import` (the Arrow-IPC bulk format), the declared write boundary
-  for every non-Rust client (Julia, Python pipelines). `migrate` /
-  `maintain` / `template` are frozen not-implemented stubs reserving the
-  verb surface. *Implemented.*
+- **`nodal-db` CLI** (`crates/nodal-db-cli`) — `init` (embedded schema,
+  `--template` for init-with-template), `import` (the Arrow-IPC bulk
+  format), and `template load` / `plan` / `apply` / `export` (the
+  template-IR loader, `specs/template_ir_plan.md`), the declared write
+  boundary for every non-Rust client (Julia, Python pipelines).
+  `migrate` / `maintain` remain frozen not-implemented stubs reserving
+  the verb surface (the v1 reconcile runner is `template apply`; the
+  full-chain `migrate` verb is a later door, plan §4.4). *Implemented.*
 - **egui editor** — lives in the separate `../nodal-editor` repo
   (two-repo layout, `specs/language_and_architecture_research.md`
   §3.2/§3.3: the editor must not be able to reach core internals). It
@@ -257,11 +260,13 @@ CI is minimal by design: `cargo test --workspace` + schema smoke.
 - **Implemented**: core write/read path, tier pipeline, axis dedup,
   history protocol (batched long-tier writes), Arrow-IPC import + CLI
   `init`, value/object deletion, de-Base DB init, conformance +
-  benchmark gates.
+  benchmark gates, template-IR loader v1 (`template` module: parse /
+  validate / load / reconcile+hints+`run:` runner / export;
+  `specs/template_ir_plan.md` phase 2).
 - **In progress**: compaction (uncommitted working tree:
   `compaction.rs`, `tests/compaction.rs`, small `conn.rs` visibility
   change); editor (separate `nodal-editor` repo).
-- **Planned**: PyO3 skin; CLI `migrate`/`maintain`/`template`.
+- **Planned**: PyO3 skin; CLI `migrate`/`maintain` (verbs reserved).
 - **Deferred doors** (design held open, no code): serving process,
   native Julia writer (conformance-gated), value inheritance, symbols,
   structured units, in-place reshape, hard erasure

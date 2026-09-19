@@ -66,3 +66,9 @@ pub mod object_delete;
 /// one that reclaims dead blocks while preserving ALL logical content, then
 /// atomically swap it in (`specs/compaction_DESIGN.md`).
 pub mod compaction;
+
+/// The template IR loader: parse/validate the YAML-1.2/JSON vocabulary IR,
+/// load into a fresh DB, reconcile against a populated one (three-layer
+/// migration model, v1 mechanics), export back out
+/// (`specs/template_ir_plan.md`; HANDOFF §8.4 phase 2).
+pub mod template;

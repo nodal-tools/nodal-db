@@ -763,7 +763,7 @@ fn index_kind_tag(k: IndexKind) -> &'static str {
     }
 }
 
-fn parse_index_kind(s: &str) -> Result<IndexKind, DbError> {
+pub(crate) fn parse_index_kind(s: &str) -> Result<IndexKind, DbError> {
     Ok(match s {
         "datetime" => IndexKind::Datetime,
         "integer" => IndexKind::Integer,
@@ -1182,7 +1182,12 @@ fn read_declared_types(conn: &Connection, pd_id: i64) -> Result<Vec<DbDeclared>,
 /// shape: `value_kind = 'indexed'` for rank ≥ 1 else the measure kind tag;
 /// dimension names/kinds from the inferred columns (VMP Part 2/7). Returns the
 /// created `parameter_type` id.
-fn create_parameter_type(
+///
+/// `pub(crate)` for the template loader (template_ir_plan §1.3): declared
+/// type-set members are created through this one insert path, so the loader
+/// and the auto-create path cannot drift. When `inferred` is non-empty the
+/// `value_kind` argument is ignored (the row stores `'indexed'`).
+pub(crate) fn create_parameter_type(
     conn: &Connection,
     commit_id: i64,
     pd_id: i64,

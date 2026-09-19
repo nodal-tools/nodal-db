@@ -43,6 +43,7 @@
 //! database alone. Exclusions are named in the phase report.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::marker::PhantomData;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -50,7 +51,69 @@ use serde_json::{json, Map, Value};
 
 use crate::encoding::content_hash as xxh3_hash;
 use crate::error::DbError;
-use crate::types::ScalarValue;
+use crate::types::{fold, ScalarValue};
+
+/// A duplicate-rejecting string-keyed map (review item: YAML mappings
+/// deserialized into a plain `BTreeMap` silently last-win on duplicate keys —
+/// an authoring footgun for `when:` branches, migration-step maps, and unit
+/// registry extras). The visitor errors, NAMING the duplicated key. Order is
+/// canonical (BTreeMap) as everywhere else in the normalized model.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UniqueMap<V>(pub BTreeMap<String, V>);
+
+impl<V> UniqueMap<V> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<V> std::ops::Deref for UniqueMap<V> {
+    type Target = BTreeMap<String, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<V> std::ops::DerefMut for UniqueMap<V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<V: Serialize> Serialize for UniqueMap<V> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
+
+impl<'de, V: Deserialize<'de>> Deserialize<'de> for UniqueMap<V> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis<V>(PhantomData<V>);
+        impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Vis<V> {
+            type Value = UniqueMap<V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a mapping with unique keys")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut m: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut out = BTreeMap::new();
+                while let Some(k) = m.next_key::<String>()? {
+                    let v = m.next_value::<V>()?;
+                    if out.insert(k.clone(), v).is_some() {
+                        return Err(A::Error::custom(format!(
+                            "duplicate key {k:?} (each key may appear once)"
+                        )));
+                    }
+                }
+                Ok(UniqueMap(out))
+            }
+        }
+        d.deserialize_map(Vis(PhantomData))
+    }
+}
 
 /// Scalar `value_kind` tags legal in a `types:` member (the store's
 /// `parameter_type.value_kind` vocabulary minus `indexed`, `api.rs`
@@ -70,10 +133,6 @@ pub const DIM_KINDS: [&str; 5] = ["datetime", "period", "label", "integer", "tim
 /// The store's name charset CHECK (`#2373`): classes, entities, parameters.
 fn name_charset_ok(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-fn fold(s: &str) -> String {
-    s.to_lowercase()
 }
 
 fn default_true() -> bool {
@@ -137,8 +196,8 @@ pub struct Unit {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity_kind: Option<String>,
-    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty", default)]
-    pub registry_extras: BTreeMap<String, Value>,
+    #[serde(flatten, skip_serializing_if = "UniqueMap::is_empty", default)]
+    pub registry_extras: UniqueMap<Value>,
 }
 
 /// A value list (§1.1): named, ordered, typed members. Member order IS the
@@ -270,6 +329,10 @@ pub struct TypeDecl {
 impl TypeDecl {
     /// The (value_kind tag, folded (name, kind) vector) the write path matches
     /// and distinguishes on (`api.rs` `MatchKey`, VMP Part 7 as amended).
+    /// Folding is the crate-wide Unicode [`fold`] (DuckDB `lower()` parity);
+    /// the write path's own matcher folds ASCII-only, so this load-time check
+    /// is equal-or-STRICTER — a set it refuses would only ever differ on
+    /// non-ASCII case aliases the SQL layer would collapse anyway.
     pub fn match_key(&self) -> (String, Vec<(String, String)>) {
         (
             self.kind.clone(),
@@ -277,7 +340,7 @@ impl TypeDecl {
                 .as_deref()
                 .unwrap_or(&[])
                 .iter()
-                .map(|d| (d.name.to_ascii_lowercase(), d.kind.clone()))
+                .map(|d| (fold(&d.name), d.kind.clone()))
                 .collect(),
         )
     }
@@ -367,8 +430,9 @@ pub struct ConditionalRequirement {
     pub class: String,
     /// A value-list parameter on the class whose value selects the branch.
     pub selector: String,
-    /// method value -> required parameters (BTreeMap: key order canonical).
-    pub when: BTreeMap<String, WhenClause>,
+    /// method value -> required parameters (key order canonical; duplicate
+    /// branch keys are a parse error, [`UniqueMap`]).
+    pub when: UniqueMap<WhenClause>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -482,151 +546,65 @@ pub enum MigrationStep {
     Run(String),
 }
 
-/// Typed bodies for the one-key-map serde of [`MigrationStep`].
-mod step_bodies {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct Rename {
-        pub from: String,
-        pub to: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct RenameInClass {
-        pub class: String,
-        pub from: String,
-        pub to: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct RenameListMember {
-        pub list: String,
-        pub from: String,
-        pub to: String,
+/// The serde mirror of [`MigrationStep`] (remote derive). The derived
+/// externally-tagged representation IS the one-key map — under `serde_json`;
+/// the serde_yaml-0.9 family would render it as a YAML `!tag`, so both impls
+/// below detour through `serde_json::Value` (the object model is
+/// JSON-compatible by design, D1). Deserialization goes through [`UniqueMap`]
+/// first for the duplicate-key rejection and the one-key contract.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "MigrationStep", rename_all = "snake_case", deny_unknown_fields)]
+enum StepDef {
+    RenameClass {
+        from: String,
+        to: String,
+    },
+    RenameParameter {
+        class: String,
+        from: String,
+        to: String,
+    },
+    RenameValueList {
+        from: String,
+        to: String,
+    },
+    RenameListMember {
+        list: String,
+        from: String,
+        to: String,
         #[serde(default)]
-        pub rewrite_values: bool,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct MoveParameter {
-        pub name: String,
-        pub from_class: String,
-        pub to_class: String,
-    }
+        rewrite_values: bool,
+    },
+    MoveParameter {
+        name: String,
+        from_class: String,
+        to_class: String,
+    },
+    Run(String),
 }
 
 impl Serialize for MigrationStep {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = s.serialize_map(Some(1))?;
-        match self {
-            MigrationStep::RenameClass { from, to } => map.serialize_entry(
-                "rename_class",
-                &step_bodies::Rename { from: from.clone(), to: to.clone() },
-            )?,
-            MigrationStep::RenameParameter { class, from, to } => map.serialize_entry(
-                "rename_parameter",
-                &step_bodies::RenameInClass {
-                    class: class.clone(),
-                    from: from.clone(),
-                    to: to.clone(),
-                },
-            )?,
-            MigrationStep::RenameValueList { from, to } => map.serialize_entry(
-                "rename_value_list",
-                &step_bodies::Rename { from: from.clone(), to: to.clone() },
-            )?,
-            MigrationStep::RenameListMember { list, from, to, rewrite_values } => map
-                .serialize_entry(
-                    "rename_list_member",
-                    &step_bodies::RenameListMember {
-                        list: list.clone(),
-                        from: from.clone(),
-                        to: to.clone(),
-                        rewrite_values: *rewrite_values,
-                    },
-                )?,
-            MigrationStep::MoveParameter { name, from_class, to_class } => map.serialize_entry(
-                "move_parameter",
-                &step_bodies::MoveParameter {
-                    name: name.clone(),
-                    from_class: from_class.clone(),
-                    to_class: to_class.clone(),
-                },
-            )?,
-            MigrationStep::Run(p) => map.serialize_entry("run", p)?,
-        }
-        map.end()
+        #[derive(Serialize)]
+        struct Helper<'a>(#[serde(with = "StepDef")] &'a MigrationStep);
+        let v = serde_json::to_value(Helper(self)).map_err(serde::ser::Error::custom)?;
+        v.serialize(s)
     }
 }
 
 impl<'de> Deserialize<'de> for MigrationStep {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        // One key -> one step. Bodies re-typed through serde_json::Value
-        // (the object model is JSON-compatible by design, D1).
-        let map = BTreeMap::<String, Value>::deserialize(d)?;
-        if map.len() != 1 {
+        let m = UniqueMap::<Value>::deserialize(d)?;
+        if m.0.len() != 1 {
             return Err(D::Error::custom(format!(
                 "a migration step is a ONE-key map (rename_class / rename_parameter / \
                  rename_value_list / rename_list_member / move_parameter / run), got {} keys",
-                map.len()
+                m.0.len()
             )));
         }
-        let (key, body) = map.into_iter().next().expect("len checked");
-        let step = match key.as_str() {
-            "rename_class" => {
-                let b: step_bodies::Rename =
-                    serde_json::from_value(body).map_err(D::Error::custom)?;
-                MigrationStep::RenameClass { from: b.from, to: b.to }
-            }
-            "rename_parameter" => {
-                let b: step_bodies::RenameInClass =
-                    serde_json::from_value(body).map_err(D::Error::custom)?;
-                MigrationStep::RenameParameter { class: b.class, from: b.from, to: b.to }
-            }
-            "rename_value_list" => {
-                let b: step_bodies::Rename =
-                    serde_json::from_value(body).map_err(D::Error::custom)?;
-                MigrationStep::RenameValueList { from: b.from, to: b.to }
-            }
-            "rename_list_member" => {
-                let b: step_bodies::RenameListMember =
-                    serde_json::from_value(body).map_err(D::Error::custom)?;
-                MigrationStep::RenameListMember {
-                    list: b.list,
-                    from: b.from,
-                    to: b.to,
-                    rewrite_values: b.rewrite_values,
-                }
-            }
-            "move_parameter" => {
-                let b: step_bodies::MoveParameter =
-                    serde_json::from_value(body).map_err(D::Error::custom)?;
-                MigrationStep::MoveParameter {
-                    name: b.name,
-                    from_class: b.from_class,
-                    to_class: b.to_class,
-                }
-            }
-            "run" => {
-                let p: String = serde_json::from_value(body).map_err(D::Error::custom)?;
-                MigrationStep::Run(p)
-            }
-            other => {
-                return Err(D::Error::custom(format!(
-                    "unknown migration step {other:?} (the hint vocabulary is CLOSED: \
-                     rename_class, rename_parameter, rename_value_list, \
-                     rename_list_member, move_parameter, run)"
-                )))
-            }
-        };
-        Ok(step)
+        let obj: Map<String, Value> = m.0.into_iter().collect();
+        StepDef::deserialize(Value::Object(obj)).map_err(D::Error::custom)
     }
 }
 
@@ -685,7 +663,7 @@ pub fn to_json(t: &Template) -> Result<String, DbError> {
 // Load-time validation (pure; §2.2 "load-time error, caught before any write")
 // ---------------------------------------------------------------------------
 
-/// The validated template plus derived lookups the loader/reconciler reuse.
+/// The validated template plus derived data the loader/reconciler reuse.
 pub struct Checked<'a> {
     pub template: &'a Template,
     /// Load-time warnings (shadowing, dropped unit registry fields, …).
@@ -694,14 +672,13 @@ pub struct Checked<'a> {
     pub class_ix: HashMap<String, usize>,
     /// folded set name -> index into `template.class_sets`.
     pub set_ix: HashMap<String, usize>,
-    /// folded list name -> index into `template.value_lists`.
-    pub list_ix: HashMap<String, usize>,
-    /// folded unit name -> index into `template.units`.
-    pub unit_ix: HashMap<String, usize>,
     /// Per parameter (class_ix, param_ix): the effective declared type set —
     /// explicit `types`, else the value-list-inferred rank-0 member, else
     /// empty (typeless).
     pub effective_types: HashMap<(usize, usize), Vec<TypeDecl>>,
+    /// The `template_content_hash` (§4.1), computed ONCE here and carried so
+    /// plan/apply never recompute it.
+    pub hash: String,
 }
 
 /// Validate a parsed template: name rules and per-kind uniqueness (§2.2),
@@ -969,6 +946,38 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                 }
             }
 
+            // Explicit types + value_list must be mutually consistent (review
+            // item 8 — the check the inference branch gets by construction):
+            // every rank-0 member's kind must be a kind the list's members can
+            // instantiate, else list-bound scalar values could never satisfy
+            // both constraints at once.
+            if p.types.is_some() {
+                if let Some(l) = list {
+                    let list_kinds: HashSet<String> = l
+                        .members
+                        .iter()
+                        .filter_map(|m| effective_member_kind(m).ok())
+                        .collect();
+                    for m in &eff {
+                        let rank0 =
+                            m.dims.as_deref().map(|d| d.is_empty()).unwrap_or(true);
+                        if rank0 && !list_kinds.contains(&m.kind) {
+                            errs.push(format!(
+                                "{loc}: declared rank-0 type kind {:?} has no member of \
+                                 that kind in value_list {:?} (kinds present: {:?})",
+                                m.kind,
+                                l.name,
+                                {
+                                    let mut ks: Vec<&String> = list_kinds.iter().collect();
+                                    ks.sort();
+                                    ks
+                                }
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Pairwise distinguishability (§3.3: refused at load; core re-checks).
             let keys: Vec<_> = eff.iter().map(|d| d.match_key()).collect();
             for a in 0..keys.len() {
@@ -1087,7 +1096,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                             }
                         }
                     }
-                    for (k, w) in &r.when {
+                    for (k, w) in r.when.iter() {
                         for req in &w.require {
                             if !c.parameters.iter().any(|p| fold(&p.name) == fold(req)) {
                                 errs.push(format!(
@@ -1247,9 +1256,8 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
         warnings: warns,
         class_ix,
         set_ix,
-        list_ix,
-        unit_ix,
         effective_types,
+        hash: template_content_hash(t),
     })
 }
 
@@ -1294,16 +1302,12 @@ fn uniform_list_kind(l: &ValueList) -> Result<String, String> {
 
 /// A canonical string for literal equality (kind-aware: `1` == `1.0` under
 /// float; used for duplicate detection and default-vs-list membership).
+/// Delegates to the crate-wide [`ScalarValue::identity_string`] — ONE scalar
+/// identity encoding shared with the reconcile diff and list matching.
 pub fn canonical_literal_string(l: &Lit, kind: &str) -> String {
     match l.resolve(kind) {
-        Ok(ScalarValue::Float(f)) => {
-            // Canonical float text: Rust's shortest round-trip formatting.
-            format!("f:{f}")
-        }
-        Ok(ScalarValue::Int(i)) => format!("i:{i}"),
-        Ok(ScalarValue::Bool(b)) => format!("b:{b}"),
-        Ok(ScalarValue::Str(s)) => format!("s:{s}"),
-        _ => format!("?:{l:?}"),
+        Ok(v) => v.identity_string(),
+        Err(_) => format!("?:{l:?}"),
     }
 }
 
@@ -1327,6 +1331,19 @@ fn opt(map: &mut Map<String, Value>, key: &str, v: &Option<String>) {
     }
 }
 
+/// THE type-elision rule, shared by normalization and `template export`
+/// (review item 11 — one rule, two users, so a §3.5-style explicit override
+/// that inference would reproduce hashes identically whether written or
+/// elided): a `types:` block is elidable iff the parameter binds a value
+/// list, the block is a single rank-0 member, and its kind equals the list's
+/// uniform member kind.
+pub fn types_elidable(types: &[TypeDecl], list: Option<&ValueList>) -> bool {
+    let Some(l) = list else { return false };
+    types.len() == 1
+        && types[0].dims.as_deref().map(|d| d.is_empty()).unwrap_or(true)
+        && uniform_list_kind(l).map(|k| k == types[0].kind).unwrap_or(false)
+}
+
 fn type_member_json(ty: &TypeDecl) -> Value {
     let mut m = Map::new();
     m.insert("kind".into(), json!(ty.kind));
@@ -1347,6 +1364,8 @@ fn type_member_json(ty: &TypeDecl) -> Value {
 /// compare `normalized_model` outputs.
 pub fn normalized_model(t: &Template) -> Value {
     let mut root = Map::new();
+    let lists_by_name: HashMap<String, &ValueList> =
+        t.value_lists.iter().map(|l| (fold(&l.name), l)).collect();
     root.insert(
         "template".into(),
         json!({"name": t.template.name, "version": t.template.version}),
@@ -1471,13 +1490,25 @@ pub fn normalized_model(t: &Template) -> Value {
                         let mut pm = Map::new();
                         pm.insert("name".into(), json!(p.name));
                         opt(&mut pm, "description", &p.description);
+                        // Explicit types normalize through the SAME elision
+                        // rule export applies (types_elidable): an explicit
+                        // block inference would reproduce is omitted, so
+                        // source and export hash identically either way.
+                        let bound_list = p
+                            .value_list
+                            .as_deref()
+                            .and_then(|n| lists_by_name.get(&fold(n)).copied());
                         if let Some(types) = &p.types {
-                            let mut sorted: Vec<&TypeDecl> = types.iter().collect();
-                            sorted.sort_by_key(|ty| ty.match_key());
-                            pm.insert(
-                                "types".into(),
-                                Value::Array(sorted.iter().map(|ty| type_member_json(ty)).collect()),
-                            );
+                            if !types_elidable(types, bound_list) {
+                                let mut sorted: Vec<&TypeDecl> = types.iter().collect();
+                                sorted.sort_by_key(|ty| ty.match_key());
+                                pm.insert(
+                                    "types".into(),
+                                    Value::Array(
+                                        sorted.iter().map(|ty| type_member_json(ty)).collect(),
+                                    ),
+                                );
+                            }
                         }
                         opt(&mut pm, "value_list", &p.value_list);
                         if let Some(dv) = &p.default {

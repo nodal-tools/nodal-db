@@ -18,19 +18,54 @@
 //!   the IR records identity/ordering only — invariant CLAUDE.md #2 by
 //!   construction).
 //!
-//! Plan-then-apply shape (migration-safety discussion): [`plan`] is a
-//! read-only, human-readable dry run. Like `api::preview_object_deletes` it is
-//! a best-effort snapshot — [`apply`] recomputes the diff inside its own write
-//! transaction (fresh state per conflict retry), so the applied plan, not the
-//! previewed one, is authoritative.
+//! ## Chain integrity (review items 1-4)
+//! `apply` guards, in order, BEFORE any write: the staleness check
+//! (`ApplyOptions::expect_commit`), the retarget guard (a DB stamped with a
+//! DIFFERENT `template_name` refuses unless `allow_retarget` — ONE decision,
+//! here, for every front end), the engine-schema note, the no-op
+//! short-circuit, the downgrade guard (the stamped version is
+//! forward-reachable FROM the template's own version through its chain), the
+//! unreachable-chain guard (a stamped version the template's non-empty chain
+//! cannot walk to the target refuses loudly; only a template with NO
+//! `migrations:` at all bridges by plain reconcile, §4.2 L1), and the blocked
+//! pre-check (the full simulated plan must carry no reshape blockers before
+//! any span commits).
+//!
+//! **Crash resume.** Each declarative step's commit also writes the
+//! `template_migration_step` progress substamp (same commit — atomic); the
+//! span's version stamp clears it. An interrupted chain resumes by skipping
+//! completed steps. A `run:` program commits through the public API on its
+//! own, so its substamp lands AFTER it in a separate commit — a crash in
+//! that window re-runs the program. **`run:` programs MUST therefore be
+//! idempotent**; that is the Layer-3 contract (true cross-program atomicity
+//! is impossible from outside the program's own commits, so the contract is
+//! stated rather than pretended away).
+//!
+//! ## Partial-apply honesty (review item 14)
+//! When anything the template declares could not be applied (a narrowed type
+//! member kept because values bind it, a seed membership the user excluded, a
+//! default withheld because a non-scalar default occupies the slot), the
+//! apply does NOT certify convergence: `template_name`/`template_version`
+//! stamp, but `template_content_hash` is withheld (and a stale one closed
+//! out), so the no-op short-circuit can never certify unconverged state —
+//! plan/apply keep replanning until the skips clear, then the hash lands.
+//!
+//! ## Layering (§7, doc note)
+//! Layered composition is REDECLARATION-based: a second template composes by
+//! declaring its own (disjoint) vocabulary in full; D6's element-closure
+//! validation is per-document, so a layered template that seeds N-D entities
+//! must declare their element entities itself. v1 keeps one primary template
+//! per DB (last applied stamps identity).
 //!
 //! **Write-path discipline (CLAUDE.md invariant #2).** This module lives in
 //! the one core and writes structural rows exactly the way `api.rs`'s
 //! auto-create resolvers do (same tables, same from/to protocol); declared
-//! type members go through `api::create_parameter_type` (the one insert path);
-//! defaults are values and land through `history::write_definition_default`
-//! (a rank-0 scalar's canonical form is itself — VMP Part 3). No domain row
-//! is written outside this crate.
+//! type members go through `api::create_parameter_type` (the one insert
+//! path); defaults and the rename-hint value rewrite are value writes and
+//! land through `history` (retention-honoring close-outs, VMP Part 5). No
+//! domain row is written outside this crate. Usage guards (the narrowing and
+//! move checks) are plain COUNT aggregates — no `error()`-style side-effect
+//! guards anywhere, so no projection-pushdown hazard class applies.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -39,21 +74,24 @@ use std::path::Path;
 use duckdb::{params, Connection};
 use serde_json::{json, Map, Value};
 
-use crate::api::{create_parameter_type, parse_index_kind};
+use crate::api::{
+    create_parameter_type, lookup_class_set, lookup_entity, lookup_entity_class,
+    lookup_parameter, lookup_unit, lookup_value_list, parse_index_kind,
+};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
-use crate::history::{close_definition_default, write_definition_default};
-use crate::types::{IndexKind, ScalarValue, ValueKind};
-
-use super::dbvocab::{read_vocab, DbParam, DbVocab};
-use super::ir::{
-    self, effective_member_kind, template_content_hash, Checked, Class, ListMember, Migration,
-    MigrationStep, Parameter, Template, TypeDecl,
+use crate::history::{
+    close_definition_default, literal_cols, rewrite_definition_string_values,
+    rewrite_scalar_string_values, write_definition_default,
 };
+use crate::object_delete::resolve_element as resolve_element_in_dim;
+use crate::types::{fold, IndexKind, ScalarValue, ValueKind};
 
-fn fold(s: &str) -> String {
-    s.to_lowercase()
-}
+use super::dbvocab::{read_metadata_key, read_vocab, DbParam, DbVocab};
+use super::ir::{
+    self, effective_member_kind, Checked, Class, ListMember, Migration, MigrationStep, Parameter,
+    Template, TypeDecl,
+};
 
 // ---------------------------------------------------------------------------
 // The migration-program registry (Layer 3)
@@ -62,6 +100,7 @@ fn fold(s: &str) -> String {
 /// A named tool-side migration program (§4.2 Layer 3): runs with the DB path
 /// and the commit author, and does ALL its writes through the public write API
 /// (its own commits). The IR's `run:` step names it; the registry binds it.
+/// **Contract: programs must be idempotent** (module docs, "Crash resume").
 pub type MigrationProgram = Box<dyn Fn(&Path, &str) -> Result<(), DbError> + Send + Sync>;
 
 /// The runner's program table. Tenants register their migration code here;
@@ -90,9 +129,56 @@ impl MigrationRegistry {
     }
 }
 
+/// Caller-side switches for [`apply`] (review items 1, 2, 16). All default
+/// off/None; the CLI deliberately does not expose the two `allow_*` overrides
+/// yet.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ApplyOptions {
+    /// Permit applying a template whose `template_name` differs from the
+    /// name already stamped on the DB (identity keys are restamped).
+    pub allow_retarget: bool,
+    /// Permit applying a template whose version the DB's stamped version is
+    /// AHEAD of (per the template's own chain) — a downgrade.
+    pub allow_downgrade: bool,
+    /// Refuse unless the DB is exactly at this commit id (the id `plan`
+    /// printed) — the plan→apply staleness guard. Re-verified inside the
+    /// final write transaction against the commits this apply itself made.
+    pub expect_commit: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // The plan model
 // ---------------------------------------------------------------------------
+
+/// A value-list member ready to write (kind + typed value resolved at plan
+/// time). `ordinal` is the member's 1-based template position — ordinal IS
+/// semantic (Decision 1 rider), so reconcile maintains template order.
+#[derive(Clone, Debug)]
+pub struct PlannedListMember {
+    pub kind: String,
+    pub value: ScalarValue,
+    pub description: Option<String>,
+    pub ordinal: i64,
+}
+
+/// One existing `list_value` row to revise (close-out + reinsert, same id) —
+/// the row id is threaded from the diff's snapshot so the executor never
+/// re-matches by value (review item 17: no float-equality SQL).
+#[derive(Clone, Debug)]
+pub struct MemberRevision {
+    pub id: i64,
+    pub ordinal: i64,
+    pub description: Option<String>,
+    /// Human rendering for the plan.
+    pub display: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlannedDim {
+    pub position: i64,
+    pub referent: String,
+    pub is_set: bool,
+}
 
 /// One planned (and then applied) reconcile write. Carries the full payload
 /// needed to execute, so plan and apply cannot diverge by re-interpretation —
@@ -103,9 +189,11 @@ pub enum Action {
     UpdateUnit { name: String, description: Option<String>, quantity_kind: Option<String> },
     CreateValueList { name: String, description: Option<String>, members: Vec<PlannedListMember> },
     UpdateValueList { name: String, description: Option<String> },
-    AddListMember { list: String, member: PlannedListMember },
-    /// Description-only member update (member identity is its typed value).
-    UpdateListMember { list: String, kind: String, value: ScalarValue, description: Option<String> },
+    /// Bring an existing list's members to the template's state: revisions
+    /// (ordinal/description, two-phase close-then-reinsert so the
+    /// `(list, ordinal)` unique index never sees a transient collision) and
+    /// additions, in template order.
+    SyncListMembers { list: String, revise: Vec<MemberRevision>, add: Vec<PlannedListMember> },
     CreateClass {
         name: String,
         description: Option<String>,
@@ -148,7 +236,8 @@ pub enum Action {
     AddParameterType { class: String, parameter: String, member: TypeDecl },
     /// Close out a declared member the template no longer carries (§4.2:
     /// "narrowing is flagged when current data instantiates a removed
-    /// member"). Apply skips-with-warning when any current value binds it.
+    /// member"). Apply skips-with-warning when any current value binds it —
+    /// a skip withholds convergence (module docs).
     NarrowParameterType { class: String, parameter: String, pt_id: i64, describe: String },
     SetDefault { class: String, parameter: String, kind: String, value: ScalarValue },
     ClearDefault { class: String, parameter: String },
@@ -158,6 +247,10 @@ pub enum Action {
         description: Option<String>,
         elements: Vec<String>,
     },
+    /// Insert a base membership row — unless one already exists: an
+    /// `included = TRUE` row is a benign no-op, an `included = FALSE` row is
+    /// a USER EXCLUSION the loader respects (skip + convergence withheld;
+    /// review item 10 — the loader never overrides user data).
     CreateSeedMembership {
         group_class: String,
         group: String,
@@ -168,23 +261,10 @@ pub enum Action {
     /// document (D8); `doc` is the full merged document to store.
     SetPresentation { doc: String },
     SetAuditRules { doc: Option<String> },
+    /// Stamp `template_name`/`template_version`; stamp `template_content_hash`
+    /// ONLY when the apply converged (no skips), else close any stale hash
+    /// (module docs, "Partial-apply honesty").
     StampIdentity { name: String, version: String, content_hash: String },
-}
-
-/// A list member ready to write (kind + typed value resolved at plan time).
-#[derive(Clone, Debug)]
-pub struct PlannedListMember {
-    pub kind: String,
-    pub value: ScalarValue,
-    pub description: Option<String>,
-    pub ordinal: i64,
-}
-
-#[derive(Clone, Debug)]
-pub struct PlannedDim {
-    pub position: i64,
-    pub referent: String,
-    pub is_set: bool,
 }
 
 fn scalar_display(v: &ScalarValue) -> String {
@@ -207,11 +287,15 @@ impl fmt::Display for Action {
                 write!(f, "create value_list {name} ({} members)", members.len())
             }
             Action::UpdateValueList { name, .. } => write!(f, "update value_list {name}"),
-            Action::AddListMember { list, member } => {
-                write!(f, "add value_list member {list}: {}", scalar_display(&member.value))
-            }
-            Action::UpdateListMember { list, value, .. } => {
-                write!(f, "update value_list member {list}: {}", scalar_display(value))
+            Action::SyncListMembers { list, revise, add } => {
+                write!(f, "sync value_list {list} members:")?;
+                for a in add {
+                    write!(f, " +{}@{}", scalar_display(&a.value), a.ordinal)?;
+                }
+                for r in revise {
+                    write!(f, " ~{}@{}", r.display, r.ordinal)?;
+                }
+                Ok(())
             }
             Action::CreateClass { name, .. } => write!(f, "create class {name}"),
             Action::UpdateClass { name, .. } => write!(f, "update class {name}"),
@@ -271,7 +355,7 @@ impl fmt::Display for Action {
             Action::StampIdentity { name, version, content_hash } => write!(
                 f,
                 "stamp identity: template_name={name} template_version={version} \
-                 template_content_hash={content_hash}"
+                 template_content_hash={content_hash} (hash withheld if any skips)"
             ),
         }
     }
@@ -286,8 +370,9 @@ pub struct PlannedSpan {
 }
 
 /// The dry-run output (§4.2 plan-then-apply): pending migration spans, the
-/// diff's action list, blockers (reshape-door conflicts — apply refuses while
-/// any exist), warnings, and informational notes.
+/// diff's action list, blockers (apply refuses while any exist), skips
+/// (declared state the apply will NOT converge on — convergence withheld),
+/// warnings, and notes.
 #[derive(Clone, Debug, Default)]
 pub struct ReconcilePlan {
     pub template_name: String,
@@ -295,9 +380,16 @@ pub struct ReconcilePlan {
     pub content_hash: String,
     pub db_template_name: Option<String>,
     pub db_template_version: Option<String>,
+    /// `max(commit.id)` at plan time — quote it to `ApplyOptions::expect_commit`
+    /// to make apply refuse if anything moved in between (review item 16).
+    pub db_commit: i64,
     pub pending_migrations: Vec<PlannedSpan>,
     pub actions: Vec<Action>,
     pub blocked: Vec<String>,
+    /// Declared template state that will be skipped, not applied (narrow
+    /// kept, membership excluded, non-scalar default in the way). Non-empty
+    /// skips withhold `template_content_hash` (module docs).
+    pub skipped: Vec<String>,
     pub warnings: Vec<String>,
     pub notes: Vec<String>,
     pub no_op: bool,
@@ -311,9 +403,19 @@ impl fmt::Display for ReconcilePlan {
             self.template_name, self.template_version, self.content_hash
         )?;
         match (&self.db_template_name, &self.db_template_version) {
-            (Some(n), Some(v)) => writeln!(f, "database: template {n} version {v}")?,
-            (Some(n), None) => writeln!(f, "database: template {n} (no version stamped)")?,
-            _ => writeln!(f, "database: no template stamped (fresh load)")?,
+            (Some(n), Some(v)) => {
+                writeln!(f, "database: template {n} version {v} at commit {}", self.db_commit)?
+            }
+            (Some(n), None) => writeln!(
+                f,
+                "database: template {n} (no version stamped) at commit {}",
+                self.db_commit
+            )?,
+            _ => writeln!(
+                f,
+                "database: no template stamped (fresh load) at commit {}",
+                self.db_commit
+            )?,
         }
         if self.no_op {
             writeln!(f, "NO-OP: the database already carries this template version")?;
@@ -334,6 +436,9 @@ impl fmt::Display for ReconcilePlan {
         for b in &self.blocked {
             writeln!(f, "  BLOCKED: {b}")?;
         }
+        for s in &self.skipped {
+            writeln!(f, "  skip (convergence withheld): {s}")?;
+        }
         for w in &self.warnings {
             writeln!(f, "  warning: {w}")?;
         }
@@ -344,18 +449,30 @@ impl fmt::Display for ReconcilePlan {
     }
 }
 
+/// One `run:` program execution, with the commit ids it produced through the
+/// public API (derived from the commit-id watermark around the call).
+#[derive(Clone, Debug)]
+pub struct RunProgramReport {
+    pub program: String,
+    pub commits: Vec<i64>,
+}
+
 /// The outcome of [`apply`].
 #[derive(Debug, Default)]
 pub struct ApplyOutcome {
     /// True when nothing needed to change (content-hash short-circuit or an
     /// empty diff): no commit was made.
     pub no_op: bool,
-    /// Commit ids in order: one per executed migration step / version stamp,
-    /// plus the final reconcile commit. Escape-hatch programs commit through
-    /// the public API on their own; those ids are not tracked here.
+    /// Commit ids THIS apply made directly: one per executed migration step /
+    /// substamp / version stamp, plus the final reconcile commit.
     pub commits: Vec<i64>,
+    /// `run:` program executions with their public-API commit ids.
+    pub run_programs: Vec<RunProgramReport>,
     /// The plan as APPLIED (recomputed inside the final transaction).
     pub plan: ReconcilePlan,
+    /// False when any skip occurred: `template_content_hash` was withheld
+    /// (module docs, "Partial-apply honesty").
+    pub converged: bool,
     pub warnings: Vec<String>,
 }
 
@@ -363,15 +480,36 @@ pub struct ApplyOutcome {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+fn max_commit(conn: &Connection) -> Result<i64, DbError> {
+    Ok(conn.query_row("SELECT max(id) FROM commit", [], |r| r.get(0))?)
+}
+
 /// Read-only dry run: validate, snapshot the DB vocabulary, simulate any
 /// pending migration chain on the snapshot (renames applied in memory; `run:`
-/// programs noted, not simulated), and diff. One per-operation RO connection
-/// (CLAUDE.md invariant 1).
+/// programs noted, not simulated), and diff. Guard conditions apply would
+/// refuse on are surfaced as blockers. One per-operation RO connection
+/// (CLAUDE.md invariant 1). Best-effort snapshot — [`apply`] recomputes
+/// everything; quote `db_commit` to `expect_commit` to pin it.
 pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
     let chk = ir::validate(t)?;
     with_read(db, |conn| {
         let mut warnings = chk.warnings.clone();
         let mut vocab = read_vocab(conn, &mut warnings)?;
+        let db_commit = max_commit(conn)?;
+        // Surface apply's own refusals read-only (retarget + chain guards) so
+        // the dry run predicts them.
+        let mut guard_blocks: Vec<String> = Vec::new();
+        if let Some(dbn) = &vocab.template_name {
+            if fold(dbn) != fold(&t.template.name) {
+                guard_blocks.push(format!(
+                    "apply will refuse: database is stamped with template {dbn:?} — \
+                     applying {:?} is an identity retarget \
+                     (ApplyOptions::allow_retarget)",
+                    t.template.name
+                ));
+            }
+        }
+        let guard = chain_guards(&vocab, t, &ApplyOptions::default());
         let spans = pending_spans(&vocab, t);
         let mut planned_spans = Vec::new();
         for m in &spans {
@@ -383,61 +521,139 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
             simulate_span(&mut vocab, m, &mut warnings);
         }
         let mut p = diff(&vocab, &chk)?;
+        p.db_commit = db_commit;
         p.pending_migrations = planned_spans;
+        if let Err(e) = guard {
+            guard_blocks.push(format!("apply will refuse: {e}"));
+        }
+        p.blocked.splice(0..0, guard_blocks);
         p.warnings.splice(0..0, warnings);
         Ok(p)
     })
 }
 
-/// Apply the template: content-hash short-circuit, then the pending migration
-/// chain (one commit per declarative step; `run:` programs through the
-/// registry and the public API; a version stamp per span), then the final
-/// reconcile diff in ONE commit that also stamps identity (§7). Refuses while
-/// the diff reports blockers (reshape-door conflicts).
+/// Apply the template under the full guard sequence (module docs): the
+/// pending migration chain (one commit per declarative step with its progress
+/// substamp; `run:` programs through the registry and the public API; a
+/// version stamp per span), then the final reconcile diff in ONE commit that
+/// also stamps identity (§7).
 pub fn apply(
     db: &Path,
     t: &Template,
     registry: &MigrationRegistry,
     user: &str,
     message: &str,
+    opts: &ApplyOptions,
 ) -> Result<ApplyOutcome, DbError> {
     let chk = ir::validate(t)?;
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
-    let hash = template_content_hash(t);
-    let mut out = ApplyOutcome::default();
+    let mut out = ApplyOutcome { converged: true, ..Default::default() };
     out.warnings.extend(chk.warnings.iter().cloned());
 
-    // Fast idempotency short-circuit (§7): same template, same version, same
-    // normalized content — nothing to do, no commit.
-    let (db_name, db_version, db_hash, spans) = with_read(db, |conn| {
-        let mut w = Vec::new();
-        let v = read_vocab(conn, &mut w)?;
-        let spans = pending_spans(&v, t);
-        Ok((v.template_name.clone(), v.template_version.clone(), v.template_content_hash, spans))
+    // --- Pre-flight: metadata keys only (cheap; review item 21). ---
+    struct Pre {
+        name: Option<String>,
+        version: Option<String>,
+        hash: Option<String>,
+        schema_version: Option<String>,
+        substamp: Option<String>,
+        commit: i64,
+    }
+    let pre = with_read(db, |conn| {
+        Ok(Pre {
+            name: read_metadata_key(conn, "template_name")?,
+            version: read_metadata_key(conn, "template_version")?,
+            hash: read_metadata_key(conn, "template_content_hash")?,
+            schema_version: read_metadata_key(conn, "schema_version")?,
+            substamp: read_metadata_key(conn, "template_migration_step")?,
+            commit: max_commit(conn)?,
+        })
     })?;
-    if db_name.as_deref() == Some(t.template.name.as_str())
-        && db_version.as_deref() == Some(t.template.version.as_str())
-        && db_hash.as_deref() == Some(hash.as_str())
+
+    // Staleness (review item 16): the caller pinned the plan's commit.
+    if let Some(exp) = opts.expect_commit {
+        if pre.commit != exp {
+            return Err(DbError::Api(format!(
+                "stale plan: the database is at commit {} but the plan was made at commit \
+                 {exp} — re-plan and re-apply",
+                pre.commit
+            )));
+        }
+    }
+
+    // Retarget guard (review item 1): ONE decision, in core, for every front
+    // end. `allow_retarget` is the explicit opt-in (not CLI-exposed yet).
+    if let Some(dbn) = &pre.name {
+        if fold(dbn) != fold(&t.template.name) {
+            if !opts.allow_retarget {
+                return Err(DbError::Api(format!(
+                    "database is stamped with template {dbn:?}; refusing to apply \
+                     {:?} (identity retarget) — this is an explicit opt-in \
+                     (ApplyOptions::allow_retarget), not a default",
+                    t.template.name
+                )));
+            }
+            out.warnings.push(format!(
+                "retargeting: identity keys restamp from template {dbn:?} to {:?} \
+                 (v1 layering is only sound for disjoint namespaces)",
+                t.template.name
+            ));
+        }
+    }
+
+    // Engine-schema note (review item 12): BEFORE the short-circuit, so it is
+    // never silenced by a no-op.
+    if let (Some(engine), Some(dbv)) = (&t.template.engine_schema, &pre.schema_version) {
+        if engine != dbv {
+            out.warnings.push(format!(
+                "template declares engine_schema {engine:?} but the database's \
+                 schema_version is {dbv:?} (compatibility note only, not a block)"
+            ));
+        }
+    }
+
+    // Fast idempotency short-circuit (§7): same template, same version, same
+    // certified content — nothing to do, no commit. An absent hash (a prior
+    // PARTIAL apply) never matches, so unconverged state keeps replanning.
+    if pre.name.as_deref() == Some(t.template.name.as_str())
+        && pre.version.as_deref() == Some(t.template.version.as_str())
+        && pre.hash.as_deref() == Some(chk.hash.as_str())
     {
         out.no_op = true;
         out.plan = ReconcilePlan {
             template_name: t.template.name.clone(),
             template_version: t.template.version.clone(),
-            content_hash: hash,
-            db_template_name: db_name,
-            db_template_version: db_version,
+            content_hash: chk.hash.clone(),
+            db_template_name: pre.name,
+            db_template_version: pre.version,
+            db_commit: pre.commit,
             no_op: true,
             ..Default::default()
         };
         return Ok(out);
     }
 
-    // --- Layer 2/3: the pending migration chain, in span/step order. ---
+    // --- Chain guards + blocked pre-check (review items 2, 3), one snapshot. ---
+    let spans = with_read(db, |conn| {
+        let mut w = Vec::new();
+        let mut vocab = read_vocab(conn, &mut w)?;
+        chain_guards(&vocab, t, opts)?;
+        let spans = pending_spans(&vocab, t);
+        for m in &spans {
+            simulate_span(&mut vocab, m, &mut w);
+        }
+        let sim = diff(&vocab, &chk)?;
+        if !sim.blocked.is_empty() {
+            return Err(blocked_error(&sim));
+        }
+        Ok(spans)
+    })?;
+
+    // Every named program across the WHOLE chain must be registered before
+    // any step runs (never leave a chain half-applied over a typo).
     for span in &spans {
-        // Every named program must be registered BEFORE any step of the span
-        // runs (never leave a chain half-applied over a typo).
         for step in &span.steps {
             if let MigrationStep::Run(p) = step {
                 if registry.get(p).is_none() {
@@ -449,12 +665,48 @@ pub fn apply(
                 }
             }
         }
-        for step in &span.steps {
+    }
+
+    // Crash-resume position from the progress substamp (module docs).
+    let resume = parse_substamp(pre.substamp.as_deref());
+    // The commit-id cursor: what max(commit.id) should be after OUR latest
+    // write — advanced by every commit we (or a run: program) make, verified
+    // inside the final transaction when expect_commit pinned the base.
+    let mut cursor = pre.commit;
+
+    // --- Layer 2/3: the pending migration chain, in span/step order. ---
+    for span in &spans {
+        let done_through: i64 = match &resume {
+            Some((f, to, idx)) if *f == span.from && *to == span.to => *idx,
+            _ => -1,
+        };
+        for (i, step) in span.steps.iter().enumerate() {
+            if (i as i64) <= done_through {
+                continue; // completed before an interruption (substamp)
+            }
+            let substamp = format!("{}->{}:{i}", span.from, span.to);
             match step {
                 MigrationStep::Run(p) => {
                     // Layer 3: tool-side program through the public write API.
                     let program = registry.get(p).unwrap();
                     program(db, user)?;
+                    let after = with_read(db, max_commit)?;
+                    out.run_programs.push(RunProgramReport {
+                        program: p.clone(),
+                        commits: ((cursor + 1)..=after).collect(),
+                    });
+                    // Progress substamp in its own commit (the program owns
+                    // its commits) — hence the run:-idempotency contract.
+                    let msg = format!(
+                        "template {} migration {} -> {}: progress after run {p}",
+                        t.template.name, span.from, span.to
+                    );
+                    let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
+                        set_metadata(conn, c, "template_migration_step", &substamp)?;
+                        Ok(c)
+                    })?;
+                    out.commits.push(c);
+                    cursor = c;
                 }
                 declarative => {
                     let desc = declarative.describe();
@@ -462,42 +714,48 @@ pub fn apply(
                         "template {} migration {} -> {}: {desc}",
                         t.template.name, span.from, span.to
                     );
-                    let commit = with_write_txn_retrying(db, user, &msg, |conn, c| {
+                    let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
                         execute_step(conn, c, declarative)?;
+                        // Same-commit progress substamp: atomic with the step.
+                        set_metadata(conn, c, "template_migration_step", &substamp)?;
                         Ok(c)
                     })?;
-                    out.commits.push(commit);
+                    out.commits.push(c);
+                    cursor = c;
                 }
             }
         }
-        // Stamp the span's target version so an interrupted chain resumes at
-        // the right span (§4.4: "in order between version stamps").
+        // Span stamp: bump the version AND clear the substamp, atomically —
+        // an interrupted chain resumes at the right span (§4.4).
         let msg = format!(
             "template {} migration {} -> {}: version stamp",
             t.template.name, span.from, span.to
         );
-        let commit = with_write_txn_retrying(db, user, &msg, |conn, c| {
+        let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
             set_metadata(conn, c, "template_version", &span.to)?;
+            clear_metadata(conn, c, "template_migration_step")?;
             Ok(c)
         })?;
-        out.commits.push(commit);
+        out.commits.push(c);
+        cursor = c;
     }
 
     // --- Layer 1: the final reconcile, one commit, identity stamped. ---
     // Pre-check RO so an empty diff never burns a commit (§7 idempotency);
-    // the write txn re-diffs, so a racing writer only costs one empty-ish
-    // commit, never a wrong apply.
-    let pre = with_read(db, |conn| {
+    // the write txn re-diffs, so a racing writer only costs one replan,
+    // never a wrong apply.
+    let pre_plan = with_read(db, |conn| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
         diff(&vocab, &chk)
     })?;
-    if !pre.blocked.is_empty() {
-        return Err(blocked_error(&pre));
+    if !pre_plan.blocked.is_empty() {
+        return Err(blocked_error(&pre_plan));
     }
-    if pre.actions.is_empty() {
+    if pre_plan.actions.is_empty() {
         out.no_op = out.commits.is_empty();
-        out.plan = pre;
+        out.converged = pre_plan.skipped.is_empty();
+        out.plan = pre_plan;
         return Ok(out);
     }
 
@@ -506,21 +764,52 @@ pub fn apply(
     } else {
         message.to_string()
     };
+    let expect_inside = opts.expect_commit.map(|_| cursor);
     let applied = with_write_txn_retrying(db, user, &msg, |conn, c| {
+        // Staleness re-check INSIDE the transaction (review item 16): the
+        // world outside our own commits must not have moved.
+        if let Some(expected) = expect_inside {
+            let outside: i64 = conn.query_row(
+                "SELECT max(id) FROM commit WHERE id <> ?",
+                params![c],
+                |r| r.get(0),
+            )?;
+            if outside != expected {
+                return Err(DbError::Api(format!(
+                    "stale plan: a concurrent commit ({outside}) appeared after the \
+                     expected commit {expected} — re-plan and re-apply"
+                )));
+            }
+        }
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
         let mut p = diff(&vocab, &chk)?;
         if !p.blocked.is_empty() {
             return Err(blocked_error(&p));
         }
+        let mut ctx = ExecCtx {
+            skipped: p.skipped.clone(),
+            warnings: Vec::new(),
+            ids: IdCache::default(),
+        };
         for a in &p.actions {
-            execute_action(conn, c, a, &mut p.warnings)?;
+            execute_action(conn, c, a, &mut ctx)?;
         }
+        p.skipped = ctx.skipped;
+        p.warnings.extend(ctx.warnings);
         p.warnings.splice(0..0, w);
         Ok((c, p))
     })?;
     out.commits.push(applied.0);
     out.plan = applied.1;
+    out.converged = out.plan.skipped.is_empty();
+    if !out.converged {
+        out.warnings.push(format!(
+            "template_content_hash withheld: {} declared item(s) skipped — the apply \
+             is PARTIAL and will replan until it converges",
+            out.plan.skipped.len()
+        ));
+    }
     out.warnings.extend(out.plan.warnings.iter().cloned());
     Ok(out)
 }
@@ -534,14 +823,96 @@ fn blocked_error(p: &ReconcilePlan) -> DbError {
     ))
 }
 
+/// Parse the `template_migration_step` progress substamp: `from->to:index`.
+fn parse_substamp(v: Option<&str>) -> Option<(String, String, i64)> {
+    let v = v?;
+    let (span, idx) = v.rsplit_once(':')?;
+    let (from, to) = span.split_once("->")?;
+    Some((from.to_string(), to.to_string(), idx.parse().ok()?))
+}
+
 // ---------------------------------------------------------------------------
-// Migration-chain selection + in-memory simulation (plan side)
+// Chain guards + selection + in-memory simulation
 // ---------------------------------------------------------------------------
 
+/// The chain-integrity guards (review item 2), evaluated on the snapshot:
+/// downgrade (the stamped version is forward-reachable FROM the template's
+/// version through its own chain) and unreachable (a non-empty chain that
+/// cannot walk from the stamped version to the target). A template with NO
+/// `migrations:` block bridges any same-name version gap by plain reconcile —
+/// the §4.2 Layer-1 case, made explicit here.
+fn chain_guards(vocab: &DbVocab, t: &Template, opts: &ApplyOptions) -> Result<(), DbError> {
+    let Some(dbv) = &vocab.template_version else { return Ok(()) };
+    // Chains are same-name lineage only.
+    match &vocab.template_name {
+        Some(n) if fold(n) == fold(&t.template.name) => {}
+        _ => return Ok(()),
+    }
+    if dbv == &t.template.version {
+        return Ok(());
+    }
+    // Downgrade: walk FORWARD from the template's version; reaching the
+    // stamped version means the DB is ahead of this template.
+    if !opts.allow_downgrade {
+        let mut cur = t.template.version.clone();
+        let mut seen = HashSet::new();
+        while seen.insert(cur.clone()) {
+            match t.migrations.iter().find(|m| m.from == cur) {
+                Some(m) => {
+                    if &m.to == dbv {
+                        return Err(DbError::Api(format!(
+                            "database is at template version {dbv:?}, AHEAD of this \
+                             template's version {:?} (per its own migration chain) — \
+                             refusing the downgrade (ApplyOptions::allow_downgrade to \
+                             override)",
+                            t.template.version
+                        )));
+                    }
+                    cur = m.to.clone();
+                }
+                None => break,
+            }
+        }
+    }
+    if t.migrations.is_empty() {
+        return Ok(()); // §4.2 L1: plain reconcile bridges; no chain declared.
+    }
+    // Unreachable: the declared chain must walk from the stamped version to
+    // the template's version, else refuse loudly (never silently reconcile
+    // across a gap the template itself says needs migrations).
+    let mut cur = dbv.clone();
+    let mut seen = HashSet::new();
+    while cur != t.template.version {
+        if !seen.insert(cur.clone()) {
+            return Err(DbError::Api(format!(
+                "template migration chain loops at version {cur:?} — the chain must be \
+                 linear"
+            )));
+        }
+        match t.migrations.iter().find(|m| m.from == cur) {
+            Some(m) => cur = m.to.clone(),
+            None => {
+                return Err(DbError::Api(format!(
+                    "database is at template version {dbv:?} but the template's \
+                     migration chain has no path from there to {:?} (nearest dead end \
+                     at {cur:?}) — this template cannot upgrade that database",
+                    t.template.version
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The spans to run: follow the chain from the DB's stamped version toward the
-/// template's version. No stamped version (fresh DB) or already-at-target ⇒
-/// no spans. A cycle in the chain is a hard error.
+/// template's version. No stamped version (fresh DB), a different stamped
+/// template name, or already-at-target ⇒ no spans. Gap/cycle handling lives in
+/// [`chain_guards`] (which runs first); this walk mirrors it.
 fn pending_spans(vocab: &DbVocab, t: &Template) -> Vec<Migration> {
+    match &vocab.template_name {
+        Some(n) if fold(n) == fold(&t.template.name) => {}
+        _ => return Vec::new(),
+    }
     let Some(mut cur) = vocab.template_version.clone() else {
         return Vec::new();
     };
@@ -549,14 +920,14 @@ fn pending_spans(vocab: &DbVocab, t: &Template) -> Vec<Migration> {
     let mut seen: HashSet<String> = HashSet::new();
     while cur != t.template.version {
         if !seen.insert(cur.clone()) {
-            break; // cycle: refuse to loop; the diff surfaces the residue
+            break;
         }
         match t.migrations.iter().find(|m| m.from == cur) {
             Some(m) => {
                 cur = m.to.clone();
                 out.push(m.clone());
             }
-            None => break, // gap: plain reconcile bridges the rest (§4.2 L1)
+            None => break,
         }
     }
     out
@@ -571,6 +942,26 @@ fn simulate_span(vocab: &mut DbVocab, m: &Migration, warnings: &mut Vec<String>)
                 if let Some(mut c) = vocab.classes.remove(&fold(from)) {
                     c.name = to.clone();
                     vocab.classes.insert(fold(to), c);
+                    // Propagate into every by-name cross-reference of the
+                    // snapshot: dimension referents and class-set members
+                    // (the physical rename keeps the id, so the DB needs no
+                    // such touch-up — only this in-memory name view does).
+                    for c in vocab.classes.values_mut() {
+                        for d in &mut c.dims {
+                            if let super::dbvocab::DbDimRef::Class(n) = d {
+                                if fold(n) == fold(from) {
+                                    *n = to.clone();
+                                }
+                            }
+                        }
+                    }
+                    for s in vocab.class_sets.values_mut() {
+                        for m in &mut s.members {
+                            if fold(m) == fold(from) {
+                                *m = to.clone();
+                            }
+                        }
+                    }
                 }
             }
             MigrationStep::RenameParameter { class, from, to } => {
@@ -637,20 +1028,12 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     let mut p = ReconcilePlan {
         template_name: t.template.name.clone(),
         template_version: t.template.version.clone(),
-        content_hash: template_content_hash(t),
+        content_hash: chk.hash.clone(),
         db_template_name: vocab.template_name.clone(),
         db_template_version: vocab.template_version.clone(),
         ..Default::default()
     };
 
-    if let (Some(dbn), n) = (&vocab.template_name, &t.template.name) {
-        if fold(dbn) != fold(n) {
-            p.warnings.push(format!(
-                "database is stamped with template {dbn:?}; applying {n:?} restamps the \
-                 identity keys (v1 layers templates only when their namespaces are disjoint)"
-            ));
-        }
-    }
     if let (Some(engine), Some(dbv)) = (&t.template.engine_schema, &vocab.schema_version) {
         if engine != dbv {
             p.warnings.push(format!(
@@ -680,20 +1063,19 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
         }
     }
 
-    // --- value lists ---
+    // --- value lists (ordinal IS semantic: template order is maintained,
+    //     extras re-numbered after the template members — review item 13) ---
     for l in &t.value_lists {
-        let planned_members = |offset: i64| -> Vec<PlannedListMember> {
-            l.members
-                .iter()
-                .enumerate()
-                .map(|(i, m)| planned_member(m, offset + i as i64 + 1))
-                .collect()
-        };
         match vocab.value_lists.get(&fold(&l.name)) {
             None => p.actions.push(Action::CreateValueList {
                 name: l.name.clone(),
                 description: l.description.clone(),
-                members: planned_members(0),
+                members: l
+                    .members
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| planned_member(m, i as i64 + 1))
+                    .collect(),
             }),
             Some(db) => {
                 if db.description != l.description {
@@ -702,55 +1084,50 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                         description: l.description.clone(),
                     });
                 }
-                // Match members by their typed value; existing members keep
-                // their DB ordinals, new members append after the current max
-                // (mid-list insertion order is not preserved on reconcile —
-                // a documented v1 simplification; fresh loads preserve order).
                 let mut db_index: HashMap<(String, String), &super::dbvocab::DbListMember> =
                     HashMap::new();
                 for m in &db.members {
-                    db_index.insert(
-                        (m.value_kind.clone(), scalar_key(&m.value)),
-                        m,
-                    );
+                    db_index.insert((m.value_kind.clone(), m.value.identity_string()), m);
                 }
-                let mut next_ordinal =
-                    db.members.iter().map(|m| m.ordinal).max().unwrap_or(0);
+                let mut revise: Vec<MemberRevision> = Vec::new();
+                let mut add: Vec<PlannedListMember> = Vec::new();
                 let mut matched: HashSet<(String, String)> = HashSet::new();
-                for m in &l.members {
+                for (i, m) in l.members.iter().enumerate() {
+                    let desired_ordinal = i as i64 + 1;
                     let kind = effective_member_kind(m)
                         .map_err(|e| DbError::Api(format!("value_list {:?}: {e}", l.name)))?;
                     let sv = m.value.resolve(&kind).map_err(DbError::Api)?;
-                    let key = (kind.clone(), scalar_key(&sv));
+                    let key = (kind.clone(), sv.identity_string());
                     matched.insert(key.clone());
                     match db_index.get(&key) {
-                        None => {
-                            next_ordinal += 1;
-                            p.actions.push(Action::AddListMember {
-                                list: l.name.clone(),
-                                member: PlannedListMember {
-                                    kind,
-                                    value: sv,
-                                    description: m.description.clone(),
-                                    ordinal: next_ordinal,
-                                },
-                            });
-                        }
+                        None => add.push(PlannedListMember {
+                            kind,
+                            value: sv,
+                            description: m.description.clone(),
+                            ordinal: desired_ordinal,
+                        }),
                         Some(dbm) => {
-                            if dbm.description != m.description {
-                                p.actions.push(Action::UpdateListMember {
-                                    list: l.name.clone(),
-                                    kind,
-                                    value: sv,
+                            if dbm.ordinal != desired_ordinal
+                                || dbm.description != m.description
+                            {
+                                revise.push(MemberRevision {
+                                    id: dbm.id,
+                                    ordinal: desired_ordinal,
                                     description: m.description.clone(),
+                                    display: scalar_display(&sv),
                                 });
                             }
                         }
                     }
                 }
+                // Extras (DB members not in the template): kept, re-homed to
+                // tail ordinals AFTER the template members in their current
+                // relative order.
+                let mut next_tail = l.members.len() as i64;
                 for m in &db.members {
-                    let key = (m.value_kind.clone(), scalar_key(&m.value));
+                    let key = (m.value_kind.clone(), m.value.identity_string());
                     if !matched.contains(&key) {
+                        next_tail += 1;
                         p.warnings.push(format!(
                             "value_list {:?}: member {} is not in the template — left in \
                              place (member removal is not additive; a rename is a \
@@ -758,7 +1135,22 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                             l.name,
                             scalar_display(&m.value)
                         ));
+                        if m.ordinal != next_tail {
+                            revise.push(MemberRevision {
+                                id: m.id,
+                                ordinal: next_tail,
+                                description: m.description.clone(),
+                                display: scalar_display(&m.value),
+                            });
+                        }
                     }
+                }
+                if !revise.is_empty() || !add.is_empty() {
+                    p.actions.push(Action::SyncListMembers {
+                        list: l.name.clone(),
+                        revise,
+                        add,
+                    });
                 }
             }
         }
@@ -911,14 +1303,14 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     // --- seed scaffolding ---
     // Creation order must respect element dependencies (an entity's elements
     // may themselves be seeded N-D entities, §8.2.2): fixpoint over the seed
-    // list, creating an entity only once every element name is available
-    // (already in the DB or created earlier in this plan). Validation
-    // guarantees elements reference declared seed entities, so a stall is a
-    // cycle — surfaced as a blocker.
+    // list, creating an entity only once every element resolves against a
+    // dimension-appropriate (class, name) — DB-existing or created earlier in
+    // this plan (review item 9: keyed on (folded class, folded name), never
+    // name alone). Validation guarantees elements reference declared seed
+    // entities, so a stall is a cycle — surfaced as a blocker.
     if let Some(seed) = &t.seed {
-        let mut available: HashSet<String> =
-            vocab.entities.keys().map(|(_, n)| n.clone()).collect();
-        let mut pending: Vec<&crate::template::ir::SeedEntity> = Vec::new();
+        let mut available: HashSet<(String, String)> = vocab.entities.keys().cloned().collect();
+        let mut pending: Vec<&ir::SeedEntity> = Vec::new();
         for e in &seed.entities {
             let name = e.effective_name();
             match vocab.entities.get(&(fold(&e.class), fold(&name))) {
@@ -943,16 +1335,36 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                 }
             }
         }
+        // Can `el` serve as the element at dimension `dim` of `class`, given
+        // what is available? Checked per the dimension's declared referent.
+        let element_ok = |dim: &ir::DimRef, el: &str, avail: &HashSet<(String, String)>| {
+            match dim {
+                ir::DimRef::Class(cls) => avail.contains(&(fold(cls), fold(el))),
+                ir::DimRef::Set { class_set } => chk
+                    .set_ix
+                    .get(&fold(class_set))
+                    .map(|&sx| {
+                        t.class_sets[sx]
+                            .members
+                            .iter()
+                            .any(|m| avail.contains(&(fold(m), fold(el))))
+                    })
+                    .unwrap_or(false),
+            }
+        };
         while !pending.is_empty() {
             let ready: Vec<usize> = pending
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
+                    let Some(&ci) = chk.class_ix.get(&fold(&e.class)) else { return false };
+                    let dims = &t.classes[ci].dimensions;
                     e.elements
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        .all(|el| available.contains(&fold(el)))
+                        .zip(dims.iter())
+                        .all(|(el, dim)| element_ok(dim, el, &available))
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -963,12 +1375,10 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                 ));
                 break;
             }
-            // Emit in template order within the wave; remove afterwards in
-            // reverse index order so indices stay valid.
             for &i in &ready {
                 let e = pending[i];
                 let name = e.effective_name();
-                available.insert(fold(&name));
+                available.insert((fold(&e.class), fold(&name)));
                 p.actions.push(Action::CreateSeedEntity {
                     class: e.class.clone(),
                     name,
@@ -980,11 +1390,17 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                 pending.remove(i);
             }
         }
-        let existing: HashSet<(String, String, String, String)> = vocab
+        // Memberships: an included=TRUE row is converged; an included=FALSE
+        // row is a user exclusion — respected at execution (item 10); absence
+        // gets a create action.
+        let existing: HashMap<(String, String, String, String), bool> = vocab
             .memberships
             .iter()
             .map(|m| {
-                (fold(&m.group_class), fold(&m.group), fold(&m.member_class), fold(&m.member))
+                (
+                    (fold(&m.group_class), fold(&m.group), fold(&m.member_class), fold(&m.member)),
+                    m.included,
+                )
             })
             .collect();
         for m in &seed.memberships {
@@ -994,13 +1410,19 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                 fold(&m.member.class),
                 fold(&m.member.entity),
             );
-            if !existing.contains(&key) {
-                p.actions.push(Action::CreateSeedMembership {
+            match existing.get(&key) {
+                Some(true) => {}
+                Some(false) => p.skipped.push(format!(
+                    "seed membership {}:{} <- {}:{} is EXCLUDED by a user base row \
+                     (included = FALSE) — the loader never overrides user data",
+                    m.group.class, m.group.entity, m.member.class, m.member.entity
+                )),
+                None => p.actions.push(Action::CreateSeedMembership {
                     group_class: m.group.class.clone(),
                     group: m.group.entity.clone(),
                     member_class: m.member.class.clone(),
                     member: m.member.entity.clone(),
-                });
+                }),
             }
         }
     }
@@ -1020,15 +1442,9 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                 doc.insert(k.clone(), v.clone());
             }
         }
-        if doc.is_empty() {
-            // Whole doc reduces to nothing: represent as a clear via an empty
-            // object (keeps the reserved key single-valued semantics simple).
-            p.actions.push(Action::SetPresentation { doc: "{}".to_string() });
-        } else {
-            p.actions.push(Action::SetPresentation {
-                doc: serde_json::to_string(&Value::Object(doc)).expect("json"),
-            });
-        }
+        p.actions.push(Action::SetPresentation {
+            doc: serde_json::to_string(&Value::Object(doc)).expect("json"),
+        });
     }
 
     // --- audit rules document (D4) ---
@@ -1045,16 +1461,17 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
         });
     }
 
-    // --- identity stamps ---
-    let hash = p.content_hash.clone();
-    if vocab.template_name.as_deref() != Some(t.template.name.as_str())
+    // --- identity stamps. Also re-emitted when skips exist while a hash is
+    // stamped: the executor then CLOSES the stale hash (a certified hash on
+    // unconverged state is the one lie the short-circuit would believe). ---
+    let identity_dirty = vocab.template_name.as_deref() != Some(t.template.name.as_str())
         || vocab.template_version.as_deref() != Some(t.template.version.as_str())
-        || vocab.template_content_hash.as_deref() != Some(hash.as_str())
-    {
+        || vocab.template_content_hash.as_deref() != Some(chk.hash.as_str());
+    if identity_dirty || (!p.skipped.is_empty() && vocab.template_content_hash.is_some()) {
         p.actions.push(Action::StampIdentity {
             name: t.template.name.clone(),
             version: t.template.version.clone(),
-            content_hash: hash,
+            content_hash: chk.hash.clone(),
         });
     }
 
@@ -1074,8 +1491,7 @@ fn action_rank(a: &Action) -> u8 {
         Action::CreateUnit { .. } | Action::UpdateUnit { .. } => 0,
         Action::CreateValueList { .. }
         | Action::UpdateValueList { .. }
-        | Action::AddListMember { .. }
-        | Action::UpdateListMember { .. } => 1,
+        | Action::SyncListMembers { .. } => 1,
         Action::CreateClass { .. } | Action::UpdateClass { .. } => 2,
         Action::CreateClassSet { .. }
         | Action::UpdateClassSet { .. }
@@ -1147,38 +1563,63 @@ fn diff_parameter(
         }
     }
 
-    // Default: template-authoritative (a vocabulary fact).
+    // Defaults.
+    //
+    // HOLD (jkiviluo ruling pending): the semantics of OMITTING `default:` in
+    // the template. CURRENT behavior: omission = CLEAR (the template is
+    // authoritative for its vocabulary, incl. the absence of a default). The
+    // alternative under consideration: omission = no opinion, with an
+    // explicit `default: null` spelling to clear. Either ruling lands
+    // entirely inside this match (the `(None, Some)` arm below).
+    //
+    // Regardless of the ruling, a NON-SCALAR default row (long/array mirror)
+    // blocks both directions conservatively (review item 6): v1 IR cannot
+    // express one, so neither Set nor Clear may silently fight it — the item
+    // is skipped and convergence withheld.
     match (&param.default, &dbp.default) {
         (Some(dv), maybe_db) => {
-            let sv = dv.value.resolve(&dv.kind).map_err(DbError::Api)?;
-            let changed = match maybe_db {
-                None => true,
-                Some(dbd) => dbd.value_kind != dv.kind || scalar_key(&dbd.value) != scalar_key(&sv),
-            };
-            if changed {
-                p.actions.push(Action::SetDefault {
-                    class: c.name.clone(),
-                    parameter: param.name.clone(),
-                    kind: dv.kind.clone(),
-                    value: sv,
-                });
+            if dbp.has_nonscalar_default {
+                p.skipped.push(format!(
+                    "parameter {}.{}: a non-scalar default occupies the slot — the \
+                     template's scalar default is NOT applied (v1 IR cannot express or \
+                     supersede it)",
+                    c.name, param.name
+                ));
+            } else {
+                let sv = dv.value.resolve(&dv.kind).map_err(DbError::Api)?;
+                let changed = match maybe_db {
+                    None => true,
+                    Some(dbd) => {
+                        dbd.value_kind != dv.kind
+                            || dbd.value.identity_string() != sv.identity_string()
+                    }
+                };
+                if changed {
+                    p.actions.push(Action::SetDefault {
+                        class: c.name.clone(),
+                        parameter: param.name.clone(),
+                        kind: dv.kind.clone(),
+                        value: sv,
+                    });
+                }
             }
         }
         (None, Some(_)) => {
+            // HOLD decision point (see above): omission currently CLEARS.
+            p.actions.push(Action::ClearDefault {
+                class: c.name.clone(),
+                parameter: param.name.clone(),
+            });
+        }
+        (None, None) => {
             if dbp.has_nonscalar_default {
-                p.warnings.push(format!(
+                p.skipped.push(format!(
                     "parameter {}.{}: non-scalar default in the database — v1 IR cannot \
                      express it; left untouched",
                     c.name, param.name
                 ));
-            } else {
-                p.actions.push(Action::ClearDefault {
-                    class: c.name.clone(),
-                    parameter: param.name.clone(),
-                });
             }
         }
-        (None, None) => {}
     }
     Ok(())
 }
@@ -1195,19 +1636,6 @@ fn planned_member(m: &ListMember, ordinal: i64) -> PlannedListMember {
     let kind = effective_member_kind(m).expect("validated");
     let value = m.value.resolve(&kind).expect("validated");
     PlannedListMember { kind, value, description: m.description.clone(), ordinal }
-}
-
-/// A hashable identity string for a scalar (mirrors the IR's canonical
-/// literal string; float text is Rust's shortest round-trip form).
-fn scalar_key(v: &ScalarValue) -> String {
-    match v {
-        ScalarValue::Float(f) => format!("f:{f}"),
-        ScalarValue::Int(i) => format!("i:{i}"),
-        ScalarValue::Bool(b) => format!("b:{b}"),
-        ScalarValue::Str(s) => format!("s:{s}"),
-        ScalarValue::DateTime(t) => format!("d:{t}"),
-        ScalarValue::Duration { months, micros } => format!("u:{months}:{micros}"),
-    }
 }
 
 /// The template-owned subtree of the presentation document (D8).
@@ -1272,117 +1700,317 @@ fn presentation_subtree(doc: &Value) -> Value {
 // Action execution (apply side; runs inside the one reconcile transaction)
 // ---------------------------------------------------------------------------
 
-fn lookup_id(
-    conn: &Connection,
-    sql: &str,
-    name: &str,
-    what: &str,
-) -> Result<i64, DbError> {
-    conn.query_row(sql, params![name], |r| r.get(0)).map_err(|e| match e {
-        duckdb::Error::QueryReturnedNoRows => {
-            DbError::Api(format!("{what} {name:?} not found (reconcile ordering bug?)"))
-        }
-        e => e.into(),
+/// Per-apply execution context: name→id memoization (one lookup per name per
+/// transaction), apply-time skips (convergence), and warnings.
+#[derive(Default)]
+struct ExecCtx {
+    skipped: Vec<String>,
+    warnings: Vec<String>,
+    ids: IdCache,
+}
+
+/// Name→id cache for one transaction (review item 21). Safe: the transaction
+/// is the only writer, and every id this cache stores was current when first
+/// resolved inside it.
+#[derive(Default)]
+struct IdCache {
+    class: HashMap<String, i64>,
+    set: HashMap<String, i64>,
+    list: HashMap<String, i64>,
+    unit: HashMap<String, i64>,
+    param: HashMap<(String, String), i64>,
+}
+
+fn require<T>(v: Option<T>, what: &str, name: &str) -> Result<T, DbError> {
+    v.ok_or_else(|| {
+        DbError::Api(format!("{what} {name:?} not found (reconcile ordering bug?)"))
     })
 }
 
-fn class_id(conn: &Connection, name: &str) -> Result<i64, DbError> {
-    lookup_id(conn, "SELECT id FROM entity_class WHERE cur_name = lower(?)", name, "class")
-}
-
-fn set_id(conn: &Connection, name: &str) -> Result<i64, DbError> {
-    lookup_id(conn, "SELECT id FROM class_set WHERE cur_name = lower(?)", name, "class_set")
-}
-
-fn list_id(conn: &Connection, name: &str) -> Result<i64, DbError> {
-    lookup_id(
-        conn,
-        "SELECT id FROM parameter_value_list WHERE cur_name = lower(?)",
-        name,
-        "value_list",
-    )
-}
-
-fn unit_id(conn: &Connection, name: &str) -> Result<i64, DbError> {
-    lookup_id(conn, "SELECT id FROM units_of_measure WHERE cur_name = lower(?)", name, "unit")
-}
-
-fn param_id(conn: &Connection, class: &str, name: &str) -> Result<i64, DbError> {
-    let cid = class_id(conn, class)?;
-    conn.query_row(
-        "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
-        params![cid, name],
-        |r| r.get(0),
-    )
-    .map_err(|e| match e {
-        duckdb::Error::QueryReturnedNoRows => {
-            DbError::Api(format!("parameter {class}.{name} not found (ordering bug?)"))
+impl IdCache {
+    fn class(&mut self, conn: &Connection, name: &str) -> Result<i64, DbError> {
+        if let Some(&id) = self.class.get(&fold(name)) {
+            return Ok(id);
         }
-        e => e.into(),
-    })
-}
-
-fn entity_id_in_class(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
-    let r = conn.query_row(
-        "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)",
-        params![class_id, name],
-        |r| r.get::<_, i64>(0),
-    );
-    match r {
-        Ok(id) => Ok(Some(id)),
-        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
+        let id = require(lookup_entity_class(conn, name)?, "class", name)?;
+        self.class.insert(fold(name), id);
+        Ok(id)
+    }
+    fn set(&mut self, conn: &Connection, name: &str) -> Result<i64, DbError> {
+        if let Some(&id) = self.set.get(&fold(name)) {
+            return Ok(id);
+        }
+        let id = require(lookup_class_set(conn, name)?, "class_set", name)?;
+        self.set.insert(fold(name), id);
+        Ok(id)
+    }
+    fn list(&mut self, conn: &Connection, name: &str) -> Result<i64, DbError> {
+        if let Some(&id) = self.list.get(&fold(name)) {
+            return Ok(id);
+        }
+        let id = require(lookup_value_list(conn, name)?, "value_list", name)?;
+        self.list.insert(fold(name), id);
+        Ok(id)
+    }
+    fn unit(&mut self, conn: &Connection, name: &str) -> Result<i64, DbError> {
+        if let Some(&id) = self.unit.get(&fold(name)) {
+            return Ok(id);
+        }
+        let id = require(lookup_unit(conn, name)?, "unit", name)?;
+        self.unit.insert(fold(name), id);
+        Ok(id)
+    }
+    fn param(&mut self, conn: &Connection, class: &str, name: &str) -> Result<i64, DbError> {
+        let key = (fold(class), fold(name));
+        if let Some(&id) = self.param.get(&key) {
+            return Ok(id);
+        }
+        let cid = self.class(conn, class)?;
+        let id = require(
+            lookup_parameter(conn, cid, name)?,
+            "parameter",
+            &format!("{class}.{name}"),
+        )?;
+        self.param.insert(key, id);
+        Ok(id)
     }
 }
 
-/// The typed value columns of a scalar for INSERT binds (mirrors history's
-/// private `VCols`; duplicated narrowly for `list_value`, which history does
-/// not write).
-struct ScalarCols {
-    kind: &'static str,
-    f: Option<f64>,
-    i: Option<i64>,
-    b: Option<bool>,
-    s: Option<String>,
-}
+// --- per-table row specs + the ONE close-out-then-reinsert site per table
+//     (review item 20: replaces the hand-written copies; RenameParameter /
+//     MoveParameter / UpdateParameter share one parameter_definition INSERT) --
 
-impl ScalarCols {
-    fn of(v: &ScalarValue) -> Result<ScalarCols, DbError> {
-        let mut c = ScalarCols { kind: "", f: None, i: None, b: None, s: None };
-        match v {
-            ScalarValue::Float(x) => {
-                c.kind = "float";
-                c.f = Some(*x);
-            }
-            ScalarValue::Int(x) => {
-                c.kind = "int";
-                c.i = Some(*x);
-            }
-            ScalarValue::Bool(x) => {
-                c.kind = "bool";
-                c.b = Some(*x);
-            }
-            ScalarValue::Str(x) => {
-                c.kind = "string";
-                c.s = Some(x.clone());
-            }
-            other => {
-                return Err(DbError::Api(format!(
-                    "scalar kind {other:?} has no v1 template literal form"
-                )))
-            }
-        }
-        Ok(c)
+/// Close the current row(s) of `table` carrying `id` (versioned tables share
+/// the id across versions; exactly one row is current). Returns rows closed.
+fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
+    let n = conn.execute(
+        &format!("UPDATE {table} SET valid_to_commit = ? WHERE id = ? AND valid_to_commit IS NULL"),
+        params![c, id],
+    )?;
+    if n != 1 {
+        return Err(DbError::Api(format!(
+            "revision of {table} id {id}: expected exactly one current row, closed {n}"
+        )));
     }
+    Ok(n)
 }
 
-fn insert_list_member(
+struct PdRow {
+    id: i64,
+    entity_class_id: i64,
+    name: String,
+    description: Option<String>,
+    parameter_value_list_id: Option<i64>,
+    unit_id: Option<i64>,
+    required: bool,
+    display_order: Option<i64>,
+    retain_content: bool,
+    version: i64,
+}
+
+fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
+    Ok(conn.query_row(
+        "SELECT id, entity_class_id, name, description, parameter_value_list_id, unit_id, \
+                required, display_order, retain_content, version \
+         FROM parameter_definition WHERE cur_id = ?",
+        params![pd_id],
+        |r| {
+            Ok(PdRow {
+                id: r.get(0)?,
+                entity_class_id: r.get(1)?,
+                name: r.get(2)?,
+                description: r.get(3)?,
+                parameter_value_list_id: r.get(4)?,
+                unit_id: r.get(5)?,
+                required: r.get(6)?,
+                display_order: r.get(7)?,
+                retain_content: r.get(8)?,
+                version: r.get(9)?,
+            })
+        },
+    )?)
+}
+
+/// The one `parameter_definition` revision site: close the current row, insert
+/// the successor (same id, `version + 1`) from `row`.
+fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> {
+    close_row(conn, c, "parameter_definition", row.id)?;
+    conn.execute(
+        "INSERT INTO parameter_definition \
+           (id, entity_class_id, name, description, parameter_value_list_id, unit_id, \
+            required, display_order, retain_content, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            row.id,
+            row.entity_class_id,
+            row.name,
+            row.description,
+            row.parameter_value_list_id,
+            row.unit_id,
+            row.required,
+            row.display_order,
+            row.retain_content,
+            c,
+            row.version + 1
+        ],
+    )?;
+    Ok(())
+}
+
+struct EcRow {
+    id: i64,
+    name: String,
+    description: Option<String>,
+    active_by_default: bool,
+    required: bool,
+    display_order: Option<i64>,
+    version: i64,
+}
+
+fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> {
+    Ok(conn.query_row(
+        "SELECT id, name, description, active_by_default, required, display_order, version \
+         FROM entity_class WHERE cur_id = ?",
+        params![id],
+        |r| {
+            Ok(EcRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                active_by_default: r.get(3)?,
+                required: r.get(4)?,
+                display_order: r.get(5)?,
+                version: r.get(6)?,
+            })
+        },
+    )?)
+}
+
+fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<(), DbError> {
+    close_row(conn, c, "entity_class", row.id)?;
+    conn.execute(
+        "INSERT INTO entity_class \
+           (id, name, description, active_by_default, required, display_order, \
+            valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            row.id,
+            row.name,
+            row.description,
+            row.active_by_default,
+            row.required,
+            row.display_order,
+            c,
+            row.version + 1
+        ],
+    )?;
+    Ok(())
+}
+
+struct ListRow {
+    id: i64,
+    name: String,
+    description: Option<String>,
+    version: i64,
+}
+
+fn read_list_row(conn: &Connection, id: i64) -> Result<ListRow, DbError> {
+    Ok(conn.query_row(
+        "SELECT id, name, description, version FROM parameter_value_list WHERE cur_id = ?",
+        params![id],
+        |r| {
+            Ok(ListRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                version: r.get(3)?,
+            })
+        },
+    )?)
+}
+
+fn revise_list_row(conn: &Connection, c: i64, row: &ListRow) -> Result<(), DbError> {
+    close_row(conn, c, "parameter_value_list", row.id)?;
+    conn.execute(
+        "INSERT INTO parameter_value_list (id, name, description, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?)",
+        params![row.id, row.name, row.description, c, row.version + 1],
+    )?;
+    Ok(())
+}
+
+/// One `list_value` member row (full payload — reads precede closes so the
+/// pre-image is always available).
+struct MemberRow {
+    id: i64,
+    list_id: i64,
+    ordinal: i64,
+    description: Option<String>,
+    semantic_link: Option<String>,
+    value_kind: String,
+    v_float: Option<f64>,
+    v_int: Option<i64>,
+    v_bool: Option<bool>,
+    v_str: Option<String>,
+    version: i64,
+}
+
+fn read_member_row(conn: &Connection, id: i64) -> Result<MemberRow, DbError> {
+    Ok(conn.query_row(
+        "SELECT id, parameter_value_list_id, ordinal, description, semantic_link, \
+                value_kind, v_float, v_int, v_bool, v_str, version \
+         FROM list_value WHERE cur_id = ?",
+        params![id],
+        |r| {
+            Ok(MemberRow {
+                id: r.get(0)?,
+                list_id: r.get(1)?,
+                ordinal: r.get(2)?,
+                description: r.get(3)?,
+                semantic_link: r.get(4)?,
+                value_kind: r.get(5)?,
+                v_float: r.get(6)?,
+                v_int: r.get(7)?,
+                v_bool: r.get(8)?,
+                v_str: r.get(9)?,
+                version: r.get(10)?,
+            })
+        },
+    )?)
+}
+
+fn insert_member_row(conn: &Connection, c: i64, row: &MemberRow) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO list_value \
+           (id, parameter_value_list_id, ordinal, description, semantic_link, value_kind, \
+            v_float, v_int, v_bool, v_str, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            row.id,
+            row.list_id,
+            row.ordinal,
+            row.description,
+            row.semantic_link,
+            row.value_kind,
+            row.v_float,
+            row.v_int,
+            row.v_bool,
+            row.v_str,
+            c,
+            row.version + 1
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_new_member(
     conn: &Connection,
     c: i64,
     list_id: i64,
     m: &PlannedListMember,
 ) -> Result<(), DbError> {
-    let vc = ScalarCols::of(&m.value)?;
+    // One scalar-column encoding site (history::VCols, review item 17).
+    let vc = literal_cols(&m.value)?;
     conn.execute(
         "INSERT INTO list_value \
            (parameter_value_list_id, ordinal, description, value_kind, \
@@ -1413,7 +2041,7 @@ fn execute_action(
     conn: &Connection,
     c: i64,
     a: &Action,
-    warnings: &mut Vec<String>,
+    ctx: &mut ExecCtx,
 ) -> Result<(), DbError> {
     match a {
         Action::CreateUnit { name, description, quantity_kind } => {
@@ -1425,17 +2053,13 @@ fn execute_action(
             )?;
         }
         Action::UpdateUnit { name, description, quantity_kind } => {
-            let (id, semantic_link, version): (i64, Option<String>, i64) = conn.query_row(
-                "SELECT id, semantic_link, version FROM units_of_measure \
-                 WHERE cur_name = lower(?)",
-                params![name],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            let id = ctx.ids.unit(conn, name)?;
+            let (semantic_link, version): (Option<String>, i64) = conn.query_row(
+                "SELECT semantic_link, version FROM units_of_measure WHERE cur_id = ?",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            conn.execute(
-                "UPDATE units_of_measure SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
+            close_row(conn, c, "units_of_measure", id)?;
             conn.execute(
                 "INSERT INTO units_of_measure \
                    (id, name, description, semantic_link, quantity_kind_link, \
@@ -1451,102 +2075,65 @@ fn execute_action(
                 params![name, description, c],
                 |r| r.get(0),
             )?;
+            ctx.ids.list.insert(fold(name), id);
             for m in members {
-                insert_list_member(conn, c, id, m)?;
+                insert_new_member(conn, c, id, m)?;
             }
         }
         Action::UpdateValueList { name, description } => {
-            let (id, version): (i64, i64) = conn.query_row(
-                "SELECT id, version FROM parameter_value_list WHERE cur_name = lower(?)",
-                params![name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            conn.execute(
-                "UPDATE parameter_value_list SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO parameter_value_list (id, name, description, \
-                    valid_from_commit, version) VALUES (?, ?, ?, ?, ?)",
-                params![id, name, description, c, version + 1],
-            )?;
+            let id = ctx.ids.list(conn, name)?;
+            let mut row = read_list_row(conn, id)?;
+            row.description = description.clone();
+            revise_list_row(conn, c, &row)?;
         }
-        Action::AddListMember { list, member } => {
-            let lid = list_id(conn, list)?;
-            insert_list_member(conn, c, lid, member)?;
-        }
-        Action::UpdateListMember { list, kind, value, description } => {
-            let lid = list_id(conn, list)?;
-            let vc = ScalarCols::of(value)?;
-            let row = conn.query_row(
-                "SELECT id, ordinal, semantic_link, version FROM list_value \
-                 WHERE cur_l = ? AND value_kind = ? AND valid_to_commit IS NULL \
-                   AND ((? = 'float' AND v_float = ?) OR (? = 'int' AND v_int = ?) \
-                     OR (? = 'bool' AND v_bool = ?) OR (? = 'string' AND v_str = ?))",
-                params![lid, kind, kind, vc.f, kind, vc.i, kind, vc.b, kind, vc.s],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                },
-            )?;
-            let (id, ordinal, semantic_link, version) = row;
-            conn.execute(
-                "UPDATE list_value SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO list_value \
-                   (id, parameter_value_list_id, ordinal, description, semantic_link, \
-                    value_kind, v_float, v_int, v_bool, v_str, valid_from_commit, version) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    id, lid, ordinal, description, semantic_link, vc.kind, vc.f, vc.i, vc.b,
-                    vc.s, c, version + 1
-                ],
-            )?;
+        Action::SyncListMembers { list, revise, add } => {
+            let lid = ctx.ids.list(conn, list)?;
+            // Reads first (pre-images), then ALL closes, then ALL inserts —
+            // the (list, ordinal) unique index never sees a transient state.
+            let mut rows: Vec<MemberRow> = Vec::with_capacity(revise.len());
+            for r in revise {
+                let mut row = read_member_row(conn, r.id)?;
+                row.ordinal = r.ordinal;
+                row.description = r.description.clone();
+                rows.push(row);
+            }
+            for row in &rows {
+                close_row(conn, c, "list_value", row.id)?;
+            }
+            for row in &rows {
+                insert_member_row(conn, c, row)?;
+            }
+            for m in add {
+                insert_new_member(conn, c, lid, m)?;
+            }
         }
         Action::CreateClass { name, description, active_by_default, required, display_order } => {
-            conn.execute(
+            let id: i64 = conn.query_row(
                 "INSERT INTO entity_class \
                    (name, description, active_by_default, required, display_order, \
                     valid_from_commit) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
                 params![name, description, active_by_default, required, display_order, c],
+                |r| r.get(0),
             )?;
+            ctx.ids.class.insert(fold(name), id);
         }
         Action::UpdateClass { name, description, active_by_default, required, display_order } => {
-            let (id, version): (i64, i64) = conn.query_row(
-                "SELECT id, version FROM entity_class WHERE cur_name = lower(?)",
-                params![name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            conn.execute(
-                "UPDATE entity_class SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO entity_class \
-                   (id, name, description, active_by_default, required, display_order, \
-                    valid_from_commit, version) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, name, description, active_by_default, required, display_order, c,
-                        version + 1],
-            )?;
+            let id = ctx.ids.class(conn, name)?;
+            let mut row = read_ec_row(conn, id)?;
+            row.description = description.clone();
+            row.active_by_default = *active_by_default;
+            row.required = *required;
+            row.display_order = *display_order;
+            revise_ec_row(conn, c, &row)?;
         }
         Action::CreateClassDims { class, dims } => {
-            let cid = class_id(conn, class)?;
+            let cid = ctx.ids.class(conn, class)?;
             for d in dims {
                 let (dc, ds) = if d.is_set {
-                    (None, Some(set_id(conn, &d.referent)?))
+                    (None, Some(ctx.ids.set(conn, &d.referent)?))
                 } else {
-                    (Some(class_id(conn, &d.referent)?), None)
+                    (Some(ctx.ids.class(conn, &d.referent)?), None)
                 };
                 conn.execute(
                     "INSERT INTO entity_class_dimension \
@@ -1558,22 +2145,22 @@ fn execute_action(
             }
         }
         Action::CreateClassSet { name, description } => {
-            conn.execute(
-                "INSERT INTO class_set (name, description, valid_from_commit) VALUES (?, ?, ?)",
+            let id: i64 = conn.query_row(
+                "INSERT INTO class_set (name, description, valid_from_commit) \
+                 VALUES (?, ?, ?) RETURNING id",
                 params![name, description, c],
+                |r| r.get(0),
             )?;
+            ctx.ids.set.insert(fold(name), id);
         }
         Action::UpdateClassSet { name, description } => {
-            let (id, version): (i64, i64) = conn.query_row(
-                "SELECT id, version FROM class_set WHERE cur_name = lower(?)",
-                params![name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+            let id = ctx.ids.set(conn, name)?;
+            let version: i64 = conn.query_row(
+                "SELECT version FROM class_set WHERE cur_id = ?",
+                params![id],
+                |r| r.get(0),
             )?;
-            conn.execute(
-                "UPDATE class_set SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
+            close_row(conn, c, "class_set", id)?;
             conn.execute(
                 "INSERT INTO class_set (id, name, description, valid_from_commit, version) \
                  VALUES (?, ?, ?, ?, ?)",
@@ -1581,8 +2168,8 @@ fn execute_action(
             )?;
         }
         Action::AddClassSetMember { set, member } => {
-            let sid = set_id(conn, set)?;
-            let mid = class_id(conn, member)?;
+            let sid = ctx.ids.set(conn, set)?;
+            let mid = ctx.ids.class(conn, member)?;
             conn.execute(
                 "INSERT INTO class_set_member (class_set_id, member_class_id, \
                     valid_from_commit) VALUES (?, ?, ?)",
@@ -1599,9 +2186,15 @@ fn execute_action(
             display_order,
             types,
         } => {
-            let cid = class_id(conn, class)?;
-            let lid = value_list.as_deref().map(|l| list_id(conn, l)).transpose()?;
-            let uid = unit.as_deref().map(|u| unit_id(conn, u)).transpose()?;
+            let cid = ctx.ids.class(conn, class)?;
+            let lid = match value_list {
+                Some(l) => Some(ctx.ids.list(conn, l)?),
+                None => None,
+            };
+            let uid = match unit {
+                Some(u) => Some(ctx.ids.unit(conn, u)?),
+                None => None,
+            };
             let pd_id: i64 = conn.query_row(
                 "INSERT INTO parameter_definition \
                    (entity_class_id, name, description, parameter_value_list_id, unit_id, \
@@ -1610,6 +2203,7 @@ fn execute_action(
                 params![cid, name, description, lid, uid, required, display_order, c],
                 |r| r.get(0),
             )?;
+            ctx.ids.param.insert((fold(class), fold(name)), pd_id);
             for m in types {
                 insert_type_member(conn, c, pd_id, m)?;
             }
@@ -1623,41 +2217,35 @@ fn execute_action(
             required,
             display_order,
         } => {
-            let pd_id = param_id(conn, class, name)?;
-            let lid = value_list.as_deref().map(|l| list_id(conn, l)).transpose()?;
-            let uid = unit.as_deref().map(|u| unit_id(conn, u)).transpose()?;
-            let (cid, retain, version): (i64, bool, i64) = conn.query_row(
-                "SELECT entity_class_id, retain_content, version FROM parameter_definition \
-                 WHERE cur_id = ?",
-                params![pd_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            conn.execute(
-                "UPDATE parameter_definition SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, pd_id],
-            )?;
-            conn.execute(
-                "INSERT INTO parameter_definition \
-                   (id, entity_class_id, name, description, parameter_value_list_id, \
-                    unit_id, required, display_order, retain_content, valid_from_commit, \
-                    version) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![pd_id, cid, name, description, lid, uid, required, display_order,
-                        retain, c, version + 1],
-            )?;
+            let pd_id = ctx.ids.param(conn, class, name)?;
+            let lid = match value_list {
+                Some(l) => Some(ctx.ids.list(conn, l)?),
+                None => None,
+            };
+            let uid = match unit {
+                Some(u) => Some(ctx.ids.unit(conn, u)?),
+                None => None,
+            };
+            let mut row = read_pd_row(conn, pd_id)?;
+            row.description = description.clone();
+            row.parameter_value_list_id = lid;
+            row.unit_id = uid;
+            row.required = *required;
+            row.display_order = *display_order;
+            revise_pd_row(conn, c, &row)?;
         }
         Action::AddParameterType { class, parameter, member } => {
-            let pd_id = param_id(conn, class, parameter)?;
+            let pd_id = ctx.ids.param(conn, class, parameter)?;
             insert_type_member(conn, c, pd_id, member)?;
         }
         Action::NarrowParameterType { class, parameter, pt_id, describe } => {
             // §4.2: narrowing is flagged when current data instantiates the
             // removed member. Conservative: any current value bound to the
             // member — or any current value of the definition with a NULL
-            // binding (pre-D11 rows whose member we cannot know) — blocks the
-            // close-out with a warning, never an error.
-            let pd_id = param_id(conn, class, parameter)?;
+            // binding (pre-D11 rows whose member we cannot know) — keeps the
+            // member, recorded as a SKIP (convergence withheld). Plain COUNT
+            // aggregates, no side-effect guards (module docs).
+            let pd_id = ctx.ids.param(conn, class, parameter)?;
             let bound: i64 = conn.query_row(
                 "SELECT \
                    (SELECT count(*) FROM value_scalar WHERE parameter_type_id = ?1 \
@@ -1686,7 +2274,7 @@ fn execute_action(
                 |r| r.get(0),
             )?;
             if bound > 0 || unbound > 0 {
-                warnings.push(format!(
+                ctx.skipped.push(format!(
                     "narrowing {class}.{parameter}: {describe} kept — {bound} current \
                      value row(s) bind it{}",
                     if unbound > 0 {
@@ -1709,16 +2297,16 @@ fn execute_action(
             }
         }
         Action::SetDefault { class, parameter, kind, value } => {
-            let pd_id = param_id(conn, class, parameter)?;
+            let pd_id = ctx.ids.param(conn, class, parameter)?;
             let pt_id = rank0_member_id(conn, pd_id, kind)?;
             write_definition_default(conn, c, pd_id, value, pt_id)?;
         }
         Action::ClearDefault { class, parameter } => {
-            let pd_id = param_id(conn, class, parameter)?;
+            let pd_id = ctx.ids.param(conn, class, parameter)?;
             close_definition_default(conn, c, pd_id)?;
         }
         Action::CreateSeedEntity { class, name, description, elements } => {
-            let cid = class_id(conn, class)?;
+            let cid = ctx.ids.class(conn, class)?;
             let eid: i64 = conn.query_row(
                 "INSERT INTO entity (entity_class_id, name, description, valid_from_commit) \
                  VALUES (?, ?, ?, ?) RETURNING id",
@@ -1727,7 +2315,7 @@ fn execute_action(
             )?;
             for (i, el) in elements.iter().enumerate() {
                 let pos = i as i64 + 1;
-                let el_id = resolve_element(conn, cid, pos, el)?;
+                let el_id = resolve_seed_element(conn, cid, pos, el)?;
                 conn.execute(
                     "INSERT INTO entity_element \
                        (entity_id, position, element_entity_id, valid_from_commit) \
@@ -1737,21 +2325,48 @@ fn execute_action(
             }
         }
         Action::CreateSeedMembership { group_class, group, member_class, member } => {
-            let gc = class_id(conn, group_class)?;
-            let mc = class_id(conn, member_class)?;
-            let gid = entity_id_in_class(conn, gc, group)?.ok_or_else(|| {
-                DbError::Api(format!("seed membership: entity {group_class}:{group} not found"))
-            })?;
-            let mid = entity_id_in_class(conn, mc, member)?.ok_or_else(|| {
-                DbError::Api(format!("seed membership: entity {member_class}:{member} not found"))
-            })?;
-            conn.execute(
-                "INSERT INTO membership \
-                   (group_entity_id, member_entity_id, alternative_id, included, \
-                    valid_from_commit) \
-                 VALUES (?, ?, NULL, TRUE, ?)",
-                params![gid, mid, c],
+            let gc = ctx.ids.class(conn, group_class)?;
+            let mc = ctx.ids.class(conn, member_class)?;
+            let gid = require(
+                lookup_entity(conn, gc, group)?,
+                "seed membership group entity",
+                &format!("{group_class}:{group}"),
             )?;
+            let mid = require(
+                lookup_entity(conn, mc, member)?,
+                "seed membership member entity",
+                &format!("{member_class}:{member}"),
+            )?;
+            // Item 10: consult ANY existing current base row first. TRUE ⇒
+            // converged no-op; FALSE ⇒ a user exclusion, respected (skip);
+            // absent ⇒ insert (never a second current row into the
+            // (group, member, alt) one-current index).
+            let existing: Option<bool> = match conn.query_row(
+                "SELECT included FROM membership WHERE cur_g = ? AND cur_m = ? AND cur_a = 0",
+                params![gid, mid],
+                |r| r.get(0),
+            ) {
+                Ok(v) => Some(v),
+                Err(duckdb::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e.into()),
+            };
+            match existing {
+                Some(true) => {}
+                Some(false) => ctx.skipped.push(format!(
+                    "seed membership {group_class}:{group} <- {member_class}:{member} is \
+                     EXCLUDED by a user base row (included = FALSE) — respected, not \
+                     overridden"
+                )),
+                None => {
+                    conn.execute(
+                        "INSERT INTO membership \
+                           (group_entity_id, member_entity_id, alternative_id, included, \
+                            valid_from_commit) \
+                         VALUES (?, ?, NULL, TRUE, ?)",
+                        params![gid, mid, c],
+                    )?;
+                }
+            }
         }
         Action::SetPresentation { doc } => {
             set_metadata(conn, c, "presentation", doc)?;
@@ -1763,17 +2378,29 @@ fn execute_action(
         Action::StampIdentity { name, version, content_hash } => {
             set_metadata(conn, c, "template_name", name)?;
             set_metadata(conn, c, "template_version", version)?;
-            set_metadata(conn, c, "template_content_hash", content_hash)?;
+            if ctx.skipped.is_empty() {
+                set_metadata(conn, c, "template_content_hash", content_hash)?;
+            } else {
+                // Partial apply: withhold certification (module docs). A
+                // stale hash from an earlier converged apply is closed so the
+                // short-circuit cannot believe it.
+                clear_metadata(conn, c, "template_content_hash")?;
+                ctx.warnings.push(format!(
+                    "identity stamped WITHOUT template_content_hash ({} skip(s)); the \
+                     template will replan until it converges",
+                    ctx.skipped.len()
+                ));
+            }
         }
     }
     Ok(())
 }
 
-/// Resolve one seed element name against the dimension's declared referent —
-/// a class (must hold the entity) or a class-set (exactly one member class
-/// must hold it; ambiguity is an error, mirroring
-/// `audit_class_set_entity_name_dup`).
-fn resolve_element(
+/// Resolve one seed element name against the dimension's declared referent,
+/// through object_delete's shared [`resolve_element_in_dim`] (one resolution
+/// semantics for elements everywhere; ambiguity across a set's members is a
+/// clean error mirroring `audit_class_set_entity_name_dup`).
+fn resolve_seed_element(
     conn: &Connection,
     class_id: i64,
     position: i64,
@@ -1785,34 +2412,11 @@ fn resolve_element(
         params![class_id, position],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if let Some(dcid) = dc {
-        return entity_id_in_class(conn, dcid, element)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "seed element {element:?} at position {position}: no such entity in the \
-                 dimension's class"
-            ))
-        });
-    }
-    let dsid = ds.expect("dimension XOR check");
-    let mut stmt = conn.prepare(
-        "SELECT e.id FROM entity e \
-         JOIN class_set_member m ON m.cur_c = e.cur_cls \
-         WHERE m.cur_s = ? AND e.cur_name = lower(?)",
-    )?;
-    let ids: Vec<i64> = stmt
-        .query_map(params![dsid, element], |r| r.get(0))?
-        .collect::<Result<_, _>>()?;
-    match ids.as_slice() {
-        [id] => Ok(*id),
-        [] => Err(DbError::Api(format!(
-            "seed element {element:?} at position {position}: no entity of any member \
-             class of the dimension's class_set"
-        ))),
-        _ => Err(DbError::Api(format!(
-            "seed element {element:?} at position {position}: ambiguous — entities of \
-             multiple member classes share the name (see audit_class_set_entity_name_dup)"
-        ))),
-    }
+    require(
+        resolve_element_in_dim(conn, dc, ds, element)?,
+        "seed element",
+        &format!("{element} (position {position})"),
+    )
 }
 
 /// Insert one declared type member through the api's one insert path.
@@ -1898,6 +2502,11 @@ fn charset_ok(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+fn hint_class_id(conn: &Connection, step: &str, name: &str) -> Result<i64, DbError> {
+    lookup_entity_class(conn, name)?
+        .ok_or_else(|| DbError::Api(format!("{step}: class {name:?} not found")))
+}
+
 fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), DbError> {
     match step {
         MigrationStep::RenameClass { from, to } => {
@@ -1906,48 +2515,16 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
                     "rename_class: target {to:?} must match [A-Za-z0-9_]+"
                 )));
             }
-            let (id, description, abd, required, display_order, version) = conn
-                .query_row(
-                    "SELECT id, description, active_by_default, required, display_order, \
-                            version \
-                     FROM entity_class WHERE cur_name = lower(?)",
-                    params![from],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, Option<String>>(1)?,
-                            r.get::<_, bool>(2)?,
-                            r.get::<_, bool>(3)?,
-                            r.get::<_, Option<i64>>(4)?,
-                            r.get::<_, i64>(5)?,
-                        ))
-                    },
-                )
-                .map_err(|e| step_lookup_err(e, "rename_class", from))?;
-            if fold(from) != fold(to) {
-                let taken: i64 = conn.query_row(
-                    "SELECT count(*) FROM entity_class WHERE cur_name = lower(?)",
-                    params![to],
-                    |r| r.get(0),
-                )?;
-                if taken > 0 {
-                    return Err(DbError::Api(format!(
-                        "rename_class: target name {to:?} already exists"
-                    )));
-                }
+            let id = lookup_entity_class(conn, from)?
+                .ok_or_else(|| DbError::Api(format!("rename_class: {from:?} not found")))?;
+            if fold(from) != fold(to) && lookup_entity_class(conn, to)?.is_some() {
+                return Err(DbError::Api(format!(
+                    "rename_class: target name {to:?} already exists"
+                )));
             }
-            conn.execute(
-                "UPDATE entity_class SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO entity_class \
-                   (id, name, description, active_by_default, required, display_order, \
-                    valid_from_commit, version) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, to, description, abd, required, display_order, c, version + 1],
-            )?;
+            let mut row = read_ec_row(conn, id)?;
+            row.name = to.clone();
+            revise_ec_row(conn, c, &row)?;
         }
         MigrationStep::RenameParameter { class, from, to } => {
             if !charset_ok(to) {
@@ -1955,114 +2532,46 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
                     "rename_parameter: target {to:?} must match [A-Za-z0-9_]+"
                 )));
             }
-            let cid = class_id(conn, class)
-                .map_err(|_| DbError::Api(format!("rename_parameter: class {class:?} not found")))?;
-            let (id, description, lid, uid, required, display_order, retain, version) = conn
-                .query_row(
-                    "SELECT id, description, parameter_value_list_id, unit_id, required, \
-                            display_order, retain_content, version \
-                     FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
-                    params![cid, from],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, Option<String>>(1)?,
-                            r.get::<_, Option<i64>>(2)?,
-                            r.get::<_, Option<i64>>(3)?,
-                            r.get::<_, bool>(4)?,
-                            r.get::<_, Option<i64>>(5)?,
-                            r.get::<_, bool>(6)?,
-                            r.get::<_, i64>(7)?,
-                        ))
-                    },
-                )
-                .map_err(|e| step_lookup_err(e, "rename_parameter", from))?;
-            if fold(from) != fold(to) {
-                let taken: i64 = conn.query_row(
-                    "SELECT count(*) FROM parameter_definition \
-                     WHERE cur_cls = ? AND cur_name = lower(?)",
-                    params![cid, to],
-                    |r| r.get(0),
-                )?;
-                if taken > 0 {
-                    return Err(DbError::Api(format!(
-                        "rename_parameter: {class}.{to} already exists"
-                    )));
-                }
+            let cid = hint_class_id(conn, "rename_parameter", class)?;
+            let pd_id = lookup_parameter(conn, cid, from)?
+                .ok_or_else(|| DbError::Api(format!("rename_parameter: {from:?} not found")))?;
+            if fold(from) != fold(to) && lookup_parameter(conn, cid, to)?.is_some() {
+                return Err(DbError::Api(format!(
+                    "rename_parameter: {class}.{to} already exists"
+                )));
             }
-            conn.execute(
-                "UPDATE parameter_definition SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO parameter_definition \
-                   (id, entity_class_id, name, description, parameter_value_list_id, \
-                    unit_id, required, display_order, retain_content, valid_from_commit, \
-                    version) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, cid, to, description, lid, uid, required, display_order, retain,
-                        c, version + 1],
-            )?;
+            let mut row = read_pd_row(conn, pd_id)?;
+            row.name = to.clone();
+            revise_pd_row(conn, c, &row)?;
         }
         MigrationStep::RenameValueList { from, to } => {
-            let (id, description, version) = conn
-                .query_row(
-                    "SELECT id, description, version FROM parameter_value_list \
-                     WHERE cur_name = lower(?)",
-                    params![from],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, Option<String>>(1)?,
-                            r.get::<_, i64>(2)?,
-                        ))
-                    },
-                )
-                .map_err(|e| step_lookup_err(e, "rename_value_list", from))?;
-            if fold(from) != fold(to) {
-                let taken: i64 = conn.query_row(
-                    "SELECT count(*) FROM parameter_value_list WHERE cur_name = lower(?)",
-                    params![to],
-                    |r| r.get(0),
-                )?;
-                if taken > 0 {
-                    return Err(DbError::Api(format!(
-                        "rename_value_list: target name {to:?} already exists"
-                    )));
-                }
+            let id = lookup_value_list(conn, from)?
+                .ok_or_else(|| DbError::Api(format!("rename_value_list: {from:?} not found")))?;
+            if fold(from) != fold(to) && lookup_value_list(conn, to)?.is_some() {
+                return Err(DbError::Api(format!(
+                    "rename_value_list: target name {to:?} already exists"
+                )));
             }
-            conn.execute(
-                "UPDATE parameter_value_list SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO parameter_value_list (id, name, description, \
-                    valid_from_commit, version) VALUES (?, ?, ?, ?, ?)",
-                params![id, to, description, c, version + 1],
-            )?;
+            let mut row = read_list_row(conn, id)?;
+            row.name = to.clone();
+            revise_list_row(conn, c, &row)?;
         }
         MigrationStep::RenameListMember { list, from, to, rewrite_values } => {
-            let lid = list_id(conn, list)
-                .map_err(|_| DbError::Api(format!("rename_list_member: list {list:?} not found")))?;
-            let (id, ordinal, description, semantic_link, version) = conn
+            let lid = lookup_value_list(conn, list)?
+                .ok_or_else(|| DbError::Api(format!("rename_list_member: list {list:?} not found")))?;
+            let member_id: i64 = conn
                 .query_row(
-                    "SELECT id, ordinal, description, semantic_link, version FROM list_value \
-                     WHERE cur_l = ? AND value_kind = 'string' AND v_str = ? \
-                       AND valid_to_commit IS NULL",
+                    "SELECT id FROM list_value WHERE cur_l = ? AND value_kind = 'string' \
+                     AND v_str = ? AND valid_to_commit IS NULL",
                     params![lid, from],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, Option<String>>(2)?,
-                            r.get::<_, Option<String>>(3)?,
-                            r.get::<_, i64>(4)?,
-                        ))
-                    },
+                    |r| r.get(0),
                 )
-                .map_err(|e| step_lookup_err(e, "rename_list_member", from))?;
+                .map_err(|e| match e {
+                    duckdb::Error::QueryReturnedNoRows => DbError::Api(format!(
+                        "rename_list_member: {list} has no string member {from:?}"
+                    )),
+                    e => e.into(),
+                })?;
             let taken: i64 = conn.query_row(
                 "SELECT count(*) FROM list_value WHERE cur_l = ? AND value_kind = 'string' \
                  AND v_str = ? AND valid_to_commit IS NULL",
@@ -2074,91 +2583,35 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
                     "rename_list_member: {list} already has a member {to:?}"
                 )));
             }
-            conn.execute(
-                "UPDATE list_value SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO list_value \
-                   (id, parameter_value_list_id, ordinal, description, semantic_link, \
-                    value_kind, v_str, valid_from_commit, version) \
-                 VALUES (?, ?, ?, ?, ?, 'string', ?, ?, ?)",
-                params![id, lid, ordinal, description, semantic_link, to, c, version + 1],
-            )?;
+            let mut row = read_member_row(conn, member_id)?;
+            row.v_str = Some(to.clone());
+            close_row(conn, c, "list_value", member_id)?;
+            insert_member_row(conn, c, &row)?;
             if *rewrite_values {
-                // The one data-touching hint (§4.2 Layer 2): mechanically
-                // rewrite matching CURRENT stored strings of definitions
-                // bound to this list — proper close-out + re-insert, so
-                // history keeps the pre-rename values.
-                conn.execute(
-                    "UPDATE value_scalar SET valid_to_commit = ?1 \
-                     WHERE valid_to_commit IS NULL AND value_kind = 'string' AND v_str = ?2 \
-                       AND parameter_definition_id IN \
-                         (SELECT id FROM parameter_definition \
-                          WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?3)",
-                    params![c, from, lid],
+                // The one data-touching hint (§4.2 Layer 2): rewrite matching
+                // CURRENT stored strings of every definition bound to this
+                // list — per definition, through the history protocol, which
+                // honors the definition's retain_content (VMP Part 5 stub
+                // contract; review item 5).
+                let mut stmt = conn.prepare(
+                    "SELECT id, retain_content FROM parameter_definition \
+                     WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
                 )?;
-                conn.execute(
-                    "INSERT INTO value_scalar \
-                       (entity_id, parameter_definition_id, alternative_id, \
-                        parameter_type_id, valid_from_commit, version, content_retained, \
-                        value_kind, v_str) \
-                     SELECT entity_id, parameter_definition_id, alternative_id, \
-                            parameter_type_id, ?1, version + 1, TRUE, 'string', ?2 \
-                     FROM value_scalar \
-                     WHERE valid_to_commit = ?1 AND value_kind = 'string' AND v_str = ?3 \
-                       AND parameter_definition_id IN \
-                         (SELECT id FROM parameter_definition \
-                          WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?4)",
-                    params![c, to, from, lid],
-                )?;
-                // Defaults/prefills mirror (the §3.3.4 defaults leg).
-                conn.execute(
-                    "UPDATE definition_value_scalar SET valid_to_commit = ?1 \
-                     WHERE valid_to_commit IS NULL AND value_kind = 'string' AND v_str = ?2 \
-                       AND parameter_definition_id IN \
-                         (SELECT id FROM parameter_definition \
-                          WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?3)",
-                    params![c, from, lid],
-                )?;
-                conn.execute(
-                    "INSERT INTO definition_value_scalar \
-                       (parameter_definition_id, slot, parameter_type_id, \
-                        valid_from_commit, version, content_retained, value_kind, v_str) \
-                     SELECT parameter_definition_id, slot, parameter_type_id, ?1, \
-                            version + 1, TRUE, 'string', ?2 \
-                     FROM definition_value_scalar \
-                     WHERE valid_to_commit = ?1 AND value_kind = 'string' AND v_str = ?3 \
-                       AND parameter_definition_id IN \
-                         (SELECT id FROM parameter_definition \
-                          WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?4)",
-                    params![c, to, from, lid],
-                )?;
+                let defs: Vec<(i64, bool)> = stmt
+                    .query_map(params![lid], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?;
+                for (pd_id, retain) in defs {
+                    rewrite_scalar_string_values(conn, c, pd_id, from, to, retain)?;
+                    rewrite_definition_string_values(conn, c, pd_id, from, to)?;
+                }
             }
         }
         MigrationStep::MoveParameter { name, from_class, to_class } => {
-            let from_cid = class_id(conn, from_class).map_err(|_| {
-                DbError::Api(format!("move_parameter: class {from_class:?} not found"))
-            })?;
-            let to_cid = class_id(conn, to_class).map_err(|_| {
-                DbError::Api(format!("move_parameter: class {to_class:?} not found"))
-            })?;
-            let pd_id = conn
-                .query_row(
-                    "SELECT id FROM parameter_definition WHERE cur_cls = ? \
-                     AND cur_name = lower(?)",
-                    params![from_cid, name],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map_err(|e| step_lookup_err(e, "move_parameter", name))?;
-            let taken: i64 = conn.query_row(
-                "SELECT count(*) FROM parameter_definition WHERE cur_cls = ? \
-                 AND cur_name = lower(?)",
-                params![to_cid, name],
-                |r| r.get(0),
-            )?;
-            if taken > 0 {
+            let from_cid = hint_class_id(conn, "move_parameter", from_class)?;
+            let to_cid = hint_class_id(conn, "move_parameter", to_class)?;
+            let pd_id = lookup_parameter(conn, from_cid, name)?
+                .ok_or_else(|| DbError::Api(format!("move_parameter: {name:?} not found")))?;
+            if lookup_parameter(conn, to_cid, name)?.is_some() {
                 return Err(DbError::Api(format!(
                     "move_parameter: {to_class}.{name} already exists"
                 )));
@@ -2183,49 +2636,11 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
                      (delete or migrate them first via a run: program)"
                 )));
             }
-            let (description, lid, uid, required, display_order, retain, version) = conn
-                .query_row(
-                    "SELECT description, parameter_value_list_id, unit_id, required, \
-                            display_order, retain_content, version \
-                     FROM parameter_definition WHERE cur_id = ?",
-                    params![pd_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, Option<String>>(0)?,
-                            r.get::<_, Option<i64>>(1)?,
-                            r.get::<_, Option<i64>>(2)?,
-                            r.get::<_, bool>(3)?,
-                            r.get::<_, Option<i64>>(4)?,
-                            r.get::<_, bool>(5)?,
-                            r.get::<_, i64>(6)?,
-                        ))
-                    },
-                )?;
-            conn.execute(
-                "UPDATE parameter_definition SET valid_to_commit = ? WHERE id = ? \
-                 AND valid_to_commit IS NULL",
-                params![c, pd_id],
-            )?;
-            conn.execute(
-                "INSERT INTO parameter_definition \
-                   (id, entity_class_id, name, description, parameter_value_list_id, \
-                    unit_id, required, display_order, retain_content, valid_from_commit, \
-                    version) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![pd_id, to_cid, name, description, lid, uid, required, display_order,
-                        retain, c, version + 1],
-            )?;
+            let mut row = read_pd_row(conn, pd_id)?;
+            row.entity_class_id = to_cid;
+            revise_pd_row(conn, c, &row)?;
         }
         MigrationStep::Run(_) => unreachable!("run steps execute through the registry"),
     }
     Ok(())
-}
-
-fn step_lookup_err(e: duckdb::Error, step: &str, name: &str) -> DbError {
-    match e {
-        duckdb::Error::QueryReturnedNoRows => {
-            DbError::Api(format!("{step}: {name:?} not found (is the chain ordered right?)"))
-        }
-        e => e.into(),
-    }
 }

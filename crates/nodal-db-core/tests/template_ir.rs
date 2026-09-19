@@ -380,3 +380,131 @@ class_sets: [{name: s, members: [c]}]
         chk.warnings
     );
 }
+
+#[test]
+fn duplicate_keys_are_rejected_naming_the_key() {
+    // when: branches (UniqueMap).
+    let dup_when = "
+template: {name: t, version: \"1\"}
+value_lists:
+  - name: l
+    members: [{value: \"a\"}, {value: \"b\"}]
+classes:
+  - name: c
+    parameters:
+      - {name: sel, value_list: l}
+      - {name: x, types: [{kind: float}]}
+audit_rules:
+  conditional_requirements:
+    - class: c
+      selector: sel
+      when:
+        a: {require: [x]}
+        a: {require: []}
+";
+    let err = parse_str(dup_when).unwrap_err().to_string();
+    assert!(err.contains("duplicate key") && err.contains('a'), "{err}");
+
+    // Migration-step one-key maps.
+    let dup_step = "
+template: {name: t, version: \"2\"}
+classes: [{name: c}]
+migrations:
+  - from: \"1\"
+    to: \"2\"
+    steps:
+      - rename_class: {from: a, to: b}
+        rename_value_list: {from: x, to: y}
+";
+    let err = parse_str(dup_step).unwrap_err().to_string();
+    assert!(err.contains("ONE-key"), "{err}");
+
+    // Unknown step names stay a closed-vocabulary error.
+    let unknown = "
+template: {name: t, version: \"2\"}
+classes: [{name: c}]
+migrations:
+  - {from: \"1\", to: \"2\", steps: [{explode_class: {name: c}}]}
+";
+    let err = parse_str(unknown).unwrap_err().to_string();
+    assert!(err.contains("unknown variant"), "{err}");
+
+    // Unit registry extras (flatten) with a duplicated extra key.
+    let dup_extra =
+        "template: {name: t, version: \"1\"}\nunits:\n  - {name: u, ucum: a, ucum: b}\nclasses: [{name: c}]";
+    let err = parse_str(dup_extra).unwrap_err().to_string();
+    assert!(err.contains("duplicate"), "{err}");
+}
+
+#[test]
+fn explicit_types_must_be_consistent_with_the_value_list() {
+    // A rank-0 int member against a string list can never be satisfied.
+    expect_err(
+        "template: {name: t, version: \"1\"}
+value_lists:
+  - name: l
+    members: [{value: \"a\"}]
+classes:
+  - name: c
+    parameters:
+      - name: p
+        value_list: l
+        types: [{kind: int}]
+",
+        "no member of that kind",
+    );
+    // A rank-0 member matching the list kind + extra indexed members is fine.
+    let ok = parse_str(
+        "template: {name: t, version: \"1\"}
+value_lists:
+  - name: l
+    members: [{value: \"a\"}]
+classes:
+  - name: c
+    parameters:
+      - name: p
+        value_list: l
+        types:
+          - {kind: string}
+          - {kind: indexed, dims: [{name: t, kind: datetime}]}
+",
+    )
+    .unwrap();
+    validate(&ok).unwrap();
+}
+
+#[test]
+fn explicit_but_inferable_types_hash_like_the_elided_spelling() {
+    // §3.5 override round-trip (review item 11): an explicit types: block
+    // that inference would reproduce normalizes AWAY, so both spellings hash
+    // identically — which is exactly what lets `template export` elide it.
+    let explicit = parse_str(
+        "template: {name: t, version: \"1\"}
+value_lists:
+  - name: l
+    members: [{value: \"a\"}, {value: \"b\"}]
+classes:
+  - name: c
+    parameters:
+      - name: p
+        value_list: l
+        types: [{kind: string}]
+",
+    )
+    .unwrap();
+    let inferred = parse_str(
+        "template: {name: t, version: \"1\"}
+value_lists:
+  - name: l
+    members: [{value: \"a\"}, {value: \"b\"}]
+classes:
+  - name: c
+    parameters:
+      - name: p
+        value_list: l
+",
+    )
+    .unwrap();
+    assert_eq!(normalized_model(&explicit), normalized_model(&inferred));
+    assert_eq!(template_content_hash(&explicit), template_content_hash(&inferred));
+}

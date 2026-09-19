@@ -79,8 +79,9 @@ fn template_verbs_end_to_end() {
     let source = parse_file(&tpl).unwrap();
     assert_eq!(normalized_model(&source), normalized_model(&e1));
 
-    // `template load` guards the fresh-init path: a DB stamped with a
-    // DIFFERENT template refuses (points to apply).
+    // The retarget guard lives in the CORE (one decision, review item 1): a
+    // DB stamped with a DIFFERENT template refuses via load AND apply, and
+    // the CLI exposes no override.
     let other = dir.path().join("other.yaml");
     std::fs::write(
         &other,
@@ -90,7 +91,22 @@ fn template_verbs_end_to_end() {
     let err = run_err(
         bin().args(["template", "load"]).arg(&other).arg("--db").arg(&db1),
     );
-    assert!(err.contains("already stamped"), "{err}");
+    assert!(err.contains("retarget"), "{err}");
+    let err = run_err(
+        bin().args(["template", "apply"]).arg(&other).arg("--db").arg(&db1),
+    );
+    assert!(err.contains("retarget"), "{err}");
+
+    // --expect-commit: a stale pin refuses (plan→apply staleness guard).
+    let err = run_err(
+        bin()
+            .args(["template", "apply"])
+            .arg(&tpl)
+            .arg("--db")
+            .arg(&db1)
+            .args(["--expect-commit", "1"]),
+    );
+    assert!(err.contains("stale plan"), "{err}");
 
     // JSON input parses through the same loader (D1).
     let json_tpl = dir.path().join("mini.json");

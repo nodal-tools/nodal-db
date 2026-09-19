@@ -6,11 +6,16 @@
 
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::{
-    apply, export, parse_str, template_content_hash, to_json, to_yaml, MigrationRegistry,
+    apply, export, parse_str, template_content_hash, to_json, to_yaml, ApplyOptions,
+    MigrationRegistry,
 };
 use nodal_db_core::template::ir::normalized_model;
 
 const SAMPLE: &str = include_str!("fixtures/template_sample.yaml");
+
+fn opts() -> ApplyOptions {
+    ApplyOptions::default()
+}
 
 #[test]
 fn load_export_reload_is_semantically_identical() {
@@ -19,13 +24,16 @@ fn load_export_reload_is_semantically_identical() {
     init_schema(&db1).unwrap();
 
     let source = parse_str(SAMPLE).unwrap();
-    apply(&db1, &source, &MigrationRegistry::new(), "tester", "").unwrap();
+    apply(&db1, &source, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
 
-    // Export re-derives the IR purely from the database.
+    // Export re-derives the IR purely from the database. The only expected
+    // warning is the ALWAYS-on seed-block honesty notice (review item 15).
     let (exported, warnings) = export(&db1).unwrap();
+    assert_eq!(warnings.len(), 1, "unexpected warnings: {warnings:?}");
     assert!(
-        warnings.is_empty(),
-        "no representability warnings expected on the sample: {warnings:?}"
+        warnings[0].contains("seed block carries ALL"),
+        "unexpected warning: {}",
+        warnings[0]
     );
 
     // Semantic equality: normalized object models match (NOT textual —
@@ -52,8 +60,8 @@ fn load_export_reload_is_semantically_identical() {
     // re-applying the ORIGINAL source is a no-op there (full circle).
     let db2 = dir.path().join("b.duckdb");
     init_schema(&db2).unwrap();
-    apply(&db2, &from_yaml, &MigrationRegistry::new(), "tester", "").unwrap();
-    let out = apply(&db2, &source, &MigrationRegistry::new(), "tester", "").unwrap();
+    apply(&db2, &from_yaml, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
+    let out = apply(&db2, &source, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
     assert!(out.no_op, "source must no-op on a DB loaded from its own export");
 
     // And the two databases export identically.

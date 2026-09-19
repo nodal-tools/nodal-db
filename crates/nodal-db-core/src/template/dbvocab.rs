@@ -11,12 +11,9 @@ use std::collections::BTreeMap;
 
 use duckdb::{params, Connection};
 
+use crate::api::{index_kind_tag, read_all_declared_types};
 use crate::error::DbError;
-use crate::types::ScalarValue;
-
-fn fold(s: &str) -> String {
-    s.to_lowercase()
-}
+use crate::types::{fold, ScalarValue};
 
 /// One declared type member as stored (`parameter_type` +
 /// `parameter_type_dimension` current rows).
@@ -161,6 +158,11 @@ pub struct DbMembership {
     pub group: String,
     pub member_class: String,
     pub member: String,
+    /// The row's `included` flag. Excluded rows (`included = FALSE`) are read
+    /// too (review item 10): the loader must SEE a user's exclusion to
+    /// respect it — and to avoid inserting a second current row into the
+    /// `(group, member, alt)` one-current index.
+    pub included: bool,
 }
 
 /// The whole current vocabulary + scaffolding snapshot.
@@ -459,31 +461,27 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
             );
         }
 
-        // Type members.
-        let mut tstmt = conn.prepare(
-            "SELECT pt.id, pt.parameter_definition_id, pt.value_kind \
-             FROM parameter_type pt WHERE pt.valid_to_commit IS NULL ORDER BY pt.id",
-        )?;
-        let trows = tstmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
-        })?;
-        let mut dstmt = conn.prepare(
-            "SELECT position, dimension_name, kind FROM parameter_type_dimension \
-             WHERE parameter_type_id = ? AND valid_to_commit IS NULL ORDER BY position",
-        )?;
-        for row in trows {
-            let (pt_id, pd_id, value_kind) = row?;
+        // Type members — through the write path's OWN batch reader
+        // (api::read_all_declared_types, review item 18): typed IndexKind
+        // parse, unknown-tag detection, and position-contiguity validation
+        // are the same code the entry check runs, so the snapshot cannot
+        // interpret a stored declaration differently than a write would.
+        for (pd_id, declared) in read_all_declared_types(conn)? {
             let Some(cf) = pd_class.get(&pd_id) else { continue };
-            let mut dims: Vec<(String, String)> = Vec::new();
-            let drows = dstmt.query_map(params![pt_id], |r| {
-                Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })?;
-            for d in drows {
-                dims.push(d?);
-            }
             let class = v.classes.get_mut(cf).unwrap();
             if let Some(p) = class.params.values_mut().find(|p| p.id == pd_id) {
-                p.types.push(DbTypeMember { pt_id, value_kind, dims });
+                for d in declared {
+                    p.types.push(DbTypeMember {
+                        pt_id: d.pt_id,
+                        value_kind: d.value_kind,
+                        dims: d
+                            .dim_names
+                            .iter()
+                            .zip(&d.shape.positions)
+                            .map(|(n, (_, k))| (n.clone(), index_kind_tag(*k).to_string()))
+                            .collect(),
+                    });
+                }
             }
         }
 
@@ -595,13 +593,15 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
             v.entities.get_mut(ek).unwrap().elements.push(el_name);
         }
         let mut mstmt = conn.prepare(
-            "SELECT group_entity_id, member_entity_id FROM membership \
-             WHERE valid_to_commit IS NULL AND alternative_id IS NULL AND included \
+            "SELECT group_entity_id, member_entity_id, included FROM membership \
+             WHERE valid_to_commit IS NULL AND alternative_id IS NULL \
              ORDER BY group_entity_id, member_entity_id",
         )?;
-        let mrows = mstmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mrows = mstmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?))
+        })?;
         for row in mrows {
-            let (gid, mid) = row?;
+            let (gid, mid, included) = row?;
             let (Some(gk), Some(mk)) = (ent_by_id.get(&gid), ent_by_id.get(&mid)) else {
                 continue;
             };
@@ -612,6 +612,7 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
                 group: g.name.clone(),
                 member_class: m.class.clone(),
                 member: m.name.clone(),
+                included,
             });
         }
     }

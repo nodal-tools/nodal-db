@@ -14,7 +14,9 @@ use duckdb::Connection;
 
 use nodal_db_core::api::write_parameter;
 use nodal_db_core::schema_init::init_schema;
-use nodal_db_core::template::{apply, parse_str, template_content_hash, MigrationRegistry};
+use nodal_db_core::template::{
+    apply, parse_str, template_content_hash, ApplyOptions, MigrationRegistry,
+};
 use nodal_db_core::types::{WarningKind, WriteOptions};
 
 const SAMPLE: &str = include_str!("fixtures/template_sample.yaml");
@@ -27,7 +29,7 @@ fn fresh_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
 
 fn load_sample(db: &Path) -> nodal_db_core::template::ApplyOutcome {
     let t = parse_str(SAMPLE).unwrap();
-    apply(db, &t, &MigrationRegistry::new(), "tester", "").unwrap()
+    apply(db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap()
 }
 
 fn q1(db: &Path, sql: &str) -> i64 {
@@ -103,7 +105,7 @@ fn fresh_load_is_one_commit_audits_empty_and_stamped() {
     assert_ne!(meta(&db, "schema_version"), meta(&db, "template_version"));
 
     // Structure spot-checks against the store.
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL"), 8);
+    assert_eq!(q1(&db, "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL"), 9);
     assert_eq!(
         q1(&db, "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL \
                  AND NOT active_by_default"),
@@ -133,6 +135,23 @@ fn fresh_load_is_one_commit_audits_empty_and_stamped() {
             .as_deref(),
         Some("string")
     );
+    // Explicit types + value_list (review item 11 fixture): co2_cap keeps its
+    // two declared members; co2_flag's explicit-but-inferable block landed as
+    // the one string member; the float default 20 (int literal, kind float)
+    // is in-list (audit_value_list_membership empty above).
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM parameter_type pt \
+                 JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'co2_cap'"),
+        2
+    );
+    assert_eq!(
+        qs(&db, "SELECT pt.value_kind FROM parameter_type pt \
+                 JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'co2_flag'")
+            .as_deref(),
+        Some("string")
+    );
     // Typeless definition loaded with NO parameter_type row (§2.2).
     assert_eq!(
         q1(&db, "SELECT count(*) FROM parameter_type pt \
@@ -145,7 +164,7 @@ fn fresh_load_is_one_commit_audits_empty_and_stamped() {
         q1(&db, "SELECT count(*) FROM definition_value_scalar \
                  WHERE valid_to_commit IS NULL AND slot = 'default_value' \
                  AND parameter_type_id IS NOT NULL"),
-        3 // demand 0.0, conversion_method, is_enabled "yes"
+        4 // demand 0.0, conversion_method, is_enabled "yes", co2_cap 20.0
     );
     // Seed: 9 entities incl. the N-D ones; elements; one base membership.
     assert_eq!(q1(&db, "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL"), 9);

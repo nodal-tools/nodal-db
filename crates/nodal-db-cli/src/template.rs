@@ -1,8 +1,11 @@
 //! `nodal-db template` — the template-IR verbs (template_ir_plan phases
 //! 2b/3/6): `load` (fresh-init load), `plan` (read-only dry run), `apply`
 //! (reconcile: migration chain + additive diff), `export` (round-trip
-//! acceptance 8.1.7). All writes go through the core's template module — the
-//! CLI parses arguments and prints reports, nothing else.
+//! acceptance 8.1.7). All decisions live in the core — the CLI parses
+//! arguments and prints reports; in particular the template-name retarget
+//! guard is `template::apply`'s own refusal (one decision for every front
+//! end), and the CLI deliberately does NOT expose the
+//! `allow_retarget`/`allow_downgrade` overrides yet.
 //!
 //! Escape-hatch (`run:`) programs are LIBRARY-registered
 //! (`template::MigrationRegistry`); the CLI ships an empty registry, so a
@@ -11,15 +14,16 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use nodal_db_core::template as tpl;
 
+use crate::import::resolve_user_from;
+
 #[derive(Subcommand)]
 pub enum TemplateCommand {
-    /// Load a template into a freshly initialized database. Refuses a DB
-    /// already stamped with a DIFFERENT template (use `apply` to reconcile
-    /// or layer).
+    /// Load a template into a freshly initialized database (the core refuses
+    /// a DB already stamped with a different template).
     Load {
         /// Template document (YAML 1.2 or JSON — one parser reads both).
         file: PathBuf,
@@ -34,7 +38,8 @@ pub enum TemplateCommand {
         message: String,
     },
     /// Dry run: print the pending migration chain and the additive reconcile
-    /// plan without writing anything.
+    /// plan without writing anything (quote the printed commit id to
+    /// `apply --expect-commit` to pin it).
     Plan {
         /// Template document (YAML or JSON).
         file: PathBuf,
@@ -52,6 +57,10 @@ pub enum TemplateCommand {
         user: Option<String>,
         #[arg(long, default_value = "")]
         message: String,
+        /// Refuse unless the database is exactly at this commit id (the id
+        /// `template plan` printed) — the plan→apply staleness guard.
+        #[arg(long)]
+        expect_commit: Option<i64>,
     },
     /// Re-emit the template IR from a loaded database (semantic round-trip:
     /// export and source compare equal under the normalized object model).
@@ -70,29 +79,16 @@ pub enum TemplateCommand {
 pub fn run(cmd: TemplateCommand) -> Result<()> {
     match cmd {
         TemplateCommand::Load { file, db, user, message } => {
-            // Fresh-load guard: a DB stamped with a different template is a
-            // reconcile/layering situation — make the caller say `apply`.
-            let (t, _) = parse(&file)?;
-            let p = tpl::plan(&db, &t).map_err(anyhow::Error::from)?;
-            if let Some(dbn) = &p.db_template_name {
-                if dbn.to_lowercase() != t.template.name.to_lowercase() {
-                    bail!(
-                        "{}: already stamped with template {dbn:?}; `template load` is the \
-                         fresh-init path — use `template apply` to reconcile or layer",
-                        db.display()
-                    );
-                }
-            }
-            apply_and_report(&file, &db, user.as_deref(), &message)
+            apply_file(&file, &db, user.as_deref(), &message, None)
         }
         TemplateCommand::Plan { file, db } => {
-            let (t, _) = parse(&file)?;
+            let t = parse(&file)?;
             let p = tpl::plan(&db, &t).map_err(anyhow::Error::from)?;
             print!("{p}");
             Ok(())
         }
-        TemplateCommand::Apply { file, db, user, message } => {
-            apply_and_report(&file, &db, user.as_deref(), &message)
+        TemplateCommand::Apply { file, db, user, message, expect_commit } => {
+            apply_file(&file, &db, user.as_deref(), &message, expect_commit)
         }
         TemplateCommand::Export { db, out, json } => {
             let (t, warnings) = tpl::export(&db).map_err(anyhow::Error::from)?;
@@ -124,20 +120,28 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
 
 /// The `init --template` path: load right after schema init.
 pub fn load_into(file: &Path, db: &Path, user: Option<&str>) -> Result<()> {
-    apply_and_report(file, db, user, "")
+    apply_file(file, db, user, "", None)
 }
 
-fn parse(file: &Path) -> Result<(tpl::Template, ())> {
-    let t = tpl::parse_file(file)
-        .with_context(|| format!("parsing template {}", file.display()))?;
-    Ok((t, ()))
+fn parse(file: &Path) -> Result<tpl::Template> {
+    tpl::parse_file(file).with_context(|| format!("parsing template {}", file.display()))
 }
 
-fn apply_and_report(file: &Path, db: &Path, user: Option<&str>, message: &str) -> Result<()> {
-    let (t, _) = parse(file)?;
-    let user = resolve_user(user)?;
+/// Parse ONCE, apply, and report (the core validates/reads inside `apply`;
+/// no CLI-side pre-plan — one parse, one snapshot chain).
+fn apply_file(
+    file: &Path,
+    db: &Path,
+    user: Option<&str>,
+    message: &str,
+    expect_commit: Option<i64>,
+) -> Result<()> {
+    let t = parse(file)?;
+    let user = resolve_user_from(user)?;
     let registry = tpl::MigrationRegistry::new();
-    let outcome = tpl::apply(db, &t, &registry, &user, message).map_err(anyhow::Error::from)?;
+    let opts = tpl::ApplyOptions { expect_commit, ..Default::default() };
+    let outcome =
+        tpl::apply(db, &t, &registry, &user, message, &opts).map_err(anyhow::Error::from)?;
     if outcome.no_op {
         println!(
             "template {} version {}: already applied (content hash match) — no-op",
@@ -149,38 +153,18 @@ fn apply_and_report(file: &Path, db: &Path, user: Option<&str>, message: &str) -
         eprintln!("warning: {w}");
     }
     println!(
-        "applied template {} version {} in {} commit(s): {} action(s)",
+        "applied template {} version {} in {} commit(s): {} action(s){}",
         t.template.name,
         t.template.version,
         outcome.commits.len(),
-        outcome.plan.actions.len()
+        outcome.plan.actions.len(),
+        if outcome.converged { "" } else { " [PARTIAL — content hash withheld]" }
     );
     for a in &outcome.plan.actions {
         println!("  + {a}");
     }
+    for s in &outcome.plan.skipped {
+        println!("  skip: {s}");
+    }
     Ok(())
-}
-
-/// Commit-author resolution, same contract as `import` (spec §8.2): `--user`
-/// if given (non-empty), else the first non-blank of USER/USERNAME/LOGNAME.
-fn resolve_user(user: Option<&str>) -> Result<String> {
-    if let Some(u) = user {
-        let u = u.trim();
-        if u.is_empty() {
-            bail!("--user must be non-empty");
-        }
-        return Ok(u.to_string());
-    }
-    for var in ["USER", "USERNAME", "LOGNAME"] {
-        if let Ok(v) = std::env::var(var) {
-            let v = v.trim().to_string();
-            if !v.is_empty() {
-                return Ok(v);
-            }
-        }
-    }
-    bail!(
-        "no commit author: --user was not given and none of USER/USERNAME/LOGNAME is set \
-         to a non-blank value (pass --user <name>)"
-    )
 }

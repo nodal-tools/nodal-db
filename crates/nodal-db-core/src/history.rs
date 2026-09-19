@@ -217,6 +217,11 @@ pub(crate) fn write_definition_default(
 
 /// Close out the current scalar `default_value` row of a definition (content
 /// retained). Returns the number of rows closed (0 or 1).
+///
+/// Scalar-only is SAFE by construction: the reconcile diff never emits a
+/// `SetDefault`/`ClearDefault` action while a non-scalar (long/array) default
+/// row exists — those are warn-and-skip (review item 6) — so this close can
+/// never orphan a live default in another tier.
 pub(crate) fn close_definition_default(
     conn: &Connection,
     commit_id: i64,
@@ -227,6 +232,83 @@ pub(crate) fn close_definition_default(
          WHERE parameter_definition_id = ? AND slot = 'default_value' \
            AND valid_to_commit IS NULL",
         params![commit_id, pd_id],
+    )?)
+}
+
+/// The `rename_list_member` value rewrite (template_ir_plan §4.2 Layer 2 —
+/// the one data-touching hint), under the FULL history protocol: for every
+/// CURRENT string value of `pd_id` equal to `from`, close the row at
+/// `commit_id`, insert the successor (`version + 1`, D11 binding carried,
+/// value = `to`), and — when the definition does not retain content
+/// (`retained = false`, VMP Part 5's stub contract) — turn the closed row
+/// into a stub (payload nulled, `content_retained = FALSE`). Sequenced
+/// close → reinsert → stub so the reinsert can still read the pre-image.
+/// Returns the number of values rewritten.
+pub(crate) fn rewrite_scalar_string_values(
+    conn: &Connection,
+    commit_id: i64,
+    pd_id: i64,
+    from: &str,
+    to: &str,
+    retained: bool,
+) -> Result<usize, DbError> {
+    conn.execute(
+        "UPDATE value_scalar SET valid_to_commit = ?1 \
+         WHERE valid_to_commit IS NULL AND parameter_definition_id = ?2 \
+           AND value_kind = 'string' AND v_str = ?3",
+        params![commit_id, pd_id, from],
+    )?;
+    let written = conn.execute(
+        "INSERT INTO value_scalar \
+           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, content_retained, value_kind, v_str) \
+         SELECT entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+                ?1, version + 1, TRUE, 'string', ?2 \
+         FROM value_scalar \
+         WHERE valid_to_commit = ?1 AND parameter_definition_id = ?3 \
+           AND value_kind = 'string' AND v_str = ?4",
+        params![commit_id, to, pd_id, from],
+    )?;
+    if !retained {
+        conn.execute(
+            "UPDATE value_scalar SET content_retained = FALSE, \
+               v_float=NULL, v_int=NULL, v_bool=NULL, v_str=NULL, v_datetime=NULL, \
+               v_dur_months=NULL, v_dur_micros=NULL \
+             WHERE valid_to_commit = ?1 AND parameter_definition_id = ?2 \
+               AND value_kind = 'string' AND v_str = ?3",
+            params![commit_id, pd_id, from],
+        )?;
+    }
+    Ok(written)
+}
+
+/// The defaults/prefills leg of the same rewrite (`definition_value_scalar`,
+/// both slots). Defaults are authored definition content, always retained
+/// (same stance as [`write_definition_default`]); the close-out keeps its
+/// pre-image. Returns rows rewritten.
+pub(crate) fn rewrite_definition_string_values(
+    conn: &Connection,
+    commit_id: i64,
+    pd_id: i64,
+    from: &str,
+    to: &str,
+) -> Result<usize, DbError> {
+    conn.execute(
+        "UPDATE definition_value_scalar SET valid_to_commit = ?1 \
+         WHERE valid_to_commit IS NULL AND parameter_definition_id = ?2 \
+           AND value_kind = 'string' AND v_str = ?3",
+        params![commit_id, pd_id, from],
+    )?;
+    Ok(conn.execute(
+        "INSERT INTO definition_value_scalar \
+           (parameter_definition_id, slot, parameter_type_id, valid_from_commit, \
+            version, content_retained, value_kind, v_str) \
+         SELECT parameter_definition_id, slot, parameter_type_id, ?1, version + 1, \
+                TRUE, 'string', ?2 \
+         FROM definition_value_scalar \
+         WHERE valid_to_commit = ?1 AND parameter_definition_id = ?3 \
+           AND value_kind = 'string' AND v_str = ?4",
+        params![commit_id, to, pd_id, from],
     )?)
 }
 
@@ -729,20 +811,38 @@ fn close_out_tier(
 
 /// The typed value columns of one scalar measure — mostly-NULL, exactly one
 /// (or the duration pair) populated. `v_datetime`/`i*_dt` bind as µs through
-/// `make_timestamp(?)` at the call site.
-struct VCols {
-    kind: &'static str,
-    f: Option<f64>,
-    i: Option<i64>,
-    b: Option<bool>,
-    s: Option<String>,
-    dt: Option<i64>,
-    dm: Option<i32>,
-    du: Option<i64>,
+/// `make_timestamp(?)` at the call site. `pub(crate)` so the template
+/// reconcile writes `list_value` members through the SAME scalar-column
+/// encoding as every value row (one encoding site, review item on scalar
+/// unification).
+pub(crate) struct VCols {
+    pub(crate) kind: &'static str,
+    pub(crate) f: Option<f64>,
+    pub(crate) i: Option<i64>,
+    pub(crate) b: Option<bool>,
+    pub(crate) s: Option<String>,
+    pub(crate) dt: Option<i64>,
+    pub(crate) dm: Option<i32>,
+    pub(crate) du: Option<i64>,
+}
+
+/// The narrow fallible constructor for TEMPLATE literals: the v1 IR literal
+/// kinds only (float/int/bool/string). `date_time`/`duration` scalars are
+/// legal values but have no IR literal form — a loud error here, so the
+/// template writers can never smuggle one in via a code path the validator
+/// did not see.
+pub(crate) fn literal_cols(v: &ScalarValue) -> Result<VCols, DbError> {
+    match v {
+        ScalarValue::Float(_) | ScalarValue::Int(_) | ScalarValue::Bool(_)
+        | ScalarValue::Str(_) => Ok(VCols::of(v)),
+        other => Err(DbError::Api(format!(
+            "scalar kind {other:?} has no v1 template literal form"
+        ))),
+    }
 }
 
 impl VCols {
-    fn of(v: &ScalarValue) -> VCols {
+    pub(crate) fn of(v: &ScalarValue) -> VCols {
         let mut c = VCols {
             kind: v.kind().tag(),
             f: None,

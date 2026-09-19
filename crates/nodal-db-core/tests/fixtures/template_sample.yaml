@@ -31,6 +31,11 @@ value_lists:
     members:
       - {value: constant_efficiency, kind: string}
       - {value: two_point_efficiency}
+  - name: co2_class                    # FLOAT members (encoder-pair coverage):
+    members:                           #   int literal under kind float unifies
+      - {value: 10.5, description: "Low emitter ceiling."}
+      - {value: 20, kind: float}
+      - {value: 33.75}
 
 parameter_groups:
   - {name: basics, color: "6fa8c7", order: 10}
@@ -87,6 +92,18 @@ classes:
         types: *float_or_t
         unit: p_u
         group: investments
+
+  - name: commodity                    # explicit types + value_list combos (§3.5):
+    parameters:
+      - name: co2_cap                  # NOT elidable (two members) — types persist
+        value_list: co2_class
+        types:
+          - {kind: float}
+          - {kind: indexed, dims: [{name: period, kind: period}]}
+        default: {kind: float, value: 20}
+      - name: co2_flag                 # explicit block inference would reproduce —
+        value_list: yes_no             #   elided by normalization AND export alike
+        types: [{kind: string}]
 
 audit_rules:
   conditional_requirements:

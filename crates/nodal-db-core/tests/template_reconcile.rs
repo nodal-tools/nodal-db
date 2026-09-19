@@ -15,7 +15,7 @@ use duckdb::Connection;
 
 use nodal_db_core::api::write_parameter;
 use nodal_db_core::schema_init::init_schema;
-use nodal_db_core::template::{apply, parse_str, plan, MigrationRegistry, Template};
+use nodal_db_core::template::{apply, parse_str, plan, ApplyOptions, MigrationRegistry, Template};
 use nodal_db_core::types::WriteOptions;
 
 const SAMPLE: &str = include_str!("fixtures/template_sample.yaml");
@@ -24,7 +24,7 @@ fn fresh_loaded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
     let db = dir.path().join("t.duckdb");
     init_schema(&db).unwrap();
     let t = parse_str(SAMPLE).unwrap();
-    apply(&db, &t, &MigrationRegistry::new(), "tester", "").unwrap();
+    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
     db
 }
 
@@ -125,12 +125,17 @@ classes:
             .find(|m| matches!(&m.value, nodal_db_core::template::ir::Lit::Str(s) if s == "constant_efficiency"))
             .unwrap();
         m.value = nodal_db_core::template::ir::Lit::Str("const_eff".into());
-        // A new list member (additive).
-        list.members.push(nodal_db_core::template::ir::ListMember {
-            value: nodal_db_core::template::ir::Lit::Str("piecewise".into()),
-            kind: None,
-            description: None,
-        });
+        // A new list member inserted MID-LIST: ordinal is semantic, so the
+        // reconcile must renumber the existing members to template order
+        // (review item 13).
+        list.members.insert(
+            1,
+            nodal_db_core::template::ir::ListMember {
+                value: nodal_db_core::template::ir::Lit::Str("piecewise".into()),
+                kind: None,
+                description: None,
+            },
+        );
     }
     // Widen node.demand with a period-indexed member (D2 widening).
     {
@@ -203,7 +208,7 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
     assert!(rendered.contains("rename_parameter unit.efficiency -> eta"), "{rendered}");
     assert!(rendered.contains("run mark_step"), "{rendered}");
 
-    let out = apply(&db, &t4, &registry, "tester", "").unwrap();
+    let out = apply(&db, &t4, &registry, "tester", "", &ApplyOptions::default()).unwrap();
     assert!(!out.no_op);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "escape hatch ran exactly once");
     assert_eq!(order.lock().unwrap().as_slice(), &["mark_step"]);
@@ -224,6 +229,20 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
                  AND lv.v_str = 'const_eff'"),
         1
     );
+    // Ordinals track TEMPLATE order after the mid-list insertion (item 13):
+    // const_eff=1, piecewise=2, two_point_efficiency=3.
+    for (val, ord) in [("const_eff", 1), ("piecewise", 2), ("two_point_efficiency", 3)] {
+        assert_eq!(
+            q1(&db, &format!(
+                "SELECT lv.ordinal FROM list_value lv \
+                 JOIN parameter_value_list l ON l.id = lv.parameter_value_list_id \
+                 WHERE l.cur_name = 'method' AND lv.valid_to_commit IS NULL \
+                 AND lv.v_str = '{val}'"
+            )),
+            ord,
+            "{val} ordinal"
+        );
+    }
     assert_eq!(
         qs(&db, "SELECT v_str FROM value_scalar vs JOIN entity e ON e.id = vs.entity_id \
                  WHERE e.cur_name = 'u1' AND vs.valid_to_commit IS NULL \
@@ -292,7 +311,7 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
     );
 
     // Re-applying v4 is now a no-op.
-    let again = apply(&db, &t4, &registry, "tester", "").unwrap();
+    let again = apply(&db, &t4, &registry, "tester", "", &ApplyOptions::default()).unwrap();
     assert!(again.no_op);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "no-op must not re-run programs");
 }
@@ -303,7 +322,7 @@ fn unregistered_run_program_fails_before_any_step() {
     let db = fresh_loaded_db(&dir);
     let t4 = v4_template();
     let commits = q1(&db, "SELECT max(id) FROM commit");
-    let err = apply(&db, &t4, &MigrationRegistry::new(), "tester", "").unwrap_err();
+    let err = apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
     assert!(err.to_string().contains("mark_step"), "{err}");
     assert!(err.to_string().contains("not registered"), "{err}");
     // Nothing of the span ran (the registry is checked before step 1).
@@ -334,12 +353,29 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
         let ms = r4.parameters.iter_mut().find(|p| p.name == "max_share").unwrap();
         ms.types.as_mut().unwrap().retain(|m| m.kind == "float");
     }
-    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "").unwrap();
+    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    // The kept member is a SKIP: the apply is PARTIAL, convergence withheld
+    // (review item 14).
     assert!(
-        out.warnings.iter().any(|w| w.contains("narrowing node.demand") && w.contains("kept")),
-        "expected a kept-member warning, got {:?}",
-        out.warnings
+        out.plan.skipped.iter().any(|s| s.contains("narrowing node.demand") && s.contains("kept")),
+        "expected a kept-member skip, got {:?}",
+        out.plan.skipped
     );
+    assert!(!out.converged, "a skipped narrow must withhold convergence");
+    // template_content_hash is withheld (absent), so the no-op short-circuit
+    // cannot certify this state: a re-apply REPLANS (not a no-op).
+    assert!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'").is_none(),
+        "content hash must be withheld on a partial apply"
+    );
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        Some("3n"),
+        "name/version still stamp on a partial apply"
+    );
+    let again = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    assert!(!again.no_op, "partial state must keep replanning");
+    assert!(!again.converged);
     // demand: float member survived (in use), datetime member still there.
     assert_eq!(
         q1(&db, "SELECT count(*) FROM parameter_type pt \
@@ -375,7 +411,7 @@ fn dimension_change_is_blocked_reshape() {
         "expected a reshape blocker, got {:?}",
         p.blocked
     );
-    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "").unwrap_err();
+    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
     assert!(err.to_string().contains("reshape"), "{err}");
 }
 
@@ -421,7 +457,7 @@ classes:
 
     // But storage doesn't exist when the migration step runs (chain runs
     // BEFORE the diff creates classes) — so the step must fail cleanly…
-    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "").unwrap_err();
+    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
     assert!(err.to_string().contains("storage"), "{err}");
 
     // …teaching the real ordering: additive prerequisites ship in an earlier
@@ -434,11 +470,11 @@ classes:
             .unwrap()
             .classes,
     );
-    apply(&db, &t4, &MigrationRegistry::new(), "tester", "").unwrap();
+    apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
 
     let mut t5 = t.clone();
     t5.migrations[0].from = "4".into();
-    apply(&db, &t5, &MigrationRegistry::new(), "tester", "").unwrap();
+    apply(&db, &t5, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
     assert_eq!(
         q1(&db, "SELECT count(*) FROM parameter_definition pd \
                  JOIN entity_class c ON c.id = pd.cur_cls \
@@ -463,7 +499,7 @@ migrations:
     )
     .unwrap()
     .migrations;
-    let err = apply(&db, &t6, &MigrationRegistry::new(), "tester", "").unwrap_err();
+    let err = apply(&db, &t6, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
     assert!(err.to_string().contains("current value row"), "{err}");
 }
 
@@ -519,7 +555,7 @@ migrations:
         }
     }
 
-    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "").unwrap();
+    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
     assert!(!out.no_op);
     // Same id across the rename (from/to versioning, not delete+add) —
     // dimension rows referencing the class id stay valid untouched.
@@ -544,6 +580,214 @@ migrations:
     assert_eq!(q1(&db, "SELECT count(*) FROM audit_dangling_ref"), 0);
     assert_eq!(q1(&db, "SELECT count(*) FROM audit_value_list_membership"), 0);
     // And re-applying v7 is a no-op (idempotency after hints).
-    let again = apply(&db, &t, &MigrationRegistry::new(), "tester", "").unwrap();
+    let again = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
     assert!(again.no_op);
+}
+
+// ---------------------------------------------------------------------------
+// Chain-integrity guards (review items 1, 2, 16) + partial-apply honesty
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retarget_refuses_by_default_and_needs_the_explicit_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+    let other = parse_str(
+        "template: {name: other, version: \"1\"}\nclasses: [{name: unrelated}]\n",
+    )
+    .unwrap();
+    // Default: typed refusal, before anything runs (no commit burned).
+    let commits = q1(&db, "SELECT max(id) FROM commit");
+    let err = apply(&db, &other, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("retarget"), "{err}");
+    assert_eq!(q1(&db, "SELECT max(id) FROM commit"), commits);
+    // Plan surfaces the same refusal as a blocker (read-only).
+    let p = plan(&db, &other).unwrap();
+    assert!(
+        p.blocked.iter().any(|b| b.contains("retarget")),
+        "plan must surface the retarget refusal: {:?}",
+        p.blocked
+    );
+    // The explicit opt-in applies and restamps, with a warning.
+    let opts = ApplyOptions { allow_retarget: true, ..Default::default() };
+    let out = apply(&db, &other, &MigrationRegistry::new(), "tester", "", &opts).unwrap();
+    assert!(out.warnings.iter().any(|w| w.contains("retargeting")), "{:?}", out.warnings);
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_name'").as_deref(),
+        Some("other")
+    );
+}
+
+#[test]
+fn downgrade_and_unreachable_chains_refuse_loudly() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+    // Move the DB to version 4 first (additive bump, no migrations).
+    let mut t4 = parse_str(SAMPLE).unwrap();
+    t4.template.version = "4".into();
+    apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+
+    // Downgrade: a v3 template whose own chain knows 3 -> 4 sees the DB (at
+    // 4) AHEAD of itself — refused by default.
+    let mut t3 = parse_str(SAMPLE).unwrap();
+    t3.migrations = parse_str(
+        "template: {name: x, version: \"1\"}
+classes: [{name: c}]
+migrations:
+  - {from: \"3\", to: \"4\", steps: [{rename_class: {from: a, to: b}}]}
+",
+    )
+    .unwrap()
+    .migrations;
+    let err = apply(&db, &t3, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("downgrade"), "{err}");
+
+    // Unreachable: a v6 template whose chain only covers 5 -> 6 cannot walk
+    // from the stamped 4 — refused loudly (never a silent gap-bridge when
+    // the template DOES declare a chain).
+    let mut t6 = parse_str(SAMPLE).unwrap();
+    t6.template.version = "6".into();
+    t6.migrations = parse_str(
+        "template: {name: x, version: \"1\"}
+classes: [{name: c}]
+migrations:
+  - {from: \"5\", to: \"6\", steps: [{rename_class: {from: a, to: b}}]}
+",
+    )
+    .unwrap()
+    .migrations;
+    let err = apply(&db, &t6, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("no path"), "{err}");
+
+    // The no-migrations-at-all case still bridges (the §4.2 L1 majority):
+    let mut t5 = parse_str(SAMPLE).unwrap();
+    t5.template.version = "5".into();
+    apply(&db, &t5, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        Some("5")
+    );
+}
+
+#[test]
+fn interrupted_chain_resumes_from_the_progress_substamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+
+    // First attempt: the declarative renames succeed (committed, each with
+    // its same-commit substamp), then the run: program FAILS.
+    let t4 = v4_template();
+    let mut failing = MigrationRegistry::new();
+    failing.register("mark_step", |_db: &Path, _u: &str| {
+        Err(nodal_db_core::error::DbError::Api("simulated crash".into()))
+    });
+    let err =
+        apply(&db, &t4, &failing, "tester", "", &ApplyOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("simulated crash"), "{err}");
+    // The chain is mid-span: version NOT bumped, substamp present.
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        Some("3")
+    );
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'")
+            .as_deref(),
+        Some("3->4:1"),
+        "substamp records the last completed step"
+    );
+
+    // Second attempt with a working program: the completed renames are
+    // SKIPPED (re-running rename_parameter would fail — 'efficiency' is
+    // gone), the program runs, the span stamps, the reconcile lands.
+    let mut working = MigrationRegistry::new();
+    working.register("mark_step", |_db: &Path, _u: &str| Ok(()));
+    let out = apply(&db, &t4, &working, "tester", "", &ApplyOptions::default()).unwrap();
+    assert!(out.converged, "resumed apply must converge: {:?}", out.plan.skipped);
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        Some("4")
+    );
+    assert!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'")
+            .is_none(),
+        "span stamp clears the substamp"
+    );
+    // The rename happened exactly once (one closed + one current row).
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM parameter_definition WHERE name = 'eta'"),
+        1
+    );
+}
+
+#[test]
+fn excluded_membership_is_respected_and_withholds_convergence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+
+    // A user excludes the seeded base membership (close + excluded row) —
+    // raw SQL here stands in for the editor's membership override.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "BEGIN;
+             INSERT INTO commit (user, message) VALUES ('user', 'exclude membership');
+             UPDATE membership SET valid_to_commit = currval('seq_commit')
+               WHERE valid_to_commit IS NULL AND alternative_id IS NULL;
+             INSERT INTO membership (group_entity_id, member_entity_id, alternative_id,
+                                     included, valid_from_commit, version)
+               SELECT group_entity_id, member_entity_id, NULL, FALSE,
+                      currval('seq_commit'), version + 1
+               FROM membership WHERE valid_to_commit = currval('seq_commit');
+             COMMIT;",
+        )
+        .unwrap();
+    }
+
+    // Re-apply at a bumped version: the exclusion is respected (no
+    // resurrection, no unique-index collision), the apply is PARTIAL.
+    let mut t = parse_str(SAMPLE).unwrap();
+    t.template.version = "3x".into();
+    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap();
+    assert!(
+        out.plan.skipped.iter().any(|s| s.contains("EXCLUDED")),
+        "expected the exclusion skip, got {:?}",
+        out.plan.skipped
+    );
+    assert!(!out.converged);
+    // The excluded row is untouched (still the one current base row, FALSE).
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM membership WHERE valid_to_commit IS NULL \
+                 AND alternative_id IS NULL AND NOT included"),
+        1
+    );
+    assert!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'").is_none(),
+        "hash withheld while the exclusion diverges from the template"
+    );
+}
+
+#[test]
+fn stale_plan_is_refused_via_expect_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+    let mut t = parse_str(SAMPLE).unwrap();
+    t.template.version = "3s".into();
+
+    let p = plan(&db, &t).unwrap();
+    // Something else commits in between (any write moves the cookie).
+    write_parameter(&db, "node", "demand", "alt", scalar_batch("n9", 1.0), &[],
+        WriteOptions::default(), "someone_else", "").unwrap();
+
+    let opts = ApplyOptions { expect_commit: Some(p.db_commit), ..Default::default() };
+    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts).unwrap_err();
+    assert!(err.to_string().contains("stale plan"), "{err}");
+
+    // Re-plan → apply with the fresh commit id succeeds.
+    let p2 = plan(&db, &t).unwrap();
+    let opts2 = ApplyOptions { expect_commit: Some(p2.db_commit), ..Default::default() };
+    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts2).unwrap();
 }

@@ -481,6 +481,18 @@ pub(crate) fn lookup_entity(conn: &Connection, class_id: i64, name: &str) -> Res
     )
 }
 
+pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(conn, "SELECT id FROM class_set WHERE cur_name = lower(?)", -1, name)
+}
+
+pub(crate) fn lookup_value_list(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(conn, "SELECT id FROM parameter_value_list WHERE cur_name = lower(?)", -1, name)
+}
+
+pub(crate) fn lookup_unit(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(conn, "SELECT id FROM units_of_measure WHERE cur_name = lower(?)", -1, name)
+}
+
 /// The pure, DB-independent part of one segment's write: batch-contract
 /// validation, kind inference, domain merge, tz warnings, and the per-entity
 /// row-index lists. Everything here is safe to compute once outside the retried
@@ -753,7 +765,7 @@ fn index_kind(dt: &DataType) -> Result<IndexKind, DbError> {
     })
 }
 
-fn index_kind_tag(k: IndexKind) -> &'static str {
+pub(crate) fn index_kind_tag(k: IndexKind) -> &'static str {
     match k {
         IndexKind::Datetime => "datetime",
         IndexKind::Integer => "integer",
@@ -813,10 +825,14 @@ fn effective_domains(
 fn opt_id(conn: &Connection, sql: &str, id_param: i64, name: &str) -> Result<Option<i64>, DbError> {
     // Two shapes share this: class/alternative (name only) and entity (class +
     // name). `id_param` < 0 means "name only"; the SQL then ignores it.
+    // `prepare_cached`: the small set of lookup statements is re-executed for
+    // every referent of every write/apply — the per-connection statement
+    // cache amortizes the prepares (review item 21).
+    let mut stmt = conn.prepare_cached(sql)?;
     let r = if id_param < 0 {
-        conn.query_row(sql, params![name], |r| r.get::<_, i64>(0))
+        stmt.query_row(params![name], |r| r.get::<_, i64>(0))
     } else {
-        conn.query_row(sql, params![id_param, name], |r| r.get::<_, i64>(0))
+        stmt.query_row(params![id_param, name], |r| r.get::<_, i64>(0))
     };
     match r {
         Ok(id) => Ok(Some(id)),
@@ -991,12 +1007,14 @@ fn inferred_declared(inferred: &[(String, IndexKind)]) -> DeclaredType {
 /// One member of a definition's declared allowed-type set as stored in the DB:
 /// the `parameter_type` row id (the D11 binding persisted on value rows), the
 /// `value_kind` tag, the dimension names in declared order, and the
-/// `(position, kind)` shape canon consumes.
-struct DbDeclared {
-    pt_id: i64,
-    value_kind: String,
-    dim_names: Vec<String>,
-    shape: DeclaredType,
+/// `(position, kind)` shape canon consumes. `pub(crate)`: the template
+/// module's DB snapshot reads declared sets through the SAME reader/validation
+/// as the write path (review item: no raw-string shadow readers).
+pub(crate) struct DbDeclared {
+    pub(crate) pt_id: i64,
+    pub(crate) value_kind: String,
+    pub(crate) dim_names: Vec<String>,
+    pub(crate) shape: DeclaredType,
 }
 
 /// Human-readable one-line description of a declared member, used by the
@@ -1155,25 +1173,78 @@ fn read_declared_types(conn: &Connection, pd_id: i64) -> Result<Vec<DbDeclared>,
     )?;
     let mut out: Vec<DbDeclared> = Vec::with_capacity(pts.len());
     for (pt_id, value_kind) in pts {
-        let mut positions: Vec<(u8, IndexKind)> = Vec::new();
-        let mut dim_names: Vec<String> = Vec::new();
+        let mut raw_dims: Vec<(i8, String, String)> = Vec::new();
         let rows = dim_stmt.query_map(params![pt_id], |r| {
             Ok((r.get::<_, i8>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
         })?;
         for row in rows {
-            let (pos, dname, kind) = row?;
-            positions.push((pos as u8, parse_index_kind(&kind)?));
-            dim_names.push(dname);
+            raw_dims.push(row?);
         }
-        for (i, (pos, _)) in positions.iter().enumerate() {
-            if *pos as usize != i + 1 {
-                return Err(DbError::Api(format!(
-                    "parameter_type {pt_id}: declared dimension positions are not contiguous \
-                     1..=rank (position {pos} at index {i}; import/hand-edit damage)"
-                )));
-            }
+        out.push(assemble_declared(pt_id, value_kind, raw_dims)?);
+    }
+    Ok(out)
+}
+
+/// Turn one `parameter_type` row + its ordered dimension rows into a
+/// [`DbDeclared`], applying THE row validation (kind-tag parse via
+/// [`parse_index_kind`], position contiguity 1..=rank). Shared by the
+/// per-definition reader above and the whole-DB batch reader below, so the
+/// write path and the template snapshot cannot diverge on what a stored
+/// declaration means.
+fn assemble_declared(
+    pt_id: i64,
+    value_kind: String,
+    raw_dims: Vec<(i8, String, String)>,
+) -> Result<DbDeclared, DbError> {
+    let mut positions: Vec<(u8, IndexKind)> = Vec::with_capacity(raw_dims.len());
+    let mut dim_names: Vec<String> = Vec::with_capacity(raw_dims.len());
+    for (pos, dname, kind) in raw_dims {
+        positions.push((pos as u8, parse_index_kind(&kind)?));
+        dim_names.push(dname);
+    }
+    for (i, (pos, _)) in positions.iter().enumerate() {
+        if *pos as usize != i + 1 {
+            return Err(DbError::Api(format!(
+                "parameter_type {pt_id}: declared dimension positions are not contiguous \
+                 1..=rank (position {pos} at index {i}; import/hand-edit damage)"
+            )));
         }
-        out.push(DbDeclared { pt_id, value_kind, dim_names, shape: DeclaredType { positions } });
+    }
+    Ok(DbDeclared { pt_id, value_kind, dim_names, shape: DeclaredType { positions } })
+}
+
+/// Batch form of [`read_declared_types`]: every definition's current declared
+/// set in two scans (one per table, JOIN-free grouping in Rust), through the
+/// SAME [`assemble_declared`] validation. Used by the template module's
+/// vocabulary snapshot (its whole-DB read idiom); the per-write path keeps the
+/// targeted single-definition reader.
+pub(crate) fn read_all_declared_types(
+    conn: &Connection,
+) -> Result<HashMap<i64, Vec<DbDeclared>>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, parameter_definition_id, value_kind FROM parameter_type \
+         WHERE valid_to_commit IS NULL ORDER BY parameter_definition_id, id",
+    )?;
+    let pts: Vec<(i64, i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut dims_by_pt: HashMap<i64, Vec<(i8, String, String)>> = HashMap::new();
+    let mut dstmt = conn.prepare(
+        "SELECT parameter_type_id, position, dimension_name, kind \
+         FROM parameter_type_dimension WHERE valid_to_commit IS NULL \
+         ORDER BY parameter_type_id, position",
+    )?;
+    let drows = dstmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i8>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+    })?;
+    for row in drows {
+        let (pt_id, pos, name, kind) = row?;
+        dims_by_pt.entry(pt_id).or_default().push((pos, name, kind));
+    }
+    let mut out: HashMap<i64, Vec<DbDeclared>> = HashMap::new();
+    for (pt_id, pd_id, value_kind) in pts {
+        let raw = dims_by_pt.remove(&pt_id).unwrap_or_default();
+        out.entry(pd_id).or_default().push(assemble_declared(pt_id, value_kind, raw)?);
     }
     Ok(out)
 }

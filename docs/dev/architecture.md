@@ -79,7 +79,7 @@ Design highlights and where they are owned:
 - The DDL review map (build order, rationale, deviations, measured read
   performance) is `specs/ddl_sketch.md`.
 
-Verified by `schema/smoke_test.py`: **156/156 checks**, including
+Verified by `schema/smoke_test.py`: **157/157 checks**, including
 hostile-data regressions from the DDL critique. Run with the
 project-local `.venv/bin/python` (DuckDB 1.5.5 — must match the bundled
 engine that writes the files).
@@ -237,7 +237,7 @@ Three legs, run via `just` tiers (`just` = quick gate, `just full` =
 release gate with `#[ignore]`d slow tests + benches):
 
 1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`,
-   156/156): builds a demo model, exercises resolution / membership /
+   157/157): builds a demo model, exercises resolution / membership /
    history / audits, then plants hostile-data corruptions and asserts
    the right constraint or audit fires.
 2. **Rust suite** (`cargo test --workspace`): unit + integration tests

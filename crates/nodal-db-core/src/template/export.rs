@@ -166,9 +166,12 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
         let mut parameters: Vec<Parameter> = Vec::new();
         for p in c.params.values() {
             // Type set: emit explicit `types:` unless the declaration is
-            // exactly what value-list inference would reproduce (a single
-            // rank-0 member of the list's uniform kind) — keeps round-trips
-            // of list-typed parameters free of redundant `types:` blocks.
+            // exactly what value-list inference would reproduce — decided by
+            // THE shared elision rule (`ir::types_elidable`), the same rule
+            // normalization applies, so an elided export and an explicit
+            // source hash identically (review item 11). The check runs
+            // against the EXPORTED list; a list with unrepresentable members
+            // never elides (its exported members under-represent it).
             let mut types: Option<Vec<TypeDecl>> = if p.types.is_empty() {
                 None
             } else {
@@ -195,17 +198,15 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
                 )
             };
             if let (Some(list_name), Some(ts)) = (&p.value_list, &types) {
-                if ts.len() == 1 && ts[0].dims.is_none() {
-                    if let Some(l) = v.value_lists.get(&fold(list_name)) {
-                        let kinds: std::collections::HashSet<&str> =
-                            l.members.iter().map(|m| m.value_kind.as_str()).collect();
-                        if l.unrepresentable_members == 0
-                            && kinds.len() == 1
-                            && kinds.contains(ts[0].kind.as_str())
-                        {
-                            types = None; // inference reproduces it (§3.5)
-                        }
-                    }
+                let fully_represented = v
+                    .value_lists
+                    .get(&fold(list_name))
+                    .map(|l| l.unrepresentable_members == 0)
+                    .unwrap_or(false);
+                let exported_list =
+                    value_lists.iter().find(|l| fold(&l.name) == fold(list_name));
+                if fully_represented && super::ir::types_elidable(ts, exported_list) {
+                    types = None; // inference reproduces it (§3.5)
                 }
             }
             let default = match &p.default {
@@ -291,6 +292,9 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
     let mut memberships: Vec<SeedMembership> = v
         .memberships
         .iter()
+        // Excluded base rows (included = FALSE) are user overrides, never
+        // template content.
+        .filter(|m| m.included)
         .map(|m| SeedMembership {
             group: EntityRef { class: m.group_class.clone(), entity: m.group.clone() },
             member: EntityRef { class: m.member_class.clone(), entity: m.member.clone() },
@@ -307,6 +311,16 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
     let seed = if entities.is_empty() && memberships.is_empty() {
         None
     } else {
+        // Runtime-visible honesty (review item 15): the store cannot tell
+        // vocabulary seed from user data, so this is loud, not a doc footnote.
+        warnings.push(format!(
+            "seed block carries ALL {} current entities and {} base memberships — the \
+             store has no vocabulary-seed marker, so exporting a POPULATED database \
+             pulls user entities into the template (on a freshly loaded DB the two \
+             coincide exactly; a seed marker is a deferred door)",
+            entities.len(),
+            memberships.len()
+        ));
         Some(Seed { entities, memberships })
     };
 

@@ -902,8 +902,9 @@ fn resolve_entity_tuple(
 /// class (`dim_class`), or ANY member class of a class-set (`dim_set`). Within a
 /// single class the per-class name uniqueness gives ≤1 hit; across a set's
 /// members a name collision (only audit-guarded, #2364) ⇒ a clean ambiguity
-/// error. Miss ⇒ `Ok(None)`.
-fn resolve_element(
+/// error. Miss ⇒ `Ok(None)`. `pub(crate)`: the template loader resolves seed
+/// entity elements through this same helper (one resolution semantics).
+pub(crate) fn resolve_element(
     conn: &Connection,
     dim_class: Option<i64>,
     dim_set: Option<i64>,

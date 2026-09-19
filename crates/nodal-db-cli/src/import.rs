@@ -213,8 +213,10 @@ pub fn run(args: &ImportArgs) -> Result<()> {
 /// non-blank), else the first of `USER`/`USERNAME`/`LOGNAME` whose value is
 /// non-blank — a set-but-empty variable falls through (critique F5). No source
 /// at all is a plain CLI usage error, not an E-class payload error.
-fn resolve_user(args: &ImportArgs) -> Result<String> {
-    if let Some(u) = &args.user {
+/// `pub(crate)`: the ONE author-resolution rule for every verb (`import`,
+/// `template`, `init --template`).
+pub(crate) fn resolve_user_from(explicit: Option<&str>) -> Result<String> {
+    if let Some(u) = explicit {
         let u = u.trim();
         if u.is_empty() {
             bail!("--user must be non-empty");
@@ -235,6 +237,10 @@ fn resolve_user(args: &ImportArgs) -> Result<String> {
                  is set to a non-blank value (pass --user <name>)"
             )
         })
+}
+
+fn resolve_user(args: &ImportArgs) -> Result<String> {
+    resolve_user_from(args.user.as_deref())
 }
 
 // ---------------------------------------------------------------------------

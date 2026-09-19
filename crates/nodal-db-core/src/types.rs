@@ -98,7 +98,31 @@ pub enum ScalarValue {
     Duration { months: i32, micros: i64 },
 }
 
+/// The one name fold used everywhere names are compared in Rust: Unicode
+/// `to_lowercase`, matching DuckDB's Unicode `lower()` that the schema's
+/// `cur_name` columns and every SQL resolver apply (api critique F3: an ASCII
+/// fold lets Ä/ä-aliased names slip past comparisons SQL would collapse).
+pub(crate) fn fold(s: &str) -> String {
+    s.to_lowercase()
+}
+
 impl ScalarValue {
+    /// A canonical identity string for scalar equality/dedup (kind-prefixed;
+    /// float text is Rust's shortest round-trip form, so `1` written as float
+    /// and `1.0` collapse). One encoding shared by the template IR's literal
+    /// canonicalization, the reconcile diff, and list-member matching — a
+    /// single definition so they cannot drift.
+    pub(crate) fn identity_string(&self) -> String {
+        match self {
+            ScalarValue::Float(f) => format!("f:{f}"),
+            ScalarValue::Int(i) => format!("i:{i}"),
+            ScalarValue::Bool(b) => format!("b:{b}"),
+            ScalarValue::Str(s) => format!("s:{s}"),
+            ScalarValue::DateTime(t) => format!("d:{t}"),
+            ScalarValue::Duration { months, micros } => format!("u:{months}:{micros}"),
+        }
+    }
+
     pub fn kind(&self) -> ValueKind {
         match self {
             ScalarValue::Float(_) => ValueKind::Float,

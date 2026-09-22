@@ -370,8 +370,8 @@ entity classes (14 of them 0-D — `node`, `unit`, `connection`,
 `commodity`, `reserve`, `constraint`, `group`, `profile`, `model`,
 `solve`, `timeline`, `timeset`, …— plus 16 N-D classes up to 4-D, e.g.
 `unit__inputNode`, `connection__node__node`,
-`reserve__upDown__unit__node`), 229 parameter definitions, and 140
-parameter value lists; a separate results vocabulary (12 classes, 58
+`reserve__upDown__unit__node`), 229 parameter definitions, and 35
+parameter value lists (140 members); a separate results vocabulary (12 classes, 58
 parameter definitions) describes outputs. The input schema carries a
 migration chain (`FLEXTOOL_DB_VERSION = 69`) with per-version canonical
 databases, and an **axis contract** (`flextool_axis_contract.json`)

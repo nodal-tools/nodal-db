@@ -17,29 +17,11 @@ use std::path::PathBuf;
 use anyhow::bail;
 use clap::{Parser, Subcommand};
 
-/// The schema embedded at compile time (plan Q4 decision: `include_str!`
-/// embedding, so a deployed binary needs no schema directory). File names are
-/// kept for lexical ordering — the same order `schema/build.py` and
-/// `core::schema_init` apply. Adding/renaming a schema file is a compile
-/// error here, loudly.
-static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
-    ("001_meta.sql", include_str!("../../../schema/001_meta.sql")),
-    ("010_entities.sql", include_str!("../../../schema/010_entities.sql")),
-    ("020_alternatives.sql", include_str!("../../../schema/020_alternatives.sql")),
-    ("030_parameters.sql", include_str!("../../../schema/030_parameters.sql")),
-    ("040_axes.sql", include_str!("../../../schema/040_axes.sql")),
-    ("050_values.sql", include_str!("../../../schema/050_values.sql")),
-    ("055_provenance.sql", include_str!("../../../schema/055_provenance.sql")),
-    ("060_display.sql", include_str!("../../../schema/060_display.sql")),
-    ("065_semantic.sql", include_str!("../../../schema/065_semantic.sql")),
-    ("070_views_current.sql", include_str!("../../../schema/070_views_current.sql")),
-    ("080_views_read.sql", include_str!("../../../schema/080_views_read.sql")),
-    ("090_views_resolution.sql", include_str!("../../../schema/090_views_resolution.sql")),
-    ("100_views_completeness.sql", include_str!("../../../schema/100_views_completeness.sql")),
-    ("110_views_history.sql", include_str!("../../../schema/110_views_history.sql")),
-    ("120_views_audit.sql", include_str!("../../../schema/120_views_audit.sql")),
-    ("900_bootstrap.sql", include_str!("../../../schema/900_bootstrap.sql")),
-];
+/// The compile-time-embedded schema (plan Q4): ONE list, owned by the core
+/// (`schema_init::EMBEDDED_SCHEMA`) and shared with every other embedder
+/// (the Python skin), so the copies cannot drift. A census test in the core
+/// asserts it matches `schema/*.sql` exactly.
+use nodal_db_core::schema_init::EMBEDDED_SCHEMA;
 
 #[derive(Parser)]
 #[command(name = "nodal-db", about = "nodal_db core CLI", version)]

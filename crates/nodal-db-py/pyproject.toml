@@ -13,6 +13,13 @@ dynamic = ["version"]
 # producer for inputs). >=16 guarantees the PyCapsule interface both ways.
 dependencies = ["pyarrow>=16"]
 
+[project.optional-dependencies]
+# The pytest suite's own deps: `pip install 'nodal-db[test]'` (or install the
+# built wheel with the [test] extra). `duckdb` is REQUIRED by
+# test_busy_on_externally_locked_file — it holds a cross-process RW lock to
+# prove the Busy taxonomy mapping; without it that test skips loudly.
+test = ["pytest", "duckdb"]
+
 [tool.maturin]
 module-name = "nodal_db"
 # pyo3/extension-module is a DEFAULT cargo feature of this crate (see

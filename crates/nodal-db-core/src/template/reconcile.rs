@@ -500,6 +500,45 @@ pub struct ApplyOutcome {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Process-local registry of databases with an [`apply`] in flight, keyed by
+/// [`crate::conn::canonical_path_key`]. See the guard comment in [`apply`];
+/// the RAII guard removes the entry on every exit path (success, error,
+/// panic-unwind).
+static APPLIES_IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<std::path::PathBuf>>> =
+    std::sync::OnceLock::new();
+
+struct ApplyInFlight(std::path::PathBuf);
+
+impl ApplyInFlight {
+    fn enter(db: &Path) -> Result<Self, DbError> {
+        let key = crate::conn::canonical_path_key(db);
+        let mut set = APPLIES_IN_FLIGHT
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if !set.insert(key.clone()) {
+            return Err(DbError::Api(format!(
+                "template apply is already in flight for {} in this process — a run: \
+                 migration program must not re-apply a template to the database it is \
+                 migrating (the nested apply would re-execute the program's own \
+                 pending step, recursing); let the outer apply finish instead",
+                db.display()
+            )));
+        }
+        Ok(Self(key))
+    }
+}
+
+impl Drop for ApplyInFlight {
+    fn drop(&mut self) {
+        let mut set = APPLIES_IN_FLIGHT
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        set.remove(&self.0);
+    }
+}
+
 fn max_commit(conn: &Connection) -> Result<i64, DbError> {
     Ok(conn.query_row("SELECT max(id) FROM commit", [], |r| r.get(0))?)
 }
@@ -655,6 +694,17 @@ pub fn apply(
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
+    // Nested-apply guard (py-skin review): a `run:` program that calls `apply`
+    // on the database it is migrating would re-execute its own step — the
+    // outer chain's substamp for it lands only AFTER it returns, so the inner
+    // apply sees it pending and recurses unboundedly. Refuse a second
+    // in-flight apply on the same DB (same canonical-path identity as
+    // `conn::path_lock`) with a typed error naming the reentrancy.
+    // PROCESS-LOCAL ONLY, deliberately: a second *process* applying to the
+    // same file is indistinguishable from any other concurrent writer and
+    // cannot be detected here — that window remains, as it does for every
+    // cross-process write race (VMP Part 5 conflict semantics own it).
+    let _in_flight = ApplyInFlight::enter(db)?;
     let mut out = ApplyOutcome { converged: true, ..Default::default() };
     out.warnings.extend(chk.warnings.iter().cloned());
 

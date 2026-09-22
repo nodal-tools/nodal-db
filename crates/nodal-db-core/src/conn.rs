@@ -48,16 +48,24 @@ const BACKOFF_CAP: Duration = Duration::from_millis(500);
 /// Process-global registry of per-path serialization locks (api critique F1).
 static PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
-/// The in-process serialization lock for one DB path, keyed by the
-/// canonicalized path so symlink/relative aliases of one file share one lock.
-/// For a not-yet-created file the parent directory is canonicalized instead.
-pub(crate) fn path_lock(db_path: &Path) -> Arc<Mutex<()>> {
-    let key = db_path.canonicalize().unwrap_or_else(|_| {
+/// The canonical process-local identity of one DB path: the canonicalized
+/// path, so symlink/relative aliases of one file share one key. For a
+/// not-yet-created file the parent directory is canonicalized instead. The
+/// key under [`path_lock`] AND the template module's in-flight-apply guard —
+/// one canonicalization, so the two registries cannot disagree on identity.
+pub(crate) fn canonical_path_key(db_path: &Path) -> PathBuf {
+    db_path.canonicalize().unwrap_or_else(|_| {
         match (db_path.parent().and_then(|d| d.canonicalize().ok()), db_path.file_name()) {
             (Some(dir), Some(name)) => dir.join(name),
             _ => db_path.to_path_buf(),
         }
-    });
+    })
+}
+
+/// The in-process serialization lock for one DB path, keyed by
+/// [`canonical_path_key`].
+pub(crate) fn path_lock(db_path: &Path) -> Arc<Mutex<()>> {
+    let key = canonical_path_key(db_path);
     let mut map = PATH_LOCKS
         .get_or_init(Default::default)
         .lock()

@@ -188,6 +188,16 @@ def test_api_errors_are_typed(db):
 
 
 def test_busy_on_externally_locked_file(db):
+    # This test proves the taxonomy's headline claim (Busy is a typed,
+    # surfaced outcome) — it needs the python 'duckdb' package, DECLARED as
+    # the [test] extra (pyproject.toml): pip install 'nodal-db[test]'.
+    # The skip below is a fallback for stripped-down envs, and it is loud.
+    pytest.importorskip(
+        "duckdb",
+        reason="python 'duckdb' package missing — install the declared test "
+        "deps (pip install 'nodal-db[test]'); without it the Busy error "
+        "mapping (a headline claim of the exception taxonomy) is UNTESTED",
+    )
     # Hold a read-write DuckDB connection from ANOTHER process (DuckDB's file
     # lock is cross-process; in-process opens are serialized by the core's
     # path lock instead). The skin must surface DbError::Busy as
@@ -318,6 +328,35 @@ def test_run_program_exception_propagates_unwrapped(db, tmp_path):
         db.template_apply(v2, user="tester", programs={"backfill": bad})
     # The chain aborted before the version stamp.
     assert meta(db, "template_version") == "1"
+
+
+def test_run_program_nested_self_apply_refused(db, tmp_path):
+    """A run: program re-applying its own in-flight template would re-execute
+    itself (unbounded recursion); the core's in-flight guard refuses the
+    nested apply with a typed error (README reentrancy contract, rule 5)."""
+    db.template_apply(write_template(tmp_path, "v1.yaml", TEMPLATE_V1), user="tester")
+    v2 = write_template(tmp_path, "v2.yaml", TEMPLATE_V2)
+
+    def recurse(db_path, user):
+        nodal_db.open(db_path).template_apply(
+            v2, user=user, programs={"backfill": recurse}
+        )
+
+    with pytest.raises(nodal_db.ApiError, match="already in flight"):
+        db.template_apply(v2, user="tester", programs={"backfill": recurse})
+    # The chain aborted before the version stamp; the DB is not wedged: a
+    # sane program afterwards completes the migration.
+    assert meta(db, "template_version") == "1"
+    ok = db.template_apply(
+        v2,
+        user="tester",
+        programs={
+            "backfill": lambda p, u: nodal_db.open(p).write_parameter(
+                "unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user=u
+            )
+        },
+    )
+    assert ok["converged"] and meta(db, "template_version") == "2"
 
 
 def test_template_apply_stale_plan_refused(db, tmp_path):

@@ -910,3 +910,37 @@ fn d12_explicit_null_respects_the_nonscalar_guard() {
         1
     );
 }
+
+/// Nested-self-apply guard (py-skin review): a `run:` program calling `apply`
+/// on the database it is migrating would re-execute its own pending step
+/// (its substamp lands only after it returns) and recurse unboundedly. The
+/// core refuses the inner apply with a typed error naming the reentrancy;
+/// the outer chain aborts mid-span and remains resumable. Process-local by
+/// design — cross-process is any other concurrent-writer race.
+#[test]
+fn nested_self_apply_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+
+    let t4 = v4_template();
+    let mut registry = MigrationRegistry::new();
+    registry.register("mark_step", move |db: &Path, user: &str| {
+        // The program tries to re-apply its own in-flight template.
+        let inner = v4_template();
+        let e = apply(db, &inner, &MigrationRegistry::new(), user, "", &ApplyOptions::default())
+            .unwrap_err();
+        Err(e)
+    });
+    let err = apply(&db, &t4, &registry, "tester", "", &ApplyOptions::default()).unwrap_err();
+    assert!(
+        err.to_string().contains("already in flight"),
+        "expected the in-flight refusal, got: {err}"
+    );
+
+    // The guard entry was released on error: a fresh (non-nested) apply of
+    // the same template succeeds afterwards.
+    let mut working = MigrationRegistry::new();
+    working.register("mark_step", |_db: &Path, _u: &str| Ok(()));
+    let out = apply(&db, &t4, &working, "tester", "", &ApplyOptions::default()).unwrap();
+    assert!(out.converged);
+}

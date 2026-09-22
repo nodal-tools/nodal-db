@@ -13,6 +13,36 @@ use duckdb::Connection;
 
 use crate::error::DbError;
 
+/// The schema embedded at compile time (plan Q4 decision: `include_str!`
+/// embedding, so a deployed artifact — the CLI binary, the Python wheel —
+/// needs no schema directory). File names are kept for lexical ordering, the
+/// same order `schema/build.py` and [`apply_schema_from`] apply.
+///
+/// ONE list, here in the core, consumed by every embedder (the CLI `init`
+/// verb, the Python skin's `nodal_db.init`) — the founding drift lesson
+/// applied to init: two hand-maintained copies of this list WILL diverge on
+/// the next schema file. Renaming a schema file is a compile error here,
+/// loudly; ADDING one is caught by `embedded_schema_matches_directory_census`
+/// below (a bare `include_str!` list cannot self-detect an omission).
+pub static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
+    ("001_meta.sql", include_str!("../../../schema/001_meta.sql")),
+    ("010_entities.sql", include_str!("../../../schema/010_entities.sql")),
+    ("020_alternatives.sql", include_str!("../../../schema/020_alternatives.sql")),
+    ("030_parameters.sql", include_str!("../../../schema/030_parameters.sql")),
+    ("040_axes.sql", include_str!("../../../schema/040_axes.sql")),
+    ("050_values.sql", include_str!("../../../schema/050_values.sql")),
+    ("055_provenance.sql", include_str!("../../../schema/055_provenance.sql")),
+    ("060_display.sql", include_str!("../../../schema/060_display.sql")),
+    ("065_semantic.sql", include_str!("../../../schema/065_semantic.sql")),
+    ("070_views_current.sql", include_str!("../../../schema/070_views_current.sql")),
+    ("080_views_read.sql", include_str!("../../../schema/080_views_read.sql")),
+    ("090_views_resolution.sql", include_str!("../../../schema/090_views_resolution.sql")),
+    ("100_views_completeness.sql", include_str!("../../../schema/100_views_completeness.sql")),
+    ("110_views_history.sql", include_str!("../../../schema/110_views_history.sql")),
+    ("120_views_audit.sql", include_str!("../../../schema/120_views_audit.sql")),
+    ("900_bootstrap.sql", include_str!("../../../schema/900_bootstrap.sql")),
+];
+
 /// The repo's `schema/` directory, resolved relative to this crate:
 /// `crates/nodal-db-core` → repo root → `schema`.
 pub fn schema_dir() -> PathBuf {
@@ -159,6 +189,34 @@ mod tests {
             .expect("count");
         conn.close().expect("close");
         n
+    }
+
+    /// The embedded schema census: [`EMBEDDED_SCHEMA`]'s file set must equal
+    /// the `schema/` directory's numbered `*.sql` files exactly (same names,
+    /// same lexical order, identical content). A schema file added to the
+    /// directory but not to the list would otherwise ship silently absent
+    /// from every embedded-init artifact (CLI binary, Python wheel).
+    #[test]
+    fn embedded_schema_matches_directory_census() {
+        let files = numbered_sql_files(&schema_dir()).expect("list schema files");
+        let dir_names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        let embedded_names: Vec<String> =
+            EMBEDDED_SCHEMA.iter().map(|(n, _)| n.to_string()).collect();
+        assert_eq!(
+            embedded_names, dir_names,
+            "EMBEDDED_SCHEMA is out of sync with schema/*.sql — update the \
+             include_str! list in schema_init.rs"
+        );
+        for (path, (name, embedded_sql)) in files.iter().zip(EMBEDDED_SCHEMA) {
+            let on_disk = fs::read_to_string(path).expect("read schema file");
+            assert_eq!(
+                &on_disk, embedded_sql,
+                "embedded {name} differs from the on-disk file (stale build?)"
+            );
+        }
     }
 
     /// D3: a fresh DB seeds NO alternative unless one is explicitly requested.

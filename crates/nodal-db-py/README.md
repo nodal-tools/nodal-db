@@ -113,6 +113,20 @@ Contract (the core's Layer-3 rules, surfaced verbatim):
    fresh, short-lived connections you close yourself); never stash a
    long-lived connection — the file lock starves the chain's next
    commit, surfacing as `nodal_db.Busy`.
+5. **A program must NOT call `template_apply` on the database it is
+   migrating.** Its own step's progress substamp lands only after it
+   returns, so a nested apply would re-execute the program itself. The
+   core refuses this (process-locally, by canonical DB path) with
+   `nodal_db.ApiError` naming the reentrancy; a second *process*
+   applying concurrently cannot be detected and is the ordinary
+   concurrent-writer race. Value writes, reads, plans, erases — all
+   fine; re-applying the in-flight template is the one forbidden call.
+6. **No detached writers.** Any thread (or process) a program spawns
+   must finish its writes before the program returns: the per-program
+   commit attribution in `run_programs` is a commit-id watermark range
+   taken around the call, so a write landing after the program returns
+   is misattributed to a later step (or to none) and, worse, races the
+   chain's own commits. Join your threads.
 
 ## Errors
 

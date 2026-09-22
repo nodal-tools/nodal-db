@@ -121,70 +121,13 @@ create_exception!(
 );
 
 // ---------------------------------------------------------------------------
-// Embedded schema (same compile-time embedding as the CLI `init` verb, plan
-// Q4) so `nodal_db.init` works from an installed wheel with no repo checkout.
+// Embedded schema: the ONE compile-time list lives in the core
+// (`schema_init::EMBEDDED_SCHEMA`, shared with the CLI `init` verb and
+// census-tested against `schema/*.sql`), so `nodal_db.init` works from an
+// installed wheel with no repo checkout and cannot drift from the CLI's.
 // ---------------------------------------------------------------------------
 
-static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
-    ("001_meta.sql", include_str!("../../../schema/001_meta.sql")),
-    (
-        "010_entities.sql",
-        include_str!("../../../schema/010_entities.sql"),
-    ),
-    (
-        "020_alternatives.sql",
-        include_str!("../../../schema/020_alternatives.sql"),
-    ),
-    (
-        "030_parameters.sql",
-        include_str!("../../../schema/030_parameters.sql"),
-    ),
-    ("040_axes.sql", include_str!("../../../schema/040_axes.sql")),
-    (
-        "050_values.sql",
-        include_str!("../../../schema/050_values.sql"),
-    ),
-    (
-        "055_provenance.sql",
-        include_str!("../../../schema/055_provenance.sql"),
-    ),
-    (
-        "060_display.sql",
-        include_str!("../../../schema/060_display.sql"),
-    ),
-    (
-        "065_semantic.sql",
-        include_str!("../../../schema/065_semantic.sql"),
-    ),
-    (
-        "070_views_current.sql",
-        include_str!("../../../schema/070_views_current.sql"),
-    ),
-    (
-        "080_views_read.sql",
-        include_str!("../../../schema/080_views_read.sql"),
-    ),
-    (
-        "090_views_resolution.sql",
-        include_str!("../../../schema/090_views_resolution.sql"),
-    ),
-    (
-        "100_views_completeness.sql",
-        include_str!("../../../schema/100_views_completeness.sql"),
-    ),
-    (
-        "110_views_history.sql",
-        include_str!("../../../schema/110_views_history.sql"),
-    ),
-    (
-        "120_views_audit.sql",
-        include_str!("../../../schema/120_views_audit.sql"),
-    ),
-    (
-        "900_bootstrap.sql",
-        include_str!("../../../schema/900_bootstrap.sql"),
-    ),
-];
+use nodal_db_core::schema_init::EMBEDDED_SCHEMA;
 
 // ---------------------------------------------------------------------------
 // The handle
@@ -482,6 +425,17 @@ impl Database {
                     match callable.call1(py, (db_str, user)) {
                         Ok(_) => Ok(()),
                         Err(err) => {
+                            // INVARIANT this stash depends on: the core's
+                            // runner propagates a program's Err IMMEDIATELY
+                            // (`program(db, user)?` in reconcile.rs `apply`,
+                            // the MigrationStep::Run arm) — the chain aborts,
+                            // no later step runs, and the Err we return here
+                            // is the Err `apply` returns, so the stashed
+                            // PyErr below is exactly the exception the apply
+                            // failed on. If the core ever starts swallowing
+                            // or deferring program errors, this stash could
+                            // surface a STALE exception for an unrelated
+                            // failure — revisit this pairing then.
                             let msg = format!("run program {pname:?} raised: {err}");
                             *pend.lock().unwrap() = Some(err);
                             Err(DbError::Api(msg))

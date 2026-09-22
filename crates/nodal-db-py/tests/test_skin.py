@@ -1,0 +1,353 @@
+"""Pytest suite for the thin PyO3 skin (crates/nodal-db-py).
+
+Run with the maturin-built module importable (``maturin develop`` into the
+active venv). The tests exercise the skin as marshaling only: every behavior
+asserted here is the CORE's behavior observed through Python.
+
+The centerpiece is ``test_run_program_writes_through_the_skin``: the D13
+acceptance seed — a template migration chain whose ``run:`` step is a plain
+Python function that writes back through the skin (reverse-direction PyO3,
+reentrancy included).
+"""
+
+import os
+import subprocess
+import sys
+
+import pyarrow as pa
+import pytest
+
+import nodal_db
+
+
+@pytest.fixture
+def db(tmp_path):
+    return nodal_db.init(str(tmp_path / "t.duckdb"), default_alternative="Base")
+
+
+def scalar_batch(entities, values, value_type=None):
+    value = pa.array(values, value_type) if value_type is not None else pa.array(values)
+    return pa.record_batch({"entity": pa.array(entities, pa.string()), "value": value})
+
+
+# ---------------------------------------------------------------------------
+# open / init / identity
+# ---------------------------------------------------------------------------
+
+
+def test_open_missing_file_is_typed_error(tmp_path):
+    with pytest.raises(nodal_db.ApiError):
+        nodal_db.open(str(tmp_path / "nope.duckdb"))
+
+
+def test_identity_is_stable_uuid(db):
+    ident = db.db_identity()
+    assert len(ident) == 36
+    assert ident == nodal_db.open(db.path).db_identity()
+
+
+# ---------------------------------------------------------------------------
+# write / read round trip, Arrow zero-copy, dtype fidelity
+# ---------------------------------------------------------------------------
+
+
+def test_scalar_roundtrip_dtype_fidelity(db):
+    rep = db.write_parameter(
+        "unit", "capacity", "Base", scalar_batch(["u1", "u2"], [1.5, 2.5], pa.float64()),
+        user="tester",
+    )
+    assert rep["values_written"] == 2
+    assert rep["tiers"] == ["scalar"]
+    assert {(w["kind"], w["object_type"]) for w in rep["warnings"]} == {
+        ("auto_created", "entity_class"),
+        ("auto_created", "parameter_definition"),
+        ("auto_created", "entity"),
+    }
+
+    rb = db.read_parameter("unit", "capacity", "Base")
+    assert isinstance(rb, pa.RecordBatch)
+    assert rb.num_rows == 2
+    assert rb.schema.field("entity").type == pa.string()
+    # dtype fidelity: the float measure comes back as float64, not a string
+    # rendering or a downcast.
+    assert rb.schema.field("v_float").type == pa.float64()
+    got = dict(zip(rb.column("entity").to_pylist(), rb.column("v_float").to_pylist()))
+    assert got == {"u1": 1.5, "u2": 2.5}
+
+
+def test_indexed_timestamp_roundtrip(db):
+    ts = pa.array(
+        [1_700_000_000_000_000, 1_700_003_600_000_000, 1_700_007_200_000_000],
+        pa.timestamp("us"),
+    )
+    batch = pa.record_batch(
+        {
+            "entity": pa.array(["u1", "u1", "u1"], pa.string()),
+            "time": ts,
+            "value": pa.array([1.0, 2.0, 3.0], pa.float64()),
+        }
+    )
+    rep = db.write_parameter("unit", "flow", "Base", batch, user="tester")
+    assert rep["values_written"] == 1
+
+    rb = db.read_parameter("unit", "flow", "Base")
+    assert rb.num_rows == 3
+    # dtype fidelity through write -> canon -> storage -> read: the datetime
+    # index column (position 1; the macro exposes idx slots for all four
+    # possible positions) is timestamp[us] again, values identical.
+    (dt_field,) = [
+        f
+        for f in rb.schema
+        if f.name.startswith("idx1") and f.type == pa.timestamp("us")
+    ]
+    assert rb.column(dt_field.name).to_pylist() == ts.to_pylist()
+    assert rb.column("v_float").to_pylist() == [1.0, 2.0, 3.0]
+
+
+def test_table_input_via_capsule_stream(db):
+    # pyarrow.Table travels the __arrow_c_stream__ path (multiple batches in
+    # one Segment).
+    table = pa.table({"entity": ["a", "b"], "value": [1.0, 2.0]})
+    rep = db.write_parameter("node", "demand", "Base", table, user="tester")
+    assert rep["values_written"] == 2
+
+
+def test_query_returns_arrow_reader(db):
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    reader = db.query("SELECT count(*) AS n FROM entity")
+    assert isinstance(reader, pa.RecordBatchReader)
+    t = reader.read_all()
+    assert t.column("n").to_pylist() == [1]
+    # The query connection is read-only: a write through it must fail.
+    with pytest.raises(nodal_db.DatabaseError):
+        db.query("INSERT INTO commit (user, message) VALUES ('x', 'y')")
+
+
+def test_commit_changes_write_plus_delete_one_commit(db):
+    db.write_parameter(
+        "unit", "capacity", "Base", scalar_batch(["u1", "u2"], [1.0, 2.0]), user="t"
+    )
+    rep = db.commit_changes(
+        segments=[
+            {
+                "class": "unit",
+                "parameter": "capacity",
+                "alternative": "Base",
+                "batch": scalar_batch(["u3"], [3.0]),
+            }
+        ],
+        deletes=[("unit", "capacity", "Base", "u1")],
+        user="t",
+    )
+    rb = db.read_parameter("unit", "capacity", "Base")
+    assert sorted(rb.column("entity").to_pylist()) == ["u2", "u3"]
+    assert rep["rows_closed"] >= 1
+
+
+def test_object_delete_preview_and_commit(db):
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    key = {"kind": "entity", "class": "unit", "name": "u1"}
+    (preview,) = db.preview_object_deletes([key])
+    assert preview["found"] and preview["cascade"]["total_rows"] >= 1
+    rep = db.commit_changes(object_deletes=[dict(key, cascade=True)], user="t")
+    (outcome,) = rep["object_deletes"]
+    assert outcome["status"] == "deleted"
+    assert db.read_parameter("unit", "capacity", "Base").num_rows == 0
+
+
+# ---------------------------------------------------------------------------
+# error mapping
+# ---------------------------------------------------------------------------
+
+
+def test_exception_hierarchy(db):
+    for exc in (
+        nodal_db.Busy,
+        nodal_db.Conflict,
+        nodal_db.ApiError,
+        nodal_db.VersionTooOld,
+        nodal_db.SchemaError,
+        nodal_db.DatabaseError,
+        nodal_db.CanonError,
+        nodal_db.ArrowError,
+        nodal_db.InternalError,
+    ):
+        assert issubclass(exc, nodal_db.NodalDbError)
+    assert issubclass(nodal_db.NodalDbError, Exception)
+
+
+def test_api_errors_are_typed(db):
+    with pytest.raises(nodal_db.ApiError, match="user must be non-empty"):
+        db.write_parameter("c", "p", "a", scalar_batch(["e"], [1.0]), user="  ")
+    # A one-column batch violates the batch contract.
+    bad = pa.record_batch({"entity": pa.array(["e"], pa.string())})
+    with pytest.raises(nodal_db.ApiError, match="entity column and a value column"):
+        db.write_parameter("c", "p", "a", bad, user="t")
+    with pytest.raises(nodal_db.ApiError, match="nothing to do"):
+        db.commit_changes(user="t")
+
+
+def test_busy_on_externally_locked_file(db):
+    # Hold a read-write DuckDB connection from ANOTHER process (DuckDB's file
+    # lock is cross-process; in-process opens are serialized by the core's
+    # path lock instead). The skin must surface DbError::Busy as
+    # nodal_db.Busy after the core's bounded backoff, never hang or segfault.
+    code = (
+        "import duckdb, sys, time\n"
+        "con = duckdb.connect(sys.argv[1])\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, db.path], stdout=subprocess.PIPE
+    )
+    try:
+        assert proc.stdout.readline().strip() == b"locked"
+        with pytest.raises(nodal_db.Busy):
+            db.db_identity()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# template: load / plan / apply through the skin, and the D13 centerpiece
+# ---------------------------------------------------------------------------
+
+TEMPLATE_V1 = """\
+template: {name: pyskin, version: "1"}
+classes:
+  - name: unit
+    parameters:
+      - name: capacity
+        types: [{kind: float}]
+"""
+
+TEMPLATE_V2 = """\
+template: {name: pyskin, version: "2"}
+classes:
+  - name: unit
+    parameters:
+      - name: capacity
+        types: [{kind: float}]
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - run: backfill
+"""
+
+
+def write_template(tmp_path, name, text):
+    p = tmp_path / name
+    p.write_text(text)
+    return str(p)
+
+
+def meta(db, key):
+    t = db.query(
+        f"SELECT value FROM metadata WHERE lower(name) = '{key}' AND valid_to_commit IS NULL"
+    ).read_all()
+    vals = t.column("value").to_pylist()
+    return vals[0] if vals else None
+
+
+def test_template_load_plan_apply(db, tmp_path):
+    v1 = write_template(tmp_path, "v1.yaml", TEMPLATE_V1)
+    plan = db.template_plan(v1)
+    assert plan["template_name"] == "pyskin"
+    assert not plan["blocked"]
+    assert plan["actions"]  # the fresh load has work to do
+    outcome = db.template_apply(v1, user="tester", expect_commit=plan["db_commit"])
+    assert outcome["converged"] and not outcome["no_op"]
+    assert meta(db, "template_name") == "pyskin"
+    assert meta(db, "template_version") == "1"
+    # Idempotent re-apply short-circuits.
+    again = db.template_apply(v1, user="tester")
+    assert again["no_op"]
+
+
+def test_run_program_writes_through_the_skin(db, tmp_path):
+    """The D13 centerpiece: a run: migration program is a plain Python
+    callable that writes back through the skin while the core's apply is on
+    the Rust stack — reverse-direction PyO3 with reentrant API use."""
+    db.template_apply(write_template(tmp_path, "v1.yaml", TEMPLATE_V1), user="tester")
+
+    calls = []
+
+    def backfill(db_path, user):
+        calls.append((db_path, user))
+        # Reentrancy: open the SAME database through the skin, from inside a
+        # core callback, and write through the one write path.
+        inner = nodal_db.open(db_path)
+        inner.write_parameter(
+            "unit", "capacity", "Base", scalar_batch(["u1"], [42.0]), user=user
+        )
+
+    v2 = write_template(tmp_path, "v2.yaml", TEMPLATE_V2)
+    outcome = db.template_apply(v2, user="tester", programs={"backfill": backfill})
+
+    assert calls == [(db.path, "tester")]
+    (run,) = outcome["run_programs"]
+    assert run["program"] == "backfill"
+    assert len(run["commits"]) == 1  # the program's own write commit
+    assert outcome["converged"]
+    assert meta(db, "template_version") == "2"
+    rb = db.read_parameter("unit", "capacity", "Base")
+    assert rb.column("v_float").to_pylist() == [42.0]
+
+
+def test_run_program_missing_registration_is_loud(db, tmp_path):
+    db.template_apply(write_template(tmp_path, "v1.yaml", TEMPLATE_V1), user="tester")
+    v2 = write_template(tmp_path, "v2.yaml", TEMPLATE_V2)
+    with pytest.raises(nodal_db.ApiError, match="not registered"):
+        db.template_apply(v2, user="tester")
+
+
+def test_run_program_exception_propagates_unwrapped(db, tmp_path):
+    db.template_apply(write_template(tmp_path, "v1.yaml", TEMPLATE_V1), user="tester")
+
+    class Boom(RuntimeError):
+        pass
+
+    def bad(db_path, user):
+        raise Boom("original python exception")
+
+    v2 = write_template(tmp_path, "v2.yaml", TEMPLATE_V2)
+    with pytest.raises(Boom, match="original python exception"):
+        db.template_apply(v2, user="tester", programs={"backfill": bad})
+    # The chain aborted before the version stamp.
+    assert meta(db, "template_version") == "1"
+
+
+def test_template_apply_stale_plan_refused(db, tmp_path):
+    v1 = write_template(tmp_path, "v1.yaml", TEMPLATE_V1)
+    plan = db.template_plan(v1)
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u9"], [9.0]), user="t")
+    with pytest.raises(nodal_db.ApiError, match="stale plan"):
+        db.template_apply(v1, user="tester", expect_commit=plan["db_commit"])
+
+
+# ---------------------------------------------------------------------------
+# erasure
+# ---------------------------------------------------------------------------
+
+
+def test_erase_alternative_preview_and_erase(db):
+    db.write_parameter("unit", "capacity", "scratch", scalar_batch(["u1"], [1.0]), user="t")
+    preview = db.preview_erase_alternative("scratch")
+    assert preview["found"] and preview["rows_total"] >= 1 and preview["still_current"]
+
+    report = db.erase_alternative("scratch", user="t", note="pytest erase")
+    assert report["erased"] and report["marker_id"] > 0 and report["identity_closed"]
+    assert report["rows_total"] == preview["rows_total"]
+    assert db.read_parameter("unit", "capacity", "scratch").num_rows == 0
+    # Idempotent second erase: full no-op.
+    again = db.erase_alternative("scratch", user="t")
+    assert not again["erased"] and again["commit_id"] == 0
+
+
+def test_erase_expect_present_belt(db):
+    db.write_parameter("unit", "capacity", "old_run", scalar_batch(["u1"], [1.0]), user="t")
+    with pytest.raises(nodal_db.ApiError):
+        db.erase_alternative("old_run", user="t", expect_present=["replacement_run"])

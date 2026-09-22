@@ -48,6 +48,18 @@ serde_json = "1.0.151"
 # emitter quotes any scalar its own parser would misread ('69', 'true'), so
 # emit->parse round-trips are self-consistent.
 serde_norway = "0.9.42"
+# The Python skin (crates/nodal-db-py; engine_portability_FINDINGS §7: the
+# write-path SDK is bindings over the one core). arrow-pyarrow is the
+# maintained Arrow <-> Python bridge split out of arrow-rs; it is pinned
+# EXACTLY to the `arrow` pin above (same release train, same arrow-array in
+# the tree — the R2 one-arrow-version rule extends to it).
+# MATCHED-BUMP REQUIRED (three-way): a duckdb-rs bump that changes the
+# re-exported arrow version requires bumping `arrow` AND `arrow-pyarrow` to
+# the identical version — and arrow-pyarrow's own pyo3 requirement then
+# dictates the `pyo3` line below (58.4.0 requires pyo3 ^0.28).
+arrow-pyarrow = "=58.4.0"
+# abi3-py39: one wheel per platform, CPython >= 3.9 (the documented floor).
+pyo3 = { version = "0.28.3", features = ["abi3-py39"] }
 clap = { version = "4.6.6", features = ["derive"] }
 anyhow = "1.0.104"
 tempfile = "3.27.0"

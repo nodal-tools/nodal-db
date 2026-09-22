@@ -1,0 +1,48 @@
+# The thin PyO3 skin — the write-path SDK (engine_portability_FINDINGS §7):
+# a LOGIC-FREE marshaling layer over the one core. It marshals Arrow tables
+# and scalars in, calls nodal-db-core, and translates DbError out. It never
+# implements any canonicalization, tier, or history rule (CLAUDE.md
+# invariant 2 — bindings over the one core, never a second implementation).
+#
+# Build: `maturin develop` (or `maturin build --release`) with the venv
+# active. `pyo3/extension-module` is a DEFAULT feature and the lib has no
+# Rust test harness (`test = false` below; the crate's tests are the pytest
+# suite in tests/), so plain `cargo test --workspace` only compiles the
+# cdylib — which, like any extension module, leaves Python symbols undefined
+# — and never needs libpython to link. CI stays exactly as it is.
+[package]
+name = "nodal-db-py"
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+publish = false
+
+[lib]
+# The Python import name: `import nodal_db`.
+name = "nodal_db"
+crate-type = ["cdylib"]
+# No Rust tests here — a marshaling layer is tested from the OUTSIDE, through
+# the wheel (pytest; see tests/test_skin.py). This also keeps `cargo test
+# --workspace` from linking an executable against pyo3 (which would need
+# libpython).
+test = false
+doctest = false
+
+[dependencies]
+nodal-db-core = { path = "../nodal-db-core" }
+# The sanctioned direct arrow line (root Cargo.toml R2 comment): `ffi` is
+# needed for ArrowArrayStreamReader (PyCapsule stream import); the pin
+# guarantees ONE arrow in the tree, so batches imported here ARE the
+# `duckdb::arrow` RecordBatch type the core's API takes (compile-time proof,
+# same as the CLI's IPC boundary).
+arrow = { workspace = true, features = ["ffi"] }
+# The Arrow <-> Python bridge (PyCapsule interface + pyarrow interop),
+# version-locked three ways with arrow and pyo3 — see root Cargo.toml.
+arrow-pyarrow = { workspace = true }
+pyo3 = { workspace = true }
+
+[features]
+# ON by default (see the [lib] comment): the crate only ever builds as an
+# extension module, so cargo builds never link libpython.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]

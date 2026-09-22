@@ -1284,7 +1284,7 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                         display_order: param.display_order,
                         types: eff.clone(),
                     });
-                    if let Some(dv) = &param.default {
+                    if let Some(dv) = param.default.value() {
                         p.actions.push(Action::SetDefault {
                             class: c.name.clone(),
                             parameter: param.name.clone(),
@@ -1563,21 +1563,16 @@ fn diff_parameter(
         }
     }
 
-    // Defaults.
-    //
-    // HOLD (jkiviluo ruling pending): the semantics of OMITTING `default:` in
-    // the template. CURRENT behavior: omission = CLEAR (the template is
-    // authoritative for its vocabulary, incl. the absence of a default). The
-    // alternative under consideration: omission = no opinion, with an
-    // explicit `default: null` spelling to clear. Either ruling lands
-    // entirely inside this match (the `(None, Some)` arm below).
-    //
-    // Regardless of the ruling, a NON-SCALAR default row (long/array mirror)
-    // blocks both directions conservatively (review item 6): v1 IR cannot
-    // express one, so neither Set nor Clear may silently fight it — the item
-    // is skipped and convergence withheld.
+    // Defaults (D12, jkiviluo 2026-09-22 — KEEP): OMISSION of `default:` is
+    // no opinion — the database keeps its default, silently (the normal
+    // case, not an event; omission never destroys). Clearing requires the
+    // explicit `default: null` instruction. A NON-SCALAR default row
+    // (long/array mirror) still blocks both Set and the explicit Clear
+    // conservatively (review item 6): v1 IR cannot express or supersede one,
+    // so the item is skipped and convergence withheld.
     match (&param.default, &dbp.default) {
-        (Some(dv), maybe_db) => {
+        (ir::DefaultSpec::Unspecified, _) => {}
+        (ir::DefaultSpec::Value(dv), maybe_db) => {
             if dbp.has_nonscalar_default {
                 p.skipped.push(format!(
                     "parameter {}.{}: a non-scalar default occupies the slot — the \
@@ -1604,20 +1599,18 @@ fn diff_parameter(
                 }
             }
         }
-        (None, Some(_)) => {
-            // HOLD decision point (see above): omission currently CLEARS.
-            p.actions.push(Action::ClearDefault {
-                class: c.name.clone(),
-                parameter: param.name.clone(),
-            });
-        }
-        (None, None) => {
+        (ir::DefaultSpec::Clear, maybe_db) => {
             if dbp.has_nonscalar_default {
                 p.skipped.push(format!(
-                    "parameter {}.{}: non-scalar default in the database — v1 IR cannot \
-                     express it; left untouched",
+                    "parameter {}.{}: `default: null` cannot clear a NON-SCALAR default \
+                     (v1 IR cannot express or supersede it) — skipped",
                     c.name, param.name
                 ));
+            } else if maybe_db.is_some() {
+                p.actions.push(Action::ClearDefault {
+                    class: c.name.clone(),
+                    parameter: param.name.clone(),
+                });
             }
         }
     }

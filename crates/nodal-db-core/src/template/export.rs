@@ -26,9 +26,9 @@ use crate::types::ScalarValue;
 
 use super::dbvocab::{read_vocab, DbVocab};
 use super::ir::{
-    AuditRules, Class, ClassSet, DefaultValue, DimRef, DimSpec, EntityRef, Identity, ListMember,
-    Lit, Parameter, ParameterGroup, Seed, SeedEntity, SeedMembership, Template, TypeDecl, Unit,
-    ValueList,
+    AuditRules, Class, ClassSet, DefaultSpec, DefaultValue, DimRef, DimSpec, EntityRef, Identity,
+    ListMember, Lit, Parameter, ParameterGroup, Seed, SeedEntity, SeedMembership, Template,
+    TypeDecl, Unit, ValueList,
 };
 
 fn fold(s: &str) -> String {
@@ -209,17 +209,21 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
                     types = None; // inference reproduces it (§3.5)
                 }
             }
+            // D12: export emits a default VALUE or an absent field, never the
+            // `default: null` clear instruction (instructions are not state).
             let default = match &p.default {
-                None => None,
+                None => DefaultSpec::Unspecified,
                 Some(d) => match lit_of(&d.value) {
-                    Some((lit, _)) => Some(DefaultValue { kind: d.value_kind.clone(), value: lit }),
+                    Some((lit, _)) => {
+                        DefaultSpec::Value(DefaultValue { kind: d.value_kind.clone(), value: lit })
+                    }
                     None => {
                         warnings.push(format!(
                             "parameter {}.{}: default kind {:?} has no v1 IR literal form — \
                              omitted from the export",
                             c.name, p.name, d.value_kind
                         ));
-                        None
+                        DefaultSpec::Unspecified
                     }
                 },
             };

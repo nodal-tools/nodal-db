@@ -112,7 +112,7 @@ classes:
         .unwrap();
         unit.parameters.push(newp.classes[0].parameters[0].clone());
         let cm = unit.parameters.iter_mut().find(|p| p.name == "conversion_method").unwrap();
-        cm.default = Some(nodal_db_core::template::ir::DefaultValue {
+        cm.default = nodal_db_core::template::ir::DefaultSpec::Value(nodal_db_core::template::ir::DefaultValue {
             kind: "string".into(),
             value: nodal_db_core::template::ir::Lit::Str("const_eff".into()),
         });
@@ -149,7 +149,7 @@ classes:
             }]),
         });
         // Changed default (Layer 1 "changed defaults").
-        demand.default = Some(nodal_db_core::template::ir::DefaultValue {
+        demand.default = nodal_db_core::template::ir::DefaultSpec::Value(nodal_db_core::template::ir::DefaultValue {
             kind: "float".into(),
             value: nodal_db_core::template::ir::Lit::Float(1.0),
         });
@@ -347,7 +347,7 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
         let node = t.classes.iter_mut().find(|c| c.name == "node").unwrap();
         let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
         demand.types.as_mut().unwrap().retain(|m| m.kind == "indexed");
-        demand.default = None; // the float default would no longer instantiate a member
+        demand.default = nodal_db_core::template::ir::DefaultSpec::Unspecified; // no opinion (D12)
         // Narrow max_share to only float (drops unused indexed member: closed).
         let r4 = t.classes.iter_mut().find(|c| c.name == "reserve__upDown__unit__node").unwrap();
         let ms = r4.parameters.iter_mut().find(|p| p.name == "max_share").unwrap();
@@ -790,4 +790,123 @@ fn stale_plan_is_refused_via_expect_commit() {
     let p2 = plan(&db, &t).unwrap();
     let opts2 = ApplyOptions { expect_commit: Some(p2.db_commit), ..Default::default() };
     apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts2).unwrap();
+}
+
+#[test]
+fn d12_default_omission_keeps_and_explicit_null_clears() {
+    use nodal_db_core::template::ir::DefaultSpec;
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+    let has_default = |db: &Path| {
+        q1(db, "SELECT count(*) FROM definition_value_scalar dv \
+                JOIN parameter_definition pd ON pd.id = dv.parameter_definition_id \
+                WHERE pd.cur_name = 'demand' AND dv.valid_to_commit IS NULL")
+    };
+    assert_eq!(has_default(&db), 1, "sample seeds demand's default");
+
+    // OMISSION = no opinion (D12 KEEP): the DB default survives, no action,
+    // no noise, and the apply CONVERGES.
+    let mut keep = parse_str(SAMPLE).unwrap();
+    keep.template.version = "3k".into();
+    {
+        let node = keep.classes.iter_mut().find(|c| c.name == "node").unwrap();
+        let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
+        demand.default = DefaultSpec::Unspecified;
+    }
+    let out = apply(&db, &keep, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap();
+    assert!(out.converged);
+    assert!(
+        !out.plan.actions.iter().any(|a| a.to_string().contains("default of node.demand")),
+        "omission must emit NO default action: {:?}",
+        out.plan.actions.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(has_default(&db), 1, "omission keeps the database's default");
+
+    // EXPLICIT `default: null` clears — and is idempotent (the instruction
+    // is not state: the second apply is a hash-certified no-op).
+    let mut clear = parse_str(SAMPLE).unwrap();
+    clear.template.version = "3c".into();
+    {
+        let node = clear.classes.iter_mut().find(|c| c.name == "node").unwrap();
+        let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
+        demand.default = DefaultSpec::Clear;
+    }
+    let out = apply(&db, &clear, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap();
+    assert!(out.converged);
+    assert!(
+        out.plan.actions.iter().any(|a| a.to_string().contains("clear default of node.demand")),
+        "{:?}",
+        out.plan.actions.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(has_default(&db), 0, "explicit null clears");
+    let again =
+        apply(&db, &clear, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+            .unwrap();
+    assert!(again.no_op, "clearing template re-applies as a no-op");
+
+    // The parse-level spelling drives the same behavior end-to-end: the
+    // YAML `default: null` document also hashes like the omitting one.
+    assert_eq!(
+        nodal_db_core::template::template_content_hash(&clear),
+        {
+            let mut omitted = parse_str(SAMPLE).unwrap();
+            omitted.template.version = "3c".into();
+            let node = omitted.classes.iter_mut().find(|c| c.name == "node").unwrap();
+            let d = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
+            d.default = DefaultSpec::Unspecified;
+            nodal_db_core::template::template_content_hash(&omitted)
+        },
+        "clear instruction is hash-invisible (D12)"
+    );
+}
+
+#[test]
+fn d12_explicit_null_respects_the_nonscalar_guard() {
+    use nodal_db_core::template::ir::DefaultSpec;
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_loaded_db(&dir);
+
+    // Manufacture a default the v1 IR cannot express (a date_time scalar —
+    // dbvocab treats any non-literal kind as non-scalar-representable).
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "BEGIN;
+             INSERT INTO commit (user, message) VALUES ('user', 'exotic default');
+             INSERT INTO definition_value_scalar
+               (parameter_definition_id, slot, valid_from_commit, version, value_kind,
+                v_datetime)
+               SELECT id, 'default_value', currval('seq_commit'), 1, 'date_time',
+                      TIMESTAMP '2026-01-01 00:00:00'
+               FROM parameter_definition WHERE cur_name = 'efficiency';
+             COMMIT;",
+        )
+        .unwrap();
+    }
+
+    let mut t = parse_str(SAMPLE).unwrap();
+    t.template.version = "3g".into();
+    {
+        let unit = t.classes.iter_mut().find(|c| c.name == "unit").unwrap();
+        let eff = unit.parameters.iter_mut().find(|p| p.name == "efficiency").unwrap();
+        eff.default = DefaultSpec::Clear;
+    }
+    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
+        .unwrap();
+    assert!(
+        out.plan.skipped.iter().any(|s| s.contains("cannot clear a NON-SCALAR default")),
+        "expected the item-6 guard skip, got {:?}",
+        out.plan.skipped
+    );
+    assert!(!out.converged, "guarded clear withholds convergence");
+    // The exotic default is untouched.
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM definition_value_scalar dv \
+                 JOIN parameter_definition pd ON pd.id = dv.parameter_definition_id \
+                 WHERE pd.cur_name = 'efficiency' AND dv.valid_to_commit IS NULL \
+                 AND dv.value_kind = 'date_time'"),
+        1
+    );
 }

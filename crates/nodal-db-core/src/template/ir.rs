@@ -303,8 +303,19 @@ pub struct Parameter {
     pub types: Option<Vec<TypeDecl>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_list: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<DefaultValue>,
+    /// Three-state default declaration (D12, jkiviluo 2026-09-22): field
+    /// ABSENT = no opinion (the database keeps whatever default it has —
+    /// omission never destroys); explicit `default: null` (or `~`, or JSON
+    /// null) = a CLEAR instruction; a value = set. The absent-vs-null
+    /// distinction is carried by [`DefaultSpec`]'s field-presence-aware serde
+    /// (deserialize_with fires only when the key is present — pinned by a
+    /// parse test, since this is exactly where deserializers conflate).
+    #[serde(
+        default,
+        deserialize_with = "de_default_spec",
+        skip_serializing_if = "DefaultSpec::is_unspecified"
+    )]
+    pub default: DefaultSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,6 +382,64 @@ pub struct DimSpec {
 pub struct DefaultValue {
     pub kind: String,
     pub value: Lit,
+}
+
+/// The three-state default declaration (D12, jkiviluo 2026-09-22).
+///
+/// - `Unspecified` — the `default:` key is ABSENT: no opinion; a reconcile
+///   leaves whatever default the database holds (omission never destroys).
+/// - `Clear` — the explicit `default: null` spelling: a clear INSTRUCTION.
+///   Instructions are not state: `Clear` does NOT appear in the normalized
+///   object model (a template carrying `default: null` and one omitting the
+///   field hash identically — after the clear applies, both describe the
+///   same converged database), and `template export` never emits it (an
+///   absent default exports as an absent field).
+/// - `Value(v)` — set the default to `v`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum DefaultSpec {
+    #[default]
+    Unspecified,
+    Clear,
+    Value(DefaultValue),
+}
+
+impl DefaultSpec {
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, DefaultSpec::Unspecified)
+    }
+
+    /// The declared value, if any (most call sites only care about `Value`).
+    pub fn value(&self) -> Option<&DefaultValue> {
+        match self {
+            DefaultSpec::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// Field-presence-aware deserialization: serde invokes `deserialize_with`
+/// ONLY when the key is present, so a present-but-null value lands here as
+/// `Option::None` → [`DefaultSpec::Clear`], while an absent key never reaches
+/// this function and stays [`DefaultSpec::Unspecified`] via `serde(default)`.
+/// (Verified against serde_norway for `null`, `~`, and JSON `null` — see the
+/// IR parse tests.)
+fn de_default_spec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<DefaultSpec, D::Error> {
+    Ok(match Option::<DefaultValue>::deserialize(d)? {
+        None => DefaultSpec::Clear,
+        Some(v) => DefaultSpec::Value(v),
+    })
+}
+
+impl Serialize for DefaultSpec {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Skipped by skip_serializing_if; a unit fallback keeps the impl
+            // total for any direct use.
+            DefaultSpec::Unspecified => s.serialize_unit(),
+            DefaultSpec::Clear => s.serialize_none(),
+            DefaultSpec::Value(v) => v.serialize(s),
+        }
+    }
 }
 
 /// A scalar literal as parsed. Variant order matters for serde's untagged
@@ -992,8 +1061,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                 }
             }
 
-            // Default literal checks (kind, member instantiation, list membership).
-            if let Some(dv) = &p.default {
+            // Default literal checks (kind, member instantiation, list
+            // membership). `Unspecified` and the explicit `Clear` instruction
+            // carry no literal to check (D12).
+            if let Some(dv) = p.default.value() {
                 if !LITERAL_KINDS.contains(&dv.kind.as_str()) {
                     errs.push(format!(
                         "{loc}: default kind {:?} is not supported as a v1 literal \
@@ -1511,7 +1582,11 @@ pub fn normalized_model(t: &Template) -> Value {
                             }
                         }
                         opt(&mut pm, "value_list", &p.value_list);
-                        if let Some(dv) = &p.default {
+                        // Only a VALUE is state; `default: null` is a pure
+                        // clear INSTRUCTION and never enters the normalized
+                        // model (D12 — a clearing template and an omitting
+                        // one hash identically, matching the post-clear DB).
+                        if let Some(dv) = p.default.value() {
                             pm.insert(
                                 "default".into(),
                                 json!({"kind": dv.kind,

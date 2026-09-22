@@ -42,7 +42,7 @@ classes:
     for (i, expect) in ["yes", "no", "on", "off"].iter().enumerate() {
         assert_eq!(vals[i], &Lit::Str(expect.to_string()), "member {i}");
     }
-    let dv = t.classes[0].parameters[0].default.as_ref().unwrap();
+    let dv = t.classes[0].parameters[0].default.value().unwrap();
     assert_eq!(dv.value, Lit::Str("yes".into()));
     // And true/false ARE booleans (core schema keeps them).
     let t2 = parse_str(
@@ -507,4 +507,46 @@ classes:
     .unwrap();
     assert_eq!(normalized_model(&explicit), normalized_model(&inferred));
     assert_eq!(template_content_hash(&explicit), template_content_hash(&inferred));
+}
+
+#[test]
+fn default_absent_vs_null_are_distinct_states() {
+    use nodal_db_core::template::ir::DefaultSpec;
+    // D12: absent = Unspecified (no opinion), explicit null (all three
+    // spellings) = Clear, a value = Value. Empirically pinned because
+    // present-null vs absent is exactly where deserializers conflate.
+    let absent = parse_str(
+        "template: {name: t, version: \"1\"}\nclasses:\n  - name: c\n    parameters:\n      - {name: p, types: [{kind: float}]}\n",
+    )
+    .unwrap();
+    assert_eq!(absent.classes[0].parameters[0].default, DefaultSpec::Unspecified);
+
+    for null_spelling in ["default: null", "default: ~"] {
+        let t = parse_str(&format!(
+            "template: {{name: t, version: \"1\"}}\nclasses:\n  - name: c\n    parameters:\n      - name: p\n        types: [{{kind: float}}]\n        {null_spelling}\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            t.classes[0].parameters[0].default,
+            DefaultSpec::Clear,
+            "{null_spelling} must parse as the explicit clear instruction"
+        );
+    }
+    // JSON null through the same loader.
+    let j = parse_str(
+        r#"{"template": {"name": "t", "version": "1"},
+            "classes": [{"name": "c", "parameters":
+              [{"name": "p", "types": [{"kind": "float"}], "default": null}]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(j.classes[0].parameters[0].default, DefaultSpec::Clear);
+
+    // The clear instruction is NOT state: it never enters the normalized
+    // model, so a clearing template and an omitting one hash identically.
+    let with_null = parse_str(
+        "template: {name: t, version: \"1\"}\nclasses:\n  - name: c\n    parameters:\n      - {name: p, types: [{kind: float}], default: null}\n",
+    )
+    .unwrap();
+    assert_eq!(normalized_model(&with_null), normalized_model(&absent));
+    assert_eq!(template_content_hash(&with_null), template_content_hash(&absent));
 }

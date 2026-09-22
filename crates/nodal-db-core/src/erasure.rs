@@ -94,6 +94,12 @@ pub struct ErasePreview {
     /// The rows themselves are retained — a run pointing at an erased
     /// alternative IS the "results were erased" signal, via the marker.
     pub referencing_runs: Vec<i64>,
+    /// The verdict an erase with the SAME [`EraseOpts::expect_present`] would
+    /// reach: one human-readable problem per failing name (no current row /
+    /// names the erased alternative itself). Empty ⇒ the ordering check would
+    /// pass. Computed by the same helper the erase uses, so preview and
+    /// refusal can never drift. `opts.note` plays no role in a preview.
+    pub expect_present_problems: Vec<String>,
 }
 
 /// Options for [`erase_alternative`] (plan §3).
@@ -112,14 +118,21 @@ pub struct EraseOpts<'a> {
 /// What one [`erase_alternative`] actually did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EraseReport {
-    /// `false` ⇒ idempotent no-op: the identity was already closed and no
-    /// in-scope row existed (e.g. a second erase of the same name). NO commit
-    /// row and NO marker were written — a zero-row marker would extend the
-    /// as-of guard's refusal range for no content change.
+    /// `true` ⇔ rows were physically removed AND the marker was written (the
+    /// two are inseparable — same transaction). `false` covers the two
+    /// markerless outcomes, distinguished by the other fields:
+    ///   - `identity_closed && commit_id > 0`: the alternative was current
+    ///     but held ZERO in-scope rows — the identity was closed (an ordinary
+    ///     delete-shaped commit) but NO marker was written: nothing was
+    ///     removed, and a zero-row marker would extend the as-of guard's
+    ///     refusal range for no content change;
+    ///   - `!identity_closed && commit_id == 0`: full idempotent no-op (the
+    ///     identity was already closed and no in-scope row existed — e.g. a
+    ///     second erase of the same name); no commit, no marker.
     pub erased: bool,
     /// The `erasure_marker` row id (0 when `!erased`).
     pub marker_id: i64,
-    /// The erasure commit (0 when `!erased`).
+    /// The commit written (0 only on the full no-op path).
     pub commit_id: i64,
     pub alternative_id: i64,
     /// `true` ⇒ step 2 closed the identity row (it was still current);
@@ -141,12 +154,17 @@ pub struct EraseReport {
 const NOOP_SENTINEL: &str = "erase: nothing to erase (internal no-op sentinel)";
 
 /// Preview one erase-by-alternative (read-only; one per-operation RO
-/// connection, CLAUDE.md invariant 1). See [`ErasePreview`].
+/// connection, CLAUDE.md invariant 1). `opts` contributes only its
+/// `expect_present` names — the SAME ordering check the erase enforces is run
+/// read-only and reported in [`ErasePreview::expect_present_problems`]
+/// (`opts.note` is recorded only by an actual erase). See [`ErasePreview`].
 pub fn preview_erase_alternative(
     db: &Path,
     alt: &ObjectDeleteKey,
+    opts: &EraseOpts,
 ) -> Result<ErasePreview, DbError> {
     let name = validate_erase_key(alt)?.to_string();
+    let expect: Vec<String> = opts.expect_present.iter().map(|s| s.to_string()).collect();
     with_read(db, |conn| {
         let Some(resolved) = resolve_alternative_any(conn, &name)? else {
             return Ok(ErasePreview::default());
@@ -156,13 +174,9 @@ pub fn preview_erase_alternative(
         let mut rows_total = 0u64;
         let mut bytes_estimate = 0u64;
         for leg in &legs {
-            let n: i64 = conn.query_row(
-                &format!("SELECT count(*) FROM {} WHERE {}", leg.table, leg.predicate),
-                params![resolved.id],
-                |r| r.get(0),
-            )?;
+            let (n, bytes) = leg_scan(conn, leg, resolved.id)?;
             if n > 0 {
-                bytes_estimate += estimate_leg_bytes(conn, leg, resolved.id)?;
+                bytes_estimate += bytes;
                 rows_total += n as u64;
                 per_table.push(TableCount {
                     table: leg.table.to_string(),
@@ -170,6 +184,7 @@ pub fn preview_erase_alternative(
                 });
             }
         }
+        let expect_present_problems = expect_present_problems(conn, &expect, resolved.id)?;
         // Reported-not-blocking reference surface (plan §3).
         let mut stmt = conn.prepare(
             "SELECT DISTINCT s.id, s.name FROM scenario_alternative sa \
@@ -201,6 +216,7 @@ pub fn preview_erase_alternative(
             still_current: resolved.still_current,
             referencing_scenarios,
             referencing_runs,
+            expect_present_problems,
         })
     })
 }
@@ -225,9 +241,13 @@ pub fn preview_erase_alternative(
 /// present) — never anything between. Bytes return to the OS at the next
 /// compaction.
 ///
-/// An alternative name that resolves to no identity row (any validity) is a
-/// loud error. A name whose identity is already closed AND has no in-scope
-/// rows is an idempotent no-op (`erased: false` — no commit, no marker).
+/// An alternative name that resolves to no identity row is a loud error. A
+/// name whose identity is already closed AND has no in-scope rows is an
+/// idempotent no-op (`erased: false` — no commit, no marker). A CURRENT
+/// alternative with no in-scope rows gets its identity closed but NO marker
+/// (nothing was removed; a zero-row marker would poison the as-of guard for
+/// no content change — the operation degenerates to a plain delete, recorded
+/// by its commit). See [`EraseReport::erased`].
 pub fn erase_alternative(
     db: &Path,
     alt: &ObjectDeleteKey,
@@ -243,9 +263,18 @@ pub fn erase_alternative(
             return Err(DbError::Api("expect_present names must be non-empty".into()));
         }
     }
+    // Cheap schema-version pre-gate (advisory, before any write): erase's SQL
+    // — the marker insert above all — is written against the current DDL; an
+    // older file fails with a raw catalog error mid-transaction otherwise.
+    // Same stance as compaction's R2 gate, same migration story.
+    assert_schema_version(db)?;
     let note = opts.note.map(str::to_string);
     let expect: Vec<String> = opts.expect_present.iter().map(|s| s.to_string()).collect();
     let message = format!("erase alternative '{name}'");
+
+    // Carries the resolved id out of a rolled-back no-op attempt (the closure
+    // must return Err to roll back, which cannot carry the report).
+    let noop_id = std::cell::Cell::new(0i64);
 
     let outcome = with_write_txn_retrying(db, user, &message, |conn, commit_id| {
         // Resolve fresh inside every (re)try — never reuse pre-conflict state.
@@ -254,43 +283,31 @@ pub fn erase_alternative(
         })?;
 
         // The m7a ordering belt: every named replacement must have a CURRENT
-        // identity row, checked inside the same transaction that erases.
-        for n in &expect {
-            match crate::api::lookup_alternative(conn, n)? {
-                None => {
-                    return Err(DbError::Api(format!(
-                        "erase refused: expect_present alternative '{n}' has no current row \
-                         (rerun-overwrite ordering: commit the replacement run fully, \
-                         then erase the old one — schema_interop.md §9)"
-                    )))
-                }
-                Some(id) if id == resolved.id => {
-                    return Err(DbError::Api(format!(
-                        "erase refused: expect_present names the alternative being erased ('{n}')"
-                    )))
-                }
-                Some(_) => {}
-            }
+        // identity row, checked inside the same transaction that erases —
+        // through the SAME helper the preview reports from.
+        let problems = expect_present_problems(conn, &expect, resolved.id)?;
+        if let Some(p) = problems.first() {
+            return Err(DbError::Api(format!("erase refused: {p}")));
         }
 
-        // Step 2 — close the identity row (retained, never removed: D-E2).
-        // The standard guarded UPDATE; erase opens its own commit, so every
-        // pre-existing row has valid_from_commit < C (same-commit guard
-        // inherited without a special case).
-        let identity_closed = conn.execute(
-            "UPDATE alternative SET valid_to_commit = ? \
-             WHERE id = ? AND valid_from_commit < ? AND valid_to_commit IS NULL",
-            params![commit_id, resolved.id, commit_id],
-        )? > 0;
+        // Step 2 — close the identity row (retained, never removed: D-E2),
+        // through the one guarded close-out shared with the object-delete
+        // cascade (`object_delete::close_current_row` — the same-commit guard
+        // has a single home). Erase opens its own commit, so every
+        // pre-existing row has valid_from_commit < C.
+        let identity_closed =
+            crate::object_delete::close_current_row(conn, "alternative", commit_id, resolved.id)?
+                > 0;
 
         // Step 3 — the erase execution arm: plain any-validity DELETEs over
         // the shared registry predicates. Bytes are estimated per leg just
-        // before its DELETE (the rows are gone after).
+        // before its DELETE (the rows are gone after); the DELETE rowcounts
+        // are the authoritative counts.
         let mut per_table: Vec<TableCount> = Vec::new();
         let mut rows_total = 0u64;
         let mut bytes_estimate = 0u64;
         for leg in &alternative_erase_legs() {
-            let bytes = estimate_leg_bytes(conn, leg, resolved.id)?;
+            let (_, bytes) = leg_scan(conn, leg, resolved.id)?;
             let deleted = conn.execute(
                 &format!("DELETE FROM {} WHERE {}", leg.table, leg.predicate),
                 params![resolved.id],
@@ -305,10 +322,35 @@ pub fn erase_alternative(
             }
         }
 
-        if !identity_closed && rows_total == 0 {
-            // Nothing to do — roll the (empty) transaction back rather than
-            // burn a commit row and a zero-row marker (which would extend the
-            // as-of guard's refusal range for no content change).
+        // Test-only crash injection (plan §7 acceptance 4, the kill test):
+        // abort the PROCESS between step 3 (removal) and step 4 (marker) —
+        // the widest window a crash could exploit if the two were not one
+        // transaction. Debug builds only; release binaries carry no hook.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("NODAL_DB_TEST_ABORT_BEFORE_MARKER").is_some() {
+            std::process::abort();
+        }
+
+        if rows_total == 0 {
+            if identity_closed {
+                // Current-but-empty alternative: the identity close is a real
+                // change (commit it), but NOTHING was removed — no marker,
+                // ever, for zero rows (it would extend the guard's refusal
+                // range over unaffected history).
+                return Ok(EraseReport {
+                    erased: false,
+                    marker_id: 0,
+                    commit_id,
+                    alternative_id: resolved.id,
+                    identity_closed: true,
+                    per_table: Vec::new(),
+                    rows_total: 0,
+                    bytes_estimate: 0,
+                });
+            }
+            // Nothing at all to do — roll the empty transaction back rather
+            // than burn a commit row.
+            noop_id.set(resolved.id);
             return Err(DbError::Api(NOOP_SENTINEL.into()));
         }
 
@@ -342,19 +384,64 @@ pub fn erase_alternative(
     });
 
     match outcome {
-        Err(DbError::Api(m)) if m == NOOP_SENTINEL => {
-            // Resolve again (read-only) purely to report the id.
-            let id = with_read(db, |conn| {
-                Ok(resolve_alternative_any(conn, &name)?.map(|r| r.id).unwrap_or(0))
-            })?;
-            Ok(EraseReport {
-                erased: false,
-                alternative_id: id,
-                ..EraseReport::default()
-            })
-        }
+        Err(DbError::Api(m)) if m == NOOP_SENTINEL => Ok(EraseReport {
+            erased: false,
+            alternative_id: noop_id.get(),
+            ..EraseReport::default()
+        }),
         other => other,
     }
+}
+
+/// Refuse cleanly (before any write) when the file's schema_version is not
+/// the one this build's SQL is written against. Advisory pre-gate — the same
+/// R2 stance and re-init/re-import migration story as
+/// [`crate::compaction::SCHEMA_VERSION`] (see its bump rule).
+fn assert_schema_version(db: &Path) -> Result<(), DbError> {
+    let found: String = with_read(db, |conn| {
+        Ok(conn.query_row(
+            "SELECT value FROM metadata \
+             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    })?;
+    let expected = crate::compaction::SCHEMA_VERSION;
+    if found != expected {
+        return Err(DbError::Api(format!(
+            "erase refused: database schema_version {found:?} != current {expected:?} \
+             (erase writes against the current DDL; pre-freeze the migration story is \
+             re-init/re-import — erasure_compaction_plan §9 step 1)"
+        )));
+    }
+    Ok(())
+}
+
+/// The [`EraseOpts::expect_present`] verdicts (plan m7a), one human-readable
+/// problem per failing name — the ONE definition both the preview report and
+/// the erase refusal use. A name with no current row fails (the replacement
+/// run has not landed); a name resolving to the erased alternative itself is
+/// a caller bug (it cannot be its own replacement).
+fn expect_present_problems(
+    conn: &Connection,
+    expect: &[String],
+    target_id: i64,
+) -> Result<Vec<String>, DbError> {
+    let mut problems = Vec::new();
+    for n in expect {
+        match crate::api::lookup_alternative(conn, n)? {
+            None => problems.push(format!(
+                "expect_present alternative '{n}' has no current row \
+                 (rerun-overwrite ordering: commit the replacement run fully, \
+                 then erase the old one — schema_interop.md §9)"
+            )),
+            Some(id) if id == target_id => problems.push(format!(
+                "expect_present names the alternative being erased ('{n}')"
+            )),
+            Some(_) => {}
+        }
+    }
+    Ok(problems)
 }
 
 /// Convenience chain (plan §4.2): [`erase_alternative`] then
@@ -422,38 +509,61 @@ struct ResolvedAlt {
     still_current: bool,
 }
 
-/// Resolve an alternative name to its identity id, across ANY validity: the
-/// current row wins (case-insensitive, like every core resolver); with no
-/// current row, the closed identity rows are searched — erase composes with a
-/// prior `delete_objects` (D-E2 keeps the closed row resolvable). Because
-/// `uq_alternative_name` constrains only CURRENT rows, a name may have been
-/// reused across closed identities; that ambiguity is a loud error, never a
-/// silent pick.
+/// Resolve an alternative name for an IRREVERSIBLE primitive. Two channels,
+/// combined refusal-first:
+///
+///   - the CURRENT identity whose current name matches (case-insensitive,
+///     like every core resolver);
+///   - the CLOSED IDENTITIES that carried the name in some version and have
+///     **no current row at all** — erase composes with a prior
+///     `delete_objects` (D-E2 keeps the closed row resolvable). An id that
+///     still has a current row is deliberately NOT matched by its former
+///     names: a renamed alternative's stale name must never resolve to live
+///     data (the current channel matches current names only).
+///
+/// Because `uq_alternative_name` constrains only current rows, a name may
+/// match BOTH a current identity and closed identities (delete-then-recreate
+/// reuse), or several closed identities. Either ambiguity is a loud refusal —
+/// an irreversible primitive never silently picks.
 fn resolve_alternative_any(
     conn: &Connection,
     name: &str,
 ) -> Result<Option<ResolvedAlt>, DbError> {
-    if let Some(id) = crate::api::lookup_alternative(conn, name)? {
-        let stored: String = conn.query_row(
-            "SELECT name FROM alternative WHERE cur_id = ?",
-            params![id],
-            |r| r.get(0),
-        )?;
-        return Ok(Some(ResolvedAlt {
-            id,
-            name: stored,
-            still_current: true,
-        }));
-    }
+    let current = crate::api::lookup_alternative(conn, name)?;
+    // Closed identities only: name matched in ANY version, id has NO current
+    // row (which also excludes the current id's own closed version rows —
+    // ordinary version history is not ambiguity).
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT id FROM alternative WHERE lower(name) = lower(?) ORDER BY id",
+        "SELECT DISTINCT id FROM alternative WHERE lower(name) = lower(?) \
+           AND id NOT IN (SELECT id FROM alternative WHERE valid_to_commit IS NULL) \
+         ORDER BY id",
     )?;
-    let ids: Vec<i64> = stmt
+    let closed: Vec<i64> = stmt
         .query_map(params![name], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    match ids.as_slice() {
-        [] => Ok(None),
-        [id] => {
+    match (current, closed.as_slice()) {
+        (Some(id), []) => {
+            let stored: String = conn.query_row(
+                "SELECT name FROM alternative WHERE cur_id = ?",
+                params![id],
+                |r| r.get(0),
+            )?;
+            Ok(Some(ResolvedAlt {
+                id,
+                name: stored,
+                still_current: true,
+            }))
+        }
+        (Some(cur), reused) => Err(DbError::Api(format!(
+            "erase: name '{name}' matches BOTH the current alternative (id {cur}) and {} \
+             closed identit{} (ids {reused:?}) — the name was reused after a delete; an \
+             irreversible erase refuses to guess (erase before reusing a result name, or \
+             address the leftover via a future disambiguated path)",
+            reused.len(),
+            if reused.len() == 1 { "y" } else { "ies" }
+        ))),
+        (None, []) => Ok(None),
+        (None, [id]) => {
             let stored: String = conn.query_row(
                 "SELECT name FROM alternative WHERE id = ? ORDER BY version DESC LIMIT 1",
                 params![id],
@@ -465,7 +575,7 @@ fn resolve_alternative_any(
                 still_current: false,
             }))
         }
-        many => Err(DbError::Api(format!(
+        (None, many) => Err(DbError::Api(format!(
             "erase: name '{name}' matches {} closed alternative identities (ids {many:?}) — \
              the name was reused; erase by a disambiguated path is not supported in v1",
             many.len()
@@ -473,31 +583,30 @@ fn resolve_alternative_any(
     }
 }
 
-/// Advisory payload-bytes estimate for one leg's in-scope rows (ANY
-/// validity), computed BEFORE their DELETE. Array tiers count cells exactly
-/// (8 bytes each); the scalar tier counts a fixed row overhead plus string
-/// payload; other tables use fixed per-row estimates. Deliberately rough —
-/// DuckDB exposes no exact per-row physical size; the marker stores this as
-/// `bytes_estimate` (advisory), and the acceptance criteria measure real
-/// reclaim end-to-end via file sizes.
-fn estimate_leg_bytes(conn: &Connection, leg: &EraseLeg, id: i64) -> Result<u64, DbError> {
-    let sql = match leg.table {
-        "value_array" | "value_array_hist" => format!(
-            "SELECT COALESCE(SUM((COALESCE(len(values), 0) + COALESCE(len(values_int), 0)) * 8), 0) \
-             FROM {} WHERE {}",
-            leg.table, leg.predicate
-        ),
-        "value_scalar" => format!(
-            "SELECT COALESCE(SUM(48 + COALESCE(length(v_str), 0)), 0) FROM {} WHERE {}",
-            leg.table, leg.predicate
-        ),
+/// One scan per leg: `(row count, advisory payload-bytes estimate)` over the
+/// in-scope rows (ANY validity). The preview's counts+bytes and the erase
+/// arm's pre-DELETE bytes both come from this one query (fused — never two
+/// scans of the same leg). Bytes are deliberately rough — DuckDB exposes no
+/// exact per-row physical size: array tiers count cells exactly (8 bytes
+/// each), the scalar tier a fixed overhead plus string payload, other tables
+/// fixed per-row estimates. The marker stores the sum as `bytes_estimate`
+/// (advisory); the acceptance criteria measure real reclaim end-to-end via
+/// file sizes.
+fn leg_scan(conn: &Connection, leg: &EraseLeg, id: i64) -> Result<(i64, u64), DbError> {
+    let bytes_expr = match leg.table {
+        "value_array" | "value_array_hist" => {
+            "COALESCE(SUM((COALESCE(len(values), 0) + COALESCE(len(values_int), 0)) * 8), 0)"
+        }
+        "value_scalar" => "COALESCE(SUM(48 + COALESCE(length(v_str), 0)), 0)",
         // Long rows are wide (30 real columns); narrow link tables are small.
-        "value_long" => format!(
-            "SELECT count(*) * 96 FROM {} WHERE {}",
-            leg.table, leg.predicate
-        ),
-        _ => format!("SELECT count(*) * 32 FROM {} WHERE {}", leg.table, leg.predicate),
+        "value_long" => "count(*) * 96",
+        _ => "count(*) * 32",
     };
-    let n: i64 = conn.query_row(&sql, params![id], |r| r.get(0))?;
-    Ok(n.max(0) as u64)
+    let sql = format!(
+        "SELECT count(*), {bytes_expr} FROM {} WHERE {}",
+        leg.table, leg.predicate
+    );
+    let (rows, bytes): (i64, i64) =
+        conn.query_row(&sql, params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok((rows, bytes.max(0) as u64))
 }

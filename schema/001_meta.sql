@@ -78,7 +78,13 @@ CREATE TABLE erasure_marker (
   note             VARCHAR,            -- free-form operator context
   CHECK ((kind = 'alternative') = (alternative_id IS NOT NULL)),
   CHECK ((kind = 'entity')      = (entity_id      IS NOT NULL)),
-  CHECK ((kind = 'horizon')     = (horizon_commit IS NOT NULL))
+  CHECK ((kind = 'horizon')     = (horizon_commit IS NOT NULL)),
+  -- The tag is extensible BY DDL EDIT, not by writing unknown strings: a new
+  -- grain ships by widening this list (a schema change, like the grain's
+  -- operation itself), so a marker whose kind nothing can interpret is
+  -- unrepresentable rather than silently inert. The scope-column CHECK trio
+  -- above stays per-kind.
+  CHECK (kind IN ('alternative', 'entity', 'horizon'))
 );
 
 -- One key/value metadata table (SDP Part 1 `metadata`): dataset-level facts

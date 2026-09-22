@@ -221,7 +221,7 @@ fn preview_and_erase_end_to_end() {
         assert!(alt_rows(&db, t, a_id) > 0, "fixture gap: no runA rows in {t}");
     }
 
-    let preview = preview_erase_alternative(&db, &alt_key("runA")).expect("preview");
+    let preview = preview_erase_alternative(&db, &alt_key("runA"), &EraseOpts::default()).expect("preview");
     assert!(preview.found);
     assert_eq!(preview.alternative_id, a_id);
     assert_eq!(preview.alternative_name, "runA");
@@ -297,14 +297,10 @@ fn preview_and_erase_end_to_end() {
         .unwrap();
     assert_eq!(a_name, "runA");
     assert!(!a_unres);
-    // Audits clean after erase (verified expectation — critique confirmed #7).
-    for audit in ["audit_dangling_ref", "audit_history_tiling", "audit_cross_tier_duplicate"] {
-        let n: i64 = conn
-            .query_row(&format!("SELECT count(*) FROM {audit}"), [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 0, "{audit} not clean after erase");
-    }
     conn.close().unwrap();
+    // The FULL audit catalog is clean after erase (verified expectation —
+    // critique confirmed #7), modulo the documented reporting surfaces.
+    assert_audit_catalog_clean(&db, 1, "end-to-end post-erase");
 
     // Commit log: exactly ONE new commit (the erasure commit); runs untouched.
     assert_eq!(scalar(&db, "SELECT count(*) FROM \"commit\""), commits_before + 1);
@@ -330,6 +326,7 @@ fn preview_and_erase_end_to_end() {
     let cr = compact(&db).expect("compact after erase");
     assert!(cr.swapped);
     assert_eq!(scalar(&db, "SELECT count(*) FROM erasure_marker"), 1);
+    assert_audit_catalog_clean(&db, 1, "end-to-end post-compact");
     for (q, before) in b_probes().iter().zip(&before_fps) {
         if q.contains("commit") {
             continue;
@@ -461,7 +458,7 @@ fn non_alternative_kinds_and_bad_keys_are_refused() {
         .expect_err("unknown name must error");
     assert!(format!("{err}").contains("not found"), "unexpected error: {err}");
     // Preview of an unknown name: found = false, everything else empty.
-    let p = preview_erase_alternative(&db, &alt_key("never_existed")).expect("preview");
+    let p = preview_erase_alternative(&db, &alt_key("never_existed"), &EraseOpts::default()).expect("preview");
     assert!(!p.found);
     assert_eq!(p.rows_total, 0);
 }
@@ -752,4 +749,453 @@ fn reclaim_matches_single_run_control_and_erase_does_not_amplify() {
     );
     // B's values byte-identical through the read surface, on both files.
     assert_eq!(fingerprint(&db_ab, b_probe), fp_control, "runB values drifted");
+}
+
+// ============================================================================
+// Adversarial-review additions (feat/erasure review, 2026-09-22)
+// ============================================================================
+
+// --- review 1: zero-row erase writes NO marker -------------------------------
+
+/// A CURRENT alternative with no in-scope rows: the erase closes the identity
+/// (an ordinary delete-shaped commit) but writes NO marker — a rows_removed=0
+/// marker would poison the as-of guard over unaffected history. As-of reads
+/// must be untouched afterwards.
+#[test]
+fn zero_row_erase_closes_identity_without_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, _) = seed_two_runs(dir.path(), 8);
+    // A live alternative with zero data rows.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "INSERT INTO \"commit\" (user, message) VALUES ('tester', 'empty alt');
+             INSERT INTO alternative (id, name, valid_from_commit)
+               VALUES (nextval('seq_alternative'), 'emptyRun', currval('seq_commit'));",
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+    let pre_commit = scalar(&db, "SELECT max(id) FROM \"commit\"");
+
+    let r = erase_alternative(&db, &alt_key("emptyRun"), &EraseOpts::default(), "tester")
+        .expect("zero-row erase");
+    assert!(!r.erased, "nothing was removed — erased must be false");
+    assert_eq!(r.marker_id, 0, "NO marker for zero rows");
+    assert!(r.identity_closed, "the live identity must be closed");
+    assert!(r.commit_id > pre_commit, "the identity close is a real commit");
+    assert_eq!(r.rows_total, 0);
+    assert_eq!(scalar(&db, "SELECT count(*) FROM erasure_marker"), 0);
+    assert_eq!(
+        scalar(&db, "SELECT count(*) FROM alternative WHERE cur_name = 'emptyrun'"),
+        0,
+        "identity no longer current"
+    );
+    // The guard is unarmed: as-of at any commit still succeeds everywhere.
+    let conn = Connection::open(&db).unwrap();
+    for c in [1, pre_commit] {
+        let n: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM value_scalar_asof({c})"), [], |r| r.get(0))
+            .expect("as-of must be unaffected by a markerless close");
+        assert!(n >= 0);
+    }
+    conn.close().unwrap();
+}
+
+// --- review 2a: a renamed alternative's stale former name must not resolve ---
+
+#[test]
+fn stale_former_name_does_not_resolve_to_the_live_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, a_id, _) = seed_two_runs(dir.path(), 8);
+    // Rename runA -> runA_v2 through the ordinary close-out + reinsert shape.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO \"commit\" (user, message) VALUES ('tester', 'rename runA');
+             UPDATE alternative SET valid_to_commit = currval('seq_commit')
+               WHERE id = {a_id} AND valid_to_commit IS NULL;
+             INSERT INTO alternative (id, name, valid_from_commit, version)
+               VALUES ({a_id}, 'runA_v2', currval('seq_commit'), 2);"
+        ))
+        .unwrap();
+        conn.close().unwrap();
+    }
+    // The STALE former name must not resolve — resolving it to the live id
+    // would erase live data addressed by a name it no longer carries.
+    let err = erase_alternative(&db, &alt_key("runA"), &EraseOpts::default(), "tester")
+        .expect_err("stale name must not resolve");
+    assert!(format!("{err}").contains("not found"), "unexpected error: {err}");
+    let p = preview_erase_alternative(&db, &alt_key("runA"), &EraseOpts::default()).unwrap();
+    assert!(!p.found, "preview must agree: stale name resolves nowhere");
+    assert!(alt_rows(&db, "value_scalar", a_id) > 0, "nothing was touched");
+    // The CURRENT name still resolves and erases the same identity.
+    let r = erase_alternative(&db, &alt_key("runA_v2"), &EraseOpts::default(), "tester")
+        .expect("current name erases");
+    assert!(r.erased);
+    assert_eq!(r.alternative_id, a_id);
+}
+
+// --- review 2b: name reuse after delete-then-recreate refuses ----------------
+
+#[test]
+fn name_reuse_after_delete_refuses_to_guess() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, a_id, _) = seed_two_runs(dir.path(), 8);
+    // Structurally delete runA (identity closed, history kept), then create a
+    // NEW alternative reusing the name — uq_alternative_name only constrains
+    // current rows, so this is legal.
+    nodal_db_core::api::delete_objects(
+        &db,
+        vec![(alt_key("runA"), ObjectDeleteOpts { cascade: true })],
+        "tester",
+        "delete runA",
+        WriteOptions::default(),
+    )
+    .expect("delete_objects");
+    write(&db, "Node", "demand", "runA", scalar_batch(&["n1"], &[7.0]));
+    let new_id = scalar(&db, "SELECT id FROM alternative WHERE cur_name = 'runa'");
+    assert_ne!(new_id, a_id, "fixture: a distinct reused identity");
+
+    // The name now matches BOTH a current identity and a closed one: an
+    // irreversible erase must refuse, touching nothing.
+    let err = erase_alternative(&db, &alt_key("runA"), &EraseOpts::default(), "tester")
+        .expect_err("reuse ambiguity must refuse");
+    let msg = format!("{err}");
+    assert!(msg.contains("reused"), "unexpected error: {msg}");
+    assert_eq!(scalar(&db, "SELECT count(*) FROM erasure_marker"), 0);
+    assert!(alt_rows(&db, "value_scalar", a_id) > 0, "old rows untouched");
+    assert!(alt_rows(&db, "value_scalar", new_id) > 0, "new rows untouched");
+}
+
+// --- review 4: preview honors expect_present ---------------------------------
+
+#[test]
+fn preview_reports_expect_present_verdicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, _) = seed_two_runs(dir.path(), 8);
+
+    let opts = EraseOpts { note: None, expect_present: &["runB", "runC_missing", "runA"] };
+    let p = preview_erase_alternative(&db, &alt_key("runA"), &opts).expect("preview");
+    assert!(p.found);
+    // runB present -> no problem; runC_missing absent; runA is the target.
+    assert_eq!(p.expect_present_problems.len(), 2, "{:?}", p.expect_present_problems);
+    assert!(p.expect_present_problems[0].contains("runC_missing"));
+    assert!(p.expect_present_problems[1].contains("being erased"));
+    // And the erase reaches the same verdict (same helper — refusal).
+    let err = erase_alternative(&db, &alt_key("runA"), &opts, "tester")
+        .expect_err("erase must refuse what preview reported");
+    assert!(format!("{err}").contains("runC_missing"));
+}
+
+// --- review 5: schema-version pre-gate ---------------------------------------
+
+#[test]
+fn erase_refuses_schema_version_mismatch_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, a_id, _) = seed_two_runs(dir.path(), 8);
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "UPDATE metadata SET value = '9.9-bogus' WHERE lower(name) = 'schema_version'",
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+    let commits = scalar(&db, "SELECT count(*) FROM \"commit\"");
+    let err = erase_alternative(&db, &alt_key("runA"), &EraseOpts::default(), "tester")
+        .expect_err("version mismatch must refuse");
+    let msg = format!("{err}");
+    assert!(msg.contains("schema_version") && msg.contains("re-init"), "unexpected: {msg}");
+    assert_eq!(scalar(&db, "SELECT count(*) FROM \"commit\""), commits, "no commit burned");
+    assert!(alt_rows(&db, "value_scalar", a_id) > 0, "nothing touched");
+}
+
+// --- review 7: sweep list == catalog census ----------------------------------
+
+/// The hardcoded 31-name sweep list must equal the live catalog's census of
+/// `*_asof` table macros — a new as-of macro that never enters the guard
+/// sweep fails HERE, not never. (`value_timeline` / `history_untrusted_span`
+/// are views, not macros; nothing else matches the suffix.)
+#[test]
+fn guard_sweep_list_matches_catalog_census() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("census.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    let conn = Connection::open(&db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT function_name FROM duckdb_functions() \
+             WHERE NOT internal AND function_type = 'table_macro' \
+               AND ends_with(function_name, '_asof') \
+             ORDER BY function_name",
+        )
+        .unwrap();
+    let census: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    let mut expected: Vec<String> = ASOF_MACROS.iter().map(|m| m.to_string()).collect();
+    expected.sort();
+    assert_eq!(census, expected, "sweep list has drifted from the catalog");
+}
+
+// --- review 8/9: full view-catalog + audit-catalog sweeps ---------------------
+
+/// Views whose content legitimately differs between the erased DB and the
+/// never-had-A control, each with its reason. Everything else must be
+/// byte-identical (order-independent fingerprint), post-erase AND post-compact.
+const VIEW_SWEEP_EXCLUSIONS: &[(&str, &str)] = &[
+    ("dataset_version", "the commit cookie counts runA's write/erase commits"),
+    ("audit_erasure", "the marker inventory IS the difference"),
+    ("audit_health", "reports the physical file (size note differs by layout)"),
+    ("metadata_current", "carries db_identity, a per-init UUID unique by construction"),
+];
+
+/// Audit views allowed to be non-empty on a healthy erased database.
+const AUDIT_ALLOWED_NONEMPTY: &[(&str, &str)] = &[
+    ("audit_erasure", "inventory reporting, not damage — one row per marker"),
+    ("audit_health", "informational surface rows, always present"),
+];
+
+/// Enumerate the full view catalog of `db`.
+fn all_views(db: &Path) -> Vec<String> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT view_name FROM duckdb_views() WHERE NOT internal ORDER BY view_name",
+        )
+        .unwrap();
+    let v: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    v
+}
+
+/// Every audit view is clean except the documented reporting surfaces
+/// (`AUDIT_ALLOWED_NONEMPTY`); audit_erasure must hold exactly
+/// `expect_markers` rows.
+fn assert_audit_catalog_clean(db: &Path, expect_markers: i64, ctx: &str) {
+    for view in all_views(db) {
+        if !view.starts_with("audit_") {
+            continue;
+        }
+        let n = scalar(db, &format!("SELECT count(*) FROM {view}"));
+        if view == "audit_erasure" {
+            assert_eq!(n, expect_markers, "{ctx}: audit_erasure marker count");
+        } else if AUDIT_ALLOWED_NONEMPTY.iter().any(|(v, _)| *v == view) {
+            // informational — any row count is fine
+        } else {
+            assert_eq!(n, 0, "{ctx}: {view} not clean");
+        }
+    }
+}
+
+/// Acceptance 2, full width: seed runB IDENTICALLY (first, so its rows carry
+/// identical commit ids and sequence ids in both files) in a control DB and
+/// an A+B DB, add runA on top, erase it — then EVERY view in the catalog,
+/// minus the three documented exclusions, fingerprints identically to the
+/// control. Repeated after compaction. The audit catalog is swept in full on
+/// both files too.
+#[test]
+fn erased_db_matches_control_across_the_view_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_ab = dir.path().join("ab.duckdb");
+    let db_b = dir.path().join("control.duckdb");
+    for db in [&db_ab, &db_b] {
+        init_schema_with_default(db, Some("Base")).expect("init");
+        // runB first — identical statements, identical order, identical ids.
+        write(db, "Node", "demand", "runB", scalar_batch(&["n1", "n2"], &[1.0, 2.0]));
+        write(db, "Node", "profile", "runB", indexed_float_batch("n1", 16, 100.0));
+        write(db, "Node", "profile", "runB", indexed_float_batch("n1", 16, 100.5));
+        write(db, "Node", "ragged", "runB", indexed_int_batch("n1", &[0, 2], &[1, 2]));
+        let conn = Connection::open(db).unwrap();
+        conn.execute_batch(
+            "INSERT INTO \"commit\" (user, message) VALUES ('tester', 'common structure');
+             INSERT INTO scenario (id, name, valid_from_commit)
+               VALUES (nextval('seq_scenario'), 's_main', currval('seq_commit'));
+             INSERT INTO scenario_alternative (scenario_id, alternative_id, rank, valid_from_commit)
+               SELECT s.id, a.id, 1, currval('seq_commit')
+               FROM scenario s, alternative a WHERE s.cur_name = 's_main' AND a.cur_name = 'runb';
+             INSERT INTO membership (group_entity_id, member_entity_id, included, valid_from_commit)
+               SELECT e1.id, e2.id, TRUE, currval('seq_commit')
+               FROM entity e1, entity e2 WHERE e1.cur_name = 'n1' AND e2.cur_name = 'n2';",
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+    // runA only in db_ab, on top of the shared prefix.
+    write(&db_ab, "Node", "demand", "runA", scalar_batch(&["n1", "n2"], &[9.0, 8.0]));
+    write(&db_ab, "Node", "profile", "runA", indexed_float_batch("n1", 16, 0.0));
+    write(&db_ab, "Node", "profile", "runA", indexed_float_batch("n1", 16, 0.5));
+    write(&db_ab, "Node", "ragged", "runA", indexed_int_batch("n1", &[0, 2], &[3, 4]));
+    {
+        let conn = Connection::open(&db_ab).unwrap();
+        conn.execute_batch(
+            "INSERT INTO \"commit\" (user, message) VALUES ('tester', 'runA structure');
+             INSERT INTO scenario_alternative (scenario_id, alternative_id, rank, valid_from_commit)
+               SELECT s.id, a.id, 2, currval('seq_commit')
+               FROM scenario s, alternative a WHERE s.cur_name = 's_main' AND a.cur_name = 'runa';
+             INSERT INTO entity_alternative (entity_id, alternative_id, active, valid_from_commit)
+               SELECT e.id, a.id, TRUE, currval('seq_commit')
+               FROM entity e, alternative a WHERE e.cur_name = 'n1' AND a.cur_name = 'runa';
+             INSERT INTO membership (group_entity_id, member_entity_id, alternative_id, included, valid_from_commit)
+               SELECT e1.id, e2.id, a.id, FALSE, currval('seq_commit')
+               FROM entity e1, entity e2, alternative a
+               WHERE e1.cur_name = 'n1' AND e2.cur_name = 'n2' AND a.cur_name = 'runa';",
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+
+    let r = erase_alternative(&db_ab, &alt_key("runA"), &EraseOpts::default(), "tester")
+        .expect("erase runA");
+    assert!(r.erased);
+
+    let views = all_views(&db_ab);
+    assert_eq!(views, all_views(&db_b), "catalogs must agree");
+    let sweep = |ctx: &str| {
+        for view in &views {
+            if VIEW_SWEEP_EXCLUSIONS.iter().any(|(v, _)| v == view) {
+                continue;
+            }
+            let q = format!("SELECT * FROM {view}");
+            assert_eq!(
+                fingerprint(&db_ab, &q),
+                fingerprint(&db_b, &q),
+                "{ctx}: view {view} differs from the never-had-A control"
+            );
+        }
+    };
+    sweep("post-erase");
+    assert_audit_catalog_clean(&db_ab, 1, "post-erase");
+    assert_audit_catalog_clean(&db_b, 0, "control");
+
+    compact(&db_ab).expect("compact erased");
+    sweep("post-compact");
+    assert_audit_catalog_clean(&db_ab, 1, "post-compact");
+}
+
+// --- review 11: real kill-injection (SIGABRT between removal and marker) -----
+
+/// Crash-injection child: performs the erase with the debug-build hook armed
+/// (`NODAL_DB_TEST_ABORT_BEFORE_MARKER`), which aborts the PROCESS between
+/// step 3 (deletes) and step 4 (marker) — a hard kill inside the widest
+/// window. Spawned by `erase_killed_mid_transaction_leaves_pre_state`; never
+/// run standalone.
+#[test]
+#[ignore = "crash-injection helper; spawned as a child process by the kill test"]
+fn helper_crash_mid_erase() {
+    let db = std::env::var("NODAL_DB_TEST_DB").expect("child db path");
+    let _ = erase_alternative(
+        Path::new(&db),
+        &alt_key("runA"),
+        &EraseOpts::default(),
+        "tester",
+    );
+    unreachable!("the abort hook must have fired before the erase returned");
+}
+
+/// Acceptance 4's kill test, for real: SIGABRT the erasing PROCESS after the
+/// deletes ran but before the marker insert. On reopen, transaction
+/// atomicity + WAL recovery must show the full pre-state: every row back, the
+/// identity still current, no marker, no commit — never a torn middle.
+#[test]
+fn erase_killed_mid_transaction_leaves_pre_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, a_id, _) = seed_two_runs(dir.path(), 8);
+    let before: Vec<i64> = SCOPE_TABLES.iter().map(|t| alt_rows(&db, t, a_id)).collect();
+    let commits = scalar(&db, "SELECT count(*) FROM \"commit\"");
+
+    let exe = std::env::current_exe().expect("test exe");
+    let status = std::process::Command::new(exe)
+        .args(["--exact", "helper_crash_mid_erase", "--ignored", "--nocapture"])
+        .env("NODAL_DB_TEST_DB", &db)
+        .env("NODAL_DB_TEST_ABORT_BEFORE_MARKER", "1")
+        .status()
+        .expect("spawn crash child");
+    assert!(!status.success(), "the child must die by abort, not finish");
+
+    // Reopen: the aborted transaction must be fully invisible.
+    let after: Vec<i64> = SCOPE_TABLES.iter().map(|t| alt_rows(&db, t, a_id)).collect();
+    assert_eq!(before, after, "killed erase must leave every row in place");
+    assert_eq!(
+        scalar(&db, &format!(
+            "SELECT count(*) FROM alternative WHERE id = {a_id} AND valid_to_commit IS NULL"
+        )),
+        1,
+        "identity must still be current"
+    );
+    assert_eq!(scalar(&db, "SELECT count(*) FROM erasure_marker"), 0, "no marker");
+    assert_eq!(scalar(&db, "SELECT count(*) FROM \"commit\""), commits, "no commit");
+
+    // And the erase then succeeds normally on the recovered file.
+    let r = erase_alternative(&db, &alt_key("runA"), &EraseOpts::default(), "tester")
+        .expect("erase after crash recovery");
+    assert!(r.erased);
+}
+
+// --- review 12: lock-contention retry ----------------------------------------
+
+/// Lock-holder child: opens the DB read-only (which blocks a writer's RW
+/// acquisition — DuckDB's symmetric lock, CLAUDE.md invariant 1), signals
+/// via a sentinel file, holds ~300 ms, exits. Spawned by the busy-retry test.
+#[test]
+#[ignore = "lock-holder helper; spawned as a child process by the busy-retry test"]
+fn helper_hold_ro_lock() {
+    use nodal_db_core::duckdb::{AccessMode, Config, Connection as RawConn};
+    let db = std::env::var("NODAL_DB_TEST_DB").expect("child db path");
+    let sentinel = std::env::var("NODAL_DB_TEST_SENTINEL").expect("sentinel path");
+    let config = Config::default().access_mode(AccessMode::ReadOnly).unwrap();
+    let conn = RawConn::open_with_flags(&db, config).expect("child RO open");
+    std::fs::write(&sentinel, b"held").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    conn.close().unwrap();
+}
+
+/// Drive the erase through real cross-process lock contention: a child holds
+/// an RO handle (starving the RW open) for ~300 ms; the erase's bounded
+/// backoff must ride it out and then commit EXACTLY ONCE — one commit, one
+/// marker, no orphan state from the retried opens. (A write-write MVCC
+/// `Conflict` is unreachable through the public API by construction: the
+/// per-path lock serializes same-process writers and the file lock excludes
+/// cross-process ones — `conn.rs` — so lock-busy is THE contention path an
+/// erase can actually meet.)
+#[test]
+fn erase_retries_through_lock_contention_and_commits_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, _) = seed_two_runs(dir.path(), 8);
+    let commits = scalar(&db, "SELECT count(*) FROM \"commit\"");
+    let sentinel = dir.path().join("lock_held.sentinel");
+
+    let exe = std::env::current_exe().expect("test exe");
+    let mut child = std::process::Command::new(exe)
+        .args(["--exact", "helper_hold_ro_lock", "--ignored", "--nocapture"])
+        .env("NODAL_DB_TEST_DB", &db)
+        .env("NODAL_DB_TEST_SENTINEL", &sentinel)
+        .spawn()
+        .expect("spawn lock holder");
+    // Wait until the child actually holds the file lock.
+    let t0 = std::time::Instant::now();
+    while !sentinel.exists() {
+        assert!(t0.elapsed().as_secs() < 10, "lock-holder child never signalled");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    let r = erase_alternative(&db, &alt_key("runA"), &EraseOpts::default(), "tester")
+        .expect("erase must ride out the busy lock via bounded backoff");
+    assert!(r.erased);
+    child.wait().expect("child exits");
+
+    assert_eq!(
+        scalar(&db, "SELECT count(*) FROM \"commit\""),
+        commits + 1,
+        "exactly one commit despite the retried opens"
+    );
+    assert_eq!(scalar(&db, "SELECT count(*) FROM erasure_marker"), 1, "exactly one marker");
 }

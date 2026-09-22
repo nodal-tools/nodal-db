@@ -1297,6 +1297,12 @@ def main():
         "erasure_marker: kind='entity' without entity_id rejected",
         "INSERT INTO erasure_marker (kind, at_commit, rows_removed)"
         " VALUES ('entity', ?, 0)", [c3])
+    # The kind tag is extensible by DDL edit only (widen the IN-list when a
+    # grain ships) — an unknown string is unrepresentable, never silently inert.
+    expect_constraint(
+        "erasure_marker: unknown kind tag rejected (extensible by DDL edit only)",
+        "INSERT INTO erasure_marker (kind, at_commit, rows_removed)"
+        " VALUES ('poison', ?, 0)", [c3])
 
     asof_macros = [
         "metadata_asof", "entity_metadata_asof", "parameter_value_metadata_asof",
@@ -1338,6 +1344,19 @@ def main():
             out[m] = verdicts.pop() if len(verdicts) == 1 else f"mixed:{verdicts}"
         return out
 
+    # The hardcoded sweep list must equal the live catalog's census of *_asof
+    # table macros — a new as-of macro that skips the guard sweep (or a
+    # renamed one that silently drops out of it) fails HERE, not never.
+    # `value_timeline` / `history_untrusted_span` are views, not macros, and
+    # do not match the suffix; there are no other exclusions.
+    census = sorted(r[0] for r in allrows(
+        "SELECT DISTINCT function_name FROM duckdb_functions()"
+        " WHERE NOT internal AND function_type = 'table_macro'"
+        " AND ends_with(function_name, '_asof')"))
+    check("erasure guard: sweep list == catalog census of *_asof table macros"
+          " (31, no stragglers)",
+          census == sorted(asof_macros), str(set(census) ^ set(asof_macros)))
+
     c_latest = one('SELECT max(id) FROM "commit"')[0]
     sweep = guard_sweep(c_latest)
     check("erasure guard: all 31 as-of macros silent in every shape on a"
@@ -1370,10 +1389,11 @@ def main():
           " identity and reports the unreliable as-of range",
           ae == [("alternative", "high", False, c_erase, c_erase - 1)], str(ae))
 
-    con.execute("DELETE FROM erasure_marker")  # raw cleanup, like every plant
-    n_bad = sum(1 for v in guard_sweep(c_erase - 1).values() if v != "silent")
-    check("erasure guard: silent again after the marker plant is cleaned up",
-          n_bad == 0, f"n={n_bad}")
+    # The marker is deliberately KEPT (not cleaned up like the hostile plants):
+    # the final all-audits sweep below must hold on a database in the erased
+    # state — markers are permanent by contract, so "clean" must mean clean
+    # WITH a marker present. (The marker-free direction was asserted by the
+    # control sweep above, before the plant.)
 
     # ---- everything green again after the hostile section's cleanups
     for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
@@ -1388,6 +1408,18 @@ def main():
                  "audit_realizes_cycle", "audit_dangling_semantic_ref"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"final: {view} clean after hostile section", n == 0, f"n={n}")
+
+    # ---- the erasure marker survived to the end WITH every audit clean above,
+    # and the guard is still armed (permanent-marker contract).
+    n_mark = one("SELECT count(*) FROM erasure_marker")[0]
+    try:
+        con.execute(f"SELECT count(*) FROM value_scalar_asof({c_erase - 1})").fetchall()
+        armed = False
+    except duckdb.Error as e:
+        armed = "unreliable" in str(e)
+    check("erasure guard: marker retained through the final audit sweep and"
+          " still refusing pre-marker as-of", n_mark == 1 and armed,
+          f"markers={n_mark} armed={armed}")
 
     # ---- DB-identity: stable for the lifetime of the database — still the one
     # current row minted at init, byte-identical after the whole smoke flow.

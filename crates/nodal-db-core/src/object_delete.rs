@@ -515,19 +515,33 @@ pub(crate) struct EraseLeg {
 /// (`value_array_hist`). `None` ⇒ no leg set exists for the kind at all;
 /// a kind whose legs are not erase-flagged yields an EMPTY vec — the caller
 /// (`crate::erasure`) refuses non-alternative kinds before ever asking.
+///
+/// The per-leg `erase` flag is deliberately kept on every registry entry
+/// (rather than dispatching on kind here) so that when a future grain lands
+/// (entity-scoped erasure, object-delete P3/P4), the erase-participation
+/// decision is made LEG BY LEG at the one place a new leg is reviewed — the
+/// registry literal — not rediscovered in a dispatch table. Until such a
+/// grain is designed, only the Alternative set may be flagged; the
+/// debug_assert below trips if a stray `erase: true` appears on an
+/// undesigned kind.
 pub(crate) fn erase_scope_legs(kind: ObjectKind) -> Option<Vec<EraseLeg>> {
     let legs = object_legs(kind)?;
-    Some(
-        legs.dependents
-            .iter()
-            .chain(legs.erase_extra.iter())
-            .filter(|l| l.erase)
-            .map(|l| EraseLeg {
-                table: l.table,
-                predicate: l.predicate,
-            })
-            .collect(),
-    )
+    let scope: Vec<EraseLeg> = legs
+        .dependents
+        .iter()
+        .chain(legs.erase_extra.iter())
+        .filter(|l| l.erase)
+        .map(|l| EraseLeg {
+            table: l.table,
+            predicate: l.predicate,
+        })
+        .collect();
+    debug_assert!(
+        kind == ObjectKind::Alternative || scope.is_empty(),
+        "erase flags set on a kind ({kind:?}) whose erase grain is not designed \
+         (erasure_compaction_plan §6)"
+    );
+    Some(scope)
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,18 +1225,32 @@ fn close_object_and_identity(
     commit_id: i64,
     target_id: i64,
 ) -> Result<usize, DbError> {
-    let mut object_rows = conn.execute(
-        &format!(
-            "UPDATE {} SET valid_to_commit = ? \
-             WHERE id = ? AND valid_from_commit < ? AND valid_to_commit IS NULL",
-            legs.object_table
-        ),
-        params![commit_id, target_id, commit_id],
-    )?;
+    let mut object_rows = close_current_row(conn, legs.object_table, commit_id, target_id)?;
     for leg in &legs.identity {
         object_rows += close_leg(conn, leg, commit_id, target_id)?;
     }
     Ok(object_rows)
+}
+
+/// Close the CURRENT version row of an id-keyed table under the same-commit
+/// guard (`valid_from_commit < commit_id AND valid_to_commit IS NULL`) — the
+/// ONE home of the guarded identity close-out: the object-delete cascade
+/// (above) and the erase primitive's step 2 (`crate::erasure`) both close
+/// through here, so the guard semantics can never fork. Returns the number of
+/// rows closed (0 = already closed / created this same commit).
+pub(crate) fn close_current_row(
+    conn: &Connection,
+    table: &str,
+    commit_id: i64,
+    id: i64,
+) -> Result<usize, DbError> {
+    Ok(conn.execute(
+        &format!(
+            "UPDATE {table} SET valid_to_commit = ? \
+             WHERE id = ? AND valid_from_commit < ? AND valid_to_commit IS NULL"
+        ),
+        params![commit_id, id, commit_id],
+    )?)
 }
 
 /// Accumulates a cascade's counts across the target AND every recursively-

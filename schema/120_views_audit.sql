@@ -860,9 +860,15 @@ FROM pragma_database_size();
 --     marker; earlier markers are subsumed by later ones);
 --   - the erasure commit's who/when, for the history viewer's
 --     "changed at commit C; content erased" rendering (VMP Part 5 UX).
--- Rows physically absent with NO marker are the out-of-contract raw-DELETE
--- signature (erasure_compaction_plan §5.2), surfaced by the Part-5 continuity
--- audits (audit_history_tiling), not here.
+-- Detection scope, stated honestly (erasure_compaction_plan §5.2): a PARTIAL
+-- out-of-contract raw DELETE (some of a key's rows gone, no marker) breaks
+-- version tiling and is surfaced by the Part-5 continuity audits
+-- (audit_history_tiling), not here. A raw DELETE of EVERYTHING under an
+-- alternative leaves no groups to tile and no marker — it is indistinguishable
+-- from "never existed" and is NOT detectable by any audit; the sanctioned
+-- erase path is safe against producing that state precisely because the
+-- marker is written in the SAME transaction as the removal (atomicity: rows
+-- gone ⇒ marker present, always).
 CREATE VIEW audit_erasure AS
 SELECT em.id AS marker_id,
        em.kind,
@@ -882,7 +888,9 @@ SELECT em.id AS marker_id,
            NOT EXISTS (SELECT 1 FROM alternative a WHERE a.id = em.alternative_id)
          WHEN 'entity' THEN
            NOT EXISTS (SELECT 1 FROM entity e WHERE e.id = em.entity_id)
-         ELSE FALSE   -- horizon scope is a commit id, engine-FK-enforced
+         WHEN 'horizon' THEN FALSE  -- scope is a commit id, engine-FK-enforced
+         ELSE TRUE   -- unknown kind (should be unrepresentable under the DDL
+                     -- CHECK; belt for attached out-of-contract files)
        END AS scope_unresolved,
        em.at_commit,
        em.at_commit - 1 AS last_unreliable_asof,

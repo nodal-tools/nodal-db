@@ -433,13 +433,26 @@ fn clustered_current_scan_is_measurably_faster() {
     let ratio = t_unclustered / t_clustered;
     println!("current-state scan: unclustered {t_unclustered:.4}s, clustered {t_clustered:.4}s, ratio {ratio:.2}x");
     assert!(
-        ratio >= 1.3,
-        "clustered current-state scan not measurably faster: {ratio:.2}x (target >=1.5x, floor 1.3x)"
+        ratio >= 1.5,
+        "clustered current-state scan not measurably faster: {ratio:.2}x \
+         (acceptance target >=1.5x; the critique measured ~2x and this harness 2.07x)"
     );
 
     // Zone-map pruning on the sortable key part of the ORDER BY (the part
-    // that DOES skip row groups — critique M2's verified sanity leg).
+    // that DOES skip row groups — critique M2's verified sanity leg),
+    // asserted on ROWS SCANNED via query profiling, not on the result: the
+    // keyed range read over the clustered layout must touch a small fraction
+    // of the 2 M rows (the critique's method measured 245 K of 2 M).
+    let prof = dir.path().join("prof.json");
     let conn = Connection::open(&clustered).unwrap();
+    conn.execute_batch(&format!(
+        "SET threads = 1; \
+         PRAGMA enable_profiling='json'; \
+         PRAGMA profiling_output='{}'; \
+         SET profiling_mode='detailed';",
+        prof.display().to_string().replace('\'', "''")
+    ))
+    .unwrap();
     let n: i64 = conn
         .query_row(
             "SELECT count(*) FROM value_scalar WHERE entity_id < 1000",
@@ -449,6 +462,76 @@ fn clustered_current_scan_is_measurably_faster() {
         .unwrap();
     assert_eq!(n, 2000);
     conn.close().unwrap();
+    let json = std::fs::read_to_string(&prof).expect("profiling output");
+    // Crude but dependency-free: collect every "operator_rows_scanned": N.
+    let scanned_max = json
+        .match_indices("\"operator_rows_scanned\"")
+        .filter_map(|(i, _)| {
+            let tail = &json[i..];
+            let colon = tail.find(':')?;
+            tail[colon + 1..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<i64>()
+                .ok()
+        })
+        .max()
+        .expect("operator_rows_scanned present in the profile");
+    println!("keyed range read: {scanned_max} of 2000000 rows scanned");
+    assert!(
+        scanned_max < 500_000,
+        "zone maps did not prune the keyed range read: {scanned_max} of 2 M rows scanned"
+    );
+}
+
+// --- (h2) valid-WAL replay pin (LOAD-BEARING engine behavior) ----------------
+
+/// PIN of the engine behavior the pre-rename WAL unlink rests on: DuckDB
+/// 1.5.5 REPLAYS a valid `<db>.wal` on read-only open/ATTACH, so a
+/// crashed-writer's committed-but-uncheckpointed content is carried into the
+/// compaction copy BEFORE the stale sidecar is removed — nothing durable is
+/// ever discarded. Like the guard's consumer-shape sweep, this is a permanent
+/// engine-upgrade tripwire (the claim is behavioral, not documented contract):
+/// if a future engine stops replaying WALs on RO open, this test fails and
+/// the unlink strategy must be redesigned — never weaken it to keep CI green.
+///
+/// The crashed writer is simulated exactly: a connection with
+/// checkpoint-on-shutdown disabled commits a row (durable in the WAL only)
+/// and closes — the same on-disk state a SIGKILLed post-commit writer leaves.
+#[test]
+fn compact_carries_stale_wal_content_and_unlinks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 5);
+    let wal = {
+        let mut w = db.as_os_str().to_os_string();
+        w.push(".wal");
+        std::path::PathBuf::from(w)
+    };
+
+    // Leave a VALID wal holding one committed row the main file lacks.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "PRAGMA disable_checkpoint_on_shutdown; \
+         INSERT INTO \"commit\" (user, message) \
+           VALUES ('walpin', 'committed only to the wal');",
+    )
+    .unwrap();
+    conn.close().unwrap();
+    assert!(wal.exists(), "fixture: a valid WAL must remain after close");
+
+    let report = compact(&db).expect("compact with a valid stale wal");
+    assert!(report.swapped);
+    assert!(!wal.exists(), "the stale wal must be gone after the swap");
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT count(*) FROM \"commit\" WHERE message = 'committed only to the wal'"
+        ),
+        1,
+        "the WAL-only commit must survive INTO the compacted file (RO replay)"
+    );
 }
 
 // --- (h) stale-WAL sidecar hygiene (erasure plan §7 item 7 / critique m7b) --

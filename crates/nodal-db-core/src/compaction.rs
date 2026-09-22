@@ -80,6 +80,16 @@ pub struct CompactionReport {
 /// source read *cheaply* before a temp is built (R2); it is cross-checked
 /// against the freshly-init'd temp's own `metadata` row (see
 /// [`assert_temp_schema_version`]) so it can never silently drift from the DDL.
+///
+/// **Bump rule:** bump iff the COPY CONTRACT changes — the base-table set or a
+/// table's insertable column shape (what the named-column `INSERT..SELECT`
+/// and the self-check hash range over). Bootstrap DATA rows and view/macro/
+/// index-only changes do NOT bump: the catalog is rebuilt from the DDL, never
+/// copied. Precedents: the DB-identity metadata row (20fe969) added bootstrap
+/// data — no bump; the `erasure_marker` base table (this version) changed the
+/// table set — bump. Consequence of a bump (erasure_compaction_plan §9 step
+/// 1): existing dev DBs refuse compaction until re-inited/re-imported —
+/// pre-freeze, re-init IS the migration story.
 pub const SCHEMA_VERSION: &str = "0.3-erasure-marker";
 
 /// Default byte-growth watermark for [`compact_if_needed`]: repack once the DB
@@ -418,7 +428,8 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
     if src_version != SCHEMA_VERSION {
         return Err(DbError::Api(format!(
             "compaction refused: source schema_version {src_version:?} != current {SCHEMA_VERSION:?} \
-             (compaction copies named columns against the current DDL; migrate first)"
+             (compaction copies named columns against the current DDL; pre-freeze the \
+             migration story is re-init/re-import — erasure_compaction_plan §9 step 1)"
         )));
     }
 
@@ -446,6 +457,26 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
     // Close the temp handle BEFORE the swap (Windows caveat, §3).
     conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
 
+    // Stale-WAL hygiene (erasure_compaction_plan §7 item 7 / critique m7b),
+    // BEFORE the rename so the removal can only ever hit a WAL of the OLD
+    // inode era: a `<db>.wal` present here was left by a writer that crashed
+    // before this compaction (normal closes checkpoint and remove it; we hold
+    // the per-path lock, and the source's file lock was held through the
+    // copy). Its committed content is already IN the temp: the RO source
+    // probe/ATTACH replays valid WALs (pinned by
+    // `compact_carries_stale_wal_content_and_unlinks_it`), and a corrupt WAL
+    // fails that open loudly, aborting long before this point. Left in place,
+    // it would be replayed against the freshly-swapped file on the next RW
+    // open — the hazard. Unlinking after the rename instead would race a
+    // second process's NEW live WAL on the swapped-in file; before the
+    // rename, no writer can have the new inode yet.
+    let stale_wal = {
+        let mut w = db_path.as_os_str().to_os_string();
+        w.push(".wal");
+        PathBuf::from(w)
+    };
+    let _ = fs::remove_file(&stale_wal);
+
     // Durability + atomic swap (§3): fsync the temp bytes and its directory
     // entry, rename over the original, fsync the directory again.
     fsync_file(&temp_path)?;
@@ -456,22 +487,6 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
         source,
     })?;
     fsync_dir(dir);
-
-    // Stale-WAL hygiene (erasure_compaction_plan §7 item 7 / critique m7b): a
-    // `<db>.wal` sidecar surviving to this point can only belong to the OLD
-    // inode (left by a writer that crashed BEFORE this compaction — normal
-    // closes checkpoint and remove it; we hold the per-path lock, and the
-    // source's file lock was held through the copy). Its committed content is
-    // already IN the new file: the RO source probe/ATTACH above replays the
-    // WAL, so the copy included it (a corrupt WAL fails that open loudly and
-    // we never reach here). Replaying it against the freshly-swapped file on
-    // the next RW open is the hazard; unlink it.
-    let stale_wal = {
-        let mut w = db_path.as_os_str().to_os_string();
-        w.push(".wal");
-        PathBuf::from(w)
-    };
-    let _ = fs::remove_file(&stale_wal);
 
     let bytes_after = fs::metadata(db_path).map(|m| m.len()).unwrap_or(bytes_before);
 

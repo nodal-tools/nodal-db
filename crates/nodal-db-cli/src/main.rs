@@ -211,8 +211,13 @@ fn main() -> anyhow::Result<()> {
                 class: None,
                 target: ObjectRef::Name(name.clone()),
             };
+            let expect: Vec<&str> = expect_present.iter().map(String::as_str).collect();
+            let opts = erasure::EraseOpts {
+                note: note.as_deref(),
+                expect_present: &expect,
+            };
             if preview {
-                let p = erasure::preview_erase_alternative(&db, &key)?;
+                let p = erasure::preview_erase_alternative(&db, &key, &opts)?;
                 if !p.found {
                     bail!("alternative '{name}' not found (no identity row)");
                 }
@@ -235,14 +240,47 @@ fn main() -> anyhow::Result<()> {
                 if !p.referencing_runs.is_empty() {
                     println!("  note: erases the results of run(s) {:?}", p.referencing_runs);
                 }
+                // The same --expect-present check the erase enforces, reported
+                // read-only (core computes both from one helper).
+                for n in &expect_present {
+                    if !p.expect_present_problems.iter().any(|prob| prob.contains(&format!("'{n}'"))) {
+                        println!("  expect-present '{n}': present — the erase would proceed");
+                    }
+                }
+                for prob in &p.expect_present_problems {
+                    println!("  expect-present PROBLEM: the erase would refuse — {prob}");
+                }
+                if note.is_some() {
+                    println!("  (--note is recorded only by an actual erase; ignored in preview)");
+                }
                 return Ok(());
             }
             let user = import::resolve_user_from(user.as_deref())?;
-            let expect: Vec<&str> = expect_present.iter().map(String::as_str).collect();
-            let opts = erasure::EraseOpts {
-                note: note.as_deref(),
-                expect_present: &expect,
-            };
+            // D-E6: mechanism is DB-agnostic, policy is client-side — warn
+            // loudly when the target does not look like a tool-produced
+            // output DB. Heuristic: output DBs carry `run` provenance rows
+            // (schema_interop.md §9); a DB with none is probably a curated
+            // input. Limits, stated: a runner that never records `run` rows
+            // makes its output DB trip this warning spuriously, and an input
+            // DB that happens to contain run rows is not caught. Warning
+            // only — never a refusal (no flag surface in v1).
+            {
+                use nodal_db_core::duckdb::{AccessMode, Config, Connection};
+                let config = Config::default().access_mode(AccessMode::ReadOnly)?;
+                let conn = Connection::open_with_flags(&db, config)?;
+                let runs: i64 =
+                    conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?;
+                let _ = conn.close();
+                if runs == 0 {
+                    eprintln!(
+                        "warning: {} has no `run` provenance rows — this looks like a \
+                         curated INPUT database, not a tool-produced output DB. Erase is \
+                         mechanism-agnostic (D-E6) and will proceed, but the sanctioned \
+                         use is output-DB overwrite-on-rerun (schema_interop.md §9).",
+                        db.display()
+                    );
+                }
+            }
             let r = erasure::erase_alternative(&db, &key, &opts, &user)?;
             if !r.erased {
                 println!(

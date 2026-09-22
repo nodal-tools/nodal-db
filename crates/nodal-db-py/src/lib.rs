@@ -45,6 +45,7 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init;
 use nodal_db_core::template as tpl;
 use nodal_db_core::types::{ObjectDeleteKey, WriteOptions};
+use nodal_db_core::verbs;
 
 mod convert;
 use convert::*;
@@ -464,6 +465,185 @@ impl Database {
                 Err(db_err(e))
             }
         }
+    }
+
+    // -- G8 migration verbs (flextool_port_finale_plan.md §1, D-F4) --------
+    // Thin 1:1, logic-free exposure of nodal_db_core::verbs — the write
+    // surface `run:` migration programs and the Spine importer use. Every
+    // rule lives in the core.
+
+    /// Idempotent alternative creation: create when absent (with
+    /// `description`), return the existing id otherwise (description applies
+    /// on creation only). No-op burns no commit.
+    #[pyo3(signature = (name, *, description = None, user))]
+    fn ensure_alternative(
+        &self,
+        py: Python<'_>,
+        name: String,
+        description: Option<String>,
+        user: String,
+    ) -> PyResult<i64> {
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::ensure_alternative(&path, &name, description.as_deref(), &user)
+        })
+        .map_err(db_err)
+    }
+
+    /// Whole-list declarative replace of a scenario's alternative ranking:
+    /// close the current rank rows, insert `alternatives` at ranks 1..n, one
+    /// commit; no-op when the order already matches (rank values are
+    /// order-only semantics). Creates the scenario when absent; alternative
+    /// names resolve strictly (never auto-created). Returns the scenario id.
+    #[pyo3(signature = (scenario, alternatives, *, user))]
+    fn set_scenario_alternatives(
+        &self,
+        py: Python<'_>,
+        scenario: String,
+        alternatives: Vec<String>,
+        user: String,
+    ) -> PyResult<i64> {
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::set_scenario_alternatives(&path, &scenario, &alternatives, &user)
+        })
+        .map_err(db_err)
+    }
+
+    /// Write/update (`active` True/False) or close (`active=None`) one
+    /// entity's per-alternative activation row via the close-out protocol.
+    /// Class, entity, and alternative must exist. Idempotent no-ops burn no
+    /// commit.
+    #[pyo3(signature = (class_name, entity, alternative, active, *, user))]
+    fn set_entity_activation(
+        &self,
+        py: Python<'_>,
+        class_name: String,
+        entity: String,
+        alternative: String,
+        active: Option<bool>,
+        user: String,
+    ) -> PyResult<()> {
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::set_entity_activation(&path, &class_name, &entity, &alternative, active, &user)
+        })
+        .map_err(db_err)
+    }
+
+    /// Versioned `entity_class.active_by_default` header update (the v56
+    /// Batch F flip). Idempotent: an equal flag burns no commit.
+    #[pyo3(signature = (class_name, active_by_default, *, user))]
+    fn set_class_active_by_default(
+        &self,
+        py: Python<'_>,
+        class_name: String,
+        active_by_default: bool,
+        user: String,
+    ) -> PyResult<()> {
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::set_class_active_by_default(&path, &class_name, active_by_default, &user)
+        })
+        .map_err(db_err)
+    }
+
+    /// Idempotent entity-class creation, 0-D or N-D. `dims` are existing
+    /// class names in position order. An existing class with matching
+    /// dimensions is returned as-is; a mismatch is an error (no in-place
+    /// re-dimensioning). Returns the class id.
+    #[pyo3(signature = (name, dims = Vec::new(), *, user))]
+    fn ensure_entity_class(
+        &self,
+        py: Python<'_>,
+        name: String,
+        dims: Vec<String>,
+        user: String,
+    ) -> PyResult<i64> {
+        let path = self.path.clone();
+        py.detach(move || verbs::ensure_entity_class(&path, &name, &dims, &user))
+            .map_err(db_err)
+    }
+
+    /// Idempotent, properly-typed parameter-definition creation. `types` is
+    /// a list of member declarations `{"kind": "float"|...|"indexed",
+    /// "dims": [{"name": ..., "kind": "label"|"integer"|...}]}`; with no
+    /// `types` and a `value_list`, the rank-0 member is inferred from the
+    /// list; with neither, the definition loads typeless. An EXISTING
+    /// definition is returned as-is — never re-declared, never widened
+    /// (D-F4: the sanctioned mid-chain retype is close-out + recreate).
+    /// Returns the definition id.
+    #[pyo3(signature = (class_name, name, *, types = None, value_list = None,
+                        description = None, user))]
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_parameter_definition(
+        &self,
+        py: Python<'_>,
+        class_name: String,
+        name: String,
+        types: Option<Vec<Bound<'_, PyAny>>>,
+        value_list: Option<String>,
+        description: Option<String>,
+        user: String,
+    ) -> PyResult<i64> {
+        let decls = type_decls_from_py(types)?;
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::ensure_parameter_definition(
+                &path,
+                &class_name,
+                &name,
+                &decls,
+                value_list.as_deref(),
+                description.as_deref(),
+                &user,
+            )
+        })
+        .map_err(db_err)
+    }
+
+    /// Idempotent 0-D / N-D entity creation. 0-D: pass `name`. N-D: pass
+    /// `elements` (entity names in declared-dimension order); `name`
+    /// defaults to the elements joined with `__`. Elements resolve through
+    /// the one shared element-resolution path; an existing entity is
+    /// verified against `elements` (same name over a different tuple is an
+    /// error). Returns the entity id.
+    #[pyo3(signature = (class_name, name = None, elements = Vec::new(), *, user))]
+    fn ensure_entity(
+        &self,
+        py: Python<'_>,
+        class_name: String,
+        name: Option<String>,
+        elements: Vec<String>,
+        user: String,
+    ) -> PyResult<i64> {
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::ensure_entity(&path, &class_name, name.as_deref(), &elements, &user)
+        })
+        .map_err(db_err)
+    }
+
+    /// Stamp `template_name` + `template_version` — the public identity
+    /// stamp (non-optional in the importer's commit sequence: an unstamped
+    /// DB runs ZERO migration spans and quietly reconciles to head). A
+    /// DIFFERENT existing stamp refuses unless `overwrite=True` (mirrors
+    /// `allow_retarget`'s posture); restamping the identical identity is a
+    /// commit-free no-op.
+    #[pyo3(signature = (name, version, *, overwrite = false, user))]
+    fn stamp_template_identity(
+        &self,
+        py: Python<'_>,
+        name: String,
+        version: String,
+        overwrite: bool,
+        user: String,
+    ) -> PyResult<()> {
+        let path = self.path.clone();
+        py.detach(move || {
+            verbs::stamp_template_identity(&path, &name, &version, overwrite, &user)
+        })
+        .map_err(db_err)
     }
 
     // -- erasure -----------------------------------------------------------

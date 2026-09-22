@@ -564,7 +564,9 @@ pub struct EntityRef {
 }
 
 /// One migration span (§4.3): identity-changing steps between two template
-/// versions, applied in `steps` order.
+/// versions, applied in `steps` order. `steps` MAY be empty (D-F1): an empty
+/// span declares the transition reconcile-only — the runner stamps the
+/// version and moves on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Migration {
@@ -1554,9 +1556,13 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
         if m.from == m.to {
             errs.push(format!("migrations[{mi}]: from == to ({:?})", m.from));
         }
-        if m.steps.is_empty() {
-            errs.push(format!("migrations[{mi}]: empty steps"));
-        }
+        // `steps: []` is LEGAL (D-F1, flextool_port_finale_plan §2/B1): an
+        // empty span DECLARES that a version transition carries no
+        // identity-changing steps (a reconcile-only version bump). The runner
+        // already handles it (iterates zero steps, stamps the version,
+        // participates in `pending_spans`); complete per-version ladders are
+        // built from such spans, because every version in the range must be a
+        // legal *starting point* for a field database.
         for (si, s) in m.steps.iter().enumerate() {
             let loc = format!("migrations[{mi}] step {si}");
             let nonempty = |errs: &mut Vec<String>, what: &str, v: &str| {

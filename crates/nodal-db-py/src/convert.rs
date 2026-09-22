@@ -105,6 +105,52 @@ pub(crate) fn segment_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Segment> {
     })
 }
 
+/// G8 verb type declarations (`ensure_parameter_definition`): a list of
+/// member dicts `{"kind": str, "dims"?: [{"name": str, "kind": str}]}` —
+/// the IR's `types:` shape 1:1. Validation (legal kinds, D3 dim rules,
+/// distinguishability) lives in the core verb, not here.
+pub(crate) fn type_decls_from_py(
+    types: Option<Vec<Bound<'_, PyAny>>>,
+) -> PyResult<Vec<nodal_db_core::template::ir::TypeDecl>> {
+    use nodal_db_core::template::ir::{DimSpec, TypeDecl};
+    let mut out = Vec::new();
+    for (i, obj) in types.unwrap_or_default().iter().enumerate() {
+        let kind: String = obj
+            .get_item("kind")
+            .map_err(|_| ApiError::new_err(format!("types[{i}] is missing key \"kind\"")))?
+            .extract()?;
+        let dims = match obj.get_item("dims") {
+            Ok(d) if !d.is_none() => {
+                let mut ds = Vec::new();
+                for (j, dim) in d.try_iter()?.enumerate() {
+                    let dim = dim?;
+                    let name: String = dim
+                        .get_item("name")
+                        .map_err(|_| {
+                            ApiError::new_err(format!(
+                                "types[{i}].dims[{j}] is missing key \"name\""
+                            ))
+                        })?
+                        .extract()?;
+                    let dkind: String = dim
+                        .get_item("kind")
+                        .map_err(|_| {
+                            ApiError::new_err(format!(
+                                "types[{i}].dims[{j}] is missing key \"kind\""
+                            ))
+                        })?
+                        .extract()?;
+                    ds.push(DimSpec { name, kind: dkind });
+                }
+                Some(ds)
+            }
+            _ => None,
+        };
+        out.push(TypeDecl { kind, dims });
+    }
+    Ok(out)
+}
+
 /// A value-delete key: a `(class, parameter, alternative, entity)` 4-tuple
 /// (or any sequence of 4 strings).
 pub(crate) fn delete_key_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DeleteKey> {

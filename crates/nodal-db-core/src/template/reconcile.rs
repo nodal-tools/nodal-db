@@ -2183,17 +2183,17 @@ fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> 
     Ok(())
 }
 
-struct EcRow {
-    id: i64,
-    name: String,
-    description: Option<String>,
-    active_by_default: bool,
-    required: bool,
-    display_order: Option<i64>,
-    version: i64,
+pub(crate) struct EcRow {
+    pub(crate) id: i64,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) active_by_default: bool,
+    pub(crate) required: bool,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) version: i64,
 }
 
-fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> {
+pub(crate) fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> {
     Ok(conn.query_row(
         "SELECT id, name, description, active_by_default, required, display_order, version \
          FROM entity_class WHERE cur_id = ?",
@@ -2212,7 +2212,7 @@ fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> {
     )?)
 }
 
-fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<(), DbError> {
+pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<(), DbError> {
     close_row(conn, c, "entity_class", row.id)?;
     conn.execute(
         "INSERT INTO entity_class \
@@ -2746,7 +2746,7 @@ fn resolve_seed_element(
 }
 
 /// Insert one declared type member through the api's one insert path.
-fn insert_type_member(conn: &Connection, c: i64, pd_id: i64, m: &TypeDecl) -> Result<(), DbError> {
+pub(crate) fn insert_type_member(conn: &Connection, c: i64, pd_id: i64, m: &TypeDecl) -> Result<(), DbError> {
     let dims: Vec<(String, IndexKind)> = m
         .dims
         .as_deref()
@@ -2812,7 +2812,7 @@ pub(crate) fn set_metadata(
     }
 }
 
-fn clear_metadata(conn: &Connection, c: i64, key: &str) -> Result<(), DbError> {
+pub(crate) fn clear_metadata(conn: &Connection, c: i64, key: &str) -> Result<(), DbError> {
     conn.execute(
         "UPDATE metadata SET valid_to_commit = ? WHERE cur_name = lower(?)",
         params![c, key],
@@ -3058,6 +3058,29 @@ fn execute_step(
             } else {
                 None
             };
+            // Absent-source tolerance (finale plan F-C, chain-ladder reality):
+            // a per-version ladder's rename may target a definition that was
+            // introduced by an earlier RECONCILE-ONLY version — which, under
+            // the one-final-reconcile execution model, never materializes
+            // mid-chain (adds are deferred to the end). It may also already
+            // be applied (FlexTool's own chain stamps `model.version` only at
+            // the very end, so partially-applied field DBs exist — the v28
+            // reality). Either way there is nothing to rename HERE and the
+            // final reconcile owns the end state: note + no-op, never an
+            // error. A typo'd CLASS still fails loudly (`hint_class_id`).
+            if src.is_none() {
+                fx.notes.push(format!(
+                    "rename_parameter {class}.{from} -> {to}: source absent — {}; \
+                     nothing to rename (the final reconcile owns the end state)",
+                    if tgt.is_some() {
+                        "target live, already applied"
+                    } else {
+                        "never materialized mid-chain (reconcile-only add) or already \
+                         superseded"
+                    }
+                ));
+                return Ok(());
+            }
             if let Some(_tgt) = tgt {
                 // Target already live — the G2 collision (v28/v66's
                 // partial-prior-migration state).
@@ -3070,28 +3093,23 @@ fn execute_step(
                         )))
                     }
                     OnCollision::DropSource => {
-                        match src {
-                            // The stale source closes WITH its values, through
-                            // the one object-delete cascade (D14).
-                            Some(_) => cascade_close(
-                                conn,
-                                c,
-                                &format!(
-                                    "rename_parameter {class}.{from} (collision: \
-                                     dropping stale source)"
-                                ),
-                                ObjectDeleteKey {
-                                    kind: ObjectKind::Parameter,
-                                    class: Some(class.clone()),
-                                    target: ObjectRef::Name(from.clone()),
-                                },
-                                fx,
-                            )?,
-                            None => fx.notes.push(format!(
-                                "rename_parameter {class}.{from} -> {to}: source absent \
-                                 and target live — already applied"
-                            )),
-                        }
+                        // The stale source (present — the absent case returned
+                        // above) closes WITH its values, through the one
+                        // object-delete cascade (D14).
+                        cascade_close(
+                            conn,
+                            c,
+                            &format!(
+                                "rename_parameter {class}.{from} (collision: \
+                                 dropping stale source)"
+                            ),
+                            ObjectDeleteKey {
+                                kind: ObjectKind::Parameter,
+                                class: Some(class.clone()),
+                                target: ObjectRef::Name(from.clone()),
+                            },
+                            fx,
+                        )?;
                         if map_values.is_some() {
                             fx.notes.push(format!(
                                 "rename_parameter {class}.{from} -> {to}: map_values \
@@ -3103,8 +3121,7 @@ fn execute_step(
                     }
                 }
             }
-            let pd_id = src
-                .ok_or_else(|| DbError::Api(format!("rename_parameter: {from:?} not found")))?;
+            let pd_id = src.expect("absent source returned above");
             let mut row = read_pd_row(conn, pd_id)?;
             let retain = row.retain_content;
             row.name = to.clone();
@@ -3123,8 +3140,22 @@ fn execute_step(
             }
         }
         MigrationStep::RenameValueList { from, to } => {
-            let id = lookup_value_list(conn, from)?
-                .ok_or_else(|| DbError::Api(format!("rename_value_list: {from:?} not found")))?;
+            let src = lookup_value_list(conn, from)?;
+            // Already-applied tolerance (finale plan F-C): source gone AND
+            // target live is the applied state — partially-applied field DBs
+            // (FlexTool stamps its version only at the end of the whole
+            // chain) re-enter here. Source and target BOTH absent stays a
+            // loud error: that is an authoring mistake, not chain reality.
+            let Some(id) = src else {
+                if lookup_value_list(conn, to)?.is_some() {
+                    fx.notes.push(format!(
+                        "rename_value_list {from} -> {to}: source absent and target \
+                         live — already applied"
+                    ));
+                    return Ok(());
+                }
+                return Err(DbError::Api(format!("rename_value_list: {from:?} not found")));
+            };
             if fold(from) != fold(to) && lookup_value_list(conn, to)?.is_some() {
                 return Err(DbError::Api(format!(
                     "rename_value_list: target name {to:?} already exists"
@@ -3135,29 +3166,58 @@ fn execute_step(
             revise_list_row(conn, c, &row)?;
         }
         MigrationStep::RenameListMember { list, from, to, rewrite_values } => {
-            let lid = lookup_value_list(conn, list)?
-                .ok_or_else(|| DbError::Api(format!("rename_list_member: list {list:?} not found")))?;
-            let member_id = list_member_id(conn, lid, from)?.ok_or_else(|| {
-                DbError::Api(format!(
-                    "rename_list_member: {list} has no string member {from:?}"
-                ))
-            })?;
-            if list_member_id(conn, lid, to)?.is_some() {
-                return Err(DbError::Api(format!(
-                    "rename_list_member: {list} already has a member {to:?}"
-                )));
-            }
-            let mut row = read_member_row(conn, member_id)?;
-            row.v_str = Some(to.clone());
-            close_row(conn, c, "list_value", member_id)?;
-            insert_member_row(conn, c, &row)?;
-            if *rewrite_values {
-                // The data-touching hint semantics (§4.2 Layer 2, DEFAULT ON
-                // per D15): rewrite matching CURRENT stored strings of every
-                // definition bound to this list — per definition, through
-                // the history protocol, which honors the definition's
-                // retain_content (VMP Part 5 stub contract; review item 5).
-                rewrite_list_bound_values(conn, c, lid, from, to)?;
+            // Mid-chain tolerance (finale plan F-C): a per-version ladder's
+            // member rename may name a list — or a member — that an earlier
+            // RECONCILE-ONLY version introduced, which never materializes
+            // mid-chain (adds are deferred to the one final reconcile). An
+            // absent list has neither members nor bound definitions: nothing
+            // to do. An absent SOURCE member still gets the value rewrite —
+            // stray stored strings can outlive the member row (the v25/v55
+            // FlexTool reality that motivated D15's rewrite-by-default), and
+            // the rewrite is the hint's data semantics.
+            let Some(lid) = lookup_value_list(conn, list)? else {
+                fx.notes.push(format!(
+                    "rename_list_member {list}: {from:?} -> {to:?}: list absent — \
+                     never materialized mid-chain (reconcile-only add) or already \
+                     superseded; nothing to do"
+                ));
+                return Ok(());
+            };
+            match list_member_id(conn, lid, from)? {
+                None => {
+                    let rewritten = if *rewrite_values {
+                        rewrite_list_bound_values(conn, c, lid, from, to)?
+                    } else {
+                        0
+                    };
+                    fx.notes.push(format!(
+                        "rename_list_member {list}: {from:?} -> {to:?}: source member \
+                         absent (already renamed, or never materialized mid-chain); \
+                         rewrote {rewritten} stray stored value(s)"
+                    ));
+                }
+                Some(member_id) => {
+                    // Source AND target both live is a merge shape, not a
+                    // rename — stays a loud error (merge_list_member exists).
+                    if list_member_id(conn, lid, to)?.is_some() {
+                        return Err(DbError::Api(format!(
+                            "rename_list_member: {list} already has a member {to:?}"
+                        )));
+                    }
+                    let mut row = read_member_row(conn, member_id)?;
+                    row.v_str = Some(to.clone());
+                    close_row(conn, c, "list_value", member_id)?;
+                    insert_member_row(conn, c, &row)?;
+                    if *rewrite_values {
+                        // The data-touching hint semantics (§4.2 Layer 2,
+                        // DEFAULT ON per D15): rewrite matching CURRENT stored
+                        // strings of every definition bound to this list — per
+                        // definition, through the history protocol, which
+                        // honors the definition's retain_content (VMP Part 5
+                        // stub contract; review item 5).
+                        rewrite_list_bound_values(conn, c, lid, from, to)?;
+                    }
+                }
             }
         }
         MigrationStep::MoveParameter { name, from_class, to_class } => {

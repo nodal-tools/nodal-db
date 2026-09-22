@@ -1003,3 +1003,205 @@ fn drop_list_member_clean_case_closes_the_member() {
     assert!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'")
         .is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Mid-chain absent-source tolerance (finale plan F-C — the per-version
+// ladder reality): under the one-final-reconcile execution model a
+// reconcile-only version's ADDS never materialize mid-chain, so a later
+// hint may name a source no given entrant ever had (v56's
+// max_capacity_coefficient for entrants < 35; v62's decomposition lists for
+// entrants < 51; v66's energy_margin for entrants < 65). Also: FlexTool
+// stamps `model.version` only at the very end of its chain, so
+// partially-applied field DBs re-enter with renames already done. Absent
+// sources note + no-op (stray stored values still rewritten for list
+// members); true anomalies stay loud.
+// ---------------------------------------------------------------------------
+
+const TOL_BASE: &str = r#"
+template: {name: tol, version: "1"}
+value_lists:
+  - name: methods
+    members:
+      - {value: "a"}
+      - {value: "b"}
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods}
+seed:
+  entities:
+    - {class: node, name: n1}
+"#;
+
+#[test]
+fn rename_parameter_absent_source_is_a_tolerant_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, TOL_BASE);
+    let v2 = r#"
+template: {name: tol, version: "2"}
+value_lists:
+  - name: methods
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods}
+      - {name: brand_new, types: [{kind: float}]}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      # Source never existed here (a reconcile-only add elsewhere): no-op.
+      - rename_parameter: {class: node, from: never_materialized, to: brand_new}
+      # Same under drop_source (the collision policy changes nothing when
+      # the source is absent and the target is not yet live).
+      - rename_parameter: {class: node, from: also_absent, to: gone_too,
+                           on_collision: drop_source}
+      # map_values on an absent source: nothing to translate, still a no-op.
+      - rename_parameter: {class: node, from: absent_flag, to: absent_enum,
+                           map_values: {"yes": manual}, unmapped_values: drop}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert!(
+        out.notes.iter().filter(|n| n.contains("source absent")).count() >= 3,
+        "each tolerated rename is NOTED, never silent: {:?}",
+        out.notes
+    );
+    // A typo'd CLASS still fails loudly (hint_class_id).
+    let bad = parse_str(
+        r#"
+template: {name: tol, version: "3"}
+classes: [{name: node}]
+migrations:
+  - from: "2"
+    to: "3"
+    steps:
+      - rename_parameter: {class: no_such_class, from: x, to: y}
+"#,
+    )
+    .unwrap();
+    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default());
+    assert!(format!("{}", err.unwrap_err()).contains("no_such_class"));
+}
+
+#[test]
+fn rename_value_list_absent_source_with_live_target_is_already_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, TOL_BASE);
+    let v2 = r#"
+template: {name: tol, version: "2"}
+value_lists:
+  - name: methods2
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods2}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_value_list: {from: methods, to: methods2}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged);
+    assert_eq!(live(&db, "parameter_value_list", "name = 'methods2'"), 1);
+    // Re-entry shape: a DB where the rename ALREADY happened (its vocabulary
+    // carries methods2, no methods) walking the same span — the absent
+    // source with a live target is the applied state, noted and tolerated.
+    let dir2 = tempfile::tempdir().unwrap();
+    let db2 = fresh_db_with(
+        &dir2,
+        r#"
+template: {name: tol, version: "1"}
+value_lists:
+  - name: methods2
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods2}
+"#,
+    );
+    let outb = apply_v2(&db2, v2);
+    assert!(outb.converged);
+    assert!(
+        outb.notes.iter().any(|n| n.contains("already applied")),
+        "tolerated re-entry is NOTED: {:?}",
+        outb.notes
+    );
+    // Both-absent stays loud.
+    let bad = parse_str(
+        r#"
+template: {name: tol, version: "3"}
+classes: [{name: node}]
+migrations:
+  - from: "2"
+    to: "3"
+    steps:
+      - rename_value_list: {from: nowhere, to: also_nowhere}
+"#,
+    )
+    .unwrap();
+    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default());
+    assert!(format!("{}", err.unwrap_err()).contains("not found"));
+}
+
+#[test]
+fn rename_list_member_tolerates_absent_list_and_rewrites_strays_without_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, TOL_BASE);
+    // A STRAY string: written value outside the list's membership (off-list
+    // strings are audited, never write-refused) — the v25/v55 mop-up case.
+    write_str(&db, "node", "method", "n1", "stray_old");
+    let v2 = r#"
+template: {name: tol, version: "2"}
+value_lists:
+  - name: methods
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      # List never materialized here: tolerant no-op with a note.
+      - rename_list_member: {list: ghost_list, from: x, to: y}
+      # Member row absent but STRAY stored values exist: the D15 rewrite
+      # still runs (member-row vocabulary and stored data are independently
+      # present mid-chain).
+      - rename_list_member: {list: methods, from: stray_old, to: b}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert_eq!(cur_str(&db, "method", "n1").as_deref(), Some("b"),
+        "stray value rewritten despite the absent member row");
+    assert!(out.notes.iter().any(|n| n.contains("ghost_list") && n.contains("list absent")));
+    assert!(out.notes.iter().any(|n| n.contains("rewrote 1 stray")));
+    // Source AND target both live stays the loud merge-shape error.
+    let bad = parse_str(
+        r#"
+template: {name: tol, version: "3"}
+classes: [{name: node}]
+migrations:
+  - from: "2"
+    to: "3"
+    steps:
+      - rename_list_member: {list: methods, from: a, to: b}
+"#,
+    )
+    .unwrap();
+    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default());
+    assert!(format!("{}", err.unwrap_err()).contains("already has a member"));
+}

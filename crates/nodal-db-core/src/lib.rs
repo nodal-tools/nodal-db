@@ -73,6 +73,11 @@ pub mod compaction;
 /// append-only history (`specs/erasure_compaction_plan.md`).
 pub mod erasure;
 
+/// The G8 migration verbs: the core write surface `run:` migration programs
+/// and the Spine importer use for vocabulary, scenario-rank, activation, and
+/// template-identity writes (`specs/flextool_port_finale_plan.md` §1, D-F4).
+pub mod verbs;
+
 /// The template IR loader: parse/validate the YAML-1.2/JSON vocabulary IR,
 /// load into a fresh DB, reconcile against a populated one (three-layer
 /// migration model, v1 mechanics), export back out

@@ -390,3 +390,173 @@ def test_erase_expect_present_belt(db):
     db.write_parameter("unit", "capacity", "old_run", scalar_batch(["u1"], [1.0]), user="t")
     with pytest.raises(nodal_db.ApiError):
         db.erase_alternative("old_run", user="t", expect_present=["replacement_run"])
+
+
+# ---------------------------------------------------------------------------
+# G8 migration verbs (flextool_port_finale_plan.md section 1, D-F4): thin 1:1
+# exposure — every rule asserted here is core behavior observed through
+# Python. Idempotent no-ops burn no commit (asserted via the commit count).
+# ---------------------------------------------------------------------------
+
+
+def commit_count(db):
+    return db.query("SELECT count(*) AS n FROM commit").read_all()["n"][0].as_py()
+
+
+def one_value(db, sql):
+    t = db.query(sql).read_all()
+    return t.column(0)[0].as_py() if t.num_rows else None
+
+
+def test_verb_ensure_alternative(db):
+    alt = db.ensure_alternative("floor", description="the v38 floor", user="t")
+    assert alt > 0
+    n = commit_count(db)
+    assert db.ensure_alternative("Floor", user="t") == alt  # case-insensitive
+    assert commit_count(db) == n  # no-op burns no commit
+    with pytest.raises(nodal_db.ApiError):
+        db.ensure_alternative("  ", user="t")
+
+
+def test_verb_set_scenario_alternatives(db):
+    for a in ("floor", "high"):
+        db.ensure_alternative(a, user="t")
+    sid = db.set_scenario_alternatives("s1", ["Base", "high"], user="t")
+    assert sid > 0
+
+    def order():
+        t = db.query(
+            "SELECT a.name FROM scenario_alternative sa "
+            "JOIN alternative a ON a.cur_id = sa.alternative_id "
+            "WHERE sa.valid_to_commit IS NULL ORDER BY sa.rank"
+        ).read_all()
+        return t["name"].to_pylist()
+
+    assert order() == ["Base", "high"]
+    n = commit_count(db)
+    db.set_scenario_alternatives("s1", ["Base", "high"], user="t")
+    assert commit_count(db) == n  # order-equal: no commit
+    # The v38 shape: prepend the floor, whole-list replace, ranks renumber.
+    db.set_scenario_alternatives("s1", ["floor", "Base", "high"], user="t")
+    assert order() == ["floor", "Base", "high"]
+    with pytest.raises(nodal_db.ApiError, match="ghost"):
+        db.set_scenario_alternatives("s1", ["ghost"], user="t")
+
+
+def test_verb_activation_and_active_by_default(db):
+    db.ensure_entity_class("constraint", user="t")
+    db.ensure_entity("constraint", "c1", user="t")
+    db.set_entity_activation("constraint", "c1", "Base", True, user="t")
+    assert (
+        one_value(
+            db,
+            "SELECT count(*) AS n FROM entity_alternative "
+            "WHERE valid_to_commit IS NULL AND active",
+        )
+        == 1
+    )
+    n = commit_count(db)
+    db.set_entity_activation("constraint", "c1", "Base", True, user="t")
+    assert commit_count(db) == n  # equal state: no commit
+    db.set_entity_activation("constraint", "c1", "Base", None, user="t")  # close
+    assert (
+        one_value(
+            db,
+            "SELECT count(*) AS n FROM entity_alternative WHERE valid_to_commit IS NULL",
+        )
+        == 0
+    )
+    with pytest.raises(nodal_db.ApiError, match="ghost"):
+        db.set_entity_activation("constraint", "ghost", "Base", True, user="t")
+
+    db.set_class_active_by_default("constraint", False, user="t")
+    assert (
+        one_value(
+            db,
+            "SELECT CAST(active_by_default AS BIGINT) AS n FROM entity_class "
+            "WHERE cur_name = 'constraint'",
+        )
+        == 0
+    )
+    n = commit_count(db)
+    db.set_class_active_by_default("constraint", False, user="t")
+    assert commit_count(db) == n
+
+
+def test_verb_vocabulary_creation(db):
+    fg = db.ensure_entity_class("flowGroup", user="t")
+    db.ensure_entity_class("nodeX", user="t")
+    nd = db.ensure_entity_class("flowGroup__nodeX", ["flowGroup", "nodeX"], user="t")
+    assert fg > 0 and nd > 0
+    # Idempotent with matching dims; mismatch is loud (no reshape door).
+    assert db.ensure_entity_class("flowGroup__nodeX", ["flowGroup", "nodeX"], user="t") == nd
+    with pytest.raises(nodal_db.ApiError, match="reshape"):
+        db.ensure_entity_class("flowGroup__nodeX", ["nodeX"], user="t")
+
+    # Properly typed definition: IR member declarations in.
+    pd = db.ensure_parameter_definition(
+        "flowGroup",
+        "limit",
+        types=[
+            {"kind": "float"},
+            {"kind": "indexed", "dims": [{"name": "period", "kind": "label"}]},
+        ],
+        description="a limit",
+        user="t",
+    )
+    assert (
+        one_value(
+            db,
+            f"SELECT count(*) AS n FROM parameter_type "
+            f"WHERE parameter_definition_id = {pd} AND valid_to_commit IS NULL",
+        )
+        == 2
+    )
+    # Existing: as-is, never widened (D-F4).
+    n = commit_count(db)
+    assert db.ensure_parameter_definition(
+        "flowGroup", "limit", types=[{"kind": "string"}], user="t"
+    ) == pd
+    assert commit_count(db) == n
+
+    # Entities: 0-D and N-D with the derived __-joined name.
+    db.ensure_entity("flowGroup", "g1", user="t")
+    db.ensure_entity("nodeX", "n1", user="t")
+    e = db.ensure_entity("flowGroup__nodeX", elements=["g1", "n1"], user="t")
+    assert (
+        one_value(db, f"SELECT name FROM entity WHERE cur_id = {e}") == "g1__n1"
+    )
+    with pytest.raises(nodal_db.ApiError):
+        db.ensure_entity("flowGroup__nodeX", elements=["g1", "ghost"], user="t")
+
+
+def test_verb_stamp_template_identity(db):
+    db.stamp_template_identity("flextool", "40", user="t")
+    assert (
+        one_value(db, "SELECT value FROM metadata WHERE cur_name = 'template_name'")
+        == "flextool"
+    )
+    n = commit_count(db)
+    db.stamp_template_identity("FlexTool", "40", user="t")  # identical: no-op
+    assert commit_count(db) == n
+    with pytest.raises(nodal_db.ApiError, match="overwrite"):
+        db.stamp_template_identity("flextool", "41", user="t")
+    db.stamp_template_identity("flextool", "41", overwrite=True, user="t")
+    assert (
+        one_value(db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
+        == "41"
+    )
+
+
+def test_stamped_db_refuses_unregistered_ladder_program(db, tmp_path):
+    """The Track-A expected state: a mid-version stamp arms the real FlexTool
+    ladder, and template_apply refuses loudly while the nine programs are
+    unregistered (they are Track B)."""
+    import pathlib
+
+    ladder = (
+        pathlib.Path(__file__).resolve().parents[3] / "templates" / "flextool" / "input.yaml"
+    )
+    db.stamp_template_identity("flextool", "55", user="t")
+    with pytest.raises(nodal_db.ApiError, match="flextool_v56_batch"):
+        db.template_apply(str(ladder), user="t")

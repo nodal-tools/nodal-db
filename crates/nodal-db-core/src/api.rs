@@ -864,6 +864,23 @@ fn resolve_entity_class(
     Ok(id)
 }
 
+/// The one `alternative` create site (the write path's decision-B
+/// auto-create and the G8 `ensure_alternative` verb share it; the verb is
+/// the only caller that carries a description).
+pub(crate) fn insert_alternative_row(
+    conn: &Connection,
+    commit_id: i64,
+    name: &str,
+    description: Option<&str>,
+) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "INSERT INTO alternative (name, description, valid_from_commit) \
+         VALUES (?, ?, ?) RETURNING id",
+        params![name, description, commit_id],
+        |r| r.get(0),
+    )?)
+}
+
 fn resolve_alternative(
     conn: &Connection,
     commit_id: i64,
@@ -873,11 +890,7 @@ fn resolve_alternative(
     if let Some(id) = opt_id(conn, "SELECT id FROM alternative WHERE cur_name = lower(?)", -1, name)? {
         return Ok(id);
     }
-    let id: i64 = conn.query_row(
-        "INSERT INTO alternative (name, valid_from_commit) VALUES (?, ?) RETURNING id",
-        params![name, commit_id],
-        |r| r.get(0),
-    )?;
+    let id = insert_alternative_row(conn, commit_id, name, None)?;
     warnings.push(Warning {
         kind: WarningKind::AutoCreated,
         object_type: "alternative".into(),

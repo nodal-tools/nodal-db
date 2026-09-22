@@ -34,14 +34,17 @@ use std::path::Path;
 use duckdb::{params, Connection};
 
 use crate::api::{
-    lookup_alternative, lookup_entity, lookup_entity_class, lookup_parameter, lookup_value_list,
+    insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class,
+    lookup_parameter, lookup_value_list,
 };
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::object_delete::resolve_element as resolve_element_in_dim;
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    clear_metadata, insert_type_member, read_ec_row, revise_ec_row, set_metadata,
+    clear_metadata, insert_class_dim_row, insert_class_row, insert_definition_row,
+    insert_entity_element_row, insert_entity_row, insert_type_member, read_ec_row,
+    revise_ec_row, set_metadata,
 };
 use crate::types::fold;
 
@@ -86,9 +89,9 @@ fn lookup_scenario(conn: &Connection, name: &str) -> Result<Option<i64>, DbError
 /// absent (with `description` — v38 sets a long description on its floor
 /// alternative, critique MINOR 3), return the existing row's id otherwise.
 ///
-/// Wraps the same insert the write path's `api::resolve_alternative`
-/// auto-create performs (`INSERT INTO alternative (name, ...)`), plus the
-/// description column. An EXISTING alternative is returned as-is — the
+/// Wraps the write path's one alternative create site
+/// (`api::insert_alternative_row`, shared with decision-B auto-create),
+/// carrying the description. An EXISTING alternative is returned as-is — the
 /// description parameter applies on creation only (alternative descriptions
 /// are fingerprint-excluded, MINOR 3; this verb never revises rows).
 pub fn ensure_alternative(
@@ -107,12 +110,7 @@ pub fn ensure_alternative(
         if let Some(id) = lookup_alternative(conn, name)? {
             return Ok(id); // raced: created since the pre-check
         }
-        Ok(conn.query_row(
-            "INSERT INTO alternative (name, description, valid_from_commit) \
-             VALUES (?, ?, ?) RETURNING id",
-            params![name, description, c],
-            |r| r.get(0),
-        )?)
+        insert_alternative_row(conn, c, name, description)
     })
 }
 
@@ -473,22 +471,9 @@ pub fn ensure_entity_class(
             })?;
             dim_ids.push(id);
         }
-        let cid: i64 = conn.query_row(
-            "INSERT INTO entity_class \
-               (name, description, active_by_default, required, display_order, \
-                valid_from_commit) \
-             VALUES (?, NULL, TRUE, FALSE, NULL, ?) RETURNING id",
-            params![name, c],
-            |r| r.get(0),
-        )?;
+        let cid = insert_class_row(conn, c, name, None, true, false, None)?;
         for (i, did) in dim_ids.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO entity_class_dimension \
-                   (entity_class_id, position, dimension_class_id, \
-                    dimension_class_set_id, valid_from_commit) \
-                 VALUES (?, ?, ?, NULL, ?)",
-                params![cid, (i + 1) as i64, did, c],
-            )?;
+            insert_class_dim_row(conn, c, cid, (i + 1) as i64, Some(*did), None)?;
         }
         Ok(cid)
     })
@@ -646,13 +631,16 @@ pub fn ensure_parameter_definition(
                 }
             }
         }
-        let pd_id: i64 = conn.query_row(
-            "INSERT INTO parameter_definition \
-               (entity_class_id, name, description, parameter_value_list_id, \
-                valid_from_commit) \
-             VALUES (?, ?, ?, ?, ?) RETURNING id",
-            params![cid, name, description, lid, c],
-            |r| r.get(0),
+        let pd_id = insert_definition_row(
+            conn,
+            c,
+            cid,
+            name,
+            description.as_deref(),
+            lid,
+            None,
+            false,
+            None,
         )?;
         for m in &effective {
             insert_type_member(conn, c, pd_id, m)?;
@@ -793,19 +781,9 @@ pub fn ensure_entity(
             })?;
             el_ids.push((*pos, id));
         }
-        let eid: i64 = conn.query_row(
-            "INSERT INTO entity (entity_class_id, name, valid_from_commit) \
-             VALUES (?, ?, ?) RETURNING id",
-            params![s.cid, effective_name, c],
-            |r| r.get(0),
-        )?;
+        let eid = insert_entity_row(conn, c, s.cid, &effective_name, None)?;
         for (pos, el_id) in &el_ids {
-            conn.execute(
-                "INSERT INTO entity_element \
-                   (entity_id, position, element_entity_id, valid_from_commit) \
-                 VALUES (?, ?, ?, ?)",
-                params![eid, pos, el_id, c],
-            )?;
+            insert_entity_element_row(conn, c, eid, *pos, *el_id)?;
         }
         Ok(eid)
     })

@@ -607,6 +607,43 @@ pub enum UnmappedValues {
     Error,
 }
 
+/// Absent-SOURCE policy for the rename/merge step family (2026-09-22,
+/// port-finale Track A review; the global default is recorded in
+/// `template_ir_plan.md` §4.2 as a dated note). Under the one-final-reconcile
+/// execution model, a reconcile-only version's adds never materialize
+/// mid-chain, and an end-stamped upstream chain (FlexTool stamps
+/// `model.version` once, at the very end) leaves partially-applied field
+/// databases — so a per-version ladder's step may name a source a given
+/// entrant never had, or already migrated. The default TOLERATES that
+/// (note + no-op, never silent; `rename_list_member` still rewrites stray
+/// stored values); `missing_source: error` is the step-level opt-out back
+/// into strictness for authors who know the source must exist.
+///
+/// Scope: the policy governs exactly the tolerance paths — an absent rename
+/// source, an absent list/member on `rename_list_member`, an absent source
+/// list with a live target on `rename_value_list`, and the neither-exists
+/// case of the merges. The merges' source-absent-AND-target-live case
+/// ("already merged") predates the policy and stays a note under either
+/// setting; a `rename_value_list` with BOTH sides absent stays a hard error
+/// under either setting (that is an authoring mistake, not chain reality).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingSource {
+    /// Note + no-op (the default): the construct never materialized
+    /// mid-chain or the step is already applied; the final reconcile owns
+    /// the end state.
+    #[default]
+    Tolerate,
+    /// Refuse the step while the source is absent.
+    Error,
+}
+
+impl MissingSource {
+    fn is_default(&self) -> bool {
+        *self == MissingSource::Tolerate
+    }
+}
+
 impl OnCollision {
     fn is_default(&self) -> bool {
         *self == OnCollision::Error
@@ -649,10 +686,12 @@ pub enum MigrationStep {
         on_collision: OnCollision,
         map_values: Option<UniqueMap<String>>,
         unmapped_values: UnmappedValues,
+        missing_source: MissingSource,
     },
     RenameValueList {
         from: String,
         to: String,
+        missing_source: MissingSource,
     },
     /// Renames a (string) list member and, with `rewrite_values` (DEFAULT ON
     /// per D15/G7 — the rewrite IS the hint's semantics; v25's un-rewritten
@@ -664,6 +703,7 @@ pub enum MigrationStep {
         from: String,
         to: String,
         rewrite_values: bool,
+        missing_source: MissingSource,
     },
     /// Re-home a definition between classes. v1 guard: legal only while the
     /// definition holds no current values (the "carry 1:1" case is deferred
@@ -682,6 +722,7 @@ pub enum MigrationStep {
         class: String,
         from: String,
         to: String,
+        missing_source: MissingSource,
     },
     /// G4 (v52 glpsol→highs, v56 D.4): make string member `from` become
     /// `to`. Target member present ⇒ rewrite stored values/defaults and
@@ -691,6 +732,7 @@ pub enum MigrationStep {
         list: String,
         from: String,
         to: String,
+        missing_source: MissingSource,
     },
     /// D14/G1: explicit versioned close-out of a definition + its values
     /// (object-delete Parameter cascade). Target absent ⇒ no-op with a note
@@ -749,10 +791,14 @@ enum StepDef {
         map_values: Option<UniqueMap<String>>,
         #[serde(default, skip_serializing_if = "UnmappedValues::is_default")]
         unmapped_values: UnmappedValues,
+        #[serde(default, skip_serializing_if = "MissingSource::is_default")]
+        missing_source: MissingSource,
     },
     RenameValueList {
         from: String,
         to: String,
+        #[serde(default, skip_serializing_if = "MissingSource::is_default")]
+        missing_source: MissingSource,
     },
     RenameListMember {
         list: String,
@@ -762,6 +808,8 @@ enum StepDef {
         // false` is the explicit opt-out.
         #[serde(default = "default_true")]
         rewrite_values: bool,
+        #[serde(default, skip_serializing_if = "MissingSource::is_default")]
+        missing_source: MissingSource,
     },
     MoveParameter {
         name: String,
@@ -772,11 +820,15 @@ enum StepDef {
         class: String,
         from: String,
         to: String,
+        #[serde(default, skip_serializing_if = "MissingSource::is_default")]
+        missing_source: MissingSource,
     },
     MergeListMember {
         list: String,
         from: String,
         to: String,
+        #[serde(default, skip_serializing_if = "MissingSource::is_default")]
+        missing_source: MissingSource,
     },
     DropParameter {
         class: String,
@@ -908,8 +960,12 @@ impl MigrationStep {
                 on_collision,
                 map_values,
                 unmapped_values,
+                missing_source,
             } => {
                 let mut s = format!("rename_parameter {class}.{from} -> {to}");
+                if *missing_source == MissingSource::Error {
+                    s.push_str(" (missing_source: error)");
+                }
                 if *on_collision == OnCollision::DropSource {
                     s.push_str(" (on collision: drop stale source, cascade)");
                 }
@@ -925,26 +981,30 @@ impl MigrationStep {
                 }
                 s
             }
-            MigrationStep::RenameValueList { from, to } => {
-                format!("rename_value_list {from} -> {to}")
-            }
-            MigrationStep::RenameListMember { list, from, to, rewrite_values } => format!(
-                "rename_list_member {list}: {from:?} -> {to:?}{}",
+            MigrationStep::RenameValueList { from, to, missing_source } => format!(
+                "rename_value_list {from} -> {to}{}",
+                if *missing_source == MissingSource::Error { " (missing_source: error)" } else { "" }
+            ),
+            MigrationStep::RenameListMember { list, from, to, rewrite_values, missing_source } => format!(
+                "rename_list_member {list}: {from:?} -> {to:?}{}{}",
                 if *rewrite_values {
                     " (rewriting stored values)"
                 } else {
                     " (NOT rewriting stored values — explicit opt-out)"
-                }
+                },
+                if *missing_source == MissingSource::Error { " (missing_source: error)" } else { "" }
             ),
             MigrationStep::MoveParameter { name, from_class, to_class } => {
                 format!("move_parameter {from_class}.{name} -> {to_class}.{name}")
             }
-            MigrationStep::MergeParameter { class, from, to } => {
-                format!("merge_parameter {class}.{from} -> {class}.{to} (fill-if-absent, then close source)")
-            }
-            MigrationStep::MergeListMember { list, from, to } => {
-                format!("merge_list_member {list}: {from:?} -> {to:?} (rewriting stored values)")
-            }
+            MigrationStep::MergeParameter { class, from, to, missing_source } => format!(
+                "merge_parameter {class}.{from} -> {class}.{to} (fill-if-absent, then close source){}",
+                if *missing_source == MissingSource::Error { " (missing_source: error)" } else { "" }
+            ),
+            MigrationStep::MergeListMember { list, from, to, missing_source } => format!(
+                "merge_list_member {list}: {from:?} -> {to:?} (rewriting stored values){}",
+                if *missing_source == MissingSource::Error { " (missing_source: error)" } else { "" }
+            ),
             MigrationStep::DropParameter { class, parameter } => {
                 format!("drop_parameter {class}.{parameter} (versioned close-out, cascade)")
             }
@@ -1619,7 +1679,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                         }
                     }
                 }
-                MigrationStep::MergeParameter { class, from, to } => {
+                MigrationStep::MergeParameter { class, from, to, .. } => {
                     nonempty(&mut errs, "class", class);
                     nonempty(&mut errs, "from", from);
                     nonempty(&mut errs, "to", to);
@@ -1627,7 +1687,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                         errs.push(format!("{loc}: merge_parameter from == to ({from:?})"));
                     }
                 }
-                MigrationStep::MergeListMember { list, from, to } => {
+                MigrationStep::MergeListMember { list, from, to, .. } => {
                     nonempty(&mut errs, "list", list);
                     nonempty(&mut errs, "from", from);
                     nonempty(&mut errs, "to", to);

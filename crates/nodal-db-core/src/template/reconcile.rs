@@ -104,7 +104,7 @@ use crate::types::{
 use super::dbvocab::{read_metadata_key, read_vocab, DbParam, DbVocab};
 use super::ir::{
     self, effective_member_kind, Checked, Class, ListMember, Migration, MigrationStep,
-    OnCollision, Parameter, Template, TypeDecl, UnmappedValues,
+    MissingSource, OnCollision, Parameter, Template, TypeDecl, UnmappedValues,
 };
 
 // ---------------------------------------------------------------------------
@@ -636,7 +636,7 @@ fn blast_radius_note(
             on_collision: OnCollision::DropSource,
             ..
         }
-        | MigrationStep::MergeParameter { class, from, to } => {
+        | MigrationStep::MergeParameter { class, from, to, .. } => {
             let both_live = match lookup_entity_class(conn, class)? {
                 Some(cid) => {
                     lookup_parameter(conn, cid, to)?.is_some()
@@ -1241,7 +1241,7 @@ fn simulate_span(
                     }
                 }
             }
-            MigrationStep::MergeParameter { class, from, to } => {
+            MigrationStep::MergeParameter { class, from, to, .. } => {
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
                     if c.params.contains_key(&fold(to)) {
                         c.params.remove(&fold(from)); // merge: source closes
@@ -1251,7 +1251,7 @@ fn simulate_span(
                     }
                 }
             }
-            MigrationStep::RenameValueList { from, to } => {
+            MigrationStep::RenameValueList { from, to, .. } => {
                 if let Some(mut l) = vocab.value_lists.remove(&fold(from)) {
                     l.name = to.clone();
                     let new_name = l.name.clone();
@@ -1287,7 +1287,7 @@ fn simulate_span(
                     tc.params.insert(fold(name), p);
                 }
             }
-            MigrationStep::MergeListMember { list, from, to } => {
+            MigrationStep::MergeListMember { list, from, to, .. } => {
                 if let Some(l) = vocab.value_lists.get_mut(&fold(list)) {
                     let has_to = l.members.iter().any(|mem| {
                         matches!(&mem.value, ScalarValue::Str(s) if s == to)
@@ -2363,6 +2363,112 @@ fn rank0_member_id(conn: &Connection, pd_id: i64, kind: &str) -> Result<Option<i
     }
 }
 
+
+// --- the per-table CREATE sites, shared by the reconcile executor and the
+//     G8 verbs (`verbs.rs`) so "wraps the loader's create path" is literal:
+//     one INSERT per table, two callers, zero drift ---
+
+/// The one `entity_class` create site (loader `CreateClass` + G8
+/// `ensure_entity_class`).
+pub(crate) fn insert_class_row(
+    conn: &Connection,
+    c: i64,
+    name: &str,
+    description: Option<&str>,
+    active_by_default: bool,
+    required: bool,
+    display_order: Option<i64>,
+) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "INSERT INTO entity_class \
+           (name, description, active_by_default, required, display_order, \
+            valid_from_commit) \
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+        params![name, description, active_by_default, required, display_order, c],
+        |r| r.get(0),
+    )?)
+}
+
+/// The one `entity_class_dimension` create site (loader `CreateClassDims` +
+/// G8 `ensure_entity_class`).
+pub(crate) fn insert_class_dim_row(
+    conn: &Connection,
+    c: i64,
+    class_id: i64,
+    position: i64,
+    dim_class: Option<i64>,
+    dim_set: Option<i64>,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO entity_class_dimension \
+           (entity_class_id, position, dimension_class_id, \
+            dimension_class_set_id, valid_from_commit) \
+         VALUES (?, ?, ?, ?, ?)",
+        params![class_id, position, dim_class, dim_set, c],
+    )?;
+    Ok(())
+}
+
+/// The one `parameter_definition` CREATE site (loader `CreateParameter` +
+/// G8 `ensure_parameter_definition`; revisions go through `revise_pd_row`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_definition_row(
+    conn: &Connection,
+    c: i64,
+    class_id: i64,
+    name: &str,
+    description: Option<&str>,
+    list_id: Option<i64>,
+    unit_id: Option<i64>,
+    required: bool,
+    display_order: Option<i64>,
+) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "INSERT INTO parameter_definition \
+           (entity_class_id, name, description, parameter_value_list_id, unit_id, \
+            required, display_order, valid_from_commit) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        params![class_id, name, description, list_id, unit_id, required, display_order, c],
+        |r| r.get(0),
+    )?)
+}
+
+/// The one explicit `entity` create site (loader `CreateSeedEntity` + G8
+/// `ensure_entity`; the write path's 0-D auto-create in `api.rs` stays its
+/// own decision-B door).
+pub(crate) fn insert_entity_row(
+    conn: &Connection,
+    c: i64,
+    class_id: i64,
+    name: &str,
+    description: Option<&str>,
+) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "INSERT INTO entity (entity_class_id, name, description, valid_from_commit) \
+         VALUES (?, ?, ?, ?) RETURNING id",
+        params![class_id, name, description, c],
+        |r| r.get(0),
+    )?)
+}
+
+/// The one `entity_element` create site (loader `CreateSeedEntity` + G8
+/// `ensure_entity`).
+pub(crate) fn insert_entity_element_row(
+    conn: &Connection,
+    c: i64,
+    entity_id: i64,
+    position: i64,
+    element_id: i64,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO entity_element \
+           (entity_id, position, element_entity_id, valid_from_commit) \
+         VALUES (?, ?, ?, ?)",
+        params![entity_id, position, element_id, c],
+    )?;
+    Ok(())
+}
+
 fn execute_action(
     conn: &Connection,
     c: i64,
@@ -2434,13 +2540,14 @@ fn execute_action(
             }
         }
         Action::CreateClass { name, description, active_by_default, required, display_order } => {
-            let id: i64 = conn.query_row(
-                "INSERT INTO entity_class \
-                   (name, description, active_by_default, required, display_order, \
-                    valid_from_commit) \
-                 VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-                params![name, description, active_by_default, required, display_order, c],
-                |r| r.get(0),
+            let id = insert_class_row(
+                conn,
+                c,
+                name,
+                description.as_deref(),
+                *active_by_default,
+                *required,
+                *display_order,
             )?;
             ctx.ids.class.insert(fold(name), id);
         }
@@ -2461,13 +2568,7 @@ fn execute_action(
                 } else {
                     (Some(ctx.ids.class(conn, &d.referent)?), None)
                 };
-                conn.execute(
-                    "INSERT INTO entity_class_dimension \
-                       (entity_class_id, position, dimension_class_id, \
-                        dimension_class_set_id, valid_from_commit) \
-                     VALUES (?, ?, ?, ?, ?)",
-                    params![cid, d.position, dc, ds, c],
-                )?;
+                insert_class_dim_row(conn, c, cid, d.position, dc, ds)?;
             }
         }
         Action::CreateClassSet { name, description } => {
@@ -2521,13 +2622,16 @@ fn execute_action(
                 Some(u) => Some(ctx.ids.unit(conn, u)?),
                 None => None,
             };
-            let pd_id: i64 = conn.query_row(
-                "INSERT INTO parameter_definition \
-                   (entity_class_id, name, description, parameter_value_list_id, unit_id, \
-                    required, display_order, valid_from_commit) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-                params![cid, name, description, lid, uid, required, display_order, c],
-                |r| r.get(0),
+            let pd_id = insert_definition_row(
+                conn,
+                c,
+                cid,
+                name,
+                description.as_deref(),
+                lid,
+                uid,
+                *required,
+                *display_order,
             )?;
             ctx.ids.param.insert((fold(class), fold(name)), pd_id);
             for m in types {
@@ -2633,21 +2737,11 @@ fn execute_action(
         }
         Action::CreateSeedEntity { class, name, description, elements } => {
             let cid = ctx.ids.class(conn, class)?;
-            let eid: i64 = conn.query_row(
-                "INSERT INTO entity (entity_class_id, name, description, valid_from_commit) \
-                 VALUES (?, ?, ?, ?) RETURNING id",
-                params![cid, name, description, c],
-                |r| r.get(0),
-            )?;
+            let eid = insert_entity_row(conn, c, cid, name, description.as_deref())?;
             for (i, el) in elements.iter().enumerate() {
                 let pos = i as i64 + 1;
                 let el_id = resolve_seed_element(conn, cid, pos, el)?;
-                conn.execute(
-                    "INSERT INTO entity_element \
-                       (entity_id, position, element_entity_id, valid_from_commit) \
-                     VALUES (?, ?, ?, ?)",
-                    params![eid, pos, el_id, c],
-                )?;
+                insert_entity_element_row(conn, c, eid, pos, el_id)?;
             }
         }
         Action::CreateSeedMembership { group_class, group, member_class, member } => {
@@ -3045,6 +3139,7 @@ fn execute_step(
             on_collision,
             map_values,
             unmapped_values,
+            missing_source,
         } => {
             if !charset_ok(to) {
                 return Err(DbError::Api(format!(
@@ -3067,8 +3162,15 @@ fn execute_step(
             // the very end, so partially-applied field DBs exist — the v28
             // reality). Either way there is nothing to rename HERE and the
             // final reconcile owns the end state: note + no-op, never an
-            // error. A typo'd CLASS still fails loudly (`hint_class_id`).
+            // error. A typo'd CLASS still fails loudly (`hint_class_id`),
+            // and `missing_source: error` is the step-level opt-out back
+            // into strictness.
             if src.is_none() {
+                if *missing_source == MissingSource::Error {
+                    return Err(DbError::Api(format!(
+                        "rename_parameter: {class}.{from} not found (missing_source: error)"
+                    )));
+                }
                 fx.notes.push(format!(
                     "rename_parameter {class}.{from} -> {to}: source absent — {}; \
                      nothing to rename (the final reconcile owns the end state)",
@@ -3139,15 +3241,18 @@ fn execute_step(
                 )?;
             }
         }
-        MigrationStep::RenameValueList { from, to } => {
+        MigrationStep::RenameValueList { from, to, missing_source } => {
             let src = lookup_value_list(conn, from)?;
             // Already-applied tolerance (finale plan F-C): source gone AND
             // target live is the applied state — partially-applied field DBs
             // (FlexTool stamps its version only at the end of the whole
-            // chain) re-enter here. Source and target BOTH absent stays a
-            // loud error: that is an authoring mistake, not chain reality.
+            // chain) re-enter here; `missing_source: error` opts out. Source
+            // and target BOTH absent stays a loud error under either
+            // setting: that is an authoring mistake, not chain reality.
             let Some(id) = src else {
-                if lookup_value_list(conn, to)?.is_some() {
+                if lookup_value_list(conn, to)?.is_some()
+                    && *missing_source == MissingSource::Tolerate
+                {
                     fx.notes.push(format!(
                         "rename_value_list {from} -> {to}: source absent and target \
                          live — already applied"
@@ -3165,7 +3270,7 @@ fn execute_step(
             row.name = to.clone();
             revise_list_row(conn, c, &row)?;
         }
-        MigrationStep::RenameListMember { list, from, to, rewrite_values } => {
+        MigrationStep::RenameListMember { list, from, to, rewrite_values, missing_source } => {
             // Mid-chain tolerance (finale plan F-C): a per-version ladder's
             // member rename may name a list — or a member — that an earlier
             // RECONCILE-ONLY version introduced, which never materializes
@@ -3176,6 +3281,11 @@ fn execute_step(
             // FlexTool reality that motivated D15's rewrite-by-default), and
             // the rewrite is the hint's data semantics.
             let Some(lid) = lookup_value_list(conn, list)? else {
+                if *missing_source == MissingSource::Error {
+                    return Err(DbError::Api(format!(
+                        "rename_list_member: list {list:?} not found (missing_source: error)"
+                    )));
+                }
                 fx.notes.push(format!(
                     "rename_list_member {list}: {from:?} -> {to:?}: list absent — \
                      never materialized mid-chain (reconcile-only add) or already \
@@ -3185,6 +3295,12 @@ fn execute_step(
             };
             match list_member_id(conn, lid, from)? {
                 None => {
+                    if *missing_source == MissingSource::Error {
+                        return Err(DbError::Api(format!(
+                            "rename_list_member: {list} has no string member {from:?} \
+                             (missing_source: error)"
+                        )));
+                    }
                     let rewritten = if *rewrite_values {
                         rewrite_list_bound_values(conn, c, lid, from, to)?
                     } else {
@@ -3254,16 +3370,28 @@ fn execute_step(
             row.entity_class_id = to_cid;
             revise_pd_row(conn, c, &row)?;
         }
-        MigrationStep::MergeParameter { class, from, to } => {
+        MigrationStep::MergeParameter { class, from, to, missing_source } => {
             let step_name = format!("merge_parameter {class}.{from} -> {to}");
             let cid = hint_class_id(conn, "merge_parameter", class)?;
             let src = lookup_parameter(conn, cid, from)?;
             let tgt = lookup_parameter(conn, cid, to)?;
             match (src, tgt) {
+                // Neither exists: mid-chain, both sides may be later
+                // reconcile-only adds this entrant never materialized (the
+                // re-entry reasoning of the absent-source family) — note +
+                // no-op unless the author opted back into strictness.
                 (None, None) => {
-                    return Err(DbError::Api(format!(
-                        "merge_parameter: neither {class}.{from} nor {class}.{to} exists"
-                    )))
+                    if *missing_source == MissingSource::Error {
+                        return Err(DbError::Api(format!(
+                            "merge_parameter: neither {class}.{from} nor {class}.{to} \
+                             exists (missing_source: error)"
+                        )));
+                    }
+                    fx.notes.push(format!(
+                        "{step_name}: neither side exists — never materialized \
+                         mid-chain; nothing to merge (the final reconcile owns the \
+                         end state)"
+                    ));
                 }
                 (None, Some(_)) => fx.notes.push(format!(
                     "{step_name}: source absent and target live — already merged"
@@ -3410,11 +3538,24 @@ fn execute_step(
                 }
             }
         }
-        MigrationStep::MergeListMember { list, from, to } => {
+        MigrationStep::MergeListMember { list, from, to, missing_source } => {
             let step_name = format!("merge_list_member {list}: {from:?} -> {to:?}");
-            let lid = lookup_value_list(conn, list)?.ok_or_else(|| {
-                DbError::Api(format!("merge_list_member: list {list:?} not found"))
-            })?;
+            // Absent-list tolerance (the stamped-51-mid-v52 re-entry case:
+            // the legacy list was already renamed away, so the member merge
+            // has no home and no values can hold the source string through
+            // a binding) — note + no-op unless opted out.
+            let Some(lid) = lookup_value_list(conn, list)? else {
+                if *missing_source == MissingSource::Error {
+                    return Err(DbError::Api(format!(
+                        "merge_list_member: list {list:?} not found (missing_source: error)"
+                    )));
+                }
+                fx.notes.push(format!(
+                    "{step_name}: list absent — never materialized mid-chain or \
+                     already superseded; nothing to do"
+                ));
+                return Ok(());
+            };
             let from_id = list_member_id(conn, lid, from)?;
             let to_id = list_member_id(conn, lid, to)?;
             match (from_id, to_id) {

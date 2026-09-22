@@ -1205,3 +1205,197 @@ migrations:
         &ApplyOptions::default());
     assert!(format!("{}", err.unwrap_err()).contains("already has a member"));
 }
+
+// ---------------------------------------------------------------------------
+// Review 2026-09-22 extensions: the absent-source family covers the merges
+// (merge_parameter neither-exists; merge_list_member absent-list — the
+// stamped-51-mid-v52 re-entry case), and `missing_source: error` is the
+// step-level opt-out back into strictness.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_parameter_neither_exists_is_a_tolerant_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, TOL_BASE);
+    let v2 = r#"
+template: {name: tol, version: "2"}
+value_lists:
+  - name: methods
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      # Both sides are later reconcile-only adds this entrant never had.
+      - merge_parameter: {class: node, from: never_was, to: also_never}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert!(
+        out.notes.iter().any(|n| n.contains("neither side exists")),
+        "tolerated merge is NOTED: {:?}",
+        out.notes
+    );
+}
+
+/// The stamped-51-mid-v52 re-entry shape: FlexTool stamps `model.version`
+/// once at the very end, so a field DB can sit at 51 with v52's list work
+/// already applied (legacy `solver` list gone, `solvers` live). The v52
+/// span's `merge_list_member` then names an ABSENT list and its
+/// `rename_value_list` an absent source with a live target — both tolerate
+/// with notes, and the chain walks on.
+#[test]
+fn stamped_51_mid_v52_reentry_tolerates_absent_list_and_applied_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(
+        &dir,
+        r#"
+template: {name: v52, version: "51"}
+value_lists:
+  - name: solvers
+    members: [{value: "highs"}, {value: "cplex"}]
+classes:
+  - name: solve
+    parameters:
+      - {name: solver, value_list: solvers}
+seed:
+  entities:
+    - {class: solve, name: s1}
+"#,
+    );
+    let head = r#"
+template: {name: v52, version: "52"}
+value_lists:
+  - name: solvers
+    members: [{value: "highs"}, {value: "cplex"}]
+classes:
+  - name: solve
+    parameters:
+      - {name: solver, value_list: solvers}
+seed:
+  entities:
+    - {class: solve, name: s1}
+migrations:
+  - from: "51"
+    to: "52"
+    steps:
+      - merge_list_member: {list: solver, from: glpsol, to: highs}
+      - rename_value_list: {from: solver, to: solvers}
+"#;
+    let out = apply_v2(&db, head);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert!(
+        out.notes.iter().any(|n| n.contains("list absent")),
+        "absent-list merge is NOTED: {:?}",
+        out.notes
+    );
+    assert!(
+        out.notes.iter().any(|n| n.contains("already applied")),
+        "applied rename is NOTED: {:?}",
+        out.notes
+    );
+    assert_eq!(live(&db, "parameter_value_list", "name = 'solvers'"), 1);
+    assert_eq!(
+        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        Some("52")
+    );
+    // merge_list_member with the LIST present but NEITHER member existing
+    // stays loud under either policy (list-present anomaly, not re-entry).
+    let bad = parse_str(
+        r#"
+template: {name: v52, version: "53"}
+classes: [{name: solve}]
+migrations:
+  - from: "52"
+    to: "53"
+    steps:
+      - merge_list_member: {list: solvers, from: nope, to: nada}
+"#,
+    )
+    .unwrap();
+    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default());
+    assert!(format!("{}", err.unwrap_err()).contains("neither member"));
+}
+
+#[test]
+fn missing_source_error_opts_back_into_strictness() {
+    // Parse: default is tolerate; the opt-out round-trips.
+    let t = parse_str(
+        r#"
+template: {name: t, version: "2"}
+classes: [{name: c}]
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_parameter: {class: c, from: a, to: b}
+      - rename_parameter: {class: c, from: a, to: b, missing_source: error}
+      - rename_list_member: {list: l, from: a, to: b, missing_source: error}
+      - merge_parameter: {class: c, from: a, to: b, missing_source: error}
+      - merge_list_member: {list: l, from: a, to: b, missing_source: error}
+      - rename_value_list: {from: a, to: b, missing_source: error}
+"#,
+    )
+    .unwrap();
+    use nodal_db_core::template::ir::MissingSource;
+    let steps = &t.migrations[0].steps;
+    assert!(matches!(&steps[0],
+        MigrationStep::RenameParameter { missing_source: MissingSource::Tolerate, .. }));
+    assert!(matches!(&steps[1],
+        MigrationStep::RenameParameter { missing_source: MissingSource::Error, .. }));
+
+    // Execute: the opted-out step refuses on the absent source the default
+    // would tolerate.
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, TOL_BASE);
+    let strict = r#"
+template: {name: tol, version: "2"}
+value_lists:
+  - name: methods
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_parameter: {class: node, from: never_materialized, to: x,
+                           missing_source: error}
+"#;
+    let err = apply(&db, &parse_str(strict).unwrap(), &MigrationRegistry::new(),
+        "tester", "", &ApplyOptions::default());
+    let msg = format!("{}", err.unwrap_err());
+    assert!(msg.contains("missing_source: error") && msg.contains("never_materialized"),
+        "{msg}");
+
+    // Same opt-out on the list-member step.
+    let strict_member = r#"
+template: {name: tol, version: "2"}
+value_lists:
+  - name: methods
+    members: [{value: "a"}, {value: "b"}]
+classes:
+  - name: node
+    parameters:
+      - {name: keeper, types: [{kind: float}]}
+      - {name: method, value_list: methods}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_list_member: {list: methods, from: ghost, to: b,
+                             missing_source: error}
+"#;
+    let err = apply(&db, &parse_str(strict_member).unwrap(), &MigrationRegistry::new(),
+        "tester", "", &ApplyOptions::default());
+    assert!(format!("{}", err.unwrap_err()).contains("missing_source: error"));
+}

@@ -237,6 +237,11 @@ fn validation_checks_v2_step_shapes() {
         &format!("{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{a: b, b: c}}}}\n"),
         "chained translations are ambiguous",
     );
+    // The identity entry gets its own explanation (review small item).
+    expect_validate_err(
+        &format!("{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{x: x}}}}\n"),
+        "maps to itself",
+    );
     // Empty map.
     expect_validate_err(
         &format!("{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{}}}}\n"),
@@ -414,6 +419,105 @@ fn v41_merge_parameter_fills_empty_slots_and_closes_source() {
     assert_eq!(cur_float(&db, "new_name", "s1"), Some(9.0));
     assert!(out.notes.iter().any(|n| n.contains("carried 1 value(s)")),
         "notes: {:?}", out.notes);
+}
+
+// --- merge_parameter guards (2026-09-22 review, MEDIUM) ---
+
+const MERGE_GUARD_BASE: &str = r#"
+template: {name: mg, version: "1"}
+value_lists:
+  - name: yes_no
+    members: [{value: "yes"}, {value: "no"}]
+  - name: on_off
+    members: [{value: "on_"}, {value: "off_"}]
+classes:
+  - name: node
+    parameters:
+      - {name: src_listed, value_list: yes_no}
+      - {name: tgt_otherlist, value_list: on_off}
+      - {name: tgt_samelist, value_list: yes_no}
+      - {name: src_string, types: [{kind: string}]}
+      - {name: tgt_float, types: [{kind: float}]}
+seed:
+  entities:
+    - {class: node, name: n1}
+    - {class: node, name: n2}
+"#;
+
+fn merge_guard_v2(step: &str) -> String {
+    format!(
+        r#"
+template: {{name: mg, version: "2"}}
+value_lists:
+  - name: yes_no
+    members: [{{value: "yes"}}, {{value: "no"}}]
+  - name: on_off
+    members: [{{value: "on_"}}, {{value: "off_"}}]
+classes:
+  - name: node
+    parameters:
+      - {{name: tgt_otherlist, value_list: on_off}}
+      - {{name: tgt_samelist, value_list: yes_no}}
+      - {{name: tgt_float, types: [{{kind: float}}]}}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - {step}
+"#
+    )
+}
+
+#[test]
+fn merge_parameter_refuses_cross_list_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, MERGE_GUARD_BASE);
+    write_str(&db, "node", "src_listed", "n1", "yes");
+    let v2 = merge_guard_v2("merge_parameter: {class: node, from: src_listed, to: tgt_otherlist}");
+    let err = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default()).unwrap_err().to_string();
+    // The typed error names BOTH lists and points at run: as the escape.
+    assert!(err.contains("yes_no") && err.contains("on_off") && err.contains("run:"), "{err}");
+    assert_eq!(live(&db, "parameter_definition", "name = 'src_listed'"), 1,
+        "refusal must close nothing");
+}
+
+#[test]
+fn merge_parameter_refuses_kind_without_target_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, MERGE_GUARD_BASE);
+    write_str(&db, "node", "src_string", "n1", "hello");
+    let v2 = merge_guard_v2("merge_parameter: {class: node, from: src_string, to: tgt_float}");
+    let err = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default()).unwrap_err().to_string();
+    // Hard error toward run: naming the uncovered kind — never the
+    // NULL-binding fallback.
+    assert!(err.contains("string") && err.contains("run:"), "{err}");
+    assert_eq!(cur_str(&db, "src_string", "n1").as_deref(), Some("hello"));
+}
+
+#[test]
+fn merge_parameter_same_list_carries_with_target_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, MERGE_GUARD_BASE);
+    write_str(&db, "node", "src_listed", "n2", "no"); // fills the empty slot
+    write_str(&db, "node", "tgt_samelist", "n1", "yes"); // occupied slot
+    let v2 = merge_guard_v2("merge_parameter: {class: node, from: src_listed, to: tgt_samelist}");
+    let out = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
+        &ApplyOptions::default()).unwrap();
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert_eq!(cur_str(&db, "tgt_samelist", "n1").as_deref(), Some("yes"));
+    assert_eq!(cur_str(&db, "tgt_samelist", "n2").as_deref(), Some("no"));
+    // The carried row binds the TARGET's own rank-0 string member (D11) —
+    // never NULL, never the source's member.
+    assert_eq!(q1(&db,
+        "SELECT count(*) FROM value_scalar v \
+         JOIN parameter_type pt ON pt.id = v.parameter_type_id \
+          AND pt.parameter_definition_id = v.parameter_definition_id \
+          AND pt.value_kind = 'string' AND pt.rank = 0 \
+         JOIN parameter_definition pd ON pd.id = v.parameter_definition_id \
+         WHERE v.valid_to_commit IS NULL AND pd.cur_name = 'tgt_samelist'"), 2);
+    assert_eq!(live(&db, "parameter_definition", "name = 'src_listed'"), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -824,27 +928,67 @@ migrations:
 "#;
 
 #[test]
-fn drop_list_member_skips_when_stranded_and_withholds_convergence() {
+fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
+    // The reviewer's probe (2026-09-22 review, HIGH): a skipped drop must
+    // NOT substamp, its span must NOT version-stamp, a re-apply must NOT
+    // certify while blocked and must RETRY the paused step; once unblocked,
+    // the retry completes the chain and converges.
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db_with(&dir, DLM_BASE);
     write_str(&db, "solve", "method", "s1", "stranded");
 
+    // apply#1 — pauses at step 0.
     let out = apply_v2(&db, DLM_V2);
-    // The stranded drop SKIPPED: member kept, value untouched…
+    assert!(!out.converged);
+    assert!(out.warnings.iter().any(|w| w.contains("PAUSED") && w.contains("RETRIES")),
+        "warnings: {:?}", out.warnings);
+    assert!(out.plan.skipped.iter().any(|s| s.contains("drop_list_member")
+            && s.contains("unblock")), "skips: {:?}", out.plan.skipped);
+    // Member kept, value untouched; the step AFTER the pause never ran.
     assert_eq!(live(&db, "list_value", "v_str = 'stranded'"), 1);
     assert_eq!(cur_str(&db, "method", "s1").as_deref(), Some("stranded"));
-    // …the clean drop executed…
-    assert_eq!(live(&db, "list_value", "v_str = 'unused'"), 0);
-    // …and convergence is withheld exactly like a reconcile skip: no
-    // certified content hash, skip on the record.
-    assert!(!out.converged);
-    assert!(out.plan.skipped.iter().any(|s| s.contains("drop_list_member")),
-        "skips: {:?}", out.plan.skipped);
+    assert_eq!(live(&db, "list_value", "v_str = 'unused'"), 1,
+        "steps after the paused one must not execute");
+    // Version did NOT advance; no substamp written; no certified hash.
+    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
+        .as_deref(), Some("1"));
+    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"),
+        None, "a skipped step must not substamp");
     assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"),
-        None, "hash must be withheld on a skipped drop");
-    // The version still stamped (a skip is not a failure; the chain moved on).
+        None, "no certification behind a paused chain");
+
+    // apply#2, still blocked — retries, pauses again, still not certified.
+    let out2 = apply_v2(&db, DLM_V2);
+    assert!(!out2.converged);
+    assert!(out2.warnings.iter().any(|w| w.contains("PAUSED")), "{:?}", out2.warnings);
+    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
+        .as_deref(), Some("1"), "version stays until the blocker clears");
+    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"),
+        None, "apply#2 must NOT certify while the drop stays blocked");
+    assert_eq!(live(&db, "list_value", "v_str = 'stranded'"), 1);
+
+    // Mop up the stranding value, then apply#3 — the RETRY completes the
+    // chain (both drops), stamps the version, and certifies.
+    nodal_db_core::api::delete_values(
+        &db,
+        vec![nodal_db_core::api::DeleteKey {
+            class: "solve".into(),
+            parameter: "method".into(),
+            alternative: "alt".into(),
+            entity: "s1".into(),
+        }],
+        "tester",
+        "mop up the stranding value",
+        WriteOptions::default(),
+    )
+    .unwrap();
+    let out3 = apply_v2(&db, DLM_V2);
+    assert!(out3.converged, "skips: {:?}", out3.plan.skipped);
+    assert_eq!(live(&db, "list_value", "v_str IN ('stranded', 'unused')"), 0);
     assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
         .as_deref(), Some("2"));
+    assert!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'")
+        .is_some());
 }
 
 #[test]

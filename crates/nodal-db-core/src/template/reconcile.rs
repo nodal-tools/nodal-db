@@ -38,7 +38,11 @@
 //! **Crash resume.** Each declarative step's commit also writes the
 //! `template_migration_step` progress substamp (same commit — atomic); the
 //! span's version stamp clears it. An interrupted chain resumes by skipping
-//! completed steps. A `run:` program commits through the public API on its
+//! completed steps. A step that SKIPS (D14 — a `drop_list_member` that would
+//! strand data) writes NO substamp and PAUSES the chain: the span's version
+//! never stamps, any stale certified hash is closed, and the next apply
+//! retries the paused step — version advancement stays blocked until the
+//! operator clears the blocker (explicit destruction is never evaporated). A `run:` program commits through the public API on its
 //! own, so its substamp lands AFTER it in a separate commit — a crash in
 //! that window re-runs the program. **`run:` programs MUST therefore be
 //! idempotent**; that is the Layer-3 contract (true cross-program atomicity
@@ -481,9 +485,10 @@ pub struct ApplyOutcome {
     /// The plan as APPLIED (recomputed inside the final transaction).
     pub plan: ReconcilePlan,
     /// False when any skip occurred: `template_content_hash` was withheld
-    /// (module docs, "Partial-apply honesty"). Chain-step skips (a
-    /// `drop_list_member` that would strand data) withhold convergence
-    /// exactly like reconcile skips (D14).
+    /// (module docs, "Partial-apply honesty"). A chain-step skip (a
+    /// `drop_list_member` that would strand data) PAUSES the chain before
+    /// its substamp (D14): the span's version does not stamp, `plan.skipped`
+    /// says why, and a re-apply RETRIES the paused step.
     pub converged: bool,
     pub warnings: Vec<String>,
     /// Informational chain-step notes: cascade close-out counts of executed
@@ -619,11 +624,6 @@ fn blast_radius_note(
                 .into(),
         ));
     }
-    let mut per: Vec<String> =
-        pv.cascade.per_table.iter().map(|t| format!("{} {}", t.table, t.rows)).collect();
-    if per.is_empty() {
-        per.push("no dependent rows".into());
-    }
     let verb = match step {
         MigrationStep::DropParameter { .. } | MigrationStep::DropClass { .. } => {
             "would close"
@@ -634,7 +634,7 @@ fn blast_radius_note(
         "{verb} {} row(s) as of plan time ({} object row(s); {})",
         pv.cascade.total_rows,
         pv.cascade.object_rows,
-        per.join(", ")
+        per_table_summary(&pv.cascade.per_table)
     )))
 }
 
@@ -781,12 +781,19 @@ pub fn apply(
     // write — advanced by every commit we (or a run: program) make, verified
     // inside the final transaction when expect_commit pinned the base.
     let mut cursor = pre.commit;
-    // Chain-step side reports (D14): skips withhold convergence exactly like
-    // reconcile skips; notes carry the executed cascades' blast radii.
+    // Chain-step side reports (D14): notes carry the executed cascades'
+    // blast radii; a skip PAUSES the chain (below).
     let mut chain_effects = StepEffects::default();
+    // Set when a step SKIPPED (D14 pause semantics): (warning, version the
+    // DB stays at). A skipped step does NOT substamp and its span does NOT
+    // version-stamp — the chain stays pending at that step and a re-apply
+    // RETRIES it (completed steps skip via their substamps). Destruction was
+    // explicitly requested, so an unresolvable drop is surfaced to the
+    // operator, never evaporated.
+    let mut paused: Option<(String, String)> = None;
 
     // --- Layer 2/3: the pending migration chain, in span/step order. ---
-    for span in &spans {
+    'spans: for span in &spans {
         let done_through: i64 = match &resume {
             Some((f, to, idx)) if *f == span.from && *to == span.to => *idx,
             _ => -1,
@@ -814,6 +821,10 @@ pub fn apply(
                     );
                     let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
                         set_metadata(conn, c, "template_migration_step", &substamp)?;
+                        // The chain moved the content past any certified
+                        // hash: close it so a stale certification can never
+                        // outlive a partially-walked chain.
+                        clear_metadata(conn, c, "template_content_hash")?;
                         Ok(c)
                     })?;
                     out.commits.push(c);
@@ -828,18 +839,41 @@ pub fn apply(
                     let effects = with_write_txn_retrying(db, user, &msg, |conn, c| {
                         let mut fx = StepEffects::default();
                         execute_step(conn, c, declarative, &mut fx)?;
-                        // Same-commit progress substamp: atomic with the step.
-                        set_metadata(conn, c, "template_migration_step", &substamp)?;
+                        // Same-commit progress substamp: atomic with the
+                        // step — but a SKIPPED step does NOT substamp (D14
+                        // pause semantics): re-apply must retry it.
+                        if fx.skips.is_empty() {
+                            set_metadata(conn, c, "template_migration_step", &substamp)?;
+                        }
+                        // Never leave a stale certified hash behind a
+                        // partially-walked chain (also atomic with the step).
+                        clear_metadata(conn, c, "template_content_hash")?;
                         Ok((c, fx))
                     })?;
                     out.commits.push(effects.0);
                     cursor = effects.0;
+                    let skipped_now = !effects.1.skips.is_empty();
+                    let why = effects.1.skips.join("; ");
                     chain_effects.absorb(effects.1, &format!("{} -> {}", span.from, span.to));
+                    if skipped_now {
+                        paused = Some((
+                            format!(
+                                "migration chain PAUSED at {} -> {} step {i} ({desc}): \
+                                 {why} — template_version stays at {:?} and no content \
+                                 hash is certified; re-applying RETRIES this step once \
+                                 the blocker clears",
+                                span.from, span.to, span.from
+                            ),
+                            span.from.clone(),
+                        ));
+                        break 'spans;
+                    }
                 }
             }
         }
         // Span stamp: bump the version AND clear the substamp, atomically —
-        // an interrupted chain resumes at the right span (§4.4).
+        // an interrupted chain resumes at the right span (§4.4). Never
+        // reached for a paused span (the loop broke before it).
         let msg = format!(
             "template {} migration {} -> {}: version stamp",
             t.template.name, span.from, span.to
@@ -853,12 +887,33 @@ pub fn apply(
         cursor = c;
     }
 
+    // --- D14 pause: the chain stopped at a skipped step. No version stamp,
+    // no reconcile, no certification — the outcome reports the skip, why,
+    // and that a re-apply retries the paused step. ---
+    if let Some((warning, at_version)) = paused {
+        out.notes = chain_effects.notes.clone();
+        out.warnings.push(warning);
+        out.converged = false;
+        out.plan = ReconcilePlan {
+            template_name: t.template.name.clone(),
+            template_version: t.template.version.clone(),
+            content_hash: chk.hash.clone(),
+            db_template_name: pre.name.clone(),
+            db_template_version: Some(at_version),
+            db_commit: cursor,
+            skipped: chain_effects.skips.clone(),
+            ..Default::default()
+        };
+        return Ok(out);
+    }
+
     // --- Layer 1: the final reconcile, one commit, identity stamped. ---
     // Pre-check RO so an empty diff never burns a commit (§7 idempotency);
     // the write txn re-diffs, so a racing writer only costs one replan,
     // never a wrong apply.
+    // Past here the chain ran to completion (a skip returned above), so the
+    // only skips left are the reconcile's own.
     out.notes = chain_effects.notes.clone();
-    let chain_skips = chain_effects.skips.clone();
     let pre_plan = with_read(db, |conn| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
@@ -869,11 +924,8 @@ pub fn apply(
     }
     if pre_plan.actions.is_empty() {
         out.no_op = out.commits.is_empty();
-        let mut p = pre_plan;
-        // Chain-step skips withhold convergence like reconcile skips (D14).
-        p.skipped.extend(chain_skips.iter().cloned());
-        out.converged = p.skipped.is_empty();
-        out.plan = p;
+        out.converged = pre_plan.skipped.is_empty();
+        out.plan = pre_plan;
         return Ok(out);
     }
 
@@ -905,9 +957,6 @@ pub fn apply(
         if !p.blocked.is_empty() {
             return Err(blocked_error(&p));
         }
-        // Chain-step skips join the reconcile skips (D14): they withhold the
-        // content-hash certification through the same StampIdentity gate.
-        p.skipped.extend(chain_skips.iter().cloned());
         let mut ctx = ExecCtx {
             skipped: p.skipped.clone(),
             warnings: Vec::new(),
@@ -2769,16 +2818,11 @@ fn cascade_close(
     apply_object_delete(conn, c, &prepared[0], &mut report)?;
     match &report.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => {
-            let per: Vec<String> = closed_out
-                .per_table
-                .iter()
-                .map(|t| format!("{} {}", t.table, t.rows))
-                .collect();
             fx.notes.push(format!(
-                "{step_name}: closed {} row(s) ({} object row(s){})",
+                "{step_name}: closed {} row(s) ({} object row(s); {})",
                 closed_out.total_rows,
                 closed_out.object_rows,
-                if per.is_empty() { String::new() } else { format!("; {}", per.join(", ")) }
+                per_table_summary(&closed_out.per_table)
             ));
         }
         ObjectDeleteResult::NotFound => fx.notes.push(format!(
@@ -2817,6 +2861,29 @@ fn rewrite_list_bound_values(
     Ok(rewritten)
 }
 
+/// Current NON-SCALAR value rows (long + array tiers) of one definition —
+/// the guard both `map_values` and the merge copy share: scalar-only hints,
+/// indexed values go through a `run:` program.
+fn nonscalar_value_count(conn: &Connection, pd_id: i64) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "SELECT \
+           (SELECT count(*) FROM value_long WHERE parameter_definition_id = ?1 \
+              AND valid_to_commit IS NULL) + \
+           (SELECT count(*) FROM value_array WHERE parameter_definition_id = ?1)",
+        params![pd_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Render per-table cascade counts for notes/plans ("value_scalar 2, …").
+fn per_table_summary(per: &[crate::types::TableCount]) -> String {
+    if per.is_empty() {
+        "no dependent rows".into()
+    } else {
+        per.iter().map(|t| format!("{} {}", t.table, t.rows)).collect::<Vec<_>>().join(", ")
+    }
+}
+
 /// The live string-member row of `lid` with value `v`, if any.
 fn list_member_id(conn: &Connection, lid: i64, v: &str) -> Result<Option<i64>, DbError> {
     match conn.query_row(
@@ -2847,14 +2914,7 @@ fn apply_value_map(
 ) -> Result<(), DbError> {
     // Scalar-only guard: a translation table over indexed values is not a
     // hint (write a run: program).
-    let nonscalar: i64 = conn.query_row(
-        "SELECT \
-           (SELECT count(*) FROM value_long WHERE parameter_definition_id = ?1 \
-              AND valid_to_commit IS NULL) + \
-           (SELECT count(*) FROM value_array WHERE parameter_definition_id = ?1)",
-        params![pd_id],
-        |r| r.get(0),
-    )?;
+    let nonscalar = nonscalar_value_count(conn, pd_id)?;
     if nonscalar > 0 {
         return Err(DbError::Api(format!(
             "{step}: map_values only translates SCALAR values, but the definition holds \
@@ -3027,26 +3087,12 @@ fn execute_step(
         MigrationStep::RenameListMember { list, from, to, rewrite_values } => {
             let lid = lookup_value_list(conn, list)?
                 .ok_or_else(|| DbError::Api(format!("rename_list_member: list {list:?} not found")))?;
-            let member_id: i64 = conn
-                .query_row(
-                    "SELECT id FROM list_value WHERE cur_l = ? AND value_kind = 'string' \
-                     AND v_str = ? AND valid_to_commit IS NULL",
-                    params![lid, from],
-                    |r| r.get(0),
-                )
-                .map_err(|e| match e {
-                    duckdb::Error::QueryReturnedNoRows => DbError::Api(format!(
-                        "rename_list_member: {list} has no string member {from:?}"
-                    )),
-                    e => e.into(),
-                })?;
-            let taken: i64 = conn.query_row(
-                "SELECT count(*) FROM list_value WHERE cur_l = ? AND value_kind = 'string' \
-                 AND v_str = ? AND valid_to_commit IS NULL",
-                params![lid, to],
-                |r| r.get(0),
-            )?;
-            if taken > 0 {
+            let member_id = list_member_id(conn, lid, from)?.ok_or_else(|| {
+                DbError::Api(format!(
+                    "rename_list_member: {list} has no string member {from:?}"
+                ))
+            })?;
+            if list_member_id(conn, lid, to)?.is_some() {
                 return Err(DbError::Api(format!(
                     "rename_list_member: {list} already has a member {to:?}"
                 )));
@@ -3128,23 +3174,67 @@ fn execute_step(
                         .push(format!("{step_name}: target absent — renamed the source"));
                 }
                 (Some(src_id), Some(tgt_id)) => {
+                    // Cross-list guard (review 2026-09-22): carrying values
+                    // between definitions bound to DIFFERENT value lists
+                    // would land off-list values on the target — refuse; a
+                    // cross-list migration is a run: program.
+                    let src_row = read_pd_row(conn, src_id)?;
+                    let tgt_row = read_pd_row(conn, tgt_id)?;
+                    if src_row.parameter_value_list_id != tgt_row.parameter_value_list_id {
+                        let list_name = |id: Option<i64>| -> Result<String, DbError> {
+                            match id {
+                                None => Ok("none".into()),
+                                Some(id) => Ok(conn.query_row(
+                                    "SELECT name FROM parameter_value_list WHERE id = ? \
+                                     AND valid_to_commit IS NULL",
+                                    params![id],
+                                    |r| r.get::<_, String>(0),
+                                )?),
+                            }
+                        };
+                        return Err(DbError::Api(format!(
+                            "merge_parameter: {class}.{from} binds value list {:?} but \
+                             {class}.{to} binds {:?} — carrying values across lists \
+                             would strand off-list strings; rebind them to one list \
+                             first, or migrate via a run: program",
+                            list_name(src_row.parameter_value_list_id)?,
+                            list_name(tgt_row.parameter_value_list_id)?,
+                        )));
+                    }
                     // Scalar-only v1 merge: an indexed-value carry is a run:
                     // program (same stance as map_values).
-                    let nonscalar: i64 = conn.query_row(
-                        "SELECT \
-                           (SELECT count(*) FROM value_long \
-                              WHERE parameter_definition_id = ?1 \
-                                AND valid_to_commit IS NULL) + \
-                           (SELECT count(*) FROM value_array \
-                              WHERE parameter_definition_id = ?1)",
-                        params![src_id],
-                        |r| r.get(0),
-                    )?;
+                    let nonscalar = nonscalar_value_count(conn, src_id)?;
                     if nonscalar > 0 {
                         return Err(DbError::Api(format!(
                             "merge_parameter: {class}.{from} holds {nonscalar} current \
                              indexed value row(s) — the v1 merge carries scalars only \
                              (migrate indexed values via a run: program first)"
+                        )));
+                    }
+                    // Kind-coverage guard (review 2026-09-22): every distinct
+                    // kind among the source's current scalars must have a
+                    // live rank-0 member on the TARGET — a carried value must
+                    // instantiate a member the write path itself would
+                    // accept, never the NULL-binding fallback.
+                    let mut stmt = conn.prepare(
+                        "SELECT DISTINCT s.value_kind FROM value_scalar s \
+                         WHERE s.parameter_definition_id = ?1 \
+                           AND s.valid_to_commit IS NULL \
+                           AND NOT EXISTS (SELECT 1 FROM parameter_type pt \
+                                 WHERE pt.parameter_definition_id = ?2 \
+                                   AND pt.valid_to_commit IS NULL \
+                                   AND pt.value_kind = s.value_kind AND pt.rank = 0) \
+                         ORDER BY s.value_kind",
+                    )?;
+                    let uncovered: Vec<String> = stmt
+                        .query_map(params![src_id, tgt_id], |r| r.get(0))?
+                        .collect::<Result<_, _>>()?;
+                    if !uncovered.is_empty() {
+                        return Err(DbError::Api(format!(
+                            "merge_parameter: {class}.{to} declares no rank-0 type \
+                             member for source value kind(s) [{}] — widen the target's \
+                             types first, or migrate via a run: program",
+                            uncovered.join(", ")
                         )));
                     }
                     // Fill-if-absent (the v41 semantics): copy each current
@@ -3326,9 +3416,10 @@ fn execute_step(
             };
             // A drop never strands data (D14, the D12 ethos): while current
             // values or defaults of the bound definitions still hold the
-            // string, the member is KEPT and the step SKIPS — convergence
-            // withheld, exactly like a reconcile skip. Rewrite first
-            // (merge_list_member / rename_list_member).
+            // string, the member is KEPT and the step SKIPS — which PAUSES
+            // the chain (no substamp, no version stamp; apply reports why
+            // and a re-apply retries this step). Rewrite first
+            // (merge_list_member / rename_list_member) or delete the values.
             let stranded: i64 = conn.query_row(
                 "SELECT \
                    (SELECT count(*) FROM value_scalar v \
@@ -3349,8 +3440,8 @@ fn execute_step(
             if stranded > 0 {
                 fx.skips.push(format!(
                     "drop_list_member {list}: {value:?} kept — {stranded} current \
-                     value/default row(s) still hold it (rewrite them first: \
-                     merge_list_member or rename_list_member)"
+                     value/default row(s) still hold it; unblock by rewriting them \
+                     (merge_list_member / rename_list_member) or deleting the values"
                 ));
             } else {
                 close_row(conn, c, "list_value", mid)?;

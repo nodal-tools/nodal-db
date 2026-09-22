@@ -710,10 +710,11 @@ pub enum MigrationStep {
     DropValueList {
         list: String,
     },
-    /// D14/G1: close out one string list member. SKIPPED (convergence
-    /// withheld, like every reconcile skip) while current values or defaults
-    /// still hold the string — a drop never strands data; rewrite first
-    /// (`merge_list_member` / `rename_list_member`).
+    /// D14/G1: close out one string list member. While current values or
+    /// defaults still hold the string the step SKIPS, which PAUSES the chain
+    /// (no substamp, no span version stamp; a re-apply retries) — a drop
+    /// never strands data; rewrite first (`merge_list_member` /
+    /// `rename_list_member`) or delete the values.
     DropListMember {
         list: String,
         value: String,
@@ -1594,8 +1595,15 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                             }
                             // A value that is also a key would make the
                             // translation order-dependent (a→b, b→c): refuse.
-                            for v in map.values() {
-                                if map.contains_key(v) {
+                            // The identity entry (a→a) trips the same net —
+                            // name why explicitly.
+                            for (key, v) in map.iter() {
+                                if v == key {
+                                    errs.push(format!(
+                                        "{loc}: map_values entry {key:?} maps to itself \
+                                         — a no-op the table must not carry (remove it)"
+                                    ));
+                                } else if map.contains_key(v) {
                                     errs.push(format!(
                                         "{loc}: map_values value {v:?} is also a key — \
                                          chained translations are ambiguous"

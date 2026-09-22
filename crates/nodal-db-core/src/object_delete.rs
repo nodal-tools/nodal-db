@@ -76,6 +76,15 @@ struct DepLeg {
     /// A SQL expression producing a human-readable identifier per referencing
     /// row, for the bounded blocker `sample`.
     sample_expr: &'static str,
+    /// Erase participation (erasure_compaction_plan §3): `true` ⇒ the erase
+    /// execution arm ([`erase_scope_legs`]) physically DELETEs this leg's rows
+    /// — same `predicate`, ANY validity, plain DELETE, no hist-move, no
+    /// live-guard. The SHARED predicate is what keeps delete's close-outs,
+    /// erase's preview COUNTs, and erase's DELETEs from ever drifting
+    /// (CLAUDE.md invariant 2). `true` on the whole Alternative set; `false`
+    /// on other kinds' legs (their erase grains are future designs — the core
+    /// refuses to erase them in v1).
+    erase: bool,
 }
 
 impl DepLeg {
@@ -98,10 +107,18 @@ impl DepLeg {
 ///     for an alternative.
 ///   - `dependent` legs are external references: cascade closes them, and a
 ///     `cascade:false` delete blocks on any that are live.
+///   - `erase_extra` legs (erasure_compaction_plan §3, critique m1) exist ONLY
+///     for the erase execution arm — for an alternative, exactly the
+///     `value_array_hist` twin, whose rows are already closed (hist rows have
+///     no live state to block on or close out, so delete's blocker/preview/
+///     close-out paths never see these legs). They live HERE, in the one
+///     registry, so erase's dependency definition stays a single source of
+///     truth with delete's (invariant 2 — one dependency finder, never two).
 struct ObjectLegSet {
     object_table: &'static str,
     identity: Vec<DepLeg>,
     dependents: Vec<DepLeg>,
+    erase_extra: Vec<DepLeg>,
 }
 
 /// Build the leg set for `kind`. VERIFIED against the live schema on 2026-08-31
@@ -122,6 +139,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "alternative_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
+                    erase: true,
                 },
                 DepLeg {
                     table: "value_long",
@@ -129,6 +147,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "alternative_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
+                    erase: true,
                 },
                 DepLeg {
                     table: "value_array",
@@ -136,6 +155,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "alternative_id = ?",
                     array: true,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
+                    erase: true,
                 },
                 DepLeg {
                     table: "entity_alternative",
@@ -143,6 +163,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "alternative_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id",
+                    erase: true,
                 },
                 // Only alternative-scoped membership rows: base rows carry
                 // alternative_id IS NULL, which `alternative_id = ?` never
@@ -153,6 +174,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "alternative_id = ?",
                     array: false,
                     sample_expr: "'group=' || group_entity_id || ',member=' || member_entity_id",
+                    erase: true,
                 },
                 DepLeg {
                     table: "scenario_alternative",
@@ -160,6 +182,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "alternative_id = ?",
                     array: false,
                     sample_expr: "'scenario=' || scenario_id || ',rank=' || rank",
+                    erase: true,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
@@ -168,8 +191,21 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr:
                         "'entity=' || entity_id || ',pd=' || parameter_definition_id",
+                    erase: true,
                 },
             ],
+            // The one leg erase adds beyond the delete dependents (critique
+            // m1): the array tier's history twin. Its rows are all closed
+            // (hist) — invisible to delete's live-guarded paths — but erase
+            // removes any-validity rows, so the twin must be in its scope.
+            erase_extra: vec![DepLeg {
+                table: "value_array_hist",
+                column: "alternative_id",
+                predicate: "alternative_id = ?",
+                array: true, // no live close-out semantics; erase-only anyway
+                sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
+                erase: true,
+            }],
         }),
         // §4d — parameter, target `parameter_definition` row by id.
         ObjectKind::Parameter => Some(ObjectLegSet {
@@ -184,6 +220,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'type=' || id",
+                    erase: false,
                 },
                 // Named index dimensions — keyed INDIRECTLY via the definition's
                 // parameter_type rows (§4d amended: this is an identity leg with
@@ -195,6 +232,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                                 (SELECT id FROM parameter_type WHERE parameter_definition_id = ?)",
                     array: false,
                     sample_expr: "'dim=' || dimension_name",
+                    erase: false,
                 },
                 // The definition's OWN default/prefill content (mirrors). §4d
                 // amended: these are IDENTITY, not dependents — a param whose
@@ -207,6 +245,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'slot=' || slot",
+                    erase: false,
                 },
                 DepLeg {
                     table: "definition_value_long",
@@ -214,6 +253,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'slot=' || slot",
+                    erase: false,
                 },
                 DepLeg {
                     table: "definition_value_array",
@@ -221,6 +261,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false, // no `_hist` twin ⇒ plain UPDATE, NOT move-to-hist
                     sample_expr: "'slot=' || slot",
+                    erase: false,
                 },
             ],
             dependents: vec![
@@ -230,6 +271,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "value_long",
@@ -237,6 +279,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "value_array",
@@ -244,6 +287,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: true,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "entity_parameter_unit",
@@ -251,6 +295,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',unit=' || unit_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
@@ -258,6 +303,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "parameter_definition_id = ?",
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 // Polymorphic annotation table — FILTERED to the
                 // parameter_definition rows (object_type discriminator).
@@ -267,8 +313,10 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "object_id = ? AND object_type = 'parameter_definition'",
                     array: false,
                     sample_expr: "'term=' || term_iri",
+                    erase: false,
                 },
             ],
+            erase_extra: Vec::new(),
         }),
         // §4b/§4c — entity, target `entity` row by id. Identity: the entity's
         // OWN element tuple (`entity_element WHERE entity_id = ?`) — empty for
@@ -284,6 +332,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 predicate: "entity_id = ?",
                 array: false,
                 sample_expr: "'pos=' || position || ',elem=' || element_entity_id",
+                erase: false,
             }],
             dependents: vec![
                 DepLeg {
@@ -292,6 +341,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "value_long",
@@ -299,6 +349,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "value_array",
@@ -306,6 +357,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: true,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "entity_location",
@@ -313,6 +365,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'loc=' || entity_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "entity_alternative",
@@ -320,6 +373,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'alt=' || alternative_id",
+                    erase: false,
                 },
                 // membership has TWO entity legs (§4b): the entity as group and
                 // as member. Both are dependents.
@@ -329,6 +383,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "group_entity_id = ?",
                     array: false,
                     sample_expr: "'member=' || member_entity_id || ',alt=' || coalesce(alternative_id, 0)",
+                    erase: false,
                 },
                 DepLeg {
                     table: "membership",
@@ -336,6 +391,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "member_entity_id = ?",
                     array: false,
                     sample_expr: "'group=' || group_entity_id || ',alt=' || coalesce(alternative_id, 0)",
+                    erase: false,
                 },
                 DepLeg {
                     table: "entity_parameter_unit",
@@ -343,6 +399,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',unit=' || unit_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "entity_metadata",
@@ -350,6 +407,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'metadata=' || metadata_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
@@ -357,6 +415,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_id = ?",
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
+                    erase: false,
                 },
                 // Polymorphic annotation table — FILTERED to entity rows.
                 DepLeg {
@@ -365,10 +424,12 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "object_id = ? AND object_type = 'entity'",
                     array: false,
                     sample_expr: "'term=' || term_iri",
+                    erase: false,
                 },
                 // EXCLUDED: run.tool_entity_id — immutable append-only leg (§10
                 // ruling 2), like run.result_alternative_id for alternatives.
             ],
+            erase_extra: Vec::new(),
         }),
         // §4e/C7 — class, target `entity_class` row by id. This is the highest
         // blast radius: besides the flat legs below it has three CROSS-KIND
@@ -383,6 +444,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 predicate: "entity_class_id = ?",
                 array: false,
                 sample_expr: "'pos=' || position",
+                erase: false,
             }],
             dependents: vec![
                 // The class as a member of a named class-set.
@@ -392,6 +454,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "member_class_id = ?",
                     array: false,
                     sample_expr: "'set=' || class_set_id",
+                    erase: false,
                 },
                 DepLeg {
                     table: "entity_class_display_mode",
@@ -399,6 +462,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "entity_class_id = ?",
                     array: false,
                     sample_expr: "'mode=' || display_mode_id",
+                    erase: false,
                 },
                 // Polymorphic annotation table — FILTERED to entity_class rows.
                 DepLeg {
@@ -407,6 +471,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "object_id = ? AND object_type = 'entity_class'",
                     array: false,
                     sample_expr: "'term=' || term_iri",
+                    erase: false,
                 },
                 // C7 — class-dimension annotations (object_id = the class id,
                 // object_subkey = position). Deliberately EXCLUDED from
@@ -418,10 +483,51 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     predicate: "object_id = ? AND object_type = 'class_dimension'",
                     array: false,
                     sample_expr: "'term=' || term_iri",
+                    erase: false,
                 },
             ],
+            erase_extra: Vec::new(),
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The erase execution scope (erasure_compaction_plan §3, critique M3). Shared
+// PREDICATES, separate execution ARMS: the registry above is the ONE dependency
+// definition, but the delete executors' hist-move (`close_leg`'s array arm) and
+// live-guard (`live_predicate`) deliberately do NOT apply to erase — run
+// verbatim, the hist-move would copy the discarded run's array payloads into
+// `value_array_hist` only for the erase to delete them, write-amplifying the
+// transaction by roughly the run's size. Erase is: registry predicate +
+// any-validity + plain DELETE. The `crate::erasure` module consumes this.
+// ---------------------------------------------------------------------------
+
+/// One leg of the erase execution arm: the table and the registry's shared
+/// match-predicate (exactly one `?` bound to the target id, covering ALL
+/// validity — no liveness applied).
+pub(crate) struct EraseLeg {
+    pub(crate) table: &'static str,
+    pub(crate) predicate: &'static str,
+}
+
+/// The tables (with predicates) `erase` physically DELETEs from for `kind`:
+/// every registry dependent flagged `erase` plus the erase-only extras
+/// (`value_array_hist`). `None` ⇒ no leg set exists for the kind at all;
+/// a kind whose legs are not erase-flagged yields an EMPTY vec — the caller
+/// (`crate::erasure`) refuses non-alternative kinds before ever asking.
+pub(crate) fn erase_scope_legs(kind: ObjectKind) -> Option<Vec<EraseLeg>> {
+    let legs = object_legs(kind)?;
+    Some(
+        legs.dependents
+            .iter()
+            .chain(legs.erase_extra.iter())
+            .filter(|l| l.erase)
+            .map(|l| EraseLeg {
+                table: l.table,
+                predicate: l.predicate,
+            })
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------

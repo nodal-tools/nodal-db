@@ -1272,6 +1272,109 @@ def main():
         n = con.execute("SELECT count(*) FROM scenario_contents(?)", [weird]).fetchone()[0]
         check(f"M12: scenario_contents({weird!r}) -> empty, no error", n == 0, f"n={n}")
 
+    # =======================================================================
+    # Erasure marker + the as-of guard (erasure_compaction_plan §1, decisions
+    # D-E1/D-E3 2026-09-19). The marker CHECK trio is exercised, then a marker
+    # is planted raw and the FULL consumer-shape sweep of acceptance 3 runs
+    # over all 31 as-of macros: the guard must fire under a bare SELECT *,
+    # count(*), a pruned projection, AND a join — and must stay silent without
+    # a marker and at/after the marker commit. This sweep is the PERMANENT
+    # engine-upgrade tripwire (the guard's soundness rests on optimizer
+    # behavior: filter expressions are not prunable, projection-riding guards
+    # are — see 110_views_history.sql); never remove it.
+    # =======================================================================
+
+    # CHECK trio: exactly one scope column, matching the kind tag.
+    expect_constraint(
+        "erasure_marker: kind='alternative' without alternative_id rejected",
+        "INSERT INTO erasure_marker (kind, at_commit, rows_removed)"
+        " VALUES ('alternative', ?, 0)", [c3])
+    expect_constraint(
+        "erasure_marker: alternative_id on a kind='horizon' marker rejected",
+        "INSERT INTO erasure_marker (kind, alternative_id, horizon_commit, at_commit, rows_removed)"
+        " VALUES ('horizon', ?, ?, ?, 0)", [base, c3, c3])
+    expect_constraint(
+        "erasure_marker: kind='entity' without entity_id rejected",
+        "INSERT INTO erasure_marker (kind, at_commit, rows_removed)"
+        " VALUES ('entity', ?, 0)", [c3])
+
+    asof_macros = [
+        "metadata_asof", "entity_metadata_asof", "parameter_value_metadata_asof",
+        "entity_class_asof", "class_set_asof", "class_set_member_asof",
+        "entity_class_dimension_asof", "entity_asof", "entity_location_asof",
+        "entity_element_asof", "alternative_asof", "scenario_asof",
+        "scenario_alternative_asof", "entity_alternative_asof", "membership_asof",
+        "units_of_measure_asof", "parameter_value_list_asof", "list_value_asof",
+        "parameter_definition_asof", "entity_parameter_unit_asof",
+        "parameter_type_asof", "parameter_type_dimension_asof", "display_mode_asof",
+        "entity_class_display_mode_asof", "semantic_annotation_asof",
+        "value_scalar_asof", "value_long_asof", "value_array_asof",
+        "definition_value_scalar_asof", "definition_value_long_asof",
+        "definition_value_array_asof"]
+
+    def guard_shapes(m, c):
+        # The B1 consumer shapes: bare, aggregate (projection fully pruned),
+        # column-pruned constant projection, join into another relation
+        # (every macro exposes valid_from_commit).
+        return [
+            f"SELECT * FROM {m}({c})",
+            f"SELECT count(*) FROM {m}({c})",
+            f"SELECT 1 FROM {m}({c})",
+            f'SELECT count(*) FROM {m}({c}) t JOIN "commit" cm'
+            f" ON cm.id = t.valid_from_commit"]
+
+    def guard_sweep(c):
+        """Per macro: 'error' if all shapes fail loudly on the guard,
+        'silent' if all succeed, else the offending shape."""
+        out = {}
+        for m in asof_macros:
+            verdicts = set()
+            for shape in guard_shapes(m, c):
+                try:
+                    con.execute(shape).fetchall()
+                    verdicts.add("silent")
+                except duckdb.Error as e:
+                    verdicts.add("error" if "unreliable" in str(e) else f"BAD:{e}")
+            out[m] = verdicts.pop() if len(verdicts) == 1 else f"mixed:{verdicts}"
+        return out
+
+    c_latest = one('SELECT max(id) FROM "commit"')[0]
+    sweep = guard_sweep(c_latest)
+    check("erasure guard: all 31 as-of macros silent in every shape on a"
+          " marker-free database",
+          all(v == "silent" for v in sweep.values()),
+          str({m: v for m, v in sweep.items() if v != "silent"}))
+
+    # Plant an erasure marker raw (the marker is append-only by convention —
+    # this is the smoke suite's usual plant-assert-clean pattern; the Rust
+    # suite exercises the real erase primitive end-to-end).
+    con.execute("BEGIN")
+    c_erase = new_commit(con, "hostile: planted erasure marker")
+    con.execute("INSERT INTO erasure_marker (kind, alternative_id, at_commit,"
+                " rows_removed, bytes_estimate, note)"
+                " VALUES ('alternative', ?, ?, 0, 0, 'smoke plant')", [high, c_erase])
+    con.execute("COMMIT")
+
+    sweep = guard_sweep(c_erase - 1)
+    for m in asof_macros:
+        check(f"erasure guard: {m} fails loudly before the marker in ALL"
+              f" consumer shapes", sweep[m] == "error", str(sweep[m]))
+    sweep = guard_sweep(c_erase)
+    check("erasure guard: all 31 macros exact and silent AT the marker commit",
+          all(v == "silent" for v in sweep.values()),
+          str({m: v for m, v in sweep.items() if v != "silent"}))
+
+    ae = allrows("SELECT kind, scope_name, scope_unresolved, at_commit,"
+                 " last_unreliable_asof FROM audit_erasure")
+    check("audit_erasure: marker inventory resolves scope to the retained"
+          " identity and reports the unreliable as-of range",
+          ae == [("alternative", "high", False, c_erase, c_erase - 1)], str(ae))
+
+    con.execute("DELETE FROM erasure_marker")  # raw cleanup, like every plant
+    n_bad = sum(1 for v in guard_sweep(c_erase - 1).values() if v != "silent")
+    check("erasure guard: silent again after the marker plant is cleaned up",
+          n_bad == 0, f"n={n_bad}")
+
     # ---- everything green again after the hostile section's cleanups
     for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
                  "audit_type_conformance", "audit_index_accelerator",

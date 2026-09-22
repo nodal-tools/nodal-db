@@ -64,8 +64,14 @@ pub mod object_delete;
 
 /// Physical repack (Sense A): rebuild the DB file into a fresh, densely-packed
 /// one that reclaims dead blocks while preserving ALL logical content, then
-/// atomically swap it in (`specs/compaction_DESIGN.md`).
+/// atomically swap it in (`specs/compaction_DESIGN.md`). The rebuild copy is
+/// clustered current-first (erasure_compaction_plan §4.1, always-on).
 pub mod compaction;
+
+/// Hard erasure: physical removal with a trace — erase-by-alternative plus the
+/// `erasure_marker` write, one atomic transaction; the sanctioned exception to
+/// append-only history (`specs/erasure_compaction_plan.md`).
+pub mod erasure;
 
 /// The template IR loader: parse/validate the YAML-1.2/JSON vocabulary IR,
 /// load into a fresh DB, reconcile against a populated one (three-layer

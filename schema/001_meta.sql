@@ -25,6 +25,7 @@ CREATE SEQUENCE seq_display_mode;
 -- (no seq for entity_class_display_mode: composite-keyed link table)
 CREATE SEQUENCE seq_run;                 -- provenance keystone (Decision 13, run table)
 CREATE SEQUENCE seq_semantic_annotation; -- polymorphic ontology crosswalk (fitness 2b)
+CREATE SEQUENCE seq_erasure_marker;      -- hard-erasure trace (erasure_compaction_plan §1.1, D-E1)
 
 -- The commit table (SDP Part 1 `commit`): append-only and immutable — the one
 -- exception to the mutable-table from/to pattern. max(id) doubles as the
@@ -36,6 +37,48 @@ CREATE TABLE commit (
   timestamp TIMESTAMP NOT NULL DEFAULT now()::TIMESTAMP,
   user      VARCHAR NOT NULL,
   message   VARCHAR
+);
+
+-- The one sanctioned trace of physical removal (erasure_compaction_plan §1.1,
+-- decision D-E1 2026-09-19). Append-only and immutable, like `commit`: markers
+-- are the permanent, truthful record that removal happened — never versioned,
+-- updated, or themselves erased. A marker row is written in the SAME
+-- transaction as the removal it records (the removed rows carry no close-out
+-- edge — the marker IS their trace). Shaped for the whole anticipated grain
+-- family (HANDOFF §8.4: alternative / horizon / entity, with detach-to-archive
+-- riding kind='alternative' + continuation_db); the v1 core writes only
+-- kind='alternative' and refuses the rest. The as-of guard in
+-- 110_views_history.sql consults this table relationally on every as-of read —
+-- which is why it is a base table, not a `metadata` reserved key.
+-- Scope columns are ids, not names; the identity rows they point to are
+-- RETAINED (closed, never removed — D-E2), so a marker always resolves to a
+-- name. They carry no engine FKs (versioned targets — deviation D1);
+-- `at_commit` is engine-enforced against the append-only commit log.
+CREATE TABLE erasure_marker (
+  id               BIGINT PRIMARY KEY DEFAULT nextval('seq_erasure_marker'),
+  kind             VARCHAR NOT NULL,   -- 'alternative' | 'horizon' | 'entity'
+                                       -- (extensible tag; v1 core writes only
+                                       --  'alternative' and refuses the rest)
+  -- exactly one scope column per kind (CHECKed below):
+  alternative_id   BIGINT,             -- kind='alternative': all data under it
+  entity_id        BIGINT,             -- kind='entity' (future): poison removal
+  horizon_commit   BIGINT REFERENCES commit(id),
+                                       -- kind='horizon' (future): superseded
+                                       -- content with valid_to_commit <= this
+                                       -- was removed
+  at_commit        BIGINT NOT NULL REFERENCES commit(id),
+                                       -- the erasure commit (when it happened)
+  continuation_db  VARCHAR,            -- NULL = truncated (bytes gone).
+                                       -- Else: the DB-identity UUID of the
+                                       -- archive file now holding the removed
+                                       -- rows (detach-to-archive, future).
+  rows_removed     BIGINT NOT NULL,    -- total across tables (report detail in
+                                       -- the API report, not the marker)
+  bytes_estimate   BIGINT,             -- advisory payload estimate at erase time
+  note             VARCHAR,            -- free-form operator context
+  CHECK ((kind = 'alternative') = (alternative_id IS NOT NULL)),
+  CHECK ((kind = 'entity')      = (entity_id      IS NOT NULL)),
+  CHECK ((kind = 'horizon')     = (horizon_commit IS NOT NULL))
 );
 
 -- One key/value metadata table (SDP Part 1 `metadata`): dataset-level facts

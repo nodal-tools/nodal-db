@@ -13,8 +13,14 @@
 //!
 //! It is **non-destructive**: every history row (live AND superseded), the whole
 //! `commit` log, all axes/metadata and sequence state survive byte-for-byte at
-//! the query level. The catalog (74 views, 38 macros, 17 sequences, indexes) is
+//! the query level. The catalog (75 views, 38 macros, 18 sequences, indexes) is
 //! reconstructed by `init_schema`, never copied — only base-table data crosses.
+//!
+//! ## Clustering (erasure_compaction_plan §4.1, D-E4 — always-on)
+//! The rebuild copy ORDER-BYs each table per [`CLUSTER_KEYS`]: current-first on
+//! versioned tables, key/natural order elsewhere. Content is untouched (the
+//! order-independent self-check still covers every row); only physical layout
+//! changes — see the `CLUSTER_KEYS` docs for the verified mechanism.
 //!
 //! ## Crash safety (§3)
 //! The original is only ever *read* (attached RO) until the final `rename`.
@@ -74,7 +80,7 @@ pub struct CompactionReport {
 /// source read *cheaply* before a temp is built (R2); it is cross-checked
 /// against the freshly-init'd temp's own `metadata` row (see
 /// [`assert_temp_schema_version`]) so it can never silently drift from the DDL.
-pub const SCHEMA_VERSION: &str = "0.2-ddl-critique-fixes";
+pub const SCHEMA_VERSION: &str = "0.3-erasure-marker";
 
 /// Default byte-growth watermark for [`compact_if_needed`]: repack once the DB
 /// file has grown to at least this multiple of its size right after the last
@@ -101,6 +107,11 @@ const TABLE_ORDER: &[&str] = &[
     // FK targets first.
     "commit",
     "axis",
+    // References commit only (`at_commit`, `horizon_commit`); append-only
+    // erasure trace (erasure_compaction_plan §1.1) — copied verbatim like
+    // every base table (§4.2: erased rows are simply not there, so compaction
+    // stays copy-verbatim-and-self-check).
+    "erasure_marker",
     // The rest — no remaining engine FKs to order among.
     "metadata",
     "entity_metadata",
@@ -196,6 +207,121 @@ fn generated_for(table: &str) -> &'static [&'static str] {
         .find(|(t, _)| *t == table)
         .map(|(_, c)| *c)
         .unwrap_or(&[])
+}
+
+/// Per-table clustering key columns for the rebuild copy's `ORDER BY`
+/// (erasure_compaction_plan §4.1, decision D-E4: clustering is ALWAYS-ON).
+/// The rule, applied uniformly by [`cluster_order`]:
+///
+///   - table has a `valid_to_commit` column (from/to tiers and all narrow
+///     versioned tables; also `value_array_hist`, whose liveness expression is
+///     constant-false) ⇒ `ORDER BY (valid_to_commit IS NULL) DESC, <keys>,
+///     valid_from_commit` — **current-first**, then key locality, then history
+///     order;
+///   - otherwise (append-only tables, axis children, the all-live
+///     `value_array`) ⇒ `ORDER BY <keys>` — natural/key order, locality only.
+///
+/// **Mechanism, stated correctly** (critique M2, empirical on DuckDB 1.5.5):
+/// the current-first win is **cheap contiguous validity-vector filtering**
+/// (~2× faster current-state scans on a 2 M-row/50%-dead fixture), NOT
+/// row-group skipping — 1.5.5 does not use null-count segment stats to
+/// eliminate row groups on `valid_to_commit IS NULL`; both layouts scan every
+/// row. Min/max zone maps DO prune on the sortable key columns (verified), so
+/// the key part buys genuine skipping for keyed reads. Insertion order
+/// verifiably persists through CHECKPOINT and reopen. The B3 self-check is
+/// order-independent (`count` + `bit_xor(hash(...))`), so clustering needs
+/// zero self-check changes; determinism costs no flag surface, and the sort
+/// is bounded by compaction already being a whole-file rewrite.
+///
+/// Every listed column is validated against the live catalog at repack time
+/// ([`cluster_order`] hard-errors on a missing column), so this map cannot
+/// silently drift from the DDL. Every TABLE_ORDER entry must appear here.
+const CLUSTER_KEYS: &[(&str, &[&str])] = &[
+    // Append-only: id / natural key (verbatim order).
+    ("commit", &["id"]),
+    ("axis", &["id"]),
+    ("erasure_marker", &["id"]),
+    ("run", &["id"]),
+    ("axis_datetime", &["axis_id", "pos"]),
+    ("axis_period", &["axis_id", "pos"]),
+    ("axis_label", &["axis_id", "pos"]),
+    ("axis_integer", &["axis_id", "pos"]),
+    ("axis_float", &["axis_id", "pos"]),
+    ("axis_time_pattern", &["axis_id", "pos", "term_no"]),
+    // All-live array tier: key triple (locality only — no validity column).
+    ("value_array", &["entity_id", "parameter_definition_id", "alternative_id"]),
+    // History twin: key triple (+ valid_from via the uniform versioned rule).
+    ("value_array_hist", &["entity_id", "parameter_definition_id", "alternative_id"]),
+    // From/to value tiers: key triple (long adds its position tuple).
+    ("value_scalar", &["entity_id", "parameter_definition_id", "alternative_id"]),
+    (
+        "value_long",
+        &["entity_id", "parameter_definition_id", "alternative_id", "i1_pos", "i2_pos", "i3_pos", "i4_pos"],
+    ),
+    ("definition_value_scalar", &["parameter_definition_id", "slot"]),
+    ("definition_value_long", &["parameter_definition_id", "slot", "i1_pos", "i2_pos", "i3_pos", "i4_pos"]),
+    ("definition_value_array", &["parameter_definition_id", "slot"]),
+    // Narrow versioned tables: their identity/key columns.
+    ("metadata", &["id"]),
+    ("entity_metadata", &["entity_id", "metadata_id"]),
+    ("parameter_value_metadata", &["entity_id", "parameter_definition_id", "alternative_id", "metadata_id"]),
+    ("alternative", &["id"]),
+    ("scenario", &["id"]),
+    ("scenario_alternative", &["scenario_id", "alternative_id"]),
+    ("entity_alternative", &["entity_id", "alternative_id"]),
+    ("membership", &["group_entity_id", "member_entity_id", "alternative_id"]),
+    ("display_mode", &["id"]),
+    ("entity_class_display_mode", &["display_mode_id", "entity_class_id"]),
+    ("entity_class", &["id"]),
+    ("class_set", &["id"]),
+    ("class_set_member", &["class_set_id", "member_class_id"]),
+    ("entity_class_dimension", &["entity_class_id", "position"]),
+    ("entity", &["id"]),
+    ("entity_element", &["entity_id", "position"]),
+    ("entity_location", &["entity_id"]),
+    ("units_of_measure", &["id"]),
+    ("parameter_value_list", &["id"]),
+    ("list_value", &["id"]),
+    ("parameter_definition", &["id"]),
+    ("entity_parameter_unit", &["entity_id", "parameter_definition_id"]),
+    ("parameter_type", &["id"]),
+    ("parameter_type_dimension", &["parameter_type_id", "position"]),
+    ("semantic_annotation", &["id"]),
+];
+
+/// The `ORDER BY` clause for one table's rebuild copy (see [`CLUSTER_KEYS`]).
+/// Hard-errors on a table missing from the map or a key column absent from the
+/// live catalog (`real_cols` — the same drift discipline as [`check_catalog`]).
+fn cluster_order(table: &str, real_cols: &[String]) -> Result<String, DbError> {
+    let keys = CLUSTER_KEYS
+        .iter()
+        .find(|(t, _)| *t == table)
+        .map(|(_, k)| *k)
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "compaction catalog drift: table {table:?} has no CLUSTER_KEYS entry \
+                 (a schema edit added a table; update compaction::CLUSTER_KEYS)"
+            ))
+        })?;
+    for k in keys {
+        if !real_cols.iter().any(|c| c == k) {
+            return Err(DbError::Api(format!(
+                "compaction catalog drift: cluster key column {k:?} of table {table:?} \
+                 is gone (update compaction::CLUSTER_KEYS)"
+            )));
+        }
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(keys.len() + 2);
+    let versioned = real_cols.iter().any(|c| c == "valid_to_commit");
+    if versioned {
+        // Current-first (D-E4): live rows form one contiguous prefix.
+        parts.push("(\"valid_to_commit\" IS NULL) DESC".to_string());
+    }
+    parts.extend(keys.iter().map(|k| q(k)));
+    if versioned {
+        parts.push(q("valid_from_commit"));
+    }
+    Ok(format!(" ORDER BY {}", parts.join(", ")))
 }
 
 /// Quote a SQL identifier (double-quote, embedded `"` doubled). Every table and
@@ -331,6 +457,22 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
     })?;
     fsync_dir(dir);
 
+    // Stale-WAL hygiene (erasure_compaction_plan §7 item 7 / critique m7b): a
+    // `<db>.wal` sidecar surviving to this point can only belong to the OLD
+    // inode (left by a writer that crashed BEFORE this compaction — normal
+    // closes checkpoint and remove it; we hold the per-path lock, and the
+    // source's file lock was held through the copy). Its committed content is
+    // already IN the new file: the RO source probe/ATTACH above replays the
+    // WAL, so the copy included it (a corrupt WAL fails that open loudly and
+    // we never reach here). Replaying it against the freshly-swapped file on
+    // the next RW open is the hazard; unlink it.
+    let stale_wal = {
+        let mut w = db_path.as_os_str().to_os_string();
+        w.push(".wal");
+        PathBuf::from(w)
+    };
+    let _ = fs::remove_file(&stale_wal);
+
     let bytes_after = fs::metadata(db_path).map(|m| m.len()).unwrap_or(bytes_before);
 
     // Refresh the byte-growth baseline (R1) to the just-compacted size — written
@@ -393,8 +535,13 @@ fn repack_into(
             .map(|(_, c)| c)
             .expect("every TABLE_ORDER entry is discovered");
         let list = cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
+        // Clustered copy (erasure_compaction_plan §4.1, always-on — D-E4):
+        // current-first / key-ordered per CLUSTER_KEYS. Insertion order
+        // persists through CHECKPOINT; the order-independent self-check is
+        // unaffected.
+        let order = cluster_order(table, cols)?;
         let sql = format!(
-            "INSERT INTO {t} ({list}) SELECT {list} FROM src.{t}",
+            "INSERT INTO {t} ({list}) SELECT {list} FROM src.{t}{order}",
             t = q(table)
         );
         conn.execute_batch(&sql)?;

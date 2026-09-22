@@ -104,6 +104,34 @@ enum Command {
         #[arg(long)]
         force_replace: bool,
     },
+    /// Hard-erase one alternative's data (physical removal WITH a trace:
+    /// closes the identity row, DELETEs every alternative-keyed row across
+    /// all tiers, and writes an erasure_marker in the same transaction —
+    /// specs/erasure_compaction_plan.md). Bytes return to the OS at the next
+    /// compaction. NOTE (D-E6): the mechanism is DB-agnostic; running it
+    /// against a curated INPUT database is almost certainly a mistake — the
+    /// sanctioned customer is output-DB overwrite-on-rerun.
+    EraseAlternative {
+        /// Target DuckDB file.
+        db: PathBuf,
+        /// The alternative to erase (name; case-insensitive, resolves closed
+        /// identities too).
+        name: String,
+        /// Report what WOULD be removed (rows per table, bytes estimate) and
+        /// exit without touching the database.
+        #[arg(long)]
+        preview: bool,
+        /// Free-form operator context, stored on the marker row.
+        #[arg(long)]
+        note: Option<String>,
+        /// Rerun-overwrite ordering belt: each named alternative must have a
+        /// current row (the replacement run) or the erase refuses.
+        #[arg(long = "expect-present")]
+        expect_present: Vec<String>,
+        /// Commit author for the erasure commit; defaults to the OS username.
+        #[arg(long)]
+        user: Option<String>,
+    },
     /// Not implemented in v1 core (verb reserved; the v1 reconcile runner is
     /// `template apply`).
     Migrate,
@@ -175,6 +203,72 @@ fn main() -> anyhow::Result<()> {
             message,
             force_replace,
         }),
+        Command::EraseAlternative { db, name, preview, note, expect_present, user } => {
+            use nodal_db_core::erasure;
+            use nodal_db_core::types::{ObjectDeleteKey, ObjectKind, ObjectRef};
+            let key = ObjectDeleteKey {
+                kind: ObjectKind::Alternative,
+                class: None,
+                target: ObjectRef::Name(name.clone()),
+            };
+            if preview {
+                let p = erasure::preview_erase_alternative(&db, &key)?;
+                if !p.found {
+                    bail!("alternative '{name}' not found (no identity row)");
+                }
+                println!(
+                    "would erase alternative '{}' (id {}, identity {}):",
+                    p.alternative_name,
+                    p.alternative_id,
+                    if p.still_current { "current — will be closed" } else { "already closed" }
+                );
+                for tc in &p.per_table {
+                    println!("  {:<24} {:>10} rows", tc.table, tc.rows);
+                }
+                println!(
+                    "  total {} rows, ~{} payload bytes (advisory)",
+                    p.rows_total, p.bytes_estimate
+                );
+                for s in &p.referencing_scenarios {
+                    println!("  note: scenario '{}' (id {}) loses a rank row", s.name, s.id);
+                }
+                if !p.referencing_runs.is_empty() {
+                    println!("  note: erases the results of run(s) {:?}", p.referencing_runs);
+                }
+                return Ok(());
+            }
+            let user = import::resolve_user_from(user.as_deref())?;
+            let expect: Vec<&str> = expect_present.iter().map(String::as_str).collect();
+            let opts = erasure::EraseOpts {
+                note: note.as_deref(),
+                expect_present: &expect,
+            };
+            let r = erasure::erase_alternative(&db, &key, &opts, &user)?;
+            if !r.erased {
+                println!(
+                    "nothing to erase: alternative '{name}' (id {}) is already closed with no \
+                     data rows (no commit, no marker written)",
+                    r.alternative_id
+                );
+                return Ok(());
+            }
+            println!(
+                "erased alternative '{name}' (id {}): {} rows across {} tables, \
+                 ~{} payload bytes; marker {} at commit {}{}",
+                r.alternative_id,
+                r.rows_total,
+                r.per_table.len(),
+                r.bytes_estimate,
+                r.marker_id,
+                r.commit_id,
+                if r.identity_closed { "; identity row closed" } else { "" }
+            );
+            for tc in &r.per_table {
+                println!("  {:<24} {:>10} rows", tc.table, tc.rows);
+            }
+            println!("(bytes return to the OS at the next compaction)");
+            Ok(())
+        }
         Command::Migrate => bail!(
             "migrate: not implemented in v1 core (the v1 reconcile runner is \
              `template apply`)"

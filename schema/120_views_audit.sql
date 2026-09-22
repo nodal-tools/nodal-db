@@ -847,3 +847,50 @@ FROM (
 UNION ALL
 SELECT 'database file', NULL, NULL, NULL, NULL, 'size: ' || database_size
 FROM pragma_database_size();
+
+-- ---------------------------------------------------------------------------
+-- Erasure inventory (erasure_compaction_plan §1.3; reporting, NOT blocking —
+-- unlike the audit_* views above, a non-empty result is not damage: it is the
+-- truthful record that hard erasure happened). One row per erasure_marker:
+--   - scope resolution: the marker's id resolved to the RETAINED identity row
+--     (D-E2 — identities are closed, never removed; `scope_unresolved` TRUE
+--     means someone removed an identity row out of contract);
+--   - the affected as-of range: any as-of at a commit < at_commit is refused
+--     by the 110 guard (`last_unreliable_asof` = at_commit - 1 for the NEWEST
+--     marker; earlier markers are subsumed by later ones);
+--   - the erasure commit's who/when, for the history viewer's
+--     "changed at commit C; content erased" rendering (VMP Part 5 UX).
+-- Rows physically absent with NO marker are the out-of-contract raw-DELETE
+-- signature (erasure_compaction_plan §5.2), surfaced by the Part-5 continuity
+-- audits (audit_history_tiling), not here.
+CREATE VIEW audit_erasure AS
+SELECT em.id AS marker_id,
+       em.kind,
+       em.alternative_id,
+       em.entity_id,
+       em.horizon_commit,
+       CASE em.kind
+         WHEN 'alternative' THEN
+           (SELECT a.name FROM alternative a WHERE a.id = em.alternative_id
+            ORDER BY a.version DESC LIMIT 1)
+         WHEN 'entity' THEN
+           (SELECT e.name FROM entity e WHERE e.id = em.entity_id
+            ORDER BY e.version DESC LIMIT 1)
+       END AS scope_name,
+       CASE em.kind
+         WHEN 'alternative' THEN
+           NOT EXISTS (SELECT 1 FROM alternative a WHERE a.id = em.alternative_id)
+         WHEN 'entity' THEN
+           NOT EXISTS (SELECT 1 FROM entity e WHERE e.id = em.entity_id)
+         ELSE FALSE   -- horizon scope is a commit id, engine-FK-enforced
+       END AS scope_unresolved,
+       em.at_commit,
+       em.at_commit - 1 AS last_unreliable_asof,
+       c.timestamp AS erased_at,
+       c.user AS erased_by,
+       em.rows_removed,
+       em.bytes_estimate,
+       em.continuation_db,
+       em.note
+FROM erasure_marker em
+JOIN commit c ON c.id = em.at_commit;

@@ -27,7 +27,7 @@ SCHEMA_DIR = pathlib.Path(__file__).resolve().parent
 MINIMUM_DUCKDB = (1, 4)
 
 # Must match the bootstrap row in 900_bootstrap.sql.
-SCHEMA_VERSION = "0.2-ddl-critique-fixes"
+SCHEMA_VERSION = "0.3-erasure-marker"
 
 
 def check_duckdb_version() -> None:

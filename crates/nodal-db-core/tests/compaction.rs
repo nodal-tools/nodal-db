@@ -81,7 +81,7 @@ fn scalar(db: &Path, sql: &str) -> i64 {
 /// Every base table (same set as `compaction::TABLE_ORDER`) — used to assert
 /// per-table row counts are preserved.
 const ALL_TABLES: &[&str] = &[
-    "commit", "axis", "metadata", "entity_metadata", "parameter_value_metadata", "run",
+    "commit", "axis", "erasure_marker", "metadata", "entity_metadata", "parameter_value_metadata", "run",
     "alternative", "scenario", "scenario_alternative", "entity_alternative", "membership",
     "axis_datetime", "axis_period", "axis_label", "axis_integer", "axis_float", "axis_time_pattern",
     "display_mode", "entity_class_display_mode", "entity_class", "class_set", "class_set_member",
@@ -317,6 +317,170 @@ fn compact_sweeps_orphan_temps_and_keeps_original() {
     assert!(!orphan.exists(), "compact() did not sweep the orphan on entry");
     let after_fp = fingerprint(&db, "SELECT * FROM read_parameter('Widget','size')");
     assert_eq!(after_fp, before_fp, "content changed across compact");
+}
+
+// --- (g) clustering (erasure_compaction_plan §4.1, D-E4 always-on) ----------
+
+/// Raw-build a value_scalar population with live and dead rows physically
+/// INTERLEAVED (each key inserts its dead v1 then its live v2, so the layout
+/// alternates dead/live), plus the two commit rows the spans reference.
+fn build_interleaved(dir: &Path, n_keys: i64) -> std::path::PathBuf {
+    let db = dir.join("interleaved.duckdb");
+    nodal_db_core::schema_init::init_schema(&db).expect("init");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO \"commit\" (user, message) VALUES ('t', 'c2');
+         INSERT INTO value_scalar
+           (entity_id, parameter_definition_id, alternative_id, valid_from_commit,
+            valid_to_commit, version, value_kind, v_float)
+         SELECT i.range, 1, 1, 1, x.vt, x.v, 'float', i.range * 10 + x.v
+         FROM range({n_keys}) i,
+              (VALUES (1::SMALLINT, 2::BIGINT), (2::SMALLINT, NULL::BIGINT)) x(v, vt)
+         ORDER BY i.range, x.v;
+         CHECKPOINT;"
+    ))
+    .expect("raw interleaved build");
+    conn.close().unwrap();
+    db
+}
+
+/// The physical row order of `(valid_to_commit IS NULL)` over value_scalar
+/// (rowid order = insertion/physical order), as a vec of bools.
+fn liveness_sequence(db: &Path) -> Vec<bool> {
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch("SET threads = 1").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT valid_to_commit IS NULL FROM value_scalar ORDER BY rowid")
+        .unwrap();
+    let seq: Vec<bool> = stmt
+        .query_map([], |r| r.get::<_, bool>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    seq
+}
+
+/// D-E4: the rebuild copy is clustered current-first — after compaction the
+/// physical layout of a from/to tier is one contiguous live prefix followed by
+/// the dead rows (the ordering IS the acceptance assertion at CI tier; the
+/// scan-time ratio is the `#[ignore]`d bench below, kept out of CI for
+/// flakiness). Content is untouched (self-check + count assertions).
+#[test]
+fn compact_clusters_from_to_tiers_current_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_interleaved(dir.path(), 5_000);
+
+    // Pre-compact: interleaved by construction (sanity — the fixture must not
+    // be accidentally clustered, or the post-assert is vacuous).
+    let pre = liveness_sequence(&db);
+    assert_eq!(pre.len(), 10_000);
+    assert!(!pre[..2].iter().all(|&l| l), "fixture must start interleaved");
+
+    let report = compact(&db).expect("compact");
+    assert!(report.swapped);
+
+    let post = liveness_sequence(&db);
+    assert_eq!(post.len(), 10_000, "row count must survive");
+    assert_eq!(post.iter().filter(|&&l| l).count(), 5_000, "live count must survive");
+    let first_dead = post.iter().position(|&l| !l).expect("dead rows exist");
+    assert_eq!(first_dead, 5_000, "live rows must form one contiguous prefix");
+    assert!(
+        post[first_dead..].iter().all(|&l| !l),
+        "no live row may follow the first dead row (current-first clustering)"
+    );
+}
+
+/// Acceptance 6's scan-time metric (target ≥1.5x per the critique's measured
+/// ~2x): clustered (compacted) vs unclustered (interleaved raw layout of the
+/// SAME data) current-state scan. `#[ignore]`d: wall-time ratios are too
+/// machine-sensitive for the CI tier — run with `--include-ignored` (the
+/// `just full` release gate). The CI-tier guarantee is the ordering assert
+/// above; the MECHANISM is contiguous validity-vector filtering, NOT
+/// row-group skipping (critique M2 — do not re-metric this on row-group
+/// counts; 1.5.5 does not skip row groups on liveness).
+#[test]
+#[ignore = "bench-style wall-time ratio; run in the release gate (just full)"]
+fn clustered_current_scan_is_measurably_faster() {
+    let dir = tempfile::tempdir().unwrap();
+    // 1M keys => 2M rows, 50% dead — the critique's fixture shape.
+    let unclustered = build_interleaved(dir.path(), 1_000_000);
+    let clustered = dir.path().join("clustered.duckdb");
+    std::fs::copy(&unclustered, &clustered).unwrap();
+    compact(&clustered).expect("compact clustered copy");
+
+    let time_scan = |db: &Path| -> f64 {
+        let conn = Connection::open(db).unwrap();
+        conn.execute_batch("SET threads = 1").unwrap();
+        let mut best = f64::INFINITY;
+        for _ in 0..7 {
+            let t0 = std::time::Instant::now();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1_000_000);
+            best = best.min(t0.elapsed().as_secs_f64());
+        }
+        conn.close().unwrap();
+        best
+    };
+    let t_unclustered = time_scan(&unclustered);
+    let t_clustered = time_scan(&clustered);
+    let ratio = t_unclustered / t_clustered;
+    println!("current-state scan: unclustered {t_unclustered:.4}s, clustered {t_clustered:.4}s, ratio {ratio:.2}x");
+    assert!(
+        ratio >= 1.3,
+        "clustered current-state scan not measurably faster: {ratio:.2}x (target >=1.5x, floor 1.3x)"
+    );
+
+    // Zone-map pruning on the sortable key part of the ORDER BY (the part
+    // that DOES skip row groups — critique M2's verified sanity leg).
+    let conn = Connection::open(&clustered).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM value_scalar WHERE entity_id < 1000",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2000);
+    conn.close().unwrap();
+}
+
+// --- (h) stale-WAL sidecar hygiene (erasure plan §7 item 7 / critique m7b) --
+
+/// A `<db>.wal` left by a previously-crashed writer must not survive a
+/// compaction swap: its content is already in the copied file (the RO
+/// open/ATTACH replays it), and replaying it against the freshly-swapped file
+/// on the next RW open is the hazard. DuckDB 1.5.5 silently tolerates an
+/// unparseable WAL (verified), so the unlink is hygiene + hazard removal, not
+/// crash-recovery interference.
+#[test]
+fn compact_unlinks_stale_wal_sidecar_after_swap() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 5);
+    let wal = {
+        let mut w = db.as_os_str().to_os_string();
+        w.push(".wal");
+        std::path::PathBuf::from(w)
+    };
+    // Simulate the crashed-writer leftover (header-invalid: DuckDB ignores it
+    // on open, so the compaction's source probe still succeeds — verified
+    // engine semantics on 1.5.5).
+    std::fs::write(&wal, b"stale wal from a crashed writer").unwrap();
+
+    let report = compact(&db).expect("compact with stale wal present");
+    assert!(report.swapped);
+    assert!(!wal.exists(), "stale <db>.wal must be unlinked after the swap");
+
+    // Next RW open + write works on the swapped file.
+    write_scalar(&db, "Widget", "size", "Base", "w_after_wal", 7.0);
+    let n = scalar(&db, "SELECT count(*) FROM entity WHERE cur_name = 'w_after_wal'");
+    assert_eq!(n, 1);
 }
 
 // --- compact_if_needed byte-growth watermark (R1 CALIBRATION FIX) -----------

@@ -9,9 +9,13 @@
 //!   unchanged template is a no-op (`template_content_hash` short-circuit,
 //!   then an empty diff).
 //! - **Layer 2 — identity hints.** The closed [`super::ir::MigrationStep`]
-//!   vocabulary (renames, `rename_list_member` with its value rewrite,
-//!   `move_parameter`) executes as ordinary from/to close-out versioning —
-//!   one commit per step, so history shows each migration step.
+//!   vocabulary (v2 per D14/D15: renames with collision policy and value
+//!   translation, `rename_list_member` with its default-on value rewrite,
+//!   `move_parameter`, the `merge_*` steps, and the explicit `drop_*`
+//!   close-outs) executes as ordinary from/to close-out versioning — one
+//!   commit per step, so history shows each migration step. Drops route
+//!   through the ONE object-delete cascade (`object_delete.rs`); the plan
+//!   shows their blast radius via the same delete preview (D14).
 //! - **Layer 3 — the `run:` escape hatch.** Named tool-side programs from the
 //!   caller's [`MigrationRegistry`], executed in declared order **through the
 //!   public write API** (each program commits via `api::commit_changes` etc.;
@@ -81,16 +85,22 @@ use crate::api::{
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::history::{
-    close_definition_default, literal_cols, rewrite_definition_string_values,
-    rewrite_scalar_string_values, write_definition_default,
+    close_definition_default, drop_scalar_values_not_matching, literal_cols,
+    rewrite_definition_string_values, rewrite_scalar_string_values, write_definition_default,
 };
-use crate::object_delete::resolve_element as resolve_element_in_dim;
-use crate::types::{fold, IndexKind, ScalarValue, ValueKind};
+use crate::object_delete::{
+    apply_object_delete, prepare_object_deletes, preview_one,
+    resolve_element as resolve_element_in_dim,
+};
+use crate::types::{
+    fold, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind,
+    ObjectRef, ScalarValue, ValueKind, WriteReport,
+};
 
 use super::dbvocab::{read_metadata_key, read_vocab, DbParam, DbVocab};
 use super::ir::{
-    self, effective_member_kind, Checked, Class, ListMember, Migration, MigrationStep, Parameter,
-    Template, TypeDecl,
+    self, effective_member_kind, Checked, Class, ListMember, Migration, MigrationStep,
+    OnCollision, Parameter, Template, TypeDecl, UnmappedValues,
 };
 
 // ---------------------------------------------------------------------------
@@ -471,9 +481,14 @@ pub struct ApplyOutcome {
     /// The plan as APPLIED (recomputed inside the final transaction).
     pub plan: ReconcilePlan,
     /// False when any skip occurred: `template_content_hash` was withheld
-    /// (module docs, "Partial-apply honesty").
+    /// (module docs, "Partial-apply honesty"). Chain-step skips (a
+    /// `drop_list_member` that would strand data) withhold convergence
+    /// exactly like reconcile skips (D14).
     pub converged: bool,
     pub warnings: Vec<String>,
+    /// Informational chain-step notes: cascade close-out counts of executed
+    /// drops (the D14 blast-radius record) and no-op/already-applied notes.
+    pub notes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -512,13 +527,26 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
         let guard = chain_guards(&vocab, t, &ApplyOptions::default());
         let spans = pending_spans(&vocab, t);
         let mut planned_spans = Vec::new();
+        let mut chain_blocked: Vec<String> = Vec::new();
         for m in &spans {
             planned_spans.push(PlannedSpan {
                 from: m.from.clone(),
                 to: m.to.clone(),
-                steps: m.steps.iter().map(|s| s.describe()).collect(),
+                steps: m
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        // D14: drop/merge steps carry their blast radius in
+                        // the plan (delete preview against the pre-chain DB —
+                        // best-effort, like the rest of the dry run).
+                        match blast_radius_note(conn, s) {
+                            Ok(Some(note)) => format!("{} — {note}", s.describe()),
+                            _ => s.describe(),
+                        }
+                    })
+                    .collect(),
             });
-            simulate_span(&mut vocab, m, &mut warnings);
+            simulate_span(&mut vocab, m, &mut warnings, &mut chain_blocked);
         }
         let mut p = diff(&vocab, &chk)?;
         p.db_commit = db_commit;
@@ -526,10 +554,88 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
         if let Err(e) = guard {
             guard_blocks.push(format!("apply will refuse: {e}"));
         }
+        guard_blocks.extend(chain_blocked);
         p.blocked.splice(0..0, guard_blocks);
         p.warnings.splice(0..0, warnings);
         Ok(p)
     })
+}
+
+/// The D14 blast-radius annotation for a plan's drop/merge steps: the delete
+/// preview's cascade counts against the CURRENT database (best-effort — a
+/// chain step running before this one may create, rename, or already close
+/// the target; the apply-time cascade is authoritative). `Ok(None)` for steps
+/// that destroy nothing.
+fn blast_radius_note(
+    conn: &Connection,
+    step: &MigrationStep,
+) -> Result<Option<String>, DbError> {
+    let key = match step {
+        MigrationStep::DropParameter { class, parameter } => ObjectDeleteKey {
+            kind: ObjectKind::Parameter,
+            class: Some(class.clone()),
+            target: ObjectRef::Name(parameter.clone()),
+        },
+        MigrationStep::DropClass { class } => ObjectDeleteKey {
+            kind: ObjectKind::Class,
+            class: None,
+            target: ObjectRef::Name(class.clone()),
+        },
+        // The stale source a collision-rename or a merge would close — only
+        // when the collision/merge will actually fire as of plan time (the
+        // target name is live too); otherwise these steps are plain renames
+        // and destroy nothing.
+        MigrationStep::RenameParameter {
+            class,
+            from,
+            to,
+            on_collision: OnCollision::DropSource,
+            ..
+        }
+        | MigrationStep::MergeParameter { class, from, to } => {
+            let both_live = match lookup_entity_class(conn, class)? {
+                Some(cid) => {
+                    lookup_parameter(conn, cid, to)?.is_some()
+                        && lookup_parameter(conn, cid, from)?.is_some()
+                }
+                None => false,
+            };
+            if !both_live {
+                return Ok(None);
+            }
+            ObjectDeleteKey {
+                kind: ObjectKind::Parameter,
+                class: Some(class.clone()),
+                target: ObjectRef::Name(from.clone()),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let pv = preview_one(conn, 0, &key)?;
+    if !pv.found {
+        return Ok(Some(
+            "target not present at plan time (best-effort preview; earlier chain steps \
+             may introduce or rename it)"
+                .into(),
+        ));
+    }
+    let mut per: Vec<String> =
+        pv.cascade.per_table.iter().map(|t| format!("{} {}", t.table, t.rows)).collect();
+    if per.is_empty() {
+        per.push("no dependent rows".into());
+    }
+    let verb = match step {
+        MigrationStep::DropParameter { .. } | MigrationStep::DropClass { .. } => {
+            "would close"
+        }
+        _ => "source close-out would cover",
+    };
+    Ok(Some(format!(
+        "{verb} {} row(s) as of plan time ({} object row(s); {})",
+        pv.cascade.total_rows,
+        pv.cascade.object_rows,
+        per.join(", ")
+    )))
 }
 
 /// Apply the template under the full guard sequence (module docs): the
@@ -638,13 +744,15 @@ pub fn apply(
     // --- Chain guards + blocked pre-check (review items 2, 3), one snapshot. ---
     let spans = with_read(db, |conn| {
         let mut w = Vec::new();
+        let mut chain_blocked = Vec::new();
         let mut vocab = read_vocab(conn, &mut w)?;
         chain_guards(&vocab, t, opts)?;
         let spans = pending_spans(&vocab, t);
         for m in &spans {
-            simulate_span(&mut vocab, m, &mut w);
+            simulate_span(&mut vocab, m, &mut w, &mut chain_blocked);
         }
-        let sim = diff(&vocab, &chk)?;
+        let mut sim = diff(&vocab, &chk)?;
+        sim.blocked.splice(0..0, chain_blocked);
         if !sim.blocked.is_empty() {
             return Err(blocked_error(&sim));
         }
@@ -673,6 +781,9 @@ pub fn apply(
     // write — advanced by every commit we (or a run: program) make, verified
     // inside the final transaction when expect_commit pinned the base.
     let mut cursor = pre.commit;
+    // Chain-step side reports (D14): skips withhold convergence exactly like
+    // reconcile skips; notes carry the executed cascades' blast radii.
+    let mut chain_effects = StepEffects::default();
 
     // --- Layer 2/3: the pending migration chain, in span/step order. ---
     for span in &spans {
@@ -714,14 +825,16 @@ pub fn apply(
                         "template {} migration {} -> {}: {desc}",
                         t.template.name, span.from, span.to
                     );
-                    let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
-                        execute_step(conn, c, declarative)?;
+                    let effects = with_write_txn_retrying(db, user, &msg, |conn, c| {
+                        let mut fx = StepEffects::default();
+                        execute_step(conn, c, declarative, &mut fx)?;
                         // Same-commit progress substamp: atomic with the step.
                         set_metadata(conn, c, "template_migration_step", &substamp)?;
-                        Ok(c)
+                        Ok((c, fx))
                     })?;
-                    out.commits.push(c);
-                    cursor = c;
+                    out.commits.push(effects.0);
+                    cursor = effects.0;
+                    chain_effects.absorb(effects.1, &format!("{} -> {}", span.from, span.to));
                 }
             }
         }
@@ -744,6 +857,8 @@ pub fn apply(
     // Pre-check RO so an empty diff never burns a commit (§7 idempotency);
     // the write txn re-diffs, so a racing writer only costs one replan,
     // never a wrong apply.
+    out.notes = chain_effects.notes.clone();
+    let chain_skips = chain_effects.skips.clone();
     let pre_plan = with_read(db, |conn| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
@@ -754,8 +869,11 @@ pub fn apply(
     }
     if pre_plan.actions.is_empty() {
         out.no_op = out.commits.is_empty();
-        out.converged = pre_plan.skipped.is_empty();
-        out.plan = pre_plan;
+        let mut p = pre_plan;
+        // Chain-step skips withhold convergence like reconcile skips (D14).
+        p.skipped.extend(chain_skips.iter().cloned());
+        out.converged = p.skipped.is_empty();
+        out.plan = p;
         return Ok(out);
     }
 
@@ -787,6 +905,9 @@ pub fn apply(
         if !p.blocked.is_empty() {
             return Err(blocked_error(&p));
         }
+        // Chain-step skips join the reconcile skips (D14): they withhold the
+        // content-hash certification through the same StampIdentity gate.
+        p.skipped.extend(chain_skips.iter().cloned());
         let mut ctx = ExecCtx {
             skipped: p.skipped.clone(),
             warnings: Vec::new(),
@@ -933,9 +1054,51 @@ fn pending_spans(vocab: &DbVocab, t: &Template) -> Vec<Migration> {
     out
 }
 
-/// Apply one span's renames/moves to the in-memory snapshot so the plan's diff
-/// reflects post-migration names. `run:` steps are opaque (noted).
-fn simulate_span(vocab: &mut DbVocab, m: &Migration, warnings: &mut Vec<String>) {
+/// Remove a class from the snapshot along with everything a DB-side class
+/// cascade would take: dependent dimension classes (B2, recursive), class-set
+/// memberships, entities, and memberships of the removed classes — so the
+/// plan's diff sees the post-drop vocabulary.
+fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
+    let mut doomed: HashSet<String> = HashSet::new();
+    doomed.insert(fold(class));
+    loop {
+        let mut grew = false;
+        for (key, c) in vocab.classes.iter() {
+            if doomed.contains(key) {
+                continue;
+            }
+            let hits = c.dims.iter().any(|d| {
+                matches!(d, super::dbvocab::DbDimRef::Class(n) if doomed.contains(&fold(n)))
+            });
+            if hits {
+                doomed.insert(key.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    vocab.classes.retain(|k, _| !doomed.contains(k));
+    for s in vocab.class_sets.values_mut() {
+        s.members.retain(|m| !doomed.contains(&fold(m)));
+    }
+    vocab.entities.retain(|(c, _), _| !doomed.contains(c));
+    vocab
+        .memberships
+        .retain(|m| !doomed.contains(&fold(&m.group_class)) && !doomed.contains(&fold(&m.member_class)));
+}
+
+/// Apply one span's renames/moves/merges/drops to the in-memory snapshot so
+/// the plan's diff reflects post-migration names. `run:` steps are opaque
+/// (noted). Conditions apply would REFUSE on (a `drop_value_list` whose list
+/// is still bound after the simulated prior steps) land in `blocked`.
+fn simulate_span(
+    vocab: &mut DbVocab,
+    m: &Migration,
+    warnings: &mut Vec<String>,
+    blocked: &mut Vec<String>,
+) {
     for step in &m.steps {
         match step {
             MigrationStep::RenameClass { from, to } => {
@@ -964,10 +1127,27 @@ fn simulate_span(vocab: &mut DbVocab, m: &Migration, warnings: &mut Vec<String>)
                     }
                 }
             }
-            MigrationStep::RenameParameter { class, from, to } => {
+            MigrationStep::RenameParameter { class, from, to, on_collision, .. } => {
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
-                    if let Some(mut p) = c.params.remove(&fold(from)) {
+                    if *on_collision == OnCollision::DropSource
+                        && c.params.contains_key(&fold(to))
+                        && fold(from) != fold(to)
+                    {
+                        // v28 shape: target already live ⇒ the source is the
+                        // stale row and closes (with its values) instead.
+                        c.params.remove(&fold(from));
+                    } else if let Some(mut p) = c.params.remove(&fold(from)) {
                         p.name = to.clone();
+                        c.params.insert(fold(to), p);
+                    }
+                }
+            }
+            MigrationStep::MergeParameter { class, from, to } => {
+                if let Some(c) = vocab.classes.get_mut(&fold(class)) {
+                    if c.params.contains_key(&fold(to)) {
+                        c.params.remove(&fold(from)); // merge: source closes
+                    } else if let Some(mut p) = c.params.remove(&fold(from)) {
+                        p.name = to.clone(); // target absent: create-by-rename
                         c.params.insert(fold(to), p);
                     }
                 }
@@ -1006,6 +1186,60 @@ fn simulate_span(vocab: &mut DbVocab, m: &Migration, warnings: &mut Vec<String>)
                     .and_then(|c| c.params.remove(&fold(name)));
                 if let (Some(p), Some(tc)) = (taken, vocab.classes.get_mut(&fold(to_class))) {
                     tc.params.insert(fold(name), p);
+                }
+            }
+            MigrationStep::MergeListMember { list, from, to } => {
+                if let Some(l) = vocab.value_lists.get_mut(&fold(list)) {
+                    let has_to = l.members.iter().any(|mem| {
+                        matches!(&mem.value, ScalarValue::Str(s) if s == to)
+                    });
+                    if has_to {
+                        l.members.retain(|mem| {
+                            !matches!(&mem.value, ScalarValue::Str(s) if s == from)
+                        });
+                    } else {
+                        for mem in &mut l.members {
+                            if matches!(&mem.value, ScalarValue::Str(s) if s == from) {
+                                mem.value = ScalarValue::Str(to.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            MigrationStep::DropParameter { class, parameter } => {
+                if let Some(c) = vocab.classes.get_mut(&fold(class)) {
+                    c.params.remove(&fold(parameter));
+                }
+            }
+            MigrationStep::DropClass { class } => simulate_drop_class(vocab, class),
+            MigrationStep::DropValueList { list } => {
+                let bound: Vec<String> = vocab
+                    .classes
+                    .values()
+                    .flat_map(|c| {
+                        c.params.values().filter_map(|p| {
+                            (p.value_list.as_deref().map(fold) == Some(fold(list)))
+                                .then(|| format!("{}.{}", c.name, p.name))
+                        })
+                    })
+                    .collect();
+                if bound.is_empty() {
+                    vocab.value_lists.remove(&fold(list));
+                } else {
+                    blocked.push(format!(
+                        "apply will refuse: drop_value_list {list:?} — {} definition(s) \
+                         still bind it after the preceding steps ({}); drop or rebind \
+                         them first",
+                        bound.len(),
+                        bound.join(", ")
+                    ));
+                }
+            }
+            MigrationStep::DropListMember { list, value } => {
+                if let Some(l) = vocab.value_lists.get_mut(&fold(list)) {
+                    l.members.retain(|mem| {
+                        !matches!(&mem.value, ScalarValue::Str(s) if s == value)
+                    });
                 }
             }
             MigrationStep::Run(p) => warnings.push(format!(
@@ -2500,7 +2734,182 @@ fn hint_class_id(conn: &Connection, step: &str, name: &str) -> Result<i64, DbErr
         .ok_or_else(|| DbError::Api(format!("{step}: class {name:?} not found")))
 }
 
-fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), DbError> {
+/// Per-step side reports (D14). `skips` withhold convergence exactly like
+/// reconcile skips; `notes` are informational (cascade counts, no-op notes).
+#[derive(Default)]
+pub(crate) struct StepEffects {
+    pub(crate) skips: Vec<String>,
+    pub(crate) notes: Vec<String>,
+}
+
+impl StepEffects {
+    fn absorb(&mut self, other: StepEffects, span: &str) {
+        self.skips
+            .extend(other.skips.into_iter().map(|s| format!("migration {span}: {s}")));
+        self.notes
+            .extend(other.notes.into_iter().map(|s| format!("migration {span}: {s}")));
+    }
+}
+
+/// Execute one explicit drop (D14) through the ONE object-delete cascade
+/// (`object_delete.rs` — same preparation, resolution, closure walk, and
+/// guarded close-outs as `api::delete_objects`; CLAUDE.md invariant #2).
+/// `NotFound` — absent, already closed, or a stale name — is a no-op note:
+/// the close-out's intent is already satisfied (the chain's steps stay
+/// re-runnable over partially-applied state, the FlexTool house style).
+fn cascade_close(
+    conn: &Connection,
+    c: i64,
+    step_name: &str,
+    key: ObjectDeleteKey,
+    fx: &mut StepEffects,
+) -> Result<(), DbError> {
+    let prepared = prepare_object_deletes(&[(key, ObjectDeleteOpts { cascade: true })])?;
+    let mut report = WriteReport::default();
+    apply_object_delete(conn, c, &prepared[0], &mut report)?;
+    match &report.object_deletes[0].result {
+        ObjectDeleteResult::Deleted { closed_out } => {
+            let per: Vec<String> = closed_out
+                .per_table
+                .iter()
+                .map(|t| format!("{} {}", t.table, t.rows))
+                .collect();
+            fx.notes.push(format!(
+                "{step_name}: closed {} row(s) ({} object row(s){})",
+                closed_out.total_rows,
+                closed_out.object_rows,
+                if per.is_empty() { String::new() } else { format!("; {}", per.join(", ")) }
+            ));
+        }
+        ObjectDeleteResult::NotFound => fx.notes.push(format!(
+            "{step_name}: target not found — nothing to close (intent already satisfied)"
+        )),
+        ObjectDeleteResult::Restricted { .. } => {
+            unreachable!("cascade:true never restricts")
+        }
+    }
+    Ok(())
+}
+
+/// The one list-member value rewrite (shared by `rename_list_member`,
+/// `merge_list_member`): rewrite matching CURRENT stored strings and defaults
+/// of every definition bound to the list, through the history protocol
+/// (retention honored per definition). Returns values rewritten.
+fn rewrite_list_bound_values(
+    conn: &Connection,
+    c: i64,
+    lid: i64,
+    from: &str,
+    to: &str,
+) -> Result<usize, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, retain_content FROM parameter_definition \
+         WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
+    )?;
+    let defs: Vec<(i64, bool)> = stmt
+        .query_map(params![lid], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut rewritten = 0usize;
+    for (pd_id, retain) in defs {
+        rewritten += rewrite_scalar_string_values(conn, c, pd_id, from, to, retain)?;
+        rewrite_definition_string_values(conn, c, pd_id, from, to)?;
+    }
+    Ok(rewritten)
+}
+
+/// The live string-member row of `lid` with value `v`, if any.
+fn list_member_id(conn: &Connection, lid: i64, v: &str) -> Result<Option<i64>, DbError> {
+    match conn.query_row(
+        "SELECT id FROM list_value WHERE cur_l = ? AND value_kind = 'string' \
+         AND v_str = ? AND valid_to_commit IS NULL",
+        params![lid, v],
+        |r| r.get(0),
+    ) {
+        Ok(id) => Ok(Some(id)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Apply a G6 `map_values` translation table to one definition's current
+/// values (and defaults): scalar-only guard, the `unmapped_values` policy
+/// first (over the pre-rewrite state), then each old→new rewrite through the
+/// history protocol.
+fn apply_value_map(
+    conn: &Connection,
+    c: i64,
+    step: &str,
+    pd_id: i64,
+    retain: bool,
+    map: &ir::UniqueMap<String>,
+    unmapped: UnmappedValues,
+    fx: &mut StepEffects,
+) -> Result<(), DbError> {
+    // Scalar-only guard: a translation table over indexed values is not a
+    // hint (write a run: program).
+    let nonscalar: i64 = conn.query_row(
+        "SELECT \
+           (SELECT count(*) FROM value_long WHERE parameter_definition_id = ?1 \
+              AND valid_to_commit IS NULL) + \
+           (SELECT count(*) FROM value_array WHERE parameter_definition_id = ?1)",
+        params![pd_id],
+        |r| r.get(0),
+    )?;
+    if nonscalar > 0 {
+        return Err(DbError::Api(format!(
+            "{step}: map_values only translates SCALAR values, but the definition holds \
+             {nonscalar} current indexed value row(s) — migrate them via a run: program"
+        )));
+    }
+    let keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+    match unmapped {
+        UnmappedValues::Keep => {}
+        UnmappedValues::Error => {
+            let placeholders = vec!["?"; keys.len()].join(", ");
+            let mut binds: Vec<duckdb::types::Value> = vec![pd_id.into()];
+            binds.extend(keys.iter().map(|k| duckdb::types::Value::Text((*k).to_string())));
+            let unmatched: i64 = conn.query_row(
+                &format!(
+                    "SELECT count(*) FROM value_scalar \
+                     WHERE valid_to_commit IS NULL AND parameter_definition_id = ? \
+                       AND NOT (value_kind = 'string' AND v_str IN ({placeholders}))"
+                ),
+                duckdb::params_from_iter(binds.iter()),
+                |r| r.get(0),
+            )?;
+            if unmatched > 0 {
+                return Err(DbError::Api(format!(
+                    "{step}: {unmatched} current value(s) match no map_values key \
+                     (unmapped_values: error)"
+                )));
+            }
+        }
+        UnmappedValues::Drop => {
+            let dropped = drop_scalar_values_not_matching(conn, c, pd_id, &keys, retain)?;
+            if dropped > 0 {
+                fx.notes.push(format!(
+                    "{step}: dropped {dropped} unmapped value(s) (fall to the default)"
+                ));
+            }
+        }
+    }
+    let mut rewritten = 0usize;
+    for (old, new) in map.iter() {
+        rewritten += rewrite_scalar_string_values(conn, c, pd_id, old, new, retain)?;
+        rewrite_definition_string_values(conn, c, pd_id, old, new)?;
+    }
+    if rewritten > 0 {
+        fx.notes.push(format!("{step}: translated {rewritten} stored value(s)"));
+    }
+    Ok(())
+}
+
+fn execute_step(
+    conn: &Connection,
+    c: i64,
+    step: &MigrationStep,
+    fx: &mut StepEffects,
+) -> Result<(), DbError> {
     match step {
         MigrationStep::RenameClass { from, to } => {
             if !charset_ok(to) {
@@ -2519,23 +2928,89 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
             row.name = to.clone();
             revise_ec_row(conn, c, &row)?;
         }
-        MigrationStep::RenameParameter { class, from, to } => {
+        MigrationStep::RenameParameter {
+            class,
+            from,
+            to,
+            on_collision,
+            map_values,
+            unmapped_values,
+        } => {
             if !charset_ok(to) {
                 return Err(DbError::Api(format!(
                     "rename_parameter: target {to:?} must match [A-Za-z0-9_]+"
                 )));
             }
             let cid = hint_class_id(conn, "rename_parameter", class)?;
-            let pd_id = lookup_parameter(conn, cid, from)?
-                .ok_or_else(|| DbError::Api(format!("rename_parameter: {from:?} not found")))?;
-            if fold(from) != fold(to) && lookup_parameter(conn, cid, to)?.is_some() {
-                return Err(DbError::Api(format!(
-                    "rename_parameter: {class}.{to} already exists"
-                )));
+            let src = lookup_parameter(conn, cid, from)?;
+            let tgt = if fold(from) != fold(to) {
+                lookup_parameter(conn, cid, to)?
+            } else {
+                None
+            };
+            if let Some(_tgt) = tgt {
+                // Target already live — the G2 collision (v28/v66's
+                // partial-prior-migration state).
+                match on_collision {
+                    OnCollision::Error => {
+                        return Err(DbError::Api(format!(
+                            "rename_parameter: {class}.{to} already exists (set \
+                             on_collision: drop_source to close the stale source \
+                             instead — the v28 shape)"
+                        )))
+                    }
+                    OnCollision::DropSource => {
+                        match src {
+                            // The stale source closes WITH its values, through
+                            // the one object-delete cascade (D14).
+                            Some(_) => cascade_close(
+                                conn,
+                                c,
+                                &format!(
+                                    "rename_parameter {class}.{from} (collision: \
+                                     dropping stale source)"
+                                ),
+                                ObjectDeleteKey {
+                                    kind: ObjectKind::Parameter,
+                                    class: Some(class.clone()),
+                                    target: ObjectRef::Name(from.clone()),
+                                },
+                                fx,
+                            )?,
+                            None => fx.notes.push(format!(
+                                "rename_parameter {class}.{from} -> {to}: source absent \
+                                 and target live — already applied"
+                            )),
+                        }
+                        if map_values.is_some() {
+                            fx.notes.push(format!(
+                                "rename_parameter {class}.{from} -> {to}: map_values \
+                                 not applied on the drop-source path (the source's \
+                                 values closed with it)"
+                            ));
+                        }
+                        return Ok(());
+                    }
+                }
             }
+            let pd_id = src
+                .ok_or_else(|| DbError::Api(format!("rename_parameter: {from:?} not found")))?;
             let mut row = read_pd_row(conn, pd_id)?;
+            let retain = row.retain_content;
             row.name = to.clone();
             revise_pd_row(conn, c, &row)?;
+            if let Some(map) = map_values {
+                apply_value_map(
+                    conn,
+                    c,
+                    &format!("rename_parameter {class}.{from} -> {to}"),
+                    pd_id,
+                    retain,
+                    map,
+                    *unmapped_values,
+                    fx,
+                )?;
+            }
         }
         MigrationStep::RenameValueList { from, to } => {
             let id = lookup_value_list(conn, from)?
@@ -2581,22 +3056,12 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
             close_row(conn, c, "list_value", member_id)?;
             insert_member_row(conn, c, &row)?;
             if *rewrite_values {
-                // The one data-touching hint (§4.2 Layer 2): rewrite matching
-                // CURRENT stored strings of every definition bound to this
-                // list — per definition, through the history protocol, which
-                // honors the definition's retain_content (VMP Part 5 stub
-                // contract; review item 5).
-                let mut stmt = conn.prepare(
-                    "SELECT id, retain_content FROM parameter_definition \
-                     WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
-                )?;
-                let defs: Vec<(i64, bool)> = stmt
-                    .query_map(params![lid], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<Result<_, _>>()?;
-                for (pd_id, retain) in defs {
-                    rewrite_scalar_string_values(conn, c, pd_id, from, to, retain)?;
-                    rewrite_definition_string_values(conn, c, pd_id, from, to)?;
-                }
+                // The data-touching hint semantics (§4.2 Layer 2, DEFAULT ON
+                // per D15): rewrite matching CURRENT stored strings of every
+                // definition bound to this list — per definition, through
+                // the history protocol, which honors the definition's
+                // retain_content (VMP Part 5 stub contract; review item 5).
+                rewrite_list_bound_values(conn, c, lid, from, to)?;
             }
         }
         MigrationStep::MoveParameter { name, from_class, to_class } => {
@@ -2632,6 +3097,265 @@ fn execute_step(conn: &Connection, c: i64, step: &MigrationStep) -> Result<(), D
             let mut row = read_pd_row(conn, pd_id)?;
             row.entity_class_id = to_cid;
             revise_pd_row(conn, c, &row)?;
+        }
+        MigrationStep::MergeParameter { class, from, to } => {
+            let step_name = format!("merge_parameter {class}.{from} -> {to}");
+            let cid = hint_class_id(conn, "merge_parameter", class)?;
+            let src = lookup_parameter(conn, cid, from)?;
+            let tgt = lookup_parameter(conn, cid, to)?;
+            match (src, tgt) {
+                (None, None) => {
+                    return Err(DbError::Api(format!(
+                        "merge_parameter: neither {class}.{from} nor {class}.{to} exists"
+                    )))
+                }
+                (None, Some(_)) => fx.notes.push(format!(
+                    "{step_name}: source absent and target live — already merged"
+                )),
+                (Some(pd_id), None) => {
+                    // Target absent ⇒ create-by-rename (the chain runs before
+                    // the final reconcile, which may be what introduces the
+                    // target definition — G3 ordering).
+                    if !charset_ok(to) {
+                        return Err(DbError::Api(format!(
+                            "merge_parameter: target {to:?} must match [A-Za-z0-9_]+"
+                        )));
+                    }
+                    let mut row = read_pd_row(conn, pd_id)?;
+                    row.name = to.clone();
+                    revise_pd_row(conn, c, &row)?;
+                    fx.notes
+                        .push(format!("{step_name}: target absent — renamed the source"));
+                }
+                (Some(src_id), Some(tgt_id)) => {
+                    // Scalar-only v1 merge: an indexed-value carry is a run:
+                    // program (same stance as map_values).
+                    let nonscalar: i64 = conn.query_row(
+                        "SELECT \
+                           (SELECT count(*) FROM value_long \
+                              WHERE parameter_definition_id = ?1 \
+                                AND valid_to_commit IS NULL) + \
+                           (SELECT count(*) FROM value_array \
+                              WHERE parameter_definition_id = ?1)",
+                        params![src_id],
+                        |r| r.get(0),
+                    )?;
+                    if nonscalar > 0 {
+                        return Err(DbError::Api(format!(
+                            "merge_parameter: {class}.{from} holds {nonscalar} current \
+                             indexed value row(s) — the v1 merge carries scalars only \
+                             (migrate indexed values via a run: program first)"
+                        )));
+                    }
+                    // Fill-if-absent (the v41 semantics): copy each current
+                    // scalar of the source to the target where the target's
+                    // (entity, alternative) slot is empty across ALL tiers.
+                    // The D11 member binding is REMAPPED to the target's own
+                    // rank-0 member of the same kind (a binding must reference
+                    // a parameter_type of its own definition), NULL when none.
+                    let copied = conn.execute(
+                        "INSERT INTO value_scalar \
+                           (entity_id, parameter_definition_id, alternative_id, \
+                            parameter_type_id, valid_from_commit, version, \
+                            content_retained, value_kind, v_float, v_int, v_bool, \
+                            v_str, v_datetime, v_dur_months, v_dur_micros) \
+                         SELECT s.entity_id, ?1, s.alternative_id, \
+                                (SELECT pt.id FROM parameter_type pt \
+                                  WHERE pt.parameter_definition_id = ?1 \
+                                    AND pt.valid_to_commit IS NULL \
+                                    AND pt.value_kind = s.value_kind AND pt.rank = 0), \
+                                ?2, \
+                                COALESCE((SELECT max(t.version) FROM value_scalar t \
+                                           WHERE t.entity_id = s.entity_id \
+                                             AND t.parameter_definition_id = ?1 \
+                                             AND t.alternative_id = s.alternative_id), 0) \
+                                  + 1, \
+                                TRUE, s.value_kind, s.v_float, s.v_int, s.v_bool, \
+                                s.v_str, s.v_datetime, s.v_dur_months, s.v_dur_micros \
+                         FROM value_scalar s \
+                         WHERE s.parameter_definition_id = ?3 \
+                           AND s.valid_to_commit IS NULL \
+                           AND NOT EXISTS (SELECT 1 FROM value_scalar t \
+                                 WHERE t.entity_id = s.entity_id \
+                                   AND t.parameter_definition_id = ?1 \
+                                   AND t.alternative_id = s.alternative_id \
+                                   AND t.valid_to_commit IS NULL) \
+                           AND NOT EXISTS (SELECT 1 FROM value_long t \
+                                 WHERE t.entity_id = s.entity_id \
+                                   AND t.parameter_definition_id = ?1 \
+                                   AND t.alternative_id = s.alternative_id \
+                                   AND t.valid_to_commit IS NULL) \
+                           AND NOT EXISTS (SELECT 1 FROM value_array t \
+                                 WHERE t.entity_id = s.entity_id \
+                                   AND t.parameter_definition_id = ?1 \
+                                   AND t.alternative_id = s.alternative_id)",
+                        params![tgt_id, c, src_id],
+                    )?;
+                    fx.notes.push(format!(
+                        "{step_name}: carried {copied} value(s) into empty target slots"
+                    ));
+                    // The source (with its remaining, superseded-by-target
+                    // values) closes through the one object-delete cascade.
+                    cascade_close(
+                        conn,
+                        c,
+                        &format!("{step_name}: closing source"),
+                        ObjectDeleteKey {
+                            kind: ObjectKind::Parameter,
+                            class: Some(class.clone()),
+                            target: ObjectRef::Name(from.clone()),
+                        },
+                        fx,
+                    )?;
+                }
+            }
+        }
+        MigrationStep::MergeListMember { list, from, to } => {
+            let step_name = format!("merge_list_member {list}: {from:?} -> {to:?}");
+            let lid = lookup_value_list(conn, list)?.ok_or_else(|| {
+                DbError::Api(format!("merge_list_member: list {list:?} not found"))
+            })?;
+            let from_id = list_member_id(conn, lid, from)?;
+            let to_id = list_member_id(conn, lid, to)?;
+            match (from_id, to_id) {
+                (None, None) => {
+                    return Err(DbError::Api(format!(
+                        "merge_list_member: {list} has neither member {from:?} nor {to:?}"
+                    )))
+                }
+                (None, Some(_)) => fx.notes.push(format!(
+                    "{step_name}: source member absent and target live — already merged"
+                )),
+                (Some(fid), None) => {
+                    // Target member absent ⇒ rename the member (G4 ordering:
+                    // the final reconcile may be what adds the target).
+                    let mut row = read_member_row(conn, fid)?;
+                    row.v_str = Some(to.clone());
+                    close_row(conn, c, "list_value", fid)?;
+                    insert_member_row(conn, c, &row)?;
+                    let n = rewrite_list_bound_values(conn, c, lid, from, to)?;
+                    fx.notes.push(format!(
+                        "{step_name}: target member absent — renamed the member, \
+                         rewrote {n} stored value(s)"
+                    ));
+                }
+                (Some(fid), Some(_)) => {
+                    // Both live (the v52 glpsol→highs shape): rewrite stored
+                    // values onto the surviving member, close the source row.
+                    let n = rewrite_list_bound_values(conn, c, lid, from, to)?;
+                    close_row(conn, c, "list_value", fid)?;
+                    fx.notes.push(format!(
+                        "{step_name}: rewrote {n} stored value(s), closed member {from:?}"
+                    ));
+                }
+            }
+        }
+        MigrationStep::DropParameter { class, parameter } => {
+            cascade_close(
+                conn,
+                c,
+                &format!("drop_parameter {class}.{parameter}"),
+                ObjectDeleteKey {
+                    kind: ObjectKind::Parameter,
+                    class: Some(class.clone()),
+                    target: ObjectRef::Name(parameter.clone()),
+                },
+                fx,
+            )?;
+        }
+        MigrationStep::DropClass { class } => {
+            cascade_close(
+                conn,
+                c,
+                &format!("drop_class {class}"),
+                ObjectDeleteKey {
+                    kind: ObjectKind::Class,
+                    class: None,
+                    target: ObjectRef::Name(class.clone()),
+                },
+                fx,
+            )?;
+        }
+        MigrationStep::DropValueList { list } => {
+            let step_name = format!("drop_value_list {list}");
+            let Some(lid) = lookup_value_list(conn, list)? else {
+                fx.notes.push(format!(
+                    "{step_name}: list not found — nothing to close (intent already \
+                     satisfied)"
+                ));
+                return Ok(());
+            };
+            // Orphan lists only: a bound list has a live binding this drop
+            // would strand — refuse (drop the definitions first, or rebind).
+            let bound: i64 = conn.query_row(
+                "SELECT count(*) FROM parameter_definition \
+                 WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
+                params![lid],
+                |r| r.get(0),
+            )?;
+            if bound > 0 {
+                return Err(DbError::Api(format!(
+                    "drop_value_list: {bound} current definition(s) still bind {list:?} \
+                     — drop them first (drop_parameter) or rebind them via reconcile"
+                )));
+            }
+            let members = conn.execute(
+                "UPDATE list_value SET valid_to_commit = ? \
+                 WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
+                params![c, lid],
+            )?;
+            close_row(conn, c, "parameter_value_list", lid)?;
+            fx.notes
+                .push(format!("{step_name}: closed the list and {members} member row(s)"));
+        }
+        MigrationStep::DropListMember { list, value } => {
+            let step_name = format!("drop_list_member {list}: {value:?}");
+            let Some(lid) = lookup_value_list(conn, list)? else {
+                fx.notes.push(format!(
+                    "{step_name}: list not found — nothing to close (intent already \
+                     satisfied)"
+                ));
+                return Ok(());
+            };
+            let Some(mid) = list_member_id(conn, lid, value)? else {
+                fx.notes.push(format!(
+                    "{step_name}: member not found — nothing to close (intent already \
+                     satisfied)"
+                ));
+                return Ok(());
+            };
+            // A drop never strands data (D14, the D12 ethos): while current
+            // values or defaults of the bound definitions still hold the
+            // string, the member is KEPT and the step SKIPS — convergence
+            // withheld, exactly like a reconcile skip. Rewrite first
+            // (merge_list_member / rename_list_member).
+            let stranded: i64 = conn.query_row(
+                "SELECT \
+                   (SELECT count(*) FROM value_scalar v \
+                      JOIN parameter_definition pd ON pd.id = v.parameter_definition_id \
+                       AND pd.valid_to_commit IS NULL \
+                       AND pd.parameter_value_list_id = ?1 \
+                      WHERE v.valid_to_commit IS NULL \
+                        AND v.value_kind = 'string' AND v.v_str = ?2) + \
+                   (SELECT count(*) FROM definition_value_scalar d \
+                      JOIN parameter_definition pd ON pd.id = d.parameter_definition_id \
+                       AND pd.valid_to_commit IS NULL \
+                       AND pd.parameter_value_list_id = ?1 \
+                      WHERE d.valid_to_commit IS NULL \
+                        AND d.value_kind = 'string' AND d.v_str = ?2)",
+                params![lid, value],
+                |r| r.get(0),
+            )?;
+            if stranded > 0 {
+                fx.skips.push(format!(
+                    "drop_list_member {list}: {value:?} kept — {stranded} current \
+                     value/default row(s) still hold it (rewrite them first: \
+                     merge_list_member or rename_list_member)"
+                ));
+            } else {
+                close_row(conn, c, "list_value", mid)?;
+                fx.notes.push(format!("{step_name}: member closed"));
+            }
         }
         MigrationStep::Run(_) => unreachable!("run steps execute through the registry"),
     }

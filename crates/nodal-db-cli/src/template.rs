@@ -163,6 +163,9 @@ fn apply_file(
     for a in &outcome.plan.actions {
         println!("  + {a}");
     }
+    for n in &outcome.notes {
+        println!("  note: {n}"); // chain-step records (D14 cascade counts &c.)
+    }
     for s in &outcome.plan.skipped {
         println!("  skip: {s}");
     }

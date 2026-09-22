@@ -282,6 +282,51 @@ pub(crate) fn rewrite_scalar_string_values(
     Ok(written)
 }
 
+/// The `unmapped_values: drop` arm of the G6 translation table
+/// (template_ir_plan §4.2 v2, D14/D15 revision): close out every CURRENT
+/// scalar value of `pd_id` that matches NO translation key (a non-string row
+/// never matches a string key, so it drops too — the v65 semantics: anything
+/// outside the table falls to the definition's default). Versioned close-out
+/// through the history protocol — retention (`retained`) honored exactly like
+/// [`rewrite_scalar_string_values`]. The caller guarantees the definition has
+/// no current long/array rows (the scalar-only map guard). Returns rows
+/// closed.
+pub(crate) fn drop_scalar_values_not_matching(
+    conn: &Connection,
+    commit_id: i64,
+    pd_id: i64,
+    keys: &[&str],
+    retained: bool,
+) -> Result<usize, DbError> {
+    // Build `NOT (value_kind = 'string' AND v_str IN (?, ?, …))` with one
+    // placeholder per key (keys is never empty: map_values is validated
+    // non-empty at load).
+    let placeholders = vec!["?"; keys.len()].join(", ");
+    let match_pred = format!("(value_kind = 'string' AND v_str IN ({placeholders}))");
+    let mut binds: Vec<duckdb::types::Value> =
+        vec![commit_id.into(), pd_id.into()];
+    binds.extend(keys.iter().map(|k| duckdb::types::Value::Text((*k).to_string())));
+    let closed = conn.execute(
+        &format!(
+            "UPDATE value_scalar SET valid_to_commit = ? \
+             WHERE valid_to_commit IS NULL AND parameter_definition_id = ? \
+               AND NOT {match_pred}"
+        ),
+        duckdb::params_from_iter(binds.iter()),
+    )?;
+    if !retained && closed > 0 {
+        conn.execute(
+            "UPDATE value_scalar SET content_retained = FALSE, \
+               v_float=NULL, v_int=NULL, v_bool=NULL, v_str=NULL, v_datetime=NULL, \
+               v_dur_months=NULL, v_dur_micros=NULL \
+             WHERE valid_to_commit = ?1 AND parameter_definition_id = ?2 \
+               AND content_retained",
+            params![commit_id, pd_id],
+        )?;
+    }
+    Ok(closed)
+}
+
 /// The defaults/prefills leg of the same rewrite (`definition_value_scalar`,
 /// both slots). Defaults are authored definition content, always retained
 /// (same stance as [`write_definition_default`]); the close-out keeps its

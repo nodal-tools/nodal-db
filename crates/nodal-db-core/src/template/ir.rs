@@ -573,29 +573,90 @@ pub struct Migration {
     pub steps: Vec<MigrationStep>,
 }
 
+/// Rename-collision policy (D14/G2, jkiviluo 2026-09-22 — the v28/v66
+/// `_rename_or_drop_parameter_definition` shape): what `rename_parameter`
+/// does when the TARGET name already exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnCollision {
+    /// Refuse (the default): a pre-existing target is an authoring error
+    /// unless the chain explicitly says otherwise.
+    #[default]
+    Error,
+    /// Drop the STALE SOURCE instead of renaming — a versioned close-out
+    /// through the object-delete cascade (values go with it; D14). The v28
+    /// intent: partial prior migration / template re-apply left both names
+    /// live, and the target is the survivor.
+    DropSource,
+}
+
+/// What `rename_parameter` + `map_values` does with current values that match
+/// NO translation key (G6 — the v65 flag→enum upgrade drops them to default).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnmappedValues {
+    /// Leave them in place (the default — omission never destroys).
+    #[default]
+    Keep,
+    /// Close them out (versioned, retention honored) so the entity falls to
+    /// the definition's default — the v65 semantics.
+    Drop,
+    /// Refuse the step while any unmapped current value exists.
+    Error,
+}
+
+impl OnCollision {
+    fn is_default(&self) -> bool {
+        *self == OnCollision::Error
+    }
+}
+
+impl UnmappedValues {
+    fn is_default(&self) -> bool {
+        *self == UnmappedValues::Keep
+    }
+}
+
 /// The closed Layer-2 hint vocabulary plus the Layer-3 `run:` escape hatch
-/// (§4.2, D5). Serialized as a ONE-KEY MAP per step (`- rename_class: {from,
-/// to}` / `- run: prog`) — the plan's §4.3 authoring syntax. Hand-written
-/// serde impls below: the serde_yaml-0.9 family represents derived enums as
-/// YAML `!tags`, which is not the decided authoring surface.
+/// (§4.2, D5; hint vocabulary v2 per D14/D15, jkiviluo 2026-09-22, from the
+/// FlexTool chain classification's G1–G7 gaps). Serialized as a ONE-KEY MAP
+/// per step (`- rename_class: {from, to}` / `- run: prog`) — the plan's §4.3
+/// authoring syntax. Hand-written serde impls below: the serde_yaml-0.9
+/// family represents derived enums as YAML `!tags`, which is not the decided
+/// authoring surface.
+///
+/// **D14 (drops).** Omission still never destroys; migration steps may
+/// destroy EXPLICITLY. Drops are versioned CLOSE-OUTS, never physical
+/// erasure, and execute through the one object-delete cascade
+/// (`object_delete.rs` — CLAUDE.md invariant #2: one dependency finder). The
+/// plan output shows the blast radius before apply (delete preview).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MigrationStep {
     RenameClass {
         from: String,
         to: String,
     },
+    /// Rename a definition within its class. v2 extensions: `on_collision`
+    /// (G2 — v28/v66's drop-stale-source), and `map_values` (G6 — v65's
+    /// old→new stored-string translation table, with `unmapped_values`
+    /// policy for strings outside the table).
     RenameParameter {
         class: String,
         from: String,
         to: String,
+        on_collision: OnCollision,
+        map_values: Option<UniqueMap<String>>,
+        unmapped_values: UnmappedValues,
     },
     RenameValueList {
         from: String,
         to: String,
     },
-    /// The one data-touching hint: renames a (string) list member and, with
-    /// `rewrite_values`, rewrites matching current scalar values and defaults
-    /// of definitions bound to the list (mechanical, value-list-scoped).
+    /// Renames a (string) list member and, with `rewrite_values` (DEFAULT ON
+    /// per D15/G7 — the rewrite IS the hint's semantics; v25's un-rewritten
+    /// rename stranded strays until v55), rewrites matching current scalar
+    /// values and defaults of definitions bound to the list (mechanical,
+    /// value-list-scoped, through the history protocol).
     RenameListMember {
         list: String,
         from: String,
@@ -609,6 +670,53 @@ pub enum MigrationStep {
         name: String,
         from_class: String,
         to_class: String,
+    },
+    /// G3 (v41): merge `from` into `to` WITHIN one class. Target absent ⇒ a
+    /// plain rename (create-by-rename — chains run before the final
+    /// reconcile, so a template-introduced target may not exist yet). Target
+    /// present ⇒ copy current SCALAR values fill-if-absent per (entity,
+    /// alternative), then close the source through the object-delete cascade.
+    MergeParameter {
+        class: String,
+        from: String,
+        to: String,
+    },
+    /// G4 (v52 glpsol→highs, v56 D.4): make string member `from` become
+    /// `to`. Target member present ⇒ rewrite stored values/defaults and
+    /// close the `from` member; absent ⇒ rename the member (rewrite always
+    /// on — the rewrite is the merge).
+    MergeListMember {
+        list: String,
+        from: String,
+        to: String,
+    },
+    /// D14/G1: explicit versioned close-out of a definition + its values
+    /// (object-delete Parameter cascade). Target absent ⇒ no-op with a note
+    /// (close-out intent already satisfied).
+    DropParameter {
+        class: String,
+        parameter: String,
+    },
+    /// D14/G1: explicit versioned close-out of a class + its entities,
+    /// definitions, values, and dependent dimension classes (object-delete
+    /// Class cascade, cross-kind closure).
+    DropClass {
+        class: String,
+    },
+    /// D14/G1: close out an ORPHAN value list (+ its member rows). Refuses
+    /// while any current definition binds it — there is no cascade here to
+    /// share, and dropping a bound list would strand the binding (drop the
+    /// definitions first, or rebind them via reconcile).
+    DropValueList {
+        list: String,
+    },
+    /// D14/G1: close out one string list member. SKIPPED (convergence
+    /// withheld, like every reconcile skip) while current values or defaults
+    /// still hold the string — a drop never strands data; rewrite first
+    /// (`merge_list_member` / `rename_list_member`).
+    DropListMember {
+        list: String,
+        value: String,
     },
     /// Layer 3: a named tool-side program executed through the ordinary write
     /// API (`MigrationRegistry`). The IR records identity/ordering only.
@@ -632,6 +740,12 @@ enum StepDef {
         class: String,
         from: String,
         to: String,
+        #[serde(default, skip_serializing_if = "OnCollision::is_default")]
+        on_collision: OnCollision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        map_values: Option<UniqueMap<String>>,
+        #[serde(default, skip_serializing_if = "UnmappedValues::is_default")]
+        unmapped_values: UnmappedValues,
     },
     RenameValueList {
         from: String,
@@ -641,13 +755,39 @@ enum StepDef {
         list: String,
         from: String,
         to: String,
-        #[serde(default)]
+        // D15 (jkiviluo, 2026-09-22): rewrite defaults ON; `rewrite_values:
+        // false` is the explicit opt-out.
+        #[serde(default = "default_true")]
         rewrite_values: bool,
     },
     MoveParameter {
         name: String,
         from_class: String,
         to_class: String,
+    },
+    MergeParameter {
+        class: String,
+        from: String,
+        to: String,
+    },
+    MergeListMember {
+        list: String,
+        from: String,
+        to: String,
+    },
+    DropParameter {
+        class: String,
+        parameter: String,
+    },
+    DropClass {
+        class: String,
+    },
+    DropValueList {
+        list: String,
+    },
+    DropListMember {
+        list: String,
+        value: String,
     },
     Run(String),
 }
@@ -661,18 +801,94 @@ impl Serialize for MigrationStep {
     }
 }
 
+/// A JSON-compatible value whose MAP layers reject duplicate keys during
+/// deserialization, at every depth. `serde_json::Value` silently last-wins on
+/// duplicates, so a step body detouring through it (the D1 JSON bridge) would
+/// lose the UniqueMap guarantee for its fields and any nested map
+/// (`map_values`). This carrier keeps the rejection all the way down.
+struct StrictJson(Value);
+
+impl<'de> Deserialize<'de> for StrictJson {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = StrictJson;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON-compatible value (maps with unique keys)")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<StrictJson, E> {
+                Ok(StrictJson(json!(v)))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<StrictJson, E> {
+                Ok(StrictJson(json!(v)))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<StrictJson, E> {
+                Ok(StrictJson(json!(v)))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<StrictJson, E> {
+                Ok(StrictJson(json!(v)))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<StrictJson, E> {
+                Ok(StrictJson(json!(v)))
+            }
+            fn visit_unit<E>(self) -> Result<StrictJson, E> {
+                Ok(StrictJson(Value::Null))
+            }
+            fn visit_none<E>(self) -> Result<StrictJson, E> {
+                Ok(StrictJson(Value::Null))
+            }
+            fn visit_some<D2: serde::Deserializer<'de>>(
+                self,
+                d: D2,
+            ) -> Result<StrictJson, D2::Error> {
+                StrictJson::deserialize(d)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<StrictJson, A::Error> {
+                let mut out = Vec::new();
+                while let Some(StrictJson(v)) = seq.next_element::<StrictJson>()? {
+                    out.push(v);
+                }
+                Ok(StrictJson(Value::Array(out)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut m: A,
+            ) -> Result<StrictJson, A::Error> {
+                use serde::de::Error;
+                let mut out = Map::new();
+                while let Some(k) = m.next_key::<String>()? {
+                    let StrictJson(v) = m.next_value::<StrictJson>()?;
+                    if out.insert(k.clone(), v).is_some() {
+                        return Err(A::Error::custom(format!(
+                            "duplicate key {k:?} (each key may appear once)"
+                        )));
+                    }
+                }
+                Ok(StrictJson(Value::Object(out)))
+            }
+        }
+        d.deserialize_any(Vis)
+    }
+}
+
 impl<'de> Deserialize<'de> for MigrationStep {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        let m = UniqueMap::<Value>::deserialize(d)?;
+        let m = UniqueMap::<StrictJson>::deserialize(d)?;
         if m.0.len() != 1 {
             return Err(D::Error::custom(format!(
                 "a migration step is a ONE-key map (rename_class / rename_parameter / \
-                 rename_value_list / rename_list_member / move_parameter / run), got {} keys",
+                 rename_value_list / rename_list_member / move_parameter / \
+                 merge_parameter / merge_list_member / drop_parameter / drop_class / \
+                 drop_value_list / drop_list_member / run), got {} keys",
                 m.0.len()
             )));
         }
-        let obj: Map<String, Value> = m.0.into_iter().collect();
+        let obj: Map<String, Value> =
+            m.0.into_iter().map(|(k, StrictJson(v))| (k, v)).collect();
         StepDef::deserialize(Value::Object(obj)).map_err(D::Error::custom)
     }
 }
@@ -682,18 +898,61 @@ impl MigrationStep {
     pub fn describe(&self) -> String {
         match self {
             MigrationStep::RenameClass { from, to } => format!("rename_class {from} -> {to}"),
-            MigrationStep::RenameParameter { class, from, to } => {
-                format!("rename_parameter {class}.{from} -> {to}")
+            MigrationStep::RenameParameter {
+                class,
+                from,
+                to,
+                on_collision,
+                map_values,
+                unmapped_values,
+            } => {
+                let mut s = format!("rename_parameter {class}.{from} -> {to}");
+                if *on_collision == OnCollision::DropSource {
+                    s.push_str(" (on collision: drop stale source, cascade)");
+                }
+                if let Some(map) = map_values {
+                    let pairs: Vec<String> =
+                        map.iter().map(|(k, v)| format!("{k:?} -> {v:?}")).collect();
+                    s.push_str(&format!(" translating values [{}]", pairs.join(", ")));
+                    match unmapped_values {
+                        UnmappedValues::Keep => {}
+                        UnmappedValues::Drop => s.push_str(" (unmapped values dropped)"),
+                        UnmappedValues::Error => s.push_str(" (unmapped values refuse)"),
+                    }
+                }
+                s
             }
             MigrationStep::RenameValueList { from, to } => {
                 format!("rename_value_list {from} -> {to}")
             }
             MigrationStep::RenameListMember { list, from, to, rewrite_values } => format!(
                 "rename_list_member {list}: {from:?} -> {to:?}{}",
-                if *rewrite_values { " (rewriting stored values)" } else { "" }
+                if *rewrite_values {
+                    " (rewriting stored values)"
+                } else {
+                    " (NOT rewriting stored values — explicit opt-out)"
+                }
             ),
             MigrationStep::MoveParameter { name, from_class, to_class } => {
                 format!("move_parameter {from_class}.{name} -> {to_class}.{name}")
+            }
+            MigrationStep::MergeParameter { class, from, to } => {
+                format!("merge_parameter {class}.{from} -> {class}.{to} (fill-if-absent, then close source)")
+            }
+            MigrationStep::MergeListMember { list, from, to } => {
+                format!("merge_list_member {list}: {from:?} -> {to:?} (rewriting stored values)")
+            }
+            MigrationStep::DropParameter { class, parameter } => {
+                format!("drop_parameter {class}.{parameter} (versioned close-out, cascade)")
+            }
+            MigrationStep::DropClass { class } => {
+                format!("drop_class {class} (versioned close-out, cascade)")
+            }
+            MigrationStep::DropValueList { list } => {
+                format!("drop_value_list {list} (orphan lists only)")
+            }
+            MigrationStep::DropListMember { list, value } => {
+                format!("drop_list_member {list}: {value:?} (skipped while values hold it)")
             }
             MigrationStep::Run(p) => format!("run {p} (imperative escape hatch)"),
         }
@@ -1297,11 +1556,82 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
         if m.steps.is_empty() {
             errs.push(format!("migrations[{mi}]: empty steps"));
         }
-        for s in &m.steps {
-            if let MigrationStep::Run(p) = s {
-                if p.trim().is_empty() {
-                    errs.push(format!("migrations[{mi}]: run step with empty program name"));
+        for (si, s) in m.steps.iter().enumerate() {
+            let loc = format!("migrations[{mi}] step {si}");
+            let nonempty = |errs: &mut Vec<String>, what: &str, v: &str| {
+                if v.trim().is_empty() {
+                    errs.push(format!("{loc}: {what} must be non-empty"));
                 }
+            };
+            match s {
+                MigrationStep::Run(p) => {
+                    if p.trim().is_empty() {
+                        errs.push(format!("migrations[{mi}]: run step with empty program name"));
+                    }
+                }
+                MigrationStep::RenameParameter {
+                    class,
+                    from,
+                    to,
+                    map_values,
+                    unmapped_values,
+                    ..
+                } => {
+                    nonempty(&mut errs, "class", class);
+                    nonempty(&mut errs, "from", from);
+                    nonempty(&mut errs, "to", to);
+                    match map_values {
+                        None => {
+                            if *unmapped_values != UnmappedValues::Keep {
+                                errs.push(format!(
+                                    "{loc}: unmapped_values requires a map_values table"
+                                ));
+                            }
+                        }
+                        Some(map) => {
+                            if map.is_empty() {
+                                errs.push(format!("{loc}: map_values must be non-empty"));
+                            }
+                            // A value that is also a key would make the
+                            // translation order-dependent (a→b, b→c): refuse.
+                            for v in map.values() {
+                                if map.contains_key(v) {
+                                    errs.push(format!(
+                                        "{loc}: map_values value {v:?} is also a key — \
+                                         chained translations are ambiguous"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                MigrationStep::MergeParameter { class, from, to } => {
+                    nonempty(&mut errs, "class", class);
+                    nonempty(&mut errs, "from", from);
+                    nonempty(&mut errs, "to", to);
+                    if fold(from) == fold(to) {
+                        errs.push(format!("{loc}: merge_parameter from == to ({from:?})"));
+                    }
+                }
+                MigrationStep::MergeListMember { list, from, to } => {
+                    nonempty(&mut errs, "list", list);
+                    nonempty(&mut errs, "from", from);
+                    nonempty(&mut errs, "to", to);
+                    if from == to {
+                        errs.push(format!("{loc}: merge_list_member from == to ({from:?})"));
+                    }
+                }
+                MigrationStep::DropParameter { class, parameter } => {
+                    nonempty(&mut errs, "class", class);
+                    nonempty(&mut errs, "parameter", parameter);
+                }
+                MigrationStep::DropClass { class } => nonempty(&mut errs, "class", class),
+                MigrationStep::DropValueList { list } => nonempty(&mut errs, "list", list),
+                MigrationStep::DropListMember { list, value } => {
+                    nonempty(&mut errs, "list", list);
+                    nonempty(&mut errs, "value", value);
+                }
+                _ => {}
             }
         }
     }

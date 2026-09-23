@@ -42,9 +42,9 @@ use crate::error::DbError;
 use crate::object_delete::resolve_element as resolve_element_in_dim;
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    clear_metadata, close_row, insert_class_dim_row, insert_class_row, insert_definition_row,
-    insert_entity_element_row, insert_entity_row, insert_type_member, read_ec_row,
-    revise_ec_row, set_metadata,
+    clear_metadata, close_value_list, insert_class_dim_row, insert_class_row,
+    insert_definition_row, insert_entity_element_row, insert_entity_row, insert_type_member,
+    read_ec_row, revise_ec_row, set_metadata, value_list_binding_count,
 };
 use crate::types::fold;
 
@@ -413,24 +413,14 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
         let Some(lid) = lookup_value_list(conn, list)? else {
             return Ok(()); // raced away between the read pre-check and here
         };
-        let bound: i64 = conn.query_row(
-            "SELECT count(*) FROM parameter_definition \
-             WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
-            params![lid],
-            |r| r.get(0),
-        )?;
+        let bound = value_list_binding_count(conn, lid)?;
         if bound > 0 {
             return Err(DbError::Api(format!(
                 "drop_value_list: {bound} current definition(s) still bind {list:?} \
                  — drop them first (drop_parameter) or rebind them"
             )));
         }
-        conn.execute(
-            "UPDATE list_value SET valid_to_commit = ? \
-             WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
-            params![c, lid],
-        )?;
-        close_row(conn, c, "parameter_value_list", lid)?;
+        close_value_list(conn, c, lid)?;
         Ok(())
     })
 }

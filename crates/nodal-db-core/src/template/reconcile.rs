@@ -2108,7 +2108,34 @@ impl IdCache {
 
 /// Close the current row(s) of `table` carrying `id` (versioned tables share
 /// the id across versions; exactly one row is current). Returns rows closed.
-pub(crate) fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
+/// Count the CURRENT parameter definitions still bound to a value list — the
+/// orphan-only guard shared by the `drop_value_list` migration step and the
+/// [`crate::verbs::drop_value_list`] verb (a bound list has a live binding a
+/// close would strand).
+pub(crate) fn value_list_binding_count(conn: &Connection, lid: i64) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM parameter_definition \
+         WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
+        params![lid],
+        |r| r.get(0),
+    )?)
+}
+
+/// Close out a value list and its member rows under `c` (the single close
+/// path shared by the `drop_value_list` migration step and verb — invariant
+/// #2: one door). Caller checks [`value_list_binding_count`] first. Returns
+/// the number of member rows closed.
+pub(crate) fn close_value_list(conn: &Connection, c: i64, lid: i64) -> Result<usize, DbError> {
+    let members = conn.execute(
+        "UPDATE list_value SET valid_to_commit = ? \
+         WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
+        params![c, lid],
+    )?;
+    close_row(conn, c, "parameter_value_list", lid)?;
+    Ok(members)
+}
+
+fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
     let n = conn.execute(
         &format!("UPDATE {table} SET valid_to_commit = ? WHERE id = ? AND valid_to_commit IS NULL"),
         params![c, id],
@@ -3628,24 +3655,14 @@ fn execute_step(
             };
             // Orphan lists only: a bound list has a live binding this drop
             // would strand — refuse (drop the definitions first, or rebind).
-            let bound: i64 = conn.query_row(
-                "SELECT count(*) FROM parameter_definition \
-                 WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
-                params![lid],
-                |r| r.get(0),
-            )?;
+            let bound = value_list_binding_count(conn, lid)?;
             if bound > 0 {
                 return Err(DbError::Api(format!(
                     "drop_value_list: {bound} current definition(s) still bind {list:?} \
                      — drop them first (drop_parameter) or rebind them via reconcile"
                 )));
             }
-            let members = conn.execute(
-                "UPDATE list_value SET valid_to_commit = ? \
-                 WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
-                params![c, lid],
-            )?;
-            close_row(conn, c, "parameter_value_list", lid)?;
+            let members = close_value_list(conn, c, lid)?;
             fx.notes
                 .push(format!("{step_name}: closed the list and {members} member row(s)"));
         }

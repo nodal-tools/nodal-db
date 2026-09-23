@@ -22,9 +22,9 @@ use nodal_db_core::types::{
     ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, WriteOptions,
 };
 use nodal_db_core::verbs::{
-    ensure_alternative, ensure_entity, ensure_entity_class, ensure_parameter_definition,
-    set_class_active_by_default, set_entity_activation, set_scenario_alternatives,
-    stamp_template_identity,
+    drop_value_list, ensure_alternative, ensure_entity, ensure_entity_class,
+    ensure_parameter_definition, set_class_active_by_default, set_entity_activation,
+    set_scenario_alternatives, stamp_template_identity,
 };
 
 fn fresh_db(dir: &tempfile::TempDir) -> PathBuf {
@@ -224,6 +224,97 @@ fn set_class_active_by_default_is_a_versioned_header_update() {
         "revise_* family: close-out + successor, same id"
     );
     assert!(set_class_active_by_default(&db, "ghost", true, "tester").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// drop_value_list (the ninth verb, §1.6 addendum) — orphan-only close-out
+// ---------------------------------------------------------------------------
+
+#[test]
+fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    // A tiny template seeds the yes_no list (the v56 D.3 shape) + a class.
+    let t = parse_str(
+        "template: {name: seedlist, version: '1'}\n\
+         value_lists: [{name: yes_no, members: [{value: 'yes'}, {value: 'no'}]}]\n\
+         classes: [{name: cls}]\n",
+    )
+    .unwrap();
+    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM list_value lv JOIN parameter_value_list p \
+                 ON p.cur_id = lv.parameter_value_list_id WHERE p.cur_name = 'yes_no'"),
+        2
+    );
+
+    // Bind a definition to the list (§3.5 inference: rank-0 string member).
+    let pd = ensure_parameter_definition(
+        &db, "cls", "is_enabled", &[], Some("yes_no"), None, "tester",
+    )
+    .unwrap();
+    assert!(pd > 0);
+
+    // (ii) A still-bound list REFUSES; the message names the binding + list.
+    let err = drop_value_list(&db, "yes_no", "tester").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("still bind") && msg.contains("yes_no"),
+        "refusal must name the binding and list, got: {msg}"
+    );
+    // The refusal touched nothing: the list is still current, members intact.
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'yes_no'"),
+        1
+    );
+
+    // Orphan it: close out the binding definition (cascade), the D.3 idiom.
+    delete_objects(
+        &db,
+        vec![(
+            ObjectDeleteKey {
+                kind: ObjectKind::Parameter,
+                class: Some("cls".into()),
+                target: ObjectRef::Name("is_enabled".into()),
+            },
+            ObjectDeleteOpts { cascade: true },
+        )],
+        "tester",
+        "orphan the yes_no list (D.3 rebind step)",
+        WriteOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM parameter_definition WHERE cur_name = 'is_enabled'"),
+        0
+    );
+
+    // (i) Dropping the now-orphan list CLOSES it — a follow-up read shows it
+    // gone (no current row), members closed too (history retained, not erased).
+    drop_value_list(&db, "yes_no", "tester").unwrap();
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'yes_no'"),
+        0,
+        "the orphan list is closed out — no current row"
+    );
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM list_value \
+                 WHERE valid_to_commit IS NULL AND parameter_value_list_id \
+                 IN (SELECT id FROM parameter_value_list WHERE cur_name IS NULL)"),
+        0,
+        "the closed list's members are closed too"
+    );
+
+    // (iii) Dropping a non-existent list is a no-op Ok that burns NO commit;
+    // re-dropping the already-closed list is likewise a no-op.
+    let n = commits(&db);
+    drop_value_list(&db, "ghost_list", "tester").unwrap();
+    drop_value_list(&db, "yes_no", "tester").unwrap();
+    assert_eq!(commits(&db), n, "a missing/absent list drop burns no commit");
+
+    // Caller-contract guards.
+    assert!(drop_value_list(&db, "  ", "tester").is_err(), "empty name");
+    assert!(drop_value_list(&db, "x", " ").is_err(), "user required");
 }
 
 // ---------------------------------------------------------------------------

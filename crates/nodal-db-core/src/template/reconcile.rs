@@ -2108,7 +2108,7 @@ impl IdCache {
 
 /// Close the current row(s) of `table` carrying `id` (versioned tables share
 /// the id across versions; exactly one row is current). Returns rows closed.
-fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
+pub(crate) fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
     let n = conn.execute(
         &format!("UPDATE {table} SET valid_to_commit = ? WHERE id = ? AND valid_to_commit IS NULL"),
         params![c, id],

@@ -548,6 +548,18 @@ impl Database {
         .map_err(db_err)
     }
 
+    /// Drop an orphan value list at runtime (the ninth verb; Track-B replay
+    /// finding, plan §1.6 addendum). Refuses a list a current definition still
+    /// binds — rebind/drop those definitions first (v56 D.3's close-out +
+    /// recreate rebind does exactly that before calling this). Idempotent: a
+    /// missing list is a no-op.
+    #[pyo3(signature = (list, *, user))]
+    fn drop_value_list(&self, py: Python<'_>, list: String, user: String) -> PyResult<()> {
+        let path = self.path.clone();
+        py.detach(move || verbs::drop_value_list(&path, &list, &user))
+            .map_err(db_err)
+    }
+
     /// Idempotent entity-class creation, 0-D or N-D. `dims` are existing
     /// class names in position order. An existing class with matching
     /// dimensions is returned as-is; a mismatch is an error (no in-place

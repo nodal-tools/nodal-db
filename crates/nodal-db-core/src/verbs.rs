@@ -42,7 +42,7 @@ use crate::error::DbError;
 use crate::object_delete::resolve_element as resolve_element_in_dim;
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    clear_metadata, insert_class_dim_row, insert_class_row, insert_definition_row,
+    clear_metadata, close_row, insert_class_dim_row, insert_class_row, insert_definition_row,
     insert_entity_element_row, insert_entity_row, insert_type_member, read_ec_row,
     revise_ec_row, set_metadata,
 };
@@ -383,6 +383,55 @@ pub fn set_class_active_by_default(
         }
         row.active_by_default = active_by_default;
         revise_ec_row(conn, c, &row)
+    })
+}
+
+/// Drop an orphan value list at RUNTIME — the ninth verb, added under the
+/// Track-B replay finding (2026-09-23; plan §1.6 addendum, route-back in §1.5).
+///
+/// Why a verb and not a ladder `drop_value_list` hint: v56 D.3 rebinds the six
+/// boolean-as-enum definitions off their single-`yes` legacy lists onto
+/// `yes_no` through the close-out+recreate idiom (a `run:` program), which
+/// leaves the five lists orphaned. Those lists must go — path A's oracle drops
+/// them and value-list membership is a strict-tier fingerprint component — but
+/// the static `drop_value_list` hint cannot serve: apply's preflight simulates
+/// migration steps against the *imported* vocabulary and treats a `run:`
+/// program as opaque, so it still sees the imported binding and refuses the
+/// drop before the program's rebind has run. This is the runtime door, reusing
+/// MigrationStep::DropValueList's exact close logic and orphan-only guard:
+/// a still-bound list refuses (rebind/drop its definitions first). Idempotent:
+/// a missing list is a no-op that burns no commit.
+pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError> {
+    require_user(user)?;
+    require_name("value list", list)?;
+    let noop = with_read(db, |conn| Ok(lookup_value_list(conn, list)?.is_none()))?;
+    if noop {
+        return Ok(());
+    }
+    let msg = format!("drop_value_list {list}");
+    with_write_txn_retrying(db, user, &msg, |conn, c| {
+        let Some(lid) = lookup_value_list(conn, list)? else {
+            return Ok(()); // raced away between the read pre-check and here
+        };
+        let bound: i64 = conn.query_row(
+            "SELECT count(*) FROM parameter_definition \
+             WHERE valid_to_commit IS NULL AND parameter_value_list_id = ?",
+            params![lid],
+            |r| r.get(0),
+        )?;
+        if bound > 0 {
+            return Err(DbError::Api(format!(
+                "drop_value_list: {bound} current definition(s) still bind {list:?} \
+                 — drop them first (drop_parameter) or rebind them"
+            )));
+        }
+        conn.execute(
+            "UPDATE list_value SET valid_to_commit = ? \
+             WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
+            params![c, lid],
+        )?;
+        close_row(conn, c, "parameter_value_list", lid)?;
+        Ok(())
     })
 }
 

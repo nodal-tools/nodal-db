@@ -2260,6 +2260,96 @@ pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<()
     Ok(())
 }
 
+/// The one `scenario` create site (structural_write_api_plan §4.2): the G8
+/// verb `set_scenario_alternatives`' scenario auto-create, the structural
+/// `CreateScenario`/`SetScenarioAlternatives` appliers all insert here, so
+/// `scenario` keeps a single writer (invariant 2).
+pub(crate) fn insert_scenario_row(
+    conn: &Connection,
+    c: i64,
+    name: &str,
+    description: Option<&str>,
+) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "INSERT INTO scenario (name, description, valid_from_commit) VALUES (?, ?, ?) RETURNING id",
+        params![name, description, c],
+        |r| r.get(0),
+    )?)
+}
+
+/// Versioned scenario rename (close current row + insert same-id successor,
+/// version+1) — mirrors [`revise_list_row`].
+pub(crate) fn revise_scenario_row(
+    conn: &Connection,
+    c: i64,
+    id: i64,
+    name: &str,
+    description: Option<&str>,
+    version: i64,
+) -> Result<(), DbError> {
+    close_row(conn, c, "scenario", id)?;
+    conn.execute(
+        "INSERT INTO scenario (id, name, description, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?)",
+        params![id, name, description, c, version + 1],
+    )?;
+    Ok(())
+}
+
+/// Versioned alternative rename (close + same-id successor, version+1) — mirrors
+/// [`revise_list_row`]. The insert site for a NEW alternative stays
+/// `api::insert_alternative_row`.
+pub(crate) fn revise_alternative_row(
+    conn: &Connection,
+    c: i64,
+    id: i64,
+    name: &str,
+    description: Option<&str>,
+    version: i64,
+) -> Result<(), DbError> {
+    close_row(conn, c, "alternative", id)?;
+    conn.execute(
+        "INSERT INTO alternative (id, name, description, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?)",
+        params![id, name, description, c, version + 1],
+    )?;
+    Ok(())
+}
+
+/// The one `membership` INSERT site (structural_write_api_plan §4.2): base
+/// (`alternative_id = None` ⇒ stored NULL, NEVER 0 — critique M4) and
+/// alternative-scoped rows both insert here. The loader's seed base row
+/// (`Action::CreateSeedMembership`, via [`insert_base_membership_row`]) and the
+/// structural `SetMembership` applier share this one site (invariant 2, m1).
+pub(crate) fn insert_membership_row(
+    conn: &Connection,
+    c: i64,
+    group_entity_id: i64,
+    member_entity_id: i64,
+    alternative_id: Option<i64>,
+    included: bool,
+    version: i64,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO membership \
+           (group_entity_id, member_entity_id, alternative_id, included, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        params![group_entity_id, member_entity_id, alternative_id, included, c, version],
+    )?;
+    Ok(())
+}
+
+/// The base seed row (`alternative_id NULL`, `included TRUE`, version 1) — the
+/// loader's `CreateSeedMembership` path, over the one [`insert_membership_row`].
+pub(crate) fn insert_base_membership_row(
+    conn: &Connection,
+    c: i64,
+    group_entity_id: i64,
+    member_entity_id: i64,
+) -> Result<(), DbError> {
+    insert_membership_row(conn, c, group_entity_id, member_entity_id, None, true, 1)
+}
+
 struct ListRow {
     id: i64,
     name: String,
@@ -2805,13 +2895,7 @@ fn execute_action(
                      overridden"
                 )),
                 None => {
-                    conn.execute(
-                        "INSERT INTO membership \
-                           (group_entity_id, member_entity_id, alternative_id, included, \
-                            valid_from_commit) \
-                         VALUES (?, ?, NULL, TRUE, ?)",
-                        params![gid, mid, c],
-                    )?;
+                    insert_base_membership_row(conn, c, gid, mid)?;
                 }
             }
         }

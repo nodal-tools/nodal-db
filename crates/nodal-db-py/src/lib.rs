@@ -265,13 +265,21 @@ impl Database {
     /// * `object_deletes`: list of dicts `{"kind": "entity"|"parameter"|
     ///   "alternative"|"class", "class"?: str, "name": str | "elements":
     ///   [str], "cascade": bool}`.
-    #[pyo3(signature = (*, segments = None, deletes = None, object_deletes = None, user,
-                        message = String::new(), force_replace = false, retain_override = None))]
+    /// * `structural`: list of dicts, each keyed on `"op"` (e.g.
+    ///   `{"op": "create_scenario", "name": "high_hydro"}`,
+    ///   `{"op": "set_scenario_alternatives", "scenario": "s", "alternatives":
+    ///   [...]}`). Applied FIRST, so a same-save value write can target a
+    ///   referent a structural item just created. Per-item outcomes land in the
+    ///   report's `"structural"` list.
+    #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
+                        object_deletes = None, user, message = String::new(),
+                        force_replace = false, retain_override = None))]
     #[allow(clippy::too_many_arguments)]
     fn commit_changes<'py>(
         &self,
         py: Python<'py>,
         segments: Option<&Bound<'py, PyAny>>,
+        structural: Option<&Bound<'py, PyAny>>,
         deletes: Option<&Bound<'py, PyAny>>,
         object_deletes: Option<&Bound<'py, PyAny>>,
         user: String,
@@ -285,6 +293,7 @@ impl Database {
                 segs.push(segment_from_py(&item?)?);
             }
         }
+        let structs = structural_changes_from_py(structural)?;
         let mut dels = Vec::new();
         if let Some(d) = deletes {
             for item in d.try_iter()? {
@@ -303,7 +312,31 @@ impl Database {
             retain_override,
         };
         let report = py
-            .detach(move || api::commit_changes(&path, segs, dels, odels, &user, &message, opts))
+            .detach(move || {
+                api::commit_changes(&path, segs, structs, dels, odels, &user, &message, opts)
+            })
+            .map_err(db_err)?;
+        report_to_py(py, &report)
+    }
+
+    /// Apply structural (create/rename/set-ranks/activation/membership) changes
+    /// in one atomic commit — the structural-only convenience over
+    /// `commit_changes` (structural_write_api_plan §6). `changes` is a list of
+    /// `"op"`-keyed dicts.
+    #[pyo3(signature = (changes, *, user, message = String::new()))]
+    fn commit_structural<'py>(
+        &self,
+        py: Python<'py>,
+        changes: &Bound<'py, PyAny>,
+        user: String,
+        message: String,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let structs = structural_changes_from_py(Some(changes))?;
+        let path = self.path.clone();
+        let report = py
+            .detach(move || {
+                api::commit_structural(&path, structs, &user, &message, WriteOptions::default())
+            })
             .map_err(db_err)?;
         report_to_py(py, &report)
     }

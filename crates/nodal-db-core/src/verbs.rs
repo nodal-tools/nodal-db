@@ -35,18 +35,21 @@ use duckdb::{params, Connection};
 
 use crate::api::{
     insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class,
-    lookup_parameter, lookup_value_list,
+    lookup_parameter, lookup_scenario, lookup_value_list,
 };
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
-use crate::object_delete::resolve_element as resolve_element_in_dim;
-use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
-use crate::template::reconcile::{
-    clear_metadata, close_value_list, insert_class_dim_row, insert_class_row,
-    insert_definition_row, insert_entity_element_row, insert_entity_row, insert_type_member,
-    read_ec_row, revise_ec_row, set_metadata, value_list_binding_count,
+use crate::structural::{
+    apply_create_entity, apply_create_entity_class, apply_create_parameter,
+    apply_set_entity_activation, apply_set_scenario_alternatives, check_class_dims,
+    effective_entity_name, entity_class_shape, validate_type_decls, verify_entity_elements,
 };
-use crate::types::fold;
+use crate::template::ir::TypeDecl;
+use crate::template::reconcile::{
+    clear_metadata, close_value_list, read_ec_row, revise_ec_row, set_metadata,
+    value_list_binding_count,
+};
+use crate::types::{charset_ok, fold};
 
 fn require_user(user: &str) -> Result<(), DbError> {
     if user.trim().is_empty() {
@@ -60,25 +63,6 @@ fn require_name(what: &str, name: &str) -> Result<(), DbError> {
         return Err(DbError::Api(format!("{what} name must be non-empty")));
     }
     Ok(())
-}
-
-/// The store's name charset CHECK (`#2373`) for classes/entities/parameters —
-/// mirrored here so a caller-contract problem fails as a clean error, never a
-/// raw CHECK error mid-transaction.
-fn charset_ok(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-fn lookup_scenario(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    match conn.query_row(
-        "SELECT id FROM scenario WHERE cur_name = lower(?)",
-        params![name],
-        |r| r.get::<_, i64>(0),
-    ) {
-        Ok(id) => Ok(Some(id)),
-        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -115,17 +99,20 @@ pub fn ensure_alternative(
 }
 
 /// Whole-list declarative replace of a scenario's alternative ranking (plan
-/// §1.1): close out the scenario's current `scenario_alternative` rows and
-/// insert the given list at ranks `1..=n`, in ONE commit; a no-op (no commit)
-/// when the current rank ORDER already equals the given order.
+/// §1.1): set the scenario's ordered ranking to EXACTLY the given list at
+/// contiguous ranks `1..=n`, in ONE commit; a no-op (no commit) when the current
+/// rank ORDER already equals the given order.
 ///
-/// Rank values are **order-only semantics** (critique MINOR 4): ranks are
-/// renumbered `1..=n` on every replace, so only the order is contract —
-/// consumers (and the replay fingerprint) must compare rank order, never rank
-/// numerals. Deliberately NOT a rank-insertion verb: v38's "insert strictly
-/// below the minimum" is read → prepend → replace in the program, and the
-/// program must mirror FlexTool's edge (only scenarios that already HAVE
-/// rank rows receive the floor alternative — empty scenarios get nothing).
+/// **A-min minimal diff** (structural_write_api_plan §4.3, D-S4): only the rows
+/// whose rank actually changes are rewritten (two-phase close-then-insert) — an
+/// unchanged prefix/suffix is left untouched, keeping its original
+/// `valid_from_commit`/`version`. Rank values are still **order-only semantics**
+/// (critique MINOR 4): only the order is contract; consumers (and the replay
+/// fingerprint) compare rank order, never rank numerals. Deliberately NOT a
+/// rank-insertion verb: v38's "insert strictly below the minimum" is read →
+/// prepend → replace in the program, and the program must mirror FlexTool's edge
+/// (only scenarios that already HAVE rank rows receive the floor alternative —
+/// empty scenarios get nothing).
 ///
 /// The scenario row is created when absent (this verb is the `scenario`
 /// table's one writer — a new-but-single door). Alternative names resolve
@@ -154,30 +141,22 @@ pub fn set_scenario_alternatives(
         seen.push(f);
     }
 
-    // Read the scenario's CURRENT ranking in rank order (order-only compare).
-    fn current_order(
-        conn: &Connection,
-        sid: i64,
-    ) -> Result<Vec<(i64, i64, String)>, DbError> {
-        // (alternative_id, sa-row version, folded name), rank-ascending.
+    let desired: Vec<String> = alternatives.iter().map(|a| fold(a)).collect();
+
+    // Read the scenario's CURRENT ranking folded names in rank order.
+    fn current_order_names(conn: &Connection, sid: i64) -> Result<Vec<String>, DbError> {
         let mut stmt = conn.prepare(
-            "SELECT sa.alternative_id, sa.version, lower(a.name) \
-             FROM scenario_alternative sa \
+            "SELECT lower(a.name) FROM scenario_alternative sa \
              JOIN alternative a ON a.cur_id = sa.alternative_id \
              WHERE sa.cur_s = ? ORDER BY sa.cur_r",
         )?;
-        let rows = stmt
-            .query_map(params![sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<Result<_, _>>()?;
-        Ok(rows)
+        Ok(stmt.query_map(params![sid], |r| r.get(0))?.collect::<Result<_, _>>()?)
     }
-    let desired: Vec<String> = alternatives.iter().map(|a| fold(a)).collect();
 
     // Idempotency pre-check (read-only, no commit).
     let pre = with_read(db, |conn| {
         let Some(sid) = lookup_scenario(conn, scenario)? else { return Ok(None) };
-        let cur = current_order(conn, sid)?;
-        Ok(Some((sid, cur.into_iter().map(|(_, _, n)| n).collect::<Vec<_>>())))
+        Ok(Some((sid, current_order_names(conn, sid)?)))
     })?;
     if let Some((sid, cur)) = pre {
         if cur == desired {
@@ -189,50 +168,11 @@ pub fn set_scenario_alternatives(
         "set_scenario_alternatives {scenario}: [{}]",
         alternatives.join(", ")
     );
+    // The shared A-min applier is the ONE scenario_alternative writer (invariant
+    // 2, critique F2): the verb and the composable channel produce identical
+    // history for the same logical op.
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        // Resolve strictly BEFORE touching anything.
-        let mut alt_ids: Vec<i64> = Vec::with_capacity(alternatives.len());
-        for a in alternatives {
-            let id = lookup_alternative(conn, a)?.ok_or_else(|| {
-                DbError::Api(format!(
-                    "set_scenario_alternatives: alternative {a:?} does not exist \
-                     (create it first — ensure_alternative)"
-                ))
-            })?;
-            alt_ids.push(id);
-        }
-        let sid = match lookup_scenario(conn, scenario)? {
-            Some(id) => id,
-            None => conn.query_row(
-                "INSERT INTO scenario (name, valid_from_commit) VALUES (?, ?) RETURNING id",
-                params![scenario, c],
-                |r| r.get(0),
-            )?,
-        };
-        let cur = current_order(conn, sid)?;
-        if cur.iter().map(|(_, _, n)| n.as_str()).eq(desired.iter().map(String::as_str)) {
-            return Ok(sid); // raced into the desired state
-        }
-        // Versions carry across the replace per (scenario, alternative) pair
-        // — close-out-protocol citizenship, so history shows a revision, not
-        // an unrelated new row.
-        let prev_version: std::collections::HashMap<i64, i64> =
-            cur.iter().map(|(aid, v, _)| (*aid, *v)).collect();
-        conn.execute(
-            "UPDATE scenario_alternative SET valid_to_commit = ? \
-             WHERE cur_s = ? AND valid_from_commit < ?",
-            params![c, sid, c],
-        )?;
-        for (i, aid) in alt_ids.iter().enumerate() {
-            let version = prev_version.get(aid).map(|v| v + 1).unwrap_or(1);
-            conn.execute(
-                "INSERT INTO scenario_alternative \
-                   (scenario_id, alternative_id, rank, valid_from_commit, version) \
-                 VALUES (?, ?, ?, ?, ?)",
-                params![sid, aid, (i + 1) as i64, c, version],
-            )?;
-        }
-        Ok(sid)
+        apply_set_scenario_alternatives(conn, c, scenario, alternatives).map(|(sid, _)| sid)
     })
 }
 
@@ -263,45 +203,29 @@ pub fn set_entity_activation(
     require_name("entity", entity)?;
     require_name("alternative", alternative)?;
 
-    struct Target {
-        entity_id: i64,
-        alt_id: i64,
-        current: Option<(bool, i64)>, // (active, version)
-    }
-    fn resolve(
-        conn: &Connection,
-        class: &str,
-        entity: &str,
-        alternative: &str,
-    ) -> Result<Target, DbError> {
+    // Idempotency pre-check (read-only, no commit) — resolves strictly, so a
+    // missing referent errors here exactly as the applier would.
+    let noop = with_read(db, |conn| {
         let cid = lookup_entity_class(conn, class)?
             .ok_or_else(|| DbError::Api(format!("set_entity_activation: class {class:?} not found")))?;
         let entity_id = lookup_entity(conn, cid, entity)?.ok_or_else(|| {
             DbError::Api(format!("set_entity_activation: entity {class}:{entity} not found"))
         })?;
         let alt_id = lookup_alternative(conn, alternative)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "set_entity_activation: alternative {alternative:?} not found"
-            ))
+            DbError::Api(format!("set_entity_activation: alternative {alternative:?} not found"))
         })?;
-        let current = match conn.query_row(
-            "SELECT active, version FROM entity_alternative WHERE cur_e = ? AND cur_a = ?",
+        let current: Option<bool> = match conn.query_row(
+            "SELECT active FROM entity_alternative WHERE cur_e = ? AND cur_a = ?",
             params![entity_id, alt_id],
-            |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?)),
+            |r| r.get(0),
         ) {
             Ok(v) => Some(v),
             Err(duckdb::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(e.into()),
         };
-        Ok(Target { entity_id, alt_id, current })
-    }
-
-    // Idempotency pre-check (read-only, no commit).
-    let noop = with_read(db, |conn| {
-        let t = resolve(conn, class, entity, alternative)?;
-        Ok(match (active, t.current) {
+        Ok(match (active, current) {
             (None, None) => true,
-            (Some(b), Some((cur, _))) => cur == b,
+            (Some(b), Some(cur)) => cur == b,
             _ => false,
         })
     })?;
@@ -313,40 +237,9 @@ pub fn set_entity_activation(
         "set_entity_activation {class}:{entity} @ {alternative} = {:?}",
         active
     );
+    // The shared applier is the ONE entity_alternative writer (invariant 2).
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        let t = resolve(conn, class, entity, alternative)?;
-        match (active, t.current) {
-            (None, None) => {}
-            (Some(b), Some((cur, _))) if cur == b => {}
-            (None, Some(_)) => {
-                // Close the row (the None instruction): versioned close-out.
-                conn.execute(
-                    "UPDATE entity_alternative SET valid_to_commit = ? \
-                     WHERE cur_e = ? AND cur_a = ? AND valid_from_commit < ?",
-                    params![c, t.entity_id, t.alt_id, c],
-                )?;
-            }
-            (Some(b), prev) => {
-                let version = match prev {
-                    Some((_, v)) => {
-                        conn.execute(
-                            "UPDATE entity_alternative SET valid_to_commit = ? \
-                             WHERE cur_e = ? AND cur_a = ? AND valid_from_commit < ?",
-                            params![c, t.entity_id, t.alt_id, c],
-                        )?;
-                        v + 1
-                    }
-                    None => 1,
-                };
-                conn.execute(
-                    "INSERT INTO entity_alternative \
-                       (entity_id, alternative_id, active, valid_from_commit, version) \
-                     VALUES (?, ?, ?, ?, ?)",
-                    params![t.entity_id, t.alt_id, b, c, version],
-                )?;
-            }
-        }
-        Ok(())
+        apply_set_entity_activation(conn, c, class, entity, alternative, active).map(|_| ())
     })
 }
 
@@ -460,61 +353,14 @@ pub fn ensure_entity_class(
         )));
     }
 
-    // Existing-class dimension check, shared by pre-check and transaction.
-    fn dims_of(conn: &Connection, cid: i64) -> Result<Vec<String>, DbError> {
-        let mut stmt = conn.prepare(
-            "SELECT COALESCE((SELECT lower(ec.name) FROM entity_class ec \
-                              WHERE ec.cur_id = d.dimension_class_id), '<class_set>') \
-             FROM entity_class_dimension d WHERE d.cur_c = ? ORDER BY d.cur_p",
-        )?;
-        let rows = stmt.query_map(params![cid], |r| r.get(0))?.collect::<Result<_, _>>()?;
-        Ok(rows)
-    }
-    fn check_match(
-        conn: &Connection,
-        name: &str,
-        cid: i64,
-        dims: &[String],
-    ) -> Result<i64, DbError> {
-        let have = dims_of(conn, cid)?;
-        let want: Vec<String> = dims.iter().map(|d| fold(d)).collect();
-        if have == want {
-            Ok(cid)
-        } else {
-            Err(DbError::Api(format!(
-                "ensure_entity_class: {name:?} already exists with dimensions \
-                 [{}], not [{}] — in-place re-dimensioning is the deferred \
-                 reshape door (create a new class and migrate, the v25/v58 shape)",
-                have.join(", "),
-                want.join(", ")
-            )))
-        }
-    }
-
+    // Existing-class fast path (read-only, no commit): verify the dims match.
     if let Some(cid) = with_read(db, |conn| lookup_entity_class(conn, name))? {
-        return with_read(db, |conn| check_match(conn, name, cid, dims));
+        return with_read(db, |conn| check_class_dims(conn, name, cid, dims));
     }
     let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
+    // The shared applier is the one class-create body (invariant 2).
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        if let Some(cid) = lookup_entity_class(conn, name)? {
-            return check_match(conn, name, cid, dims);
-        }
-        // Resolve every dimension class BEFORE inserting anything.
-        let mut dim_ids: Vec<i64> = Vec::with_capacity(dims.len());
-        for d in dims {
-            let id = lookup_entity_class(conn, d)?.ok_or_else(|| {
-                DbError::Api(format!(
-                    "ensure_entity_class: dimension class {d:?} does not exist \
-                     (create it first)"
-                ))
-            })?;
-            dim_ids.push(id);
-        }
-        let cid = insert_class_row(conn, c, name, None, true, false, None)?;
-        for (i, did) in dim_ids.iter().enumerate() {
-            insert_class_dim_row(conn, c, cid, (i + 1) as i64, Some(*did), None)?;
-        }
-        Ok(cid)
+        apply_create_entity_class(conn, c, name, dims).map(|(id, _)| id)
     })
 }
 
@@ -552,64 +398,8 @@ pub fn ensure_parameter_definition(
         )));
     }
     // Pure member validation (the load-time subset of `ir::validate`'s type
-    // rules): legal kinds, D3 dim rules, rank cap, pairwise
-    // distinguishability (D2a).
-    for (ti, ty) in types.iter().enumerate() {
-        let loc = format!("ensure_parameter_definition {class}.{name} types[{ti}]");
-        match ty.kind.as_str() {
-            "indexed" => match ty.dims.as_deref() {
-                None | Some([]) => {
-                    return Err(DbError::Api(format!(
-                        "{loc}: kind \"indexed\" requires a non-empty dims list (D3)"
-                    )))
-                }
-                Some(dims) => {
-                    if dims.len() > 4 {
-                        return Err(DbError::Api(format!(
-                            "{loc}: {} dims exceeds the rank cap of 4",
-                            dims.len()
-                        )));
-                    }
-                    for d in dims {
-                        if d.name.trim().is_empty() {
-                            return Err(DbError::Api(format!("{loc}: empty dimension name")));
-                        }
-                        if !DIM_KINDS.contains(&d.kind.as_str()) {
-                            return Err(DbError::Api(format!(
-                                "{loc}: unknown dimension kind {:?} (expected one of {DIM_KINDS:?})",
-                                d.kind
-                            )));
-                        }
-                    }
-                }
-            },
-            k if SCALAR_KINDS.contains(&k) => {
-                if ty.dims.as_deref().map(|d| !d.is_empty()).unwrap_or(false) {
-                    return Err(DbError::Api(format!(
-                        "{loc}: scalar kind {k:?} must not declare dims (use kind: indexed)"
-                    )));
-                }
-            }
-            other => {
-                return Err(DbError::Api(format!(
-                    "{loc}: unknown kind {other:?} (expected {SCALAR_KINDS:?} or \"indexed\")"
-                )))
-            }
-        }
-    }
-    let keys: Vec<_> = types.iter().map(|t| t.match_key()).collect();
-    for i in 0..keys.len() {
-        for j in (i + 1)..keys.len() {
-            if keys[i] == keys[j] {
-                return Err(DbError::Api(format!(
-                    "ensure_parameter_definition {class}.{name}: declared members {i} and \
-                     {j} are indistinguishable ({}) — exactly-one-member matching would \
-                     be impossible (D2a)",
-                    types[i].describe()
-                )));
-            }
-        }
-    }
+    // rules), shared with the structural channel's prepare (invariant 2).
+    validate_type_decls("ensure_parameter_definition", class, name, types)?;
 
     if let Some(id) = with_read(db, |conn| {
         let Some(cid) = lookup_entity_class(conn, class)? else { return Ok(None) };
@@ -619,72 +409,9 @@ pub fn ensure_parameter_definition(
     }
 
     let msg = format!("ensure_parameter_definition {class}.{name}");
-    let types = types.to_vec();
-    let value_list = value_list.map(str::to_string);
-    let description = description.map(str::to_string);
-    with_write_txn_retrying(db, user, &msg, move |conn, c| {
-        let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "ensure_parameter_definition: class {class:?} not found \
-                 (create it first — ensure_entity_class)"
-            ))
-        })?;
-        if let Some(id) = lookup_parameter(conn, cid, name)? {
-            return Ok(id); // raced: created since the pre-check (as-is, D-F4)
-        }
-        let lid = match value_list.as_deref() {
-            None => None,
-            Some(l) => Some(lookup_value_list(conn, l)?.ok_or_else(|| {
-                DbError::Api(format!(
-                    "ensure_parameter_definition: value_list {l:?} not found"
-                ))
-            })?),
-        };
-        // §3.5 inference: no explicit types + a bound list ⇒ the single
-        // rank-0 member of the list's uniform member kind.
-        let mut effective = types.clone();
-        if effective.is_empty() {
-            if let Some(lid) = lid {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT value_kind FROM list_value \
-                     WHERE cur_l = ? AND valid_to_commit IS NULL ORDER BY value_kind",
-                )?;
-                let kinds: Vec<String> =
-                    stmt.query_map(params![lid], |r| r.get(0))?.collect::<Result<_, _>>()?;
-                match kinds.as_slice() {
-                    [k] => effective.push(TypeDecl { kind: k.clone(), dims: None }),
-                    [] => {
-                        return Err(DbError::Api(format!(
-                            "ensure_parameter_definition: cannot infer a kind from empty \
-                             value_list {:?} (declare types explicitly)",
-                            value_list.as_deref().unwrap_or("")
-                        )))
-                    }
-                    many => {
-                        return Err(DbError::Api(format!(
-                            "ensure_parameter_definition: value_list {:?} members mix \
-                             kinds {many:?} — declare types explicitly",
-                            value_list.as_deref().unwrap_or("")
-                        )))
-                    }
-                }
-            }
-        }
-        let pd_id = insert_definition_row(
-            conn,
-            c,
-            cid,
-            name,
-            description.as_deref(),
-            lid,
-            None,
-            false,
-            None,
-        )?;
-        for m in &effective {
-            insert_type_member(conn, c, pd_id, m)?;
-        }
-        Ok(pd_id)
+    // The shared applier is the one definition+type-member create body.
+    with_write_txn_retrying(db, user, &msg, |conn, c| {
+        apply_create_parameter(conn, c, class, name, types, value_list, description).map(|(id, _)| id)
     })
 }
 
@@ -711,75 +438,19 @@ pub fn ensure_entity(
 ) -> Result<i64, DbError> {
     require_user(user)?;
     require_name("class", class)?;
-    let effective_name: String = match name {
-        Some(n) => n.to_string(),
-        None if !elements.is_empty() => elements.join("__"),
-        None => {
-            return Err(DbError::Api(
-                "ensure_entity: a 0-D entity needs a name (N-D may derive it from \
-                 elements)"
-                    .into(),
-            ))
-        }
-    };
+    let effective_name = effective_entity_name(name, elements)?;
     if !charset_ok(&effective_name) {
         return Err(DbError::Api(format!(
             "ensure_entity: entity name {effective_name:?} must match [A-Za-z0-9_]+"
         )));
     }
 
-    struct ClassShape {
-        cid: i64,
-        // (position, dimension_class_id, dimension_class_set_id)
-        dims: Vec<(i64, Option<i64>, Option<i64>)>,
-    }
-    fn shape(conn: &Connection, class: &str) -> Result<ClassShape, DbError> {
-        let cid = lookup_entity_class(conn, class)?
-            .ok_or_else(|| DbError::Api(format!("ensure_entity: class {class:?} not found")))?;
-        let mut stmt = conn.prepare(
-            "SELECT cur_p, dimension_class_id, dimension_class_set_id \
-             FROM entity_class_dimension WHERE cur_c = ? ORDER BY cur_p",
-        )?;
-        let dims = stmt
-            .query_map(params![cid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<Result<_, _>>()?;
-        Ok(ClassShape { cid, dims })
-    }
-    fn verify_elements(
-        conn: &Connection,
-        class: &str,
-        name: &str,
-        eid: i64,
-        elements: &[String],
-    ) -> Result<(), DbError> {
-        if elements.is_empty() {
-            return Ok(()); // caller gave no tuple to verify against
-        }
-        let mut stmt = conn.prepare(
-            "SELECT lower(e.name) FROM entity_element el \
-             JOIN entity e ON e.cur_id = el.element_entity_id \
-             WHERE el.cur_e = ? ORDER BY el.cur_p",
-        )?;
-        let have: Vec<String> =
-            stmt.query_map(params![eid], |r| r.get(0))?.collect::<Result<_, _>>()?;
-        let want: Vec<String> = elements.iter().map(|e| fold(e)).collect();
-        if have == want {
-            Ok(())
-        } else {
-            Err(DbError::Api(format!(
-                "ensure_entity: {class}:{name} already exists with elements \
-                 [{}], not [{}]",
-                have.join(", "),
-                want.join(", ")
-            )))
-        }
-    }
-
+    // Existing-entity fast path (read-only, no commit): verify the tuple.
     let pre = with_read(db, |conn| {
-        let s = shape(conn, class)?;
+        let s = entity_class_shape(conn, class)?;
         match lookup_entity(conn, s.cid, &effective_name)? {
             Some(eid) => {
-                verify_elements(conn, class, &effective_name, eid, elements)?;
+                verify_entity_elements(conn, class, &effective_name, eid, elements)?;
                 Ok(Some(eid))
             }
             None => Ok(None),
@@ -790,41 +461,9 @@ pub fn ensure_entity(
     }
 
     let msg = format!("ensure_entity {class}:{effective_name}");
+    // The shared applier is the one entity+element create body (invariant 2).
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        let s = shape(conn, class)?;
-        if let Some(eid) = lookup_entity(conn, s.cid, &effective_name)? {
-            verify_elements(conn, class, &effective_name, eid, elements)?;
-            return Ok(eid);
-        }
-        if s.dims.is_empty() {
-            if !elements.is_empty() {
-                return Err(DbError::Api(format!(
-                    "ensure_entity: class {class:?} is 0-D but elements were given"
-                )));
-            }
-        } else if elements.len() != s.dims.len() {
-            return Err(DbError::Api(format!(
-                "ensure_entity: class {class:?} is {}-D; got {} element(s)",
-                s.dims.len(),
-                elements.len()
-            )));
-        }
-        // Resolve every element BEFORE inserting anything.
-        let mut el_ids: Vec<(i64, i64)> = Vec::with_capacity(elements.len());
-        for ((pos, dc, ds), el) in s.dims.iter().zip(elements.iter()) {
-            let id = resolve_element_in_dim(conn, *dc, *ds, el)?.ok_or_else(|| {
-                DbError::Api(format!(
-                    "ensure_entity: element {el:?} at position {pos} does not name an \
-                     entity of the dimension's class"
-                ))
-            })?;
-            el_ids.push((*pos, id));
-        }
-        let eid = insert_entity_row(conn, c, s.cid, &effective_name, None)?;
-        for (pos, el_id) in &el_ids {
-            insert_entity_element_row(conn, c, eid, *pos, *el_id)?;
-        }
-        Ok(eid)
+        apply_create_entity(conn, c, class, name, elements).map(|(id, _)| id)
     })
 }
 

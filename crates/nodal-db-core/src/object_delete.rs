@@ -488,6 +488,25 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
             ],
             erase_extra: Vec::new(),
         }),
+        // §3 (structural_write_api_plan) — scenario, target `scenario` row by id.
+        // VERIFIED against the live schema (2026-09-23): `scenario_alternative.
+        // scenario_id` is the ONLY FK-intent referent of `scenario` (grep of
+        // schema/*.sql — no run / semantic_annotation / other table keys it). If
+        // scenarios ever become semantic_annotation targets, add a filtered leg
+        // here — the registry is the one place that decision lands.
+        ObjectKind::Scenario => Some(ObjectLegSet {
+            object_table: "scenario",
+            identity: Vec::new(), // a scenario owns no identity rows
+            dependents: vec![DepLeg {
+                table: "scenario_alternative",
+                column: "scenario_id",
+                predicate: "scenario_id = ?",
+                array: false,
+                sample_expr: "'alternative=' || alternative_id || ',rank=' || rank",
+                erase: false, // scenario erase grain is undesigned
+            }],
+            erase_extra: Vec::new(),
+        }),
     }
 }
 
@@ -910,6 +929,19 @@ fn resolve_target(
                 }
             };
             Ok(crate::api::lookup_entity_class(conn, name)?.map(|id| ResolvedTarget { id }))
+        }
+        ObjectKind::Scenario => {
+            // A scenario is globally name-addressed (class is None, validated in
+            // prepare); an element tuple never addresses a scenario.
+            let name = match &key.target {
+                ObjectRef::Name(n) => n,
+                ObjectRef::Elements(_) => {
+                    return Err(DbError::Api(
+                        "a scenario is addressed by name, not an element tuple".into(),
+                    ))
+                }
+            };
+            Ok(crate::api::lookup_scenario(conn, name)?.map(|id| ResolvedTarget { id }))
         }
     }
 }

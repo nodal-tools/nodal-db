@@ -45,9 +45,10 @@ use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::history::{delete_value, write_value};
 use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
+use crate::structural::{apply_structural, prepare_structural};
 use crate::types::{
-    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview, ValueKey,
-    ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
+    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview,
+    StructuralChange, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -127,7 +128,7 @@ pub fn ingest_segments(
     // A pure-write ingest is a `commit_changes` with no deletes (delete design
     // MAJOR-2): the write path and the retried-commit shape are shared, so
     // writes-only and writes+deletes cannot drift.
-    commit_changes(db, segments, Vec::new(), Vec::new(), user, message, opts)
+    commit_changes(db, segments, Vec::new(), Vec::new(), Vec::new(), user, message, opts)
 }
 
 /// A typed delete target: one `(class, parameter, alternative, entity)` value,
@@ -156,7 +157,7 @@ pub struct DeleteKey {
 /// resolved (case-insensitive, lookup-only — never auto-created) and closed out
 /// via `history::delete_value`. A missing referent or already-absent value is a
 /// machine-readable [`Warning`] + skip, never a hard error (delete design §2).
-/// Non-empty `user`; empty segments AND empty deletes ⇒ [`DbError::Api`].
+/// Non-empty `user`; empty across ALL channels ⇒ [`DbError::Api`].
 ///
 /// `object_deletes` (object_delete plan §2) join the SAME atomic commit, applied
 /// AFTER value writes and value deletes: a coord closed by a staged value delete
@@ -164,12 +165,22 @@ pub struct DeleteKey {
 /// double-counted — D5), and a later phase's class delete can compose over
 /// already-settled value state. Each is resolved lookup-only and closed under
 /// the `valid_from < commit_id` guard; per-request outcomes land in
-/// `report.object_deletes`. Empty segments AND deletes AND object_deletes ⇒
-/// [`DbError::Api`].
+/// `report.object_deletes`.
+///
+/// `structural` (structural_write_api_plan §2/§4) is the fourth channel, applied
+/// FIRST inside the retried closure (structural → segments → deletes →
+/// object_deletes): a same-save value write / rank / activation may target a
+/// referent an earlier structural item just created, and items apply
+/// sequentially against the one open txn, so create → use resolves. Pure,
+/// name-level guards (§4.5) reject caller-contract problems (one set-ranks per
+/// scenario, contradictory renames, the cross-channel object-delete orphan)
+/// before any DB work; per-item outcomes land in `report.structural`.
+/// Empty across every channel ⇒ [`DbError::Api`].
 #[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
     segments: Vec<Segment>,
+    structural: Vec<StructuralChange>,
     deletes: Vec<DeleteKey>,
     object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
     user: &str,
@@ -181,9 +192,10 @@ pub fn commit_changes(
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
-    if segments.is_empty() && deletes.is_empty() && object_deletes.is_empty() {
+    if segments.is_empty() && structural.is_empty() && deletes.is_empty() && object_deletes.is_empty()
+    {
         return Err(DbError::Api(
-            "nothing to do: no segments, no deletes, no object deletes".into(),
+            "nothing to do: no segments, no structural changes, no deletes, no object deletes".into(),
         ));
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
@@ -234,6 +246,10 @@ pub fn commit_changes(
     // fold-colliding requests up front, carrying the caller index (object_delete
     // plan §2). Pure — no DB touched.
     let prepared_object_deletes = prepare_object_deletes(&object_deletes)?;
+    // Structural changes: pure, name-level guards (§4.5) — per-change name/
+    // charset/type validation, one-set-per-scenario (M3), contradictory renames,
+    // and the cross-channel object-delete orphan guard (M2). No DB touched.
+    prepare_structural(&structural, &object_deletes)?;
 
     // --- The atomic, retried commit. Everything below re-reads/re-creates DB
     // state inside a fresh transaction on each retry (VMP Part 5), so the axis
@@ -246,6 +262,13 @@ pub fn commit_changes(
             commit_id,
             ..Default::default()
         };
+        // Structural changes run FIRST (§4.1): a value write / rank / activation
+        // later in this same commit may target a referent an earlier structural
+        // item just created, and items apply sequentially against the one open
+        // txn, so create → use resolves. Caller-given vec order is honored.
+        for (i, ch) in structural.iter().enumerate() {
+            apply_structural(conn, commit_id, i, ch, &mut report)?;
+        }
         for (i, p) in prepared.iter().enumerate() {
             write_prepared(conn, commit_id, p, opts, &mut cache, &mut report).map_err(|e| {
                 // Name the failing segment (spec §9.1) — but never rewrap a raw
@@ -284,7 +307,21 @@ pub fn delete_values(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(db, Vec::new(), keys, Vec::new(), user, message, opts)
+    commit_changes(db, Vec::new(), Vec::new(), keys, Vec::new(), user, message, opts)
+}
+
+/// Apply one or more structural (create/rename/set-ranks/activation/membership)
+/// changes in ONE atomic, conflict-retried commit — the structural-only wrapper
+/// over [`commit_changes`] (structural_write_api_plan §2.1). Per-item outcomes
+/// land in `report.structural`.
+pub fn commit_structural(
+    db: &Path,
+    changes: Vec<StructuralChange>,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
+    commit_changes(db, Vec::new(), changes, Vec::new(), Vec::new(), user, message, opts)
 }
 
 /// Delete (append-only close-out) one or more OBJECTS in ONE atomic, conflict-
@@ -300,7 +337,7 @@ pub fn delete_objects(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(db, Vec::new(), Vec::new(), object_deletes, user, message, opts)
+    commit_changes(db, Vec::new(), Vec::new(), Vec::new(), object_deletes, user, message, opts)
 }
 
 /// Read-only preview of each object delete (object_delete plan §3, decision D6):
@@ -457,6 +494,10 @@ pub(crate) fn lookup_entity_class(conn: &Connection, name: &str) -> Result<Optio
 
 pub(crate) fn lookup_alternative(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
     opt_id(conn, "SELECT id FROM alternative WHERE cur_name = lower(?)", -1, name)
+}
+
+pub(crate) fn lookup_scenario(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
+    opt_id(conn, "SELECT id FROM scenario WHERE cur_name = lower(?)", -1, name)
 }
 
 pub(crate) fn lookup_parameter(

@@ -405,6 +405,7 @@ fn combined_write_and_delete_one_commit() {
     let r = commit_changes(
         &db,
         vec![seg("node", "demand", "Base", scalar_batch("node_2", 9.0))], // write
+        vec![],                                                           // no structural
         vec![dk("node", "demand", "Base", "node_1")],                     // delete
         vec![],                                                           // no object deletes
         "t",
@@ -446,6 +447,7 @@ fn combined_error_rolls_back_whole_invocation() {
             // seg 2 fails at canonicalization (MissingDomain) mid-transaction.
             seg("node", "level_param", "Base", undomained_label_batch("node_1")),
         ],
+        vec![],                                       // no structural
         vec![dk("node", "demand", "Base", "node_1")], // queued delete, never reached
         vec![],                                       // no object deletes
         "t",

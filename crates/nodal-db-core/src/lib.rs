@@ -78,6 +78,13 @@ pub mod erasure;
 /// template-identity writes (`specs/flextool_port_finale_plan.md` §1, D-F4).
 pub mod verbs;
 
+/// The sanctioned structural (non-value) write path — the fourth
+/// `commit_changes` channel: create/rename alternatives + scenarios, declarative
+/// scenario ranking (A-min), per-edge activation + membership, and the D-S9
+/// entity/class/parameter creates (`specs/structural_write_api_plan.md`). Shared
+/// appliers so no table gets a second writer (invariant 2).
+pub mod structural;
+
 /// The template IR loader: parse/validate the YAML-1.2/JSON vocabulary IR,
 /// load into a fresh DB, reconcile against a populated one (three-layer
 /// migration model, v1 mechanics), export back out

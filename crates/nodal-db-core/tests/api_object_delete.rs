@@ -502,6 +502,7 @@ fn combined_atomicity_one_commit() {
     let r = commit_changes(
         &db,
         vec![seg("node", "demand", "altA", scalar_batch("node_3", 3.0))],
+        vec![],
         vec![dk("node", "demand", "altA", "node_1")],
         vec![(oalt("altB"), cascade(true))],
         "t",
@@ -543,6 +544,7 @@ fn same_commit_write_then_cascade_guard() {
     let r = commit_changes(
         &db,
         vec![seg("node", "demand", "fresh", scalar_batch("node_1", 7.0))],
+        vec![],
         vec![],
         vec![(oalt("fresh"), cascade(true))],
         "t",
@@ -979,6 +981,7 @@ fn param_combined_atomicity_one_commit() {
     let r = commit_changes(
         &db,
         vec![seg("node", "keep", "altA", scalar_batch("node_2", 2.0))],
+        vec![],
         vec![dk("node", "keep", "altA", "node_1")],
         vec![(opar("node", "profile"), cascade(true))],
         "t",
@@ -1243,7 +1246,7 @@ fn entity_bare_delete_no_dependents() {
     write_parameter(&db, "node", "demand", "Base", scalar_batch("solo", 1.0), &[], o(), "t", "s").expect("solo");
     delete_objects(&db, vec![], "t", "noop", o()).ok();
     // Close the only value so `solo` has no dependents.
-    commit_changes(&db, vec![], vec![dk("node", "demand", "Base", "solo")], vec![], "t", "clear", o())
+    commit_changes(&db, vec![], vec![], vec![dk("node", "demand", "Base", "solo")], vec![], "t", "clear", o())
         .expect("clear value");
     let e = count(&db, "SELECT id FROM entity WHERE cur_name=lower('solo')");
 
@@ -1316,6 +1319,7 @@ fn entity_combined_atomicity_one_commit() {
     let r = commit_changes(
         &db,
         vec![seg("node", "demand", "Base", scalar_batch("node_3", 9.0))],
+        vec![],
         vec![dk("node", "demand", "Base", "node_2")],
         vec![(oent("node", "node_1"), cascade(true))],
         "t", "one atomic save", o(),
@@ -1879,6 +1883,7 @@ fn class_combined_atomicity_one_commit() {
     let r = commit_changes(
         &db,
         vec![seg("gen", "cap", "Base", scalar_batch("g2", 2.0))],
+        vec![],
         vec![dk("gen", "cap", "Base", "g1")],
         vec![(oclass("node"), cascade(true))],
         "t", "one atomic save", o(),
@@ -2050,6 +2055,7 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
     let r = commit_changes(
         &db,
         vec![],
+        vec![],
         vec![dk("node", "demand", "victim", "node_1")],
         vec![(oalt("victim"), cascade(true))],
         "t", "overlap", o(),
@@ -2096,6 +2102,7 @@ fn same_commit_array_write_then_cascade_guard() {
     let r = commit_changes(
         &db,
         vec![seg("node", "profile", "afresh", array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]))],
+        vec![],
         vec![],
         vec![(oalt("afresh"), cascade(true))],
         "t", "array hazard", o(),

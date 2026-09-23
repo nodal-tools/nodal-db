@@ -106,6 +106,14 @@ pub(crate) fn fold(s: &str) -> String {
     s.to_lowercase()
 }
 
+/// The store's name charset CHECK (`#2373`) for classes/entities/parameters —
+/// mirrored in Rust so a caller-contract problem fails as a clean error, never
+/// a raw CHECK error mid-transaction. Shared by the G8 verbs and the structural
+/// channel's pure prepare (invariant 2 — one charset rule).
+pub(crate) fn charset_ok(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 impl ScalarValue {
     /// A canonical identity string for scalar equality/dedup (kind-prefixed;
     /// float text is Rust's shortest round-trip form, so `1` written as float
@@ -224,6 +232,10 @@ pub struct WriteReport {
     /// structured result, not a warning, so the CLI's exhaustive `WarningKind`
     /// match is untouched.
     pub object_deletes: Vec<ObjectDeleteOutcome>,
+    /// Per-item outcomes of any structural (create/rename/set-ranks/activation/
+    /// membership) changes in this commit (structural_write_api_plan §2.3).
+    /// Empty for pure value work. Additive, like `object_deletes`.
+    pub structural: Vec<StructuralOutcome>,
 }
 
 impl WriteReport {
@@ -288,6 +300,7 @@ pub enum ObjectKind {
     Parameter,
     Alternative,
     Class,
+    Scenario,
 }
 
 impl ObjectKind {
@@ -298,6 +311,7 @@ impl ObjectKind {
             ObjectKind::Parameter => "parameter",
             ObjectKind::Alternative => "alternative",
             ObjectKind::Class => "class",
+            ObjectKind::Scenario => "scenario",
         }
     }
 }
@@ -387,6 +401,129 @@ pub struct ObjectDeleteOutcome {
     pub key_index: usize,
     pub kind: ObjectKind,
     pub result: ObjectDeleteResult,
+}
+
+// ---------------------------------------------------------------------------
+// Structural (non-value) writes — the fourth `commit_changes` channel
+// (structural_write_api_plan §2.2). Names, not ids; the core resolves strictly
+// (lookup-only, never auto-created — the opposite of the value path), except
+// the `Create*` ops and the scenario auto-create inside SetScenarioAlternatives.
+// ---------------------------------------------------------------------------
+
+/// One `(class, name)` entity address — a group/member endpoint for membership,
+/// resolved strictly. Mirrors the delete side's `(class, ObjectRef::Name)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EntityAddr {
+    pub class: String,
+    pub name: String,
+}
+
+/// A sanctioned create/update of a structural (non-value) object, applied inside
+/// `commit_changes`' atomic commit (structural_write_api_plan §2.2). Removal is
+/// NOT here — it rides `object_deletes` ([`ObjectKind`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum StructuralChange {
+    /// Idempotent create. Existing (folded) name ⇒ its id, no write.
+    /// `description` applies on create only.
+    CreateAlternative {
+        name: String,
+        description: Option<String>,
+    },
+    /// Versioned rename (close-out + successor, id preserved). `description`
+    /// None keeps the current description; Some(_) revises it. Renaming to the
+    /// current folded name with no description change is a no-op.
+    RenameAlternative {
+        current: String,
+        new_name: String,
+        description: Option<String>,
+    },
+    CreateScenario {
+        name: String,
+        description: Option<String>,
+    },
+    RenameScenario {
+        current: String,
+        new_name: String,
+        description: Option<String>,
+    },
+    /// Declarative: set the scenario's ordered alternative membership to EXACTLY
+    /// this list. `alternatives[i]` takes rank i+1; the LAST element wins
+    /// (higher-rank-wins). Creates the scenario when absent. An empty list clears
+    /// the ranking. Alternatives resolve strictly; at most one per scenario per
+    /// commit.
+    SetScenarioAlternatives {
+        scenario: String,
+        alternatives: Vec<String>,
+    },
+    /// Per-edge activation of one entity in one alternative. `active: None`
+    /// closes the current row (revert to class default). Idempotent.
+    SetEntityActivation {
+        class: String,
+        entity: String,
+        alternative: String,
+        active: Option<bool>,
+    },
+    /// Idempotent 0-D/N-D entity create (existing ⇒ its id, verifies tuple).
+    CreateEntity {
+        class: String,
+        name: Option<String>,
+        elements: Vec<String>,
+    },
+    /// Idempotent entity-class create (0-D or N-D).
+    CreateEntityClass { name: String, dims: Vec<String> },
+    /// Idempotent, typed parameter-definition create.
+    CreateParameter {
+        class: String,
+        name: String,
+        types: Vec<crate::template::ir::TypeDecl>,
+        value_list: Option<String>,
+        description: Option<String>,
+    },
+    /// Per-edge membership of `member` in group `group`. `alternative: None`
+    /// writes/updates the base row; Some(a) the alternative-scoped override.
+    /// `included: None` closes the current row; Some(b) sets `included = b`.
+    SetMembership {
+        group: EntityAddr,
+        member: EntityAddr,
+        alternative: Option<String>,
+        included: Option<bool>,
+    },
+}
+
+/// Which structural object an outcome concerns (structural_write_api_plan §2.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StructuralKind {
+    Alternative,
+    Scenario,
+    ScenarioRanking,
+    Activation,
+    Membership,
+    Entity,
+    EntityClass,
+    Parameter,
+}
+
+/// What a structural change did (structural_write_api_plan §2.3): tell "created
+/// a new object" from "it already existed", and "changed" from "already so".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StructuralEffect {
+    Created,
+    Renamed,
+    Updated,
+    NoOp,
+    Cleared,
+}
+
+/// One structural item's outcome, mapped back to the caller's `structural` vec
+/// by `change_index` (structural_write_api_plan §2.3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuralOutcome {
+    /// Position in the caller's `structural` vec.
+    pub change_index: usize,
+    pub kind: StructuralKind,
+    /// The affected/created object id (0 where n/a, e.g. a cleared membership).
+    pub object_id: i64,
+    pub effect: StructuralEffect,
 }
 
 /// Read-only preview of ONE object delete (object_delete plan §3, decision D6).

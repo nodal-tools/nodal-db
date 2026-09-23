@@ -17,9 +17,10 @@ use nodal_db_core::erasure::{ErasePreview, EraseReport};
 use nodal_db_core::error::DbError;
 use nodal_db_core::template::{ApplyOutcome, ReconcilePlan};
 use nodal_db_core::types::{
-    Blocker, CascadeCounts, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteOutcome,
-    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, TableCount, Tier, Warning,
-    WarningKind, WriteReport,
+    Blocker, CascadeCounts, EntityAddr, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteOutcome,
+    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, StructuralChange,
+    StructuralEffect, StructuralKind, StructuralOutcome, TableCount, Tier, Warning, WarningKind,
+    WriteReport,
 };
 
 use crate::{
@@ -233,6 +234,145 @@ pub(crate) fn object_delete_from_py(
 }
 
 // ---------------------------------------------------------------------------
+// Structural changes in (structural_write_api_plan §6). Each dict's `"op"`
+// discriminator maps 1:1 to a `StructuralChange` variant. No decision here —
+// every rule (strict resolution, A-min, same-commit guard) lives in the core.
+// ---------------------------------------------------------------------------
+
+fn req_str(obj: &Bound<'_, PyAny>, op: &str, key: &str) -> PyResult<String> {
+    obj.get_item(key)
+        .map_err(|_| ApiError::new_err(format!("structural {op:?} is missing key {key:?}")))?
+        .extract::<String>()
+}
+
+fn opt_str(obj: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
+    match obj.get_item(key) {
+        Ok(v) if !v.is_none() => Ok(Some(v.extract()?)),
+        _ => Ok(None),
+    }
+}
+
+fn opt_bool(obj: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<bool>> {
+    match obj.get_item(key) {
+        Ok(v) if !v.is_none() => Ok(Some(v.extract()?)),
+        _ => Ok(None),
+    }
+}
+
+fn str_list(obj: &Bound<'_, PyAny>, key: &str) -> PyResult<Vec<String>> {
+    match obj.get_item(key) {
+        Ok(v) if !v.is_none() => Ok(v.extract()?),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// An entity address: a dict `{"class": str, "name": str}` or a `(class, name)`
+/// 2-tuple.
+fn entity_addr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<EntityAddr> {
+    if let Ok((class, name)) = obj.extract::<(String, String)>() {
+        return Ok(EntityAddr { class, name });
+    }
+    Ok(EntityAddr {
+        class: req_str(obj, "entity_addr", "class")?,
+        name: req_str(obj, "entity_addr", "name")?,
+    })
+}
+
+/// Collect an optional iterable of `"op"`-keyed dicts into `StructuralChange`s.
+pub(crate) fn structural_changes_from_py(
+    obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<StructuralChange>> {
+    let mut out = Vec::new();
+    if let Some(items) = obj {
+        for item in items.try_iter()? {
+            out.push(structural_change_from_py(&item?)?);
+        }
+    }
+    Ok(out)
+}
+
+/// One structural change dict, keyed on `"op"`.
+pub(crate) fn structural_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<StructuralChange> {
+    let op: String = obj
+        .get_item("op")
+        .map_err(|_| ApiError::new_err("structural change is missing key \"op\""))?
+        .extract()?;
+    Ok(match op.as_str() {
+        "create_alternative" => StructuralChange::CreateAlternative {
+            name: req_str(obj, &op, "name")?,
+            description: opt_str(obj, "description")?,
+        },
+        "rename_alternative" => StructuralChange::RenameAlternative {
+            current: req_str(obj, &op, "current")?,
+            new_name: req_str(obj, &op, "new_name")?,
+            description: opt_str(obj, "description")?,
+        },
+        "create_scenario" => StructuralChange::CreateScenario {
+            name: req_str(obj, &op, "name")?,
+            description: opt_str(obj, "description")?,
+        },
+        "rename_scenario" => StructuralChange::RenameScenario {
+            current: req_str(obj, &op, "current")?,
+            new_name: req_str(obj, &op, "new_name")?,
+            description: opt_str(obj, "description")?,
+        },
+        "set_scenario_alternatives" => StructuralChange::SetScenarioAlternatives {
+            scenario: req_str(obj, &op, "scenario")?,
+            alternatives: str_list(obj, "alternatives")?,
+        },
+        "set_entity_activation" => StructuralChange::SetEntityActivation {
+            class: req_str(obj, &op, "class")?,
+            entity: req_str(obj, &op, "entity")?,
+            alternative: req_str(obj, &op, "alternative")?,
+            active: opt_bool(obj, "active")?,
+        },
+        "create_entity" => StructuralChange::CreateEntity {
+            class: req_str(obj, &op, "class")?,
+            name: opt_str(obj, "name")?,
+            elements: str_list(obj, "elements")?,
+        },
+        "create_entity_class" => StructuralChange::CreateEntityClass {
+            name: req_str(obj, &op, "name")?,
+            dims: str_list(obj, "dims")?,
+        },
+        "create_parameter" => {
+            let types = match obj.get_item("types") {
+                Ok(t) if !t.is_none() => Some(t.try_iter()?.collect::<PyResult<Vec<_>>>()?),
+                _ => None,
+            };
+            StructuralChange::CreateParameter {
+                class: req_str(obj, &op, "class")?,
+                name: req_str(obj, &op, "name")?,
+                types: type_decls_from_py(types)?,
+                value_list: opt_str(obj, "value_list")?,
+                description: opt_str(obj, "description")?,
+            }
+        }
+        "set_membership" => {
+            let group = entity_addr_from_py(
+                &obj.get_item("group")
+                    .map_err(|_| ApiError::new_err("set_membership is missing key \"group\""))?,
+            )?;
+            let member = entity_addr_from_py(
+                &obj.get_item("member")
+                    .map_err(|_| ApiError::new_err("set_membership is missing key \"member\""))?,
+            )?;
+            StructuralChange::SetMembership {
+                group,
+                member,
+                alternative: opt_str(obj, "alternative")?,
+                included: opt_bool(obj, "included")?,
+            }
+        }
+        other => {
+            return Err(ApiError::new_err(format!(
+                "unknown structural op {other:?}"
+            )))
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Reports out (plain dicts/lists — no wrapper classes to hold on to)
 // ---------------------------------------------------------------------------
 
@@ -325,6 +465,41 @@ fn object_delete_outcome_to_py<'py>(
     Ok(d)
 }
 
+fn structural_kind_tag(k: StructuralKind) -> &'static str {
+    match k {
+        StructuralKind::Alternative => "alternative",
+        StructuralKind::Scenario => "scenario",
+        StructuralKind::ScenarioRanking => "scenario_ranking",
+        StructuralKind::Activation => "activation",
+        StructuralKind::Membership => "membership",
+        StructuralKind::Entity => "entity",
+        StructuralKind::EntityClass => "entity_class",
+        StructuralKind::Parameter => "parameter",
+    }
+}
+
+fn structural_effect_tag(e: StructuralEffect) -> &'static str {
+    match e {
+        StructuralEffect::Created => "created",
+        StructuralEffect::Renamed => "renamed",
+        StructuralEffect::Updated => "updated",
+        StructuralEffect::NoOp => "no_op",
+        StructuralEffect::Cleared => "cleared",
+    }
+}
+
+fn structural_outcome_to_py<'py>(
+    py: Python<'py>,
+    o: &StructuralOutcome,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("change_index", o.change_index)?;
+    d.set_item("kind", structural_kind_tag(o.kind))?;
+    d.set_item("object_id", o.object_id)?;
+    d.set_item("effect", structural_effect_tag(o.effect))?;
+    Ok(d)
+}
+
 pub(crate) fn report_to_py<'py>(py: Python<'py>, r: &WriteReport) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("commit_id", r.commit_id)?;
@@ -347,6 +522,11 @@ pub(crate) fn report_to_py<'py>(py: Python<'py>, r: &WriteReport) -> PyResult<Bo
         odos.append(object_delete_outcome_to_py(py, o)?)?;
     }
     d.set_item("object_deletes", odos)?;
+    let structs = PyList::empty(py);
+    for o in &r.structural {
+        structs.append(structural_outcome_to_py(py, o)?)?;
+    }
+    d.set_item("structural", structs)?;
     Ok(d)
 }
 

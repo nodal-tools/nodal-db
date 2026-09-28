@@ -12,7 +12,7 @@
 -- (Decision 12).
 CREATE TABLE display_mode (
   id                BIGINT NOT NULL DEFAULT nextval('seq_display_mode'),
-  name              VARCHAR NOT NULL CHECK (regexp_matches(name, '^[A-Za-z0-9_]+$')),  -- #2373 charset
+  name              VARCHAR NOT NULL,  -- name is free-text (was #2373 [A-Za-z0-9_]+; relaxed for Spine/FlexTool interop — writer enforces a non-empty/no-control-char/trimmed hygiene floor)
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),

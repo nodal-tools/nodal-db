@@ -1231,6 +1231,23 @@ def main():
                       "INSERT INTO alternative (id, name, valid_from_commit)"
                       " VALUES (nextval('seq_alternative'), 'BASE', ?)", [c3])
 
+    # ---- #2373 relaxed: free-text names (hyphen/space) insert and round-trip.
+    # The charset CHECK is gone; the DB now accepts any non-null name. The
+    # hygiene floor (non-empty/trimmed/no-control-chars) lives in the writer,
+    # not the DB — so only positive DB acceptance is asserted here.
+    con.execute("BEGIN")
+    hc = new_commit(con, "#2373: free-text names")
+    hcls = nextval(con, "seq_entity_class")
+    con.execute("INSERT INTO entity_class (id, name, valid_from_commit)"
+                " VALUES (?, '5week-invest', ?)", [hcls, hc])
+    hent = nextval(con, "seq_entity")
+    con.execute("INSERT INTO entity (id, entity_class_id, name, valid_from_commit)"
+                " VALUES (?, ?, 'gen-1 (wind)', ?)", [hent, hcls, hc])
+    con.execute("COMMIT")
+    check("#2373 relaxed: hyphenated/spaced class + entity names insert and round-trip",
+          one("SELECT name FROM entity_class WHERE id = ?", hcls) == ("5week-invest",)
+          and one("SELECT name FROM entity WHERE id = ?", hent) == ("gen-1 (wind)",))
+
     # ---- F10/M2: membership cycle surfaces, incl. the scenario-free base branch
     con.execute("BEGIN")
     con.execute("INSERT INTO membership (group_entity_id, member_entity_id, included,"

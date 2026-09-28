@@ -343,7 +343,7 @@ pub fn ensure_entity_class(
     require_user(user)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "ensure_entity_class: name {name:?} must match [A-Za-z0-9_]+"
+            "ensure_entity_class: name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     if dims.len() > 4 {
@@ -394,7 +394,7 @@ pub fn ensure_parameter_definition(
     require_name("class", class)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "ensure_parameter_definition: name {name:?} must match [A-Za-z0-9_]+"
+            "ensure_parameter_definition: name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     // Pure member validation (the load-time subset of `ir::validate`'s type
@@ -441,7 +441,7 @@ pub fn ensure_entity(
     let effective_name = effective_entity_name(name, elements)?;
     if !charset_ok(&effective_name) {
         return Err(DbError::Api(format!(
-            "ensure_entity: entity name {effective_name:?} must match [A-Za-z0-9_]+"
+            "ensure_entity: entity name {effective_name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
 

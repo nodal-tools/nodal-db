@@ -208,9 +208,22 @@ fn validation_catches_dangling_and_malformed_references() {
         "template: {name: t, version: \"1\"}\nclasses: [{name: c}, {name: C}]",
         "duplicate class name",
     );
+    // #2373 relaxed: hyphens, spaces, and the `__` sequence are now legal
+    // names (Spine/FlexTool interop) — only the hygiene floor is enforced.
+    let ok = parse_str(
+        "template: {name: t, version: \"1\"}\nclasses: [{name: \"5week-invest\"}, {name: \"with space\"}, {name: has__dunder}]",
+    )
+    .unwrap();
+    validate(&ok).unwrap();
+    // But the hygiene floor still rejects genuinely-bad names: empty,
+    // untrimmed (leading/trailing whitespace), or containing control chars.
     expect_err(
-        "template: {name: t, version: \"1\"}\nclasses: [{name: \"bad name\"}]",
-        "must match [A-Za-z0-9_]+",
+        "template: {name: t, version: \"1\"}\nclasses: [{name: \" leading\"}]",
+        "must be non-empty, trimmed, and free of control characters",
+    );
+    expect_err(
+        "template: {name: t, version: \"1\"}\nclasses: [{name: \"tab\\there\"}]",
+        "must be non-empty, trimmed, and free of control characters",
     );
 }
 

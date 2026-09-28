@@ -74,7 +74,7 @@ CREATE UNIQUE INDEX uq_list_value_ordinal ON list_value (cur_l, cur_o);
 CREATE TABLE parameter_definition (
   id                      BIGINT NOT NULL DEFAULT nextval('seq_parameter_definition'),
   entity_class_id         BIGINT NOT NULL,
-  name                    VARCHAR NOT NULL CHECK (regexp_matches(name, '^[A-Za-z0-9_]+$')),  -- #2373
+  name                    VARCHAR NOT NULL,  -- name is free-text (was #2373 [A-Za-z0-9_]+; relaxed for Spine/FlexTool interop — writer enforces a non-empty/no-control-char/trimmed hygiene floor)
   description             VARCHAR,
   parameter_value_list_id BIGINT,                    -- optional value-list constraint (writer-checked, view-audited)
   unit_id                 BIGINT,                    -- expressed default unit (Decision 9)

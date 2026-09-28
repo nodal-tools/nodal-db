@@ -106,12 +106,20 @@ pub(crate) fn fold(s: &str) -> String {
     s.to_lowercase()
 }
 
-/// The store's name charset CHECK (`#2373`) for classes/entities/parameters —
-/// mirrored in Rust so a caller-contract problem fails as a clean error, never
-/// a raw CHECK error mid-transaction. Shared by the G8 verbs and the structural
-/// channel's pure prepare (invariant 2 — one charset rule).
+/// The store's name **hygiene floor** for classes/entities/parameters (was the
+/// `#2373` charset CHECK `[A-Za-z0-9_]+`, relaxed for Spine/FlexTool interop —
+/// hyphens, spaces, dots, `%`, `__`, non-ASCII letters etc. are all allowed).
+/// A name is valid iff it is non-empty, equals its trimmed form (no
+/// leading/trailing whitespace), and contains no ASCII control characters
+/// (bytes < 0x20 or 0x7f, including newlines, tabs, and NUL). The DB CHECK is
+/// gone, so the writer is strictly *stricter* than the DB — the safe direction,
+/// never "writer accepts, DB rejects" (api critique F3). This is the canonical
+/// predicate: mirrored in Rust so a caller-contract problem fails as a clean
+/// error, never a raw CHECK error mid-transaction. Shared by the G8 verbs and
+/// the structural channel's pure prepare (invariant 2 — one name rule); the
+/// template IR and reconcile predicates delegate here so they cannot drift.
 pub(crate) fn charset_ok(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    !s.is_empty() && s == s.trim() && !s.chars().any(|c| c.is_ascii_control())
 }
 
 impl ScalarValue {

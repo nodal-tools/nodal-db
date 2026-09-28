@@ -3029,8 +3029,11 @@ pub(crate) fn clear_metadata(conn: &Connection, c: i64, key: &str) -> Result<(),
 // Layer-2 hint execution (one commit per step; apply side)
 // ---------------------------------------------------------------------------
 
+/// Name hygiene floor for rename/merge targets (was the `#2373` charset CHECK).
+/// Delegates to the canonical predicate in [`crate::types::charset_ok`] so the
+/// writer's name rule cannot drift.
 fn charset_ok(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    crate::types::charset_ok(s)
 }
 
 fn hint_class_id(conn: &Connection, step: &str, name: &str) -> Result<i64, DbError> {
@@ -3229,7 +3232,7 @@ fn execute_step(
         MigrationStep::RenameClass { from, to } => {
             if !charset_ok(to) {
                 return Err(DbError::Api(format!(
-                    "rename_class: target {to:?} must match [A-Za-z0-9_]+"
+                    "rename_class: target {to:?} must be non-empty, trimmed, and free of control characters"
                 )));
             }
             let id = lookup_entity_class(conn, from)?
@@ -3254,7 +3257,7 @@ fn execute_step(
         } => {
             if !charset_ok(to) {
                 return Err(DbError::Api(format!(
-                    "rename_parameter: target {to:?} must match [A-Za-z0-9_]+"
+                    "rename_parameter: target {to:?} must be non-empty, trimmed, and free of control characters"
                 )));
             }
             let cid = hint_class_id(conn, "rename_parameter", class)?;
@@ -3513,7 +3516,7 @@ fn execute_step(
                     // target definition — G3 ordering).
                     if !charset_ok(to) {
                         return Err(DbError::Api(format!(
-                            "merge_parameter: target {to:?} must match [A-Za-z0-9_]+"
+                            "merge_parameter: target {to:?} must be non-empty, trimmed, and free of control characters"
                         )));
                     }
                     let mut row = read_pd_row(conn, pd_id)?;

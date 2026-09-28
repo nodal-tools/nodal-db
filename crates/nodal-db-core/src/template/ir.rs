@@ -130,9 +130,11 @@ pub const LITERAL_KINDS: [&str; 4] = ["float", "int", "bool", "string"];
 /// Index-dimension kinds (`parameter_type_dimension.kind`, VMP Part 1).
 pub const DIM_KINDS: [&str; 5] = ["datetime", "period", "label", "integer", "time_pattern"];
 
-/// The store's name charset CHECK (`#2373`): classes, entities, parameters.
+/// The store's name hygiene floor (was the `#2373` charset CHECK): classes,
+/// entities, parameters. Delegates to the canonical predicate in
+/// [`crate::types::charset_ok`] so the writer's name rule cannot drift.
 fn name_charset_ok(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    crate::types::charset_ok(s)
 }
 
 fn default_true() -> bool {
@@ -1098,7 +1100,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
     let mut class_ix: HashMap<String, usize> = HashMap::new();
     for (i, c) in t.classes.iter().enumerate() {
         if !name_charset_ok(&c.name) {
-            errs.push(format!("class {:?}: name must match [A-Za-z0-9_]+", c.name));
+            errs.push(format!(
+                "class {:?}: name must be non-empty, trimmed, and free of control characters",
+                c.name
+            ));
         }
         if class_ix.insert(fold(&c.name), i).is_some() {
             errs.push(format!("duplicate class name {:?} (case-insensitive)", c.name));
@@ -1107,7 +1112,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
     let mut set_ix: HashMap<String, usize> = HashMap::new();
     for (i, s) in t.class_sets.iter().enumerate() {
         if !name_charset_ok(&s.name) {
-            errs.push(format!("class_set {:?}: name must match [A-Za-z0-9_]+", s.name));
+            errs.push(format!(
+                "class_set {:?}: name must be non-empty, trimmed, and free of control characters",
+                s.name
+            ));
         }
         if set_ix.insert(fold(&s.name), i).is_some() {
             errs.push(format!("duplicate class_set name {:?} (case-insensitive)", s.name));
@@ -1244,7 +1252,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
         for (pi, p) in c.parameters.iter().enumerate() {
             let loc = format!("class {:?} parameter {:?}", c.name, p.name);
             if !name_charset_ok(&p.name) {
-                errs.push(format!("{loc}: name must match [A-Za-z0-9_]+"));
+                errs.push(format!(
+                    "{loc}: name must be non-empty, trimmed, and free of control characters"
+                ));
             }
             if !pnames.insert(fold(&p.name)) {
                 errs.push(format!("{loc}: duplicate parameter name (case-insensitive)"));
@@ -1522,7 +1532,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                 continue;
             }
             if !name_charset_ok(&name) {
-                errs.push(format!("{loc}: entity name {name:?} must match [A-Za-z0-9_]+"));
+                errs.push(format!(
+                    "{loc}: entity name {name:?} must be non-empty, trimmed, and free of control characters"
+                ));
             }
             if !seeded.insert((fold(&e.class), fold(&name))) {
                 errs.push(format!("{loc}: duplicate seed entity {name:?} (case-insensitive)"));

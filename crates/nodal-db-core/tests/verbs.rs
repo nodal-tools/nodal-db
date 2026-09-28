@@ -767,3 +767,48 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
         Some("label")
     );
 }
+
+// ---------------------------------------------------------------------------
+// #2373 relaxed: free-text names through the write path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn free_text_names_round_trip_through_verbs() {
+    // Names that the old [A-Za-z0-9_]+ charset would have rejected — a hyphen
+    // (real FlexTool: `5week-invest`), an internal space, and the `__`
+    // sequence — now write and read back verbatim (case-preserving storage).
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+
+    let cls = ensure_entity_class(&db, "5week-invest", &[], "tester").unwrap();
+    assert!(cls > 0);
+    ensure_entity(&db, "5week-invest", Some("node with space"), &[], "tester").unwrap();
+    let pd = ensure_parameter_definition(
+        &db, "5week-invest", "ramp__limit", &[], None, None, "tester",
+    )
+    .unwrap();
+    assert!(pd > 0);
+
+    // Read back verbatim: storage preserves case and the exact bytes.
+    assert_eq!(
+        qs(&db, "SELECT name FROM entity_class WHERE cur_name = '5week-invest'").as_deref(),
+        Some("5week-invest")
+    );
+    assert_eq!(
+        qs(&db, "SELECT name FROM entity WHERE cur_name = 'node with space'").as_deref(),
+        Some("node with space")
+    );
+    assert_eq!(
+        qs(&db, "SELECT name FROM parameter_definition WHERE cur_name = 'ramp__limit'")
+            .as_deref(),
+        Some("ramp__limit")
+    );
+
+    // The hygiene floor still rejects a control character (writer stricter than
+    // the now-unconstrained DB — the safe direction, never a raw CHECK error).
+    let err = ensure_entity_class(&db, "bad\tname", &[], "tester").unwrap_err();
+    assert!(
+        format!("{err}").contains("must be non-empty, trimmed, and free of control characters"),
+        "control-char name must be refused by the writer, got: {err}"
+    );
+}

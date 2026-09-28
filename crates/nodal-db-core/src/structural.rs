@@ -991,7 +991,7 @@ fn require_nonempty(what: &str, name: &str) -> Result<(), DbError> {
 fn require_charset(what: &str, name: &str) -> Result<(), DbError> {
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "structural: {what} name {name:?} must match [A-Za-z0-9_]+"
+            "structural: {what} name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     Ok(())

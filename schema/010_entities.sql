@@ -3,7 +3,9 @@
 -- SDP Part 1 rows `entity_class`, `entity_class_dimension`,
 -- `superclass_subclass` (replaced by class-set, Decision 5), `entity`,
 -- `entity_element`, `entity_location`; SDP Part 2 "Validation philosophy"
--- (name rules #2373/#1302); VMP Part 5 (from/to on all narrow mutable tables).
+-- (name rules: #2373 charset relaxed to free-text — writer enforces a
+-- non-empty/no-control-char/trimmed hygiene floor; #1302 case-insensitive
+-- uniqueness retained); VMP Part 5 (from/to on all narrow mutable tables).
 
 -- Entity class (SDP Part 1 `entity_class`): carried, pruned. Keeps
 -- active_by_default (resolution semantics), display_order (authored template
@@ -11,7 +13,7 @@
 -- display_icon / hidden are NOT carried (editor layer).
 CREATE TABLE entity_class (
   id                BIGINT NOT NULL DEFAULT nextval('seq_entity_class'),
-  name              VARCHAR NOT NULL CHECK (regexp_matches(name, '^[A-Za-z0-9_]+$')),  -- #2373 charset
+  name              VARCHAR NOT NULL,  -- name is free-text (was #2373 [A-Za-z0-9_]+; relaxed for Spine/FlexTool interop — writer enforces a non-empty/no-control-char/trimmed hygiene floor)
   description       VARCHAR,
   active_by_default BOOLEAN NOT NULL DEFAULT TRUE,   -- resolution semantics (SDP Part 1)
   required          BOOLEAN NOT NULL DEFAULT FALSE,  -- completeness marker (#3133)
@@ -35,7 +37,7 @@ CREATE UNIQUE INDEX uq_entity_class_name ON entity_class (cur_name);
 -- member relation is the plan's (set, member_class) table).
 CREATE TABLE class_set (
   id                BIGINT NOT NULL DEFAULT nextval('seq_class_set'),
-  name              VARCHAR NOT NULL CHECK (regexp_matches(name, '^[A-Za-z0-9_]+$')),  -- class-like name
+  name              VARCHAR NOT NULL,  -- name is free-text (was #2373 [A-Za-z0-9_]+; relaxed for Spine/FlexTool interop — writer enforces a non-empty/no-control-char/trimmed hygiene floor)
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
@@ -82,7 +84,7 @@ CREATE UNIQUE INDEX one_current_ec_dimension ON entity_class_dimension (cur_c, c
 CREATE TABLE entity (
   id                BIGINT NOT NULL DEFAULT nextval('seq_entity'),
   entity_class_id   BIGINT NOT NULL,
-  name              VARCHAR NOT NULL CHECK (regexp_matches(name, '^[A-Za-z0-9_]+$')),  -- #2373
+  name              VARCHAR NOT NULL,  -- name is free-text (was #2373 [A-Za-z0-9_]+; relaxed for Spine/FlexTool interop — writer enforces a non-empty/no-control-char/trimmed hygiene floor)
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),

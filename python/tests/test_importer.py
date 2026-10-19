@@ -1,0 +1,527 @@
+"""Generic Spine -> nodal-db importer suite, on SYNTHETIC Spine databases.
+
+Everything here is made up (classes ``widget`` / ``hub`` / ``widget__hub``,
+a ``run_modes`` list, …) and imports through the generic ``Profile`` with an
+explicit template name and version — no tool-specific profile or template.
+
+Covered:
+
+- version-string normalization and the ``upgrade=False`` open contract;
+- the identity stamp is non-optional (no version / no name => FAIL), and is
+  present on the imported DB with the explicit name/version;
+- the ``Profile.version_of`` hook supplies the version when none is passed;
+- OBSERVED-SHAPE DECLARATION: each definition's declared member set is the
+  union of shapes seen in its stored values (scalar float/string, label Map,
+  datetime time series, integer-position Array); value-less definitions
+  import typeless; list bindings carry over;
+- the ``parameter_type_list`` drift table (declared vs observed);
+- LOUD residue: time patterns, entity/scenario descriptions, entity groups,
+  metadata items, non-literal defaults, ragged multi-shape values;
+- structural sections (alternatives, scenarios, entities incl. 2-D,
+  activation) and value fidelity read back against the Spine source;
+- case-colliding names refuse loudly.
+
+Run (project venv carries spinedb_api, pytest and the ``nodal_db`` skin;
+rebuild the skin with ``maturin develop`` in ``crates/nodal-db-py`` after core
+changes):
+
+    .venv/bin/python -m pytest python/tests -q
+"""
+
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("spinedb_api")
+pytest.importorskip("nodal_db")
+
+from nodal_spine_import import (  # noqa: E402
+    ImportError_,
+    Profile,
+    SpineImporter,
+    normalize_version,
+)
+from nodal_spine_import.importer import OPEN_KWARGS  # noqa: E402
+
+TEMPLATE_NAME = "synthetic_model"
+
+
+class SyntheticProfile(Profile):
+    """The generic profile with an explicit template name (nothing else)."""
+
+    template_name = TEMPLATE_NAME
+
+
+# ---------------------------------------------------------------------------
+# Synthetic Spine builders
+# ---------------------------------------------------------------------------
+
+
+def _url(path):
+    return "sqlite:///" + str(path)
+
+
+def _value(db, cls, byname, param, alt, value):
+    from spinedb_api import to_database
+
+    v, t = to_database(value)
+    db.add_update_item(
+        "parameter_value", entity_class_name=cls, entity_byname=tuple(byname),
+        parameter_definition_name=param, alternative_name=alt, value=v, type=t,
+    )
+
+
+def make_basic_spine(tmp_path, name="basic.sqlite"):
+    """A small, clean synthetic source: every construct is importable."""
+    from spinedb_api import (
+        Array,
+        DatabaseMapping,
+        Map,
+        TimeSeriesVariableResolution,
+        to_database,
+    )
+
+    path = tmp_path / name
+    with DatabaseMapping(_url(path), create=True) as db:
+        db.add_update_item("alternative", name="high")
+        for cls in ("widget", "hub"):
+            db.add_update_item("entity_class", name=cls)
+        db.add_update_item(
+            "entity_class", name="widget__hub", dimension_name_list=("widget", "hub"),
+        )
+        db.add_update_item("parameter_value_list", name="run_modes")
+        for i, member in enumerate(("idle", "busy", "boost")):
+            v, t = to_database(member)
+            db.add_update_item(
+                "list_value", parameter_value_list_name="run_modes", value=v, type=t,
+                index=i,
+            )
+
+        # widget: float scalar, list-bound string, free string, Array, and a
+        # value-less definition.
+        db.add_update_item("parameter_definition", entity_class_name="widget",
+                           name="capacity")
+        dv, dt = to_database("idle")
+        db.add_update_item("parameter_definition", entity_class_name="widget",
+                           name="mode", parameter_value_list_name="run_modes",
+                           default_value=dv, default_type=dt)
+        db.add_update_item("parameter_definition", entity_class_name="widget",
+                           name="tag")
+        db.add_update_item("parameter_definition", entity_class_name="widget",
+                           name="stages")
+        db.add_update_item("parameter_definition", entity_class_name="widget",
+                           name="unused_knob")
+        # hub: a label Map and a datetime time series.
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="demand")
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="inflow")
+        # widget__hub: a 2-D class scalar.
+        db.add_update_item("parameter_definition", entity_class_name="widget__hub",
+                           name="share")
+
+        for w in ("w1", "w2"):
+            db.add_update_item("entity", entity_class_name="widget", entity_byname=(w,))
+        db.add_update_item("entity", entity_class_name="hub", entity_byname=("h1",))
+        db.add_update_item("entity", entity_class_name="widget__hub",
+                           entity_byname=("w1", "h1"))
+
+        _value(db, "widget", ["w1"], "capacity", "Base", 10.0)
+        _value(db, "widget", ["w2"], "capacity", "Base", 20.0)
+        _value(db, "widget", ["w1"], "capacity", "high", 15.0)
+        _value(db, "widget", ["w1"], "mode", "Base", "busy")
+        _value(db, "widget", ["w2"], "tag", "Base", "blue")
+        _value(db, "widget", ["w1"], "stages", "Base", Array([1.0, 2.0, 3.0]))
+        _value(db, "hub", ["h1"], "demand", "Base",
+               Map(["p1", "p2"], [5.0, 6.0], index_name="period"))
+        _value(db, "hub", ["h1"], "inflow", "Base", TimeSeriesVariableResolution(
+            ["2030-01-01T00:00", "2030-01-01T01:00"], [1.5, 2.5], False, False))
+        _value(db, "widget__hub", ["w1", "h1"], "share", "Base", 0.25)
+
+        db.add_update_item("scenario", name="sc_high")
+        db.add_update_item("scenario_alternative", scenario_name="sc_high",
+                           alternative_name="Base", rank=1)
+        db.add_update_item("scenario_alternative", scenario_name="sc_high",
+                           alternative_name="high", rank=2)
+        db.add_update_item("entity_alternative", entity_class_name="widget",
+                           entity_byname=("w2",), alternative_name="high", active=False)
+        db.commit_session("synthetic basic source")
+    return path
+
+
+def run_import(tmp_path, spine, *, version="7", out="out.duckdb", profile=None):
+    imp = SpineImporter(str(spine), str(tmp_path / out),
+                        profile or SyntheticProfile(), user="t", version=version)
+    return imp.run(), tmp_path / out
+
+
+def _nodal(path):
+    import nodal_db
+
+    return nodal_db.open(str(path))
+
+
+def _rows(db, sql):
+    return db.query(sql).read_all().to_pylist()
+
+
+def _meta(db):
+    return {
+        r["name"]: r["value"]
+        for r in _rows(db, "SELECT name, value FROM metadata WHERE valid_to_commit IS NULL")
+    }
+
+
+def _declared(db, cls, param):
+    """Current declared member signatures of (cls, param): sorted
+    (value_kind-ish, rank) tuples straight from parameter_type."""
+    return _rows(
+        db,
+        "SELECT pt.* FROM parameter_type pt "
+        "JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id "
+        "JOIN entity_class c ON c.id = pd.cur_cls "
+        f"WHERE pt.valid_to_commit IS NULL AND c.cur_name = '{cls}' "
+        f"AND pd.cur_name = '{param}'",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pins: version normalization, open contract, identity stamp
+# ---------------------------------------------------------------------------
+
+
+def test_version_normalization_pin():
+    assert normalize_version("7.0") == "7"
+    assert normalize_version(7.0) == "7"
+    assert normalize_version(" 12 ") == "12"
+    with pytest.raises(ImportError_):
+        normalize_version("7.5")
+    with pytest.raises(ImportError_):
+        normalize_version("seven")
+    with pytest.raises(ImportError_, match="non-optional"):
+        normalize_version(None)
+
+
+def test_upgrade_false_pin():
+    # The importer NEVER upgrades or creates its input.
+    assert OPEN_KWARGS == {"create": False, "upgrade": False}
+
+
+def test_stamp_is_non_optional_without_version(tmp_path):
+    spine = make_basic_spine(tmp_path)
+    with pytest.raises(ImportError_, match="non-optional"):
+        run_import(tmp_path, spine, version=None)
+    assert not (tmp_path / "out.duckdb").exists(), "nothing written before the refusal"
+
+
+def test_profile_without_template_name_refuses(tmp_path):
+    spine = make_basic_spine(tmp_path)
+    with pytest.raises(ImportError_, match="no template name"):
+        run_import(tmp_path, spine, profile=Profile())
+
+
+def test_explicit_identity_is_stamped(tmp_path):
+    rep, out = run_import(tmp_path, make_basic_spine(tmp_path), version="7.0")
+    assert (rep.template_name, rep.template_version) == (TEMPLATE_NAME, "7")
+    meta = _meta(_nodal(out))
+    assert meta.get("template_name") == TEMPLATE_NAME
+    assert meta.get("template_version") == "7"
+
+
+def test_profile_version_hook_supplies_the_version(tmp_path):
+    class Versioned(SyntheticProfile):
+        def version_of(self, db):
+            return "3.0"
+
+    rep, out = run_import(tmp_path, make_basic_spine(tmp_path), version=None,
+                          profile=Versioned())
+    assert rep.template_version == "3"
+    assert _meta(_nodal(out)).get("template_version") == "3"
+
+
+# ---------------------------------------------------------------------------
+# A clean source: counts, observed-shape declaration, zero residue
+# ---------------------------------------------------------------------------
+
+
+def test_clean_source_imports_with_zero_residue(tmp_path):
+    rep, out = run_import(tmp_path, make_basic_spine(tmp_path))
+    assert rep.residue == [], rep.summary()
+    assert rep.drift_table == []
+    assert rep.write_warnings == [], "everything is pre-declared: no auto-creates"
+    assert rep.counts["classes"] == 3
+    assert rep.counts["parameter_definitions"] == 8
+    assert rep.counts["value_lists"] == 1
+    assert rep.counts["entities"] == 4
+    assert rep.counts["alternatives"] == 2
+    assert rep.counts["scenarios"] == 1
+    assert rep.counts["activation_rows"] == 1
+    # values_written counts (entity, alternative) values, not cells:
+    # 3 capacity + mode + tag + stages (Array) + demand (Map) + inflow (time
+    # series) + share = 9.
+    assert rep.counts["values_written"] == 9
+    kinds = [k for k, _ in rep.commits]
+    assert kinds[:2] == ["vocabulary", "structural"]
+    assert set(kinds[2:]) == {"values"}
+
+
+def test_observed_shape_declaration(tmp_path):
+    _rep, out = run_import(tmp_path, make_basic_spine(tmp_path))
+    db = _nodal(out)
+    # one member per observed shape; nothing for a value-less definition
+    assert len(_declared(db, "widget", "capacity")) == 1
+    assert len(_declared(db, "widget", "tag")) == 1
+    assert len(_declared(db, "widget", "stages")) == 1
+    assert len(_declared(db, "hub", "demand")) == 1
+    assert len(_declared(db, "hub", "inflow")) == 1
+    assert len(_declared(db, "widget__hub", "share")) == 1
+    assert _declared(db, "widget", "unused_knob") == [], "value-less imports typeless"
+
+    # the dims of the indexed members carry the observed index names/kinds
+    dims = _rows(
+        db,
+        "SELECT c.cur_name AS cls, pd.cur_name AS param, pt.value_kind, pt.rank, "
+        "d.position, d.dimension_name, d.kind FROM parameter_type pt "
+        "JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id "
+        "JOIN entity_class c ON c.id = pd.cur_cls "
+        "JOIN parameter_type_dimension d ON d.parameter_type_id = pt.id "
+        "AND d.valid_to_commit IS NULL "
+        "WHERE pt.valid_to_commit IS NULL ORDER BY cls, param, d.position",
+    )
+    got = {(r["cls"], r["param"]): (r["rank"], r["dimension_name"], r["kind"])
+           for r in dims}
+    assert got == {
+        ("hub", "demand"): (1, "period", "label"),
+        ("hub", "inflow"): (1, "time", "datetime"),
+        ("widget", "stages"): (1, "i", "integer"),
+    }, dims
+    scalars = {
+        (r["cls"], r["param"]): r["value_kind"]
+        for r in _rows(
+            db,
+            "SELECT c.cur_name AS cls, pd.cur_name AS param, pt.value_kind "
+            "FROM parameter_type pt "
+            "JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id "
+            "JOIN entity_class c ON c.id = pd.cur_cls "
+            "WHERE pt.valid_to_commit IS NULL AND pt.rank = 0",
+        )
+    }
+    assert scalars == {
+        ("widget", "capacity"): "float",
+        ("widget", "mode"): "string",
+        ("widget", "tag"): "string",
+        ("widget__hub", "share"): "float",
+    }, scalars
+
+    # list binding carried over, with its members and default
+    bound = _rows(
+        db,
+        "SELECT l.name AS list FROM parameter_definition pd "
+        "JOIN parameter_value_list l ON l.id = pd.parameter_value_list_id "
+        "AND l.valid_to_commit IS NULL "
+        "WHERE pd.valid_to_commit IS NULL AND pd.cur_name = 'mode'",
+    )
+    assert [r["list"] for r in bound] == ["run_modes"]
+    members = _rows(
+        db,
+        "SELECT lv.v_str FROM list_value lv "
+        "JOIN parameter_value_list l ON l.id = lv.parameter_value_list_id "
+        "WHERE lv.valid_to_commit IS NULL AND l.cur_name = 'run_modes' "
+        "ORDER BY lv.ordinal",
+    )
+    assert [m["v_str"] for m in members] == ["idle", "busy", "boost"]
+
+
+def test_structural_sections_land(tmp_path):
+    _rep, out = run_import(tmp_path, make_basic_spine(tmp_path))
+    db = _nodal(out)
+    alts = {r["name"] for r in _rows(
+        db, "SELECT name FROM alternative WHERE valid_to_commit IS NULL")}
+    assert {"Base", "high"} <= alts
+    ents = {r["name"] for r in _rows(
+        db, "SELECT name FROM entity WHERE valid_to_commit IS NULL")}
+    assert {"w1", "w2", "h1", "w1__h1"} <= ents
+    dims = _rows(
+        db,
+        "SELECT count(*) AS n FROM entity_class_dimension d "
+        "JOIN entity_class c ON c.id = d.entity_class_id "
+        "WHERE d.valid_to_commit IS NULL AND c.cur_name = 'widget__hub'",
+    )
+    assert dims == [{"n": 2}]
+
+
+# ---------------------------------------------------------------------------
+# Value fidelity: imported content == the Spine source, read independently
+# ---------------------------------------------------------------------------
+
+
+def _cell(row):
+    return {
+        "float": row["v_float"],
+        "int": row["v_int"],
+        "integer": row["v_int"],
+        "bool": row["v_bool"],
+        "string": row["v_str"],
+    }[row["value_kind"]]
+
+
+def _nodal_values(db, cls, param):
+    rows = _rows(
+        db,
+        "SELECT entity, alternative, value_kind, idx1_text, "
+        "v_float, v_int, v_bool, v_str "
+        f"FROM read_parameter('{cls}', '{param}')",
+    )
+    grouped: dict = {}
+    for r in rows:
+        grouped.setdefault((r["entity"], r["alternative"]), []).append(r)
+    out = {}
+    for key, group in grouped.items():
+        if len(group) == 1 and group[0]["idx1_text"] is None:
+            out[key] = ("scalar", _cell(group[0]))
+        else:
+            out[key] = ("map", sorted((g["idx1_text"], _cell(g)) for g in group))
+    return out
+
+
+def test_imported_values_match_the_spine_source(tmp_path):
+    from spinedb_api import DatabaseMapping, Map, from_database
+
+    spine = make_basic_spine(tmp_path)
+    _rep, out = run_import(tmp_path, spine)
+    want = {("widget", "capacity"), ("widget", "mode"), ("widget", "tag"),
+            ("hub", "demand"), ("widget__hub", "share")}
+
+    source = {}
+    with DatabaseMapping(_url(spine), upgrade=False) as sdb:
+        for pv in sdb.find_parameter_values():
+            key = (pv["entity_class_name"], pv["parameter_definition_name"])
+            if key not in want:
+                continue
+            val = from_database(pv["value"], pv["type"])
+            norm = (
+                ("map", sorted((str(i), v) for i, v in zip(val.indexes, val.values)))
+                if isinstance(val, Map) else ("scalar", val)
+            )
+            entity = "__".join(pv["entity_byname"])
+            source[(key[0], entity, pv["alternative_name"], key[1])] = norm
+
+    db = _nodal(out)
+    imported = {}
+    for cls, param in want:
+        for (entity, alt), norm in _nodal_values(db, cls, param).items():
+            imported[(cls, entity, alt, param)] = norm
+
+    assert ("widget", "w1", "high", "capacity") in source  # non-Base covered
+    assert source[("hub", "h1", "Base", "demand")] == ("map", [("p1", 5.0), ("p2", 6.0)])
+    assert imported == source
+
+
+def test_array_and_time_series_cells_land(tmp_path):
+    _rep, out = run_import(tmp_path, make_basic_spine(tmp_path))
+    db = _nodal(out)
+    stages = _rows(db, "SELECT v_float FROM read_parameter('widget', 'stages')")
+    assert sorted(r["v_float"] for r in stages) == [1.0, 2.0, 3.0]
+    inflow = _rows(db, "SELECT v_float FROM read_parameter('hub', 'inflow')")
+    assert sorted(r["v_float"] for r in inflow) == [1.5, 2.5]
+
+
+# ---------------------------------------------------------------------------
+# Drift table and loud residue
+# ---------------------------------------------------------------------------
+
+
+def test_type_drift_imports_by_construction_with_a_drift_row(tmp_path):
+    """Declared ``float`` but stored as a mix of string scalar + Array: both
+    land (observed-shape declaration => zero type rejections) and the drift
+    table names the mismatch."""
+    from spinedb_api import Array, DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="routing", parameter_type_list=("float",))
+        _value(db, "hub", ["h1"], "routing", "Base", "direct")
+        db.add_update_item("entity", entity_class_name="hub", entity_byname=("h2",))
+        _value(db, "hub", ["h2"], "routing", "Base", Array(["via_a", "via_b"]))
+        db.commit_session("drift payload")
+
+    rep, out = run_import(tmp_path, spine)
+    assert not [r for r in rep.residue if "unrepresentable" in r or "unparseable" in r]
+    assert any("hub.routing" in row and "chain will repair" in row
+               for row in rep.drift_table), rep.drift_table
+    got = _rows(_nodal(out), "SELECT count(*) AS n FROM read_parameter('hub', 'routing')")
+    assert got == [{"n": 3}]  # 1 scalar + 2 array cells
+
+
+def test_hostile_source_reports_loud_residue(tmp_path):
+    from spinedb_api import DatabaseMapping, Map, TimePattern, to_database
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        # unflattenable value
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="seasonality")
+        _value(db, "hub", ["h1"], "seasonality", "Base", TimePattern(["M1-6"], [1.0]))
+        # a typeless definition's default cannot be carried
+        dv, dt = to_database(4.5)
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="fallback_level", default_value=dv, default_type=dt)
+        # ragged value: two leaf shapes in one Map on one entity
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="mixed")
+        _value(db, "hub", ["h1"], "mixed", "Base",
+               Map(["a", "b", "c"], [1.0, 2.0, Map(["x"], [3.0])]))
+        # descriptions with no store slot + an entity group
+        db.add_update_item("entity", entity_class_name="widget", entity_byname=("w3",),
+                           description="a described widget")
+        db.add_update_item("scenario", name="sc_described", description="has text")
+        db.add_update_item("entity_group", entity_class_name="widget",
+                           group_name="w1", member_name="w2")
+        db.commit_session("hostile payload")
+
+    rep, _out = run_import(tmp_path, spine)
+    res = "\n".join(rep.residue)
+    assert "hub.seasonality" in res and "time_pattern" in res, res
+    assert "hub.fallback_level" in res and "not carried" in res, res
+    assert "hub.mixed" in res and "ragged" in res, res
+    assert "entity widget/w3: description not carried" in res, res
+    assert "scenario sc_described: description not carried" in res, res
+    assert "entity_group row(s) present, not imported" in res, res
+    # the ragged value's largest group still landed (+1 over the clean 9)
+    assert rep.counts["values_written"] == 10
+
+
+def test_case_colliding_names_refuse(tmp_path):
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("entity", entity_class_name="widget", entity_byname=("W1",))
+        db.commit_session("case collision")
+    with pytest.raises(ImportError_, match="case-colliding"):
+        run_import(tmp_path, spine)
+
+
+def test_unnamed_map_index_gets_a_generic_dim_name(tmp_path):
+    """The base profile names an unnamed index ``i1`` (never an empty or
+    illegal column name)."""
+    from spinedb_api import DatabaseMapping, Map
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="levels")
+        _value(db, "hub", ["h1"], "levels", "Base", Map(["lo", "hi"], [1.0, 9.0],
+                                                        index_name=""))
+        db.commit_session("unnamed index")
+    profile = SyntheticProfile()
+    names, note = profile.dim_names("hub", "levels", ("label",), ("",), ("lo", "hi"))
+    assert (names, note) == (["i1"], None)
+    names, _ = profile.dim_names("hub", "x", ("label", "label"), ("t", "t"), ())
+    assert names == ["t", "t_1"], "duplicate index names de-duplicated"
+
+    rep, out = run_import(tmp_path, spine)
+    assert rep.residue == [], rep.summary()
+    vals = _nodal_values(_nodal(out), "hub", "levels")
+    assert vals[("h1", "Base")] == ("map", [("hi", 9.0), ("lo", 1.0)])

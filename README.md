@@ -83,3 +83,29 @@ SELECT * FROM "commit" ORDER BY id;              -- the write/version history (u
 
 Note: `cargo test` builds throwaway DBs in tempdirs (gone after the run) — use
 `nodal-db init` / `import` to make a persistent file to browse.
+
+## License
+
+Copyright (c) 2026 Nodal-Tools Oy.
+
+nodal-db is licensed under the [European Union Public Licence v1.2 (EUPL-1.2)](https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12); see [`LICENSE`](LICENSE).
+
+### What this means in practice
+
+This section explains how we, the copyright holders, interpret the license for this project. Where it gives you more freedom than the license text alone, it is an additional permission from us as the licensor, and you may rely on it. It never takes away any right the license gives you.
+
+**You may freely:**
+
+- Use the schema and tools for any purpose, including commercial use.
+- Use them unmodified in internal systems and in hosted or SaaS products, without any obligation to publish your own code. If you give others access to nodal-db's functionality, keep the copyright and license notices intact and point to where its source is available (a link to this repository is enough).
+- Build your own applications, queries, reports and integrations on top of the schema. These are your own works and are not covered by this license.
+
+**Your data is yours.** Data stored in databases that use this schema is not a derivative work and is not covered by this license. A database file necessarily contains the schema definitions; you may share, publish or sell such database files on terms of your choice, and the schema they contain creates no license obligations for you or for the recipients.
+
+**If you modify nodal-db's files** (schema definitions, migrations or tool source code) and distribute them, or make them available to others over a network (for example as part of a hosted service), you must publish those modified files under the EUPL-1.2 (or, where the EUPL's compatibility clause applies, under a compatible licence listed in its Appendix).
+
+Files you write yourself (such as your own additional tables, extensions or application code) are not covered, provided they do not include modified copies of nodal-db's files. Unmodified copies of nodal-db's files that you include remain under the EUPL-1.2 with their notices intact.
+
+### Questions
+
+If you are unsure whether your use case creates obligations, please open an issue. We are happy to clarify.

@@ -18,11 +18,8 @@ serde_norway = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
-# The ladder cross-check test parses the machine-readable classification
-# mirror (tests/fixtures/flextool_migration_classification.yaml) with the
-# same serde stack the loader uses.
-serde = { workspace = true }
-serde_norway = { workspace = true }
+# serde / serde_norway are regular dependencies above, so the integration
+# tests that deserialize fixtures (e.g. template_ir.rs) need no dev-dep copy.
 
 # The pre-freeze benchmark gate (plan Part 5 deliverable 4): `cargo bench`.
 # `test = false` is load-bearing — the gate builds a ~150 MB synthetic DB

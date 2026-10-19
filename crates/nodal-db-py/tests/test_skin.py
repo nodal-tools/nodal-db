@@ -549,14 +549,18 @@ def test_verb_stamp_template_identity(db):
 
 
 def test_stamped_db_refuses_unregistered_ladder_program(db, tmp_path):
-    """The Track-A expected state: a mid-version stamp arms the real FlexTool
-    ladder, and template_apply refuses loudly while the nine programs are
-    unregistered (they are Track B)."""
-    import pathlib
-
-    ladder = (
-        pathlib.Path(__file__).resolve().parents[3] / "templates" / "flextool" / "input.yaml"
+    """A mid-version stamp arms the template's migration ladder, and
+    template_apply refuses loudly while a pending `run:` program is
+    unregistered (synthetic three-span ladder)."""
+    ladder = tmp_path / "ladder.yaml"
+    ladder.write_text(
+        "template: {name: synth, version: '4'}\n"
+        "classes: [{name: widget, parameters: [{name: size, types: [{kind: float}]}]}]\n"
+        "migrations:\n"
+        "  - {from: '1', to: '2', steps: []}\n"
+        "  - {from: '2', to: '3', steps: [{run: synth_v3_backfill}]}\n"
+        "  - {from: '3', to: '4', steps: []}\n"
     )
-    db.stamp_template_identity("flextool", "55", user="t")
-    with pytest.raises(nodal_db.ApiError, match="flextool_v56_batch"):
+    db.stamp_template_identity("synth", "2", user="t")
+    with pytest.raises(nodal_db.ApiError, match="synth_v3_backfill"):
         db.template_apply(str(ladder), user="t")

@@ -17,9 +17,16 @@
 //!     copied.
 //!   - **array**: the live table holds only current rows; the pre-image is
 //!     copied to the `value_array_hist` twin **entirely in SQL**
-//!     (`INSERT INTO value_array_hist SELECT *, c, TRUE FROM value_array …`) so
-//!     snapshot consistency and crash atomicity stay engine-guaranteed, then the
-//!     current row is replaced (or, on delete/transition, deleted).
+//!     (`INSERT INTO value_array_hist SELECT *, c, TRUE FROM value_array
+//!     WHERE array_id = ?`) so snapshot consistency and crash atomicity stay
+//!     engine-guaranteed, then the current row is replaced in place (or, on
+//!     delete/transition, deleted). Every statement that touches the list
+//!     payload is keyed by the row's `array_id` (resolved narrowly by the key
+//!     triple in `live_tier`), so DuckDB serves it with an index scan instead
+//!     of scanning the payload of the whole table. `array_id` is a physical row
+//!     handle, never canonical content: minted by the column DEFAULT on INSERT,
+//!     never updated, copied verbatim into `_hist`; a delete or tier
+//!     transition followed by a re-insert mints a new one.
 //!
 //! **Version counter (VMP Part 5, `audit_history_tiling`)**: the new version is
 //! `max(existing versions for the key) + 1`, scoped to the tier-partition the
@@ -39,7 +46,7 @@
 use std::collections::HashMap;
 
 use duckdb::types::Value;
-use duckdb::{params, Connection};
+use duckdb::{params, Connection, OptionalExt};
 
 use crate::axis::{dedup_or_insert, AxisCache};
 use crate::canon::CanonicalValue;
@@ -86,12 +93,12 @@ pub fn write_value(
     // --- 2. Current state: which tier (if any) holds a live row for the key. ---
     let current = live_tier(conn, &key)?;
     let target = value.tier;
-    let same_tier_live = current == Some(target);
+    let same_tier_live = current.map(Live::tier) == Some(target);
 
     // --- 3. Tier transition: close out / move the OLD tier's current row. ---
     let mut rows_closed = 0usize;
     if let Some(cur) = current {
-        if cur != target {
+        if cur.tier() != target {
             rows_closed += close_out_tier(conn, &key, commit_id, cur, retained)?;
         }
     }
@@ -113,7 +120,7 @@ pub fn write_value(
             commit_id,
             &axis_ids,
             vals,
-            same_tier_live,
+            current.and_then(Live::array_id),
             retained,
             parameter_type_id,
         )?,
@@ -374,10 +381,39 @@ fn axis_count(conn: &Connection) -> Result<i64, DbError> {
     Ok(conn.query_row("SELECT count(*) FROM axis", [], |r| r.get(0))?)
 }
 
+/// The live state of a key triple: the tier holding its current row and, for
+/// the array tier, that row's `array_id` (the physical handle every
+/// payload-touching statement is keyed by).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Live {
+    Scalar,
+    Long,
+    Array(i64),
+}
+
+impl Live {
+    fn tier(self) -> Tier {
+        match self {
+            Live::Scalar => Tier::Scalar,
+            Live::Long => Tier::Long,
+            Live::Array(_) => Tier::Array,
+        }
+    }
+
+    fn array_id(self) -> Option<i64> {
+        match self {
+            Live::Array(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
 /// The tier currently holding a live row for the key triple, or `None`. At most
 /// one tier is live per triple (enforced by `audit_cross_tier_duplicate`); the
-/// array table stores only live rows, so its mere presence is "live".
-fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Tier>, DbError> {
+/// array table stores only live rows, so its mere presence is "live". The array
+/// probe is narrow (it reads `array_id` by the triple, never the payload); the
+/// UNIQUE key triple guarantees at most one row.
+fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError> {
     let triple = params![
         key.entity_id,
         key.parameter_definition_id,
@@ -390,7 +426,7 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Tier>, DbError>
         |r| r.get(0),
     )?;
     if scalar > 0 {
-        return Ok(Some(Tier::Scalar));
+        return Ok(Some(Live::Scalar));
     }
     let long: i64 = conn.query_row(
         "SELECT count(*) FROM value_long WHERE entity_id=? AND parameter_definition_id=? \
@@ -399,18 +435,17 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Tier>, DbError>
         |r| r.get(0),
     )?;
     if long > 0 {
-        return Ok(Some(Tier::Long));
+        return Ok(Some(Live::Long));
     }
-    let array: i64 = conn.query_row(
-        "SELECT count(*) FROM value_array WHERE entity_id=? AND parameter_definition_id=? \
-         AND alternative_id=?",
-        triple,
-        |r| r.get(0),
-    )?;
-    if array > 0 {
-        return Ok(Some(Tier::Array));
-    }
-    Ok(None)
+    let array_id: Option<i64> = conn
+        .query_row(
+            "SELECT array_id FROM value_array WHERE entity_id=? AND parameter_definition_id=? \
+             AND alternative_id=?",
+            triple,
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(array_id.map(Live::Array))
 }
 
 // ---------------------------------------------------------------------------
@@ -514,24 +549,25 @@ fn write_array(
     c: i64,
     axis_ids: &[i64],
     vals: &[f64],
-    same_tier_live: bool,
+    live_array_id: Option<i64>,
     retained: bool,
     pt_id: Option<i64>,
 ) -> Result<(u16, usize, usize), DbError> {
     let (vmin, vmax) = min_max(vals);
     let list_sql = list_value_sql(vals.len());
 
-    if same_tier_live {
+    if let Some(array_id) = live_array_id {
         // Pre-image copy to the twin — entirely in SQL (never client-buffered).
-        copy_array_preimage(conn, key, c, retained)?;
+        copy_array_preimage(conn, array_id, c, retained)?;
         let version = next_version_array(conn, key)?;
-        // Replace the current row in place (bump version, new payload). Both
-        // payload columns are set so a stale values_int can't break the XOR.
+        // Replace the current row in place (bump version, new payload), keyed
+        // by its array_id, which is never updated. Both payload columns are set
+        // so a stale values_int can't break the XOR.
         let sql = format!(
             "UPDATE value_array SET valid_from_commit=?, version=?, parameter_type_id=?, \
                axis1_id=?, axis2_id=?, axis3_id=?, axis4_id=?, \
                values={list_sql}, values_int=NULL, v_min=?, v_max=? \
-             WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
+             WHERE array_id=?"
         );
         let mut p: Vec<Value> = vec![Value::BigInt(c), Value::SmallInt(version as i16)];
         p.push(pt_id.map(Value::BigInt).unwrap_or(Value::Null));
@@ -541,13 +577,13 @@ fn write_array(
         }
         p.push(Value::Double(vmin));
         p.push(Value::Double(vmax));
-        p.push(Value::BigInt(key.entity_id));
-        p.push(Value::BigInt(key.parameter_definition_id));
-        p.push(Value::BigInt(key.alternative_id));
+        p.push(Value::BigInt(array_id));
         conn.execute(&sql, duckdb::params_from_iter(p.iter()))?;
         Ok((version, 1, 1))
     } else {
         let version = next_version_array(conn, key)?;
+        // array_id is omitted: the column DEFAULT (seq_value_array) is its
+        // only minter.
         let sql = format!(
             "INSERT INTO value_array \
                (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
@@ -574,39 +610,31 @@ fn write_array(
     }
 }
 
-/// SQL-side pre-image copy of the live array row(s) into `value_array_hist`
-/// (VMP Part 5). Retained → `SELECT *, c, TRUE`; stub → payload columns nulled
-/// with `content_retained = FALSE`. The pre-image never leaves SQL.
+/// SQL-side pre-image copy of the live array row into `value_array_hist`
+/// (VMP Part 5), keyed by its `array_id` (an index scan; the id is copied
+/// verbatim). Retained → `SELECT *, c, TRUE` (column parity: `array_id` is the
+/// first column of both tables); stub → payload columns nulled with
+/// `content_retained = FALSE`. The pre-image never leaves SQL.
 fn copy_array_preimage(
     conn: &Connection,
-    key: &ValueKey,
+    array_id: i64,
     c: i64,
     retained: bool,
 ) -> Result<usize, DbError> {
     let sql = if retained {
-        "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
+        "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array WHERE array_id=?"
     } else {
         "INSERT INTO value_array_hist \
-           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+           (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
             valid_from_commit, version, \
             axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
             valid_to_commit, content_retained) \
-         SELECT entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+         SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
             valid_from_commit, version, \
             axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, ?, FALSE \
-         FROM value_array \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
+         FROM value_array WHERE array_id=?"
     };
-    Ok(conn.execute(
-        sql,
-        params![
-            c,
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id
-        ],
-    )?)
+    Ok(conn.execute(sql, params![c, array_id])?)
 }
 
 fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u16, DbError> {
@@ -884,23 +912,15 @@ fn close_out_tier(
     conn: &Connection,
     key: &ValueKey,
     c: i64,
-    tier: Tier,
+    live: Live,
     retained: bool,
 ) -> Result<usize, DbError> {
-    match tier {
-        Tier::Scalar => close_out_scalar(conn, key, c, retained),
-        Tier::Long => close_out_long(conn, key, c, retained),
-        Tier::Array => {
-            let moved = copy_array_preimage(conn, key, c, retained)?;
-            conn.execute(
-                "DELETE FROM value_array \
-                 WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-                params![
-                    key.entity_id,
-                    key.parameter_definition_id,
-                    key.alternative_id
-                ],
-            )?;
+    match live {
+        Live::Scalar => close_out_scalar(conn, key, c, retained),
+        Live::Long => close_out_long(conn, key, c, retained),
+        Live::Array(array_id) => {
+            let moved = copy_array_preimage(conn, array_id, c, retained)?;
+            conn.execute("DELETE FROM value_array WHERE array_id=?", [array_id])?;
             Ok(moved)
         }
     }

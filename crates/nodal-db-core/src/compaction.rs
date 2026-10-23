@@ -771,6 +771,14 @@ fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(), DbError> {
 /// mirroring `last_value` — not `max(id)+1` — is the non-destructive bar). A
 /// source sequence that is unused (`last_value` NULL) is left at its DDL start.
 ///
+/// **The whole sequence spec is re-emitted** (F10 fix): `INCREMENT BY`,
+/// `MINVALUE`, `MAXVALUE` and `CYCLE` are read from the source and written back
+/// with the new start. A bare `START WITH n` silently resets the increment to
+/// 1, which for `seq_value_array` (stride 2) would let new `array_id`s fall next
+/// to copied ones — dense id sets that DuckDB rewrites into range filters, so
+/// payload reads lose the index scan. `n = last_value + increment_by` keeps the
+/// ids' parity.
+///
 /// **B2b:** `duckdb_sequences()` returns rows for BOTH databases under ATTACH,
 /// so the source state read is filtered `WHERE database_name = 'src'`.
 fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
@@ -791,33 +799,60 @@ fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
 
     for (table, column, seq) in mapping {
         // Source state for THIS sequence (B2b: filter by database_name).
-        let row: Option<(Option<i64>, i64)> = conn
+        let row: Option<SeqState> = conn
             .query_row(
-                "SELECT last_value, increment_by FROM duckdb_sequences() \
+                "SELECT last_value, increment_by, min_value, max_value, cycle \
+                 FROM duckdb_sequences() \
                  WHERE database_name = 'src' AND sequence_name = ?",
                 [&seq],
-                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?)),
+                |r| {
+                    Ok(SeqState {
+                        last: r.get(0)?,
+                        inc: r.get(1)?,
+                        min: r.get(2)?,
+                        max: r.get(3)?,
+                        cycle: r.get(4)?,
+                    })
+                },
             )
             .ok();
-        let Some((Some(last), inc)) = row else {
+        let Some(SeqState {
+            last: Some(last),
+            inc,
+            min,
+            max,
+            cycle,
+        }) = row
+        else {
             // Unused (NULL last_value) or missing ⇒ leave the fresh sequence at
             // its DDL start (matches an unused source sequence).
             continue;
         };
         let n = last + inc;
-        // The confirmed drop-default → replace → re-add-default dance.
+        let cycle = if cycle { "CYCLE" } else { "NO CYCLE" };
+        // The confirmed drop-default → replace → re-add-default dance, with
+        // the full sequence spec (see the F10 note above).
         conn.execute_batch(&format!(
             "ALTER TABLE {t} ALTER COLUMN {c} DROP DEFAULT; \
-             CREATE OR REPLACE SEQUENCE {s} START WITH {n}; \
+             CREATE OR REPLACE SEQUENCE {s} START WITH {n} INCREMENT BY {inc} \
+               MINVALUE {min} MAXVALUE {max} {cycle}; \
              ALTER TABLE {t} ALTER COLUMN {c} SET DEFAULT nextval('{seq}');",
             t = q(&table),
             c = q(&column),
             s = q(&seq),
-            n = n,
             seq = seq.replace('\'', "''"),
         ))?;
     }
     Ok(())
+}
+
+/// One source sequence's state, as `duckdb_sequences()` reports it.
+struct SeqState {
+    last: Option<i64>,
+    inc: i64,
+    min: i64,
+    max: i64,
+    cycle: bool,
 }
 
 /// Extract `seq` from a `nextval('seq')` DEFAULT expression.

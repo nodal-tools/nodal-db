@@ -173,12 +173,14 @@ fn write_arrays(db: &Path, n: usize) {
 /// (~5 min for 200), too slow for the quick tier; the bulk rows only supply
 /// list payload volume for the WAL measurement. Test-only raw SQL on a
 /// scratch DB — not a writer path (CLAUDE.md invariant 2 does not apply).
+/// `array_id` is left to the column DEFAULT (`BY NAME`, excluded from the
+/// copy): the sequence is the only minter.
 fn fill_arrays(db: &Path) {
     write_arrays(db, 1);
     let conn = Connection::open(db).expect("open rw");
     conn.execute_batch(&format!(
-        "INSERT INTO value_array
-           SELECT va.* REPLACE (va.entity_id + r.k AS entity_id,
+        "INSERT INTO value_array BY NAME
+           SELECT va.* EXCLUDE (array_id) REPLACE (va.entity_id + r.k AS entity_id,
                                 list_transform(va.values, lambda v: v + r.k) AS values)
            FROM value_array va, range(1, {ARRAYS}) r(k);
          CHECKPOINT;"

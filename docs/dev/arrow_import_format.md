@@ -191,6 +191,8 @@ Grouping rows by entity is good for locality.
   (E6).
 - A null in the `value` column means **the cell is absent**: the index
   tuple is dropped, exactly as if the row had not been written.
+- A null is only ever what the file contains: a value the importer
+  cannot convert is an error, not a null.
 - An entity all of whose value cells are null is an error (E6).
 - At rank 0, each entity must appear in exactly one row (E6 otherwise).
 - Two rows with the same entity and index tuple are an error (E6).
@@ -298,11 +300,11 @@ cannot be imported yet.
 Float values:
 
 - **NaN** is a legal value. It does not mean "missing"; for a missing
-  cell, use a null (long form) or leave the row out. In the canonical
-  encoding every NaN bit pattern counts as the same value.
+  cell, use a null (long form) or leave the row out. Every NaN is stored
+  as the same quiet NaN (bit pattern `0x7ff8000000000000`), whatever sign
+  or payload bits it had in the file.
 - **±Inf** are legal values.
-- **−0.0** is accepted. The canonical encoding treats it as equal to
-  `+0.0`; the float itself is stored as written.
+- **−0.0** is accepted and stored as `+0.0`.
 
 ### Timestamps
 
@@ -319,9 +321,11 @@ Float values:
 Timestamps are stored without a timezone. Write timezone-naive columns.
 A column with a timezone is accepted as UTC instants: the stored value
 is the UTC time, the timezone is dropped, and the import prints a
-`timezone-normalized` warning for the column. Second and millisecond
-timestamps must still fit the 64-bit microsecond range after
-conversion (roughly ±290 000 years around 1970).
+`timezone-normalized` warning for the column. Timestamps must lie in
+the supported range, 290309-12-22 BC to 294247-01-10 AD (the database's
+timestamp range, slightly narrower than 64-bit microseconds), after
+conversion. A value outside it is an error (E6) naming the column, row
+and value — it is never turned into a null or stored.
 
 !!! warning "String columns: `utf8` only"
     Entity, label and string value columns must be `utf8`
@@ -362,6 +366,9 @@ segment rolls back the whole file, so a failed import can be fixed and
 re-run without cleanup.
 
 - `--db` must name an existing database created with `nodal-db init`.
+  If the file does not exist, the import fails before reading the input
+  and creates nothing (a usage error without an `E` class); an existing
+  file that is not an initialized nodal-db database is E6.
 - The commit's author is `--user`, or by default the first non-empty
   of the environment variables `USER`, `USERNAME`, `LOGNAME`. If none is
   set, the import fails before reading the file (a usage error without
@@ -369,9 +376,11 @@ re-run without cleanup.
 - `--message` sets the commit message (default empty).
 - Re-importing the same data writes a new version of each value; it is
   not skipped as a duplicate.
-- With `--force-replace`, the superseded versions are not kept in
-  history: the old rows remain as stubs without content. This applies to
-  all segments in the file.
+- With `--force-replace`, the versions this import replaces keep no
+  content: they stay in history as stubs that record that the value
+  changed, but not what it was (as if the parameter's `retain_content`
+  were false). New versions are written either way. This applies to all
+  segments.
 - `--class` and `--parameter` are assertions, not filters: if given,
   every segment must target that class or parameter, or the import
   fails (E4).
@@ -400,7 +409,7 @@ is stable; the message text may change between releases.
 | E3 | version problem | `spinal:format_version` missing, malformed, a major version other than 1, or different in different segments |
 | E4 | metadata or target problem | `spinal:segment_count`, `spinal:class`, `spinal:parameter` or `spinal:form` missing; unknown `spinal:form`; no alternative; `spinal:alternative` conflicts with `--alternative`; `--class`/`--parameter` assertion does not match |
 | E5 | warning only | unknown `spinal:` metadata key, ignored |
-| E6 | malformed payload or rejected by the core | unsupported Arrow type (`timestamp[ns]`, `large_utf8`, `float32`, …); run-end encoding; rank above 4; null where not allowed; zero-row segment; `entity`/`value` column out of place; label domain missing, invalid or not covering the data; duplicate index tuple or dense entity; rank-0 entity with several rows; empty entity name or two spellings of one entity; type does not match the existing definition; entity of a multi-dimensional class does not exist; `--db` is not an initialized nodal-db database; trailing bytes after a segment; a stream cut off in the middle of a message |
+| E6 | malformed payload or rejected by the core | unsupported Arrow type (`timestamp[ns]`, `large_utf8`, `float32`, …); run-end encoding; rank above 4; null where not allowed; zero-row segment; `entity`/`value` column out of place; label domain missing, invalid or not covering the data; duplicate index tuple or dense entity; rank-0 entity with several rows; timestamp outside the supported range (290309 BC to 294247 AD), including after conversion from s/ms; empty entity name or two spellings of one entity; type does not match the existing definition; entity of a multi-dimensional class does not exist; `--db` is not an initialized nodal-db database; trailing bytes after a segment; a stream cut off in the middle of a message |
 | E7 | duplicate target | two segments target the same `(class, parameter, alternative)` |
 | E8 | dense shape error | value list length is not the product of the dimension list lengths; duplicate coordinate in a dimension list; empty dimension list |
 | E9 | database busy | the write lock could not be obtained, or a write conflict persisted, within the retry budget; retry later |
@@ -409,10 +418,11 @@ is stable; the message text may change between releases.
 Some real messages:
 
 ```text
-Error: E1: file.arrow is in the Arrow IPC *file* (Feather / random-access) format; this importer accepts only the IPC *stream* format (spec §2.1)
-Error: E6: segment 1 (node:cap): column "t" is timestamp[ns]; nanosecond truncation is lossy and never silent — cast to microseconds producer-side (pandas: .astype("datetime64[us]")) (§5.2.1)
-Error: E6: segment 1 (node:cap): label dimension "s" has no spinal:label_domain field metadata (required on every label dimension, §7.2)
-Error: E8: segment 1 (node:cap): dense row 0 (entity "a"): payload length 2 != product of axis lengths 3 (§6.2 row-major law)
+Error: E1: file.arrow is in the Arrow IPC *file* (Feather / random-access) format; this importer accepts only the IPC *stream* format (pyarrow: pa.ipc.new_stream, not new_file)
+Error: E6: segment 1 (node:cap): column "t" is timestamp[ns]; nanosecond truncation is lossy and never silent — cast to microseconds producer-side (pandas: .astype("datetime64[us]"))
+Error: E6: segment 1 (node:cap): label dimension "s" has no spinal:label_domain field metadata (required on every label dimension)
+Error: E6: segment 1 (node:cap): dimension column "t", row 1 (entity "a"): timestamp[s] value 4611686018427387904 overflows the supported timestamp range when converted to microseconds (×1000000); supported timestamps run from 290309 BC to 294247 AD
+Error: E8: segment 1 (node:cap): dense row 0 (entity "a"): payload length 2 != product of axis lengths 3 (values are row-major: the last dimension varies fastest)
 Error: E10: segment 2 is not terminated by the end-of-stream marker — truncation suspected (producer crash before close?)
 ```
 

@@ -55,7 +55,8 @@ bench-raw-layout python=py *ARGS:
 
 # Input files: `NODAL_RESULTS_DIR=/tmp/nr NODAL_RESULTS_KEEP=1 cargo bench -p nodal-db-cli
 # --bench results_path -- dense10k long`, then `--db /tmp/nr/ipc_dense_10p_r0.db`.
-# Surrogate-key value_array variant + commit-after-replace probe (any duckdb Python).
+# Surrogate-key value_array variant + commit-after-replace probe (any duckdb Python;
+# superseded by the array_id schema: needs a 0.3-schema input file).
 bench-sk-variant python=py *ARGS:
     {{python}} scripts/bench/surrogate_key_variant.py {{ARGS}}
 

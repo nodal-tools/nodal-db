@@ -9,9 +9,9 @@ It is a recording benchmark: nothing here gates a build.
 
 | Harness | What it measures | Run |
 |---|---|---|
-| `crates/nodal-db-cli/benches/results_path.rs` | Ingest (core API loop and Arrow-IPC import), file size, bind cost of the array INSERT, read paths, row-group steel-man, long-tier reads. DuckDB as bundled by the core. | `just bench-results` (full, ~30-40 min) or `just bench-results --quick` (~1 min) |
+| `crates/nodal-db-cli/benches/results_path.rs` | Ingest (core API loop and Arrow-IPC import), file size, bind cost of the array INSERT, read paths, the `value_array_cells` A/B gate (`cellsgate`), row-group steel-man, long-tier reads. DuckDB as bundled by the core. | `just bench-results` (full, ~30-40 min) or `just bench-results --quick` (~1 min) |
 | `scripts/bench/raw_duckdb_layout.py` | Dense `DOUBLE[]` lists against a lean sorted `(k, pos, v)` long table in plain DuckDB, no nodal-db schema. Any DuckDB version. | runs after the Rust bench in `just bench-results`; alone: `just bench-raw-layout <python> [--quick]` |
-| `scripts/bench/surrogate_key_variant.py` | The real `value_array` (composite primary key) against a copy with a single-column `array_id` key; the long tier's equivalent; commit cost after an array replace. Any DuckDB version. | `just bench-sk-variant <python> --db <file> [--long-db <file>] [--commit-probe] [--commit-probe-native]` (input files: see the script's docstring) |
+| `scripts/bench/surrogate_key_variant.py` | Superseded by schema 0.4 (§4b); needs a 0.3-schema input file. The real `value_array` (composite primary key) against a copy with a single-column `array_id` key; the long tier's equivalent; commit cost after an array replace. Any DuckDB version. | `just bench-sk-variant <python> --db <file> [--long-db <file>] [--commit-probe] [--commit-probe-native]` (input files: see the script's docstring) |
 
 All data is deterministic (splitmix64, fixed seed); the raw-DuckDB script
 generates values bit-identical to the Rust bench's dense shape (verified
@@ -182,6 +182,9 @@ long-tier shape of section 1 (1 000 series × 876 integers).
 
 ## 4. Surrogate key on the real schema (1.5.5 and 2.0.0)
 
+> The committed schema adopted this key in 0.4; §4b measures it through
+> the real macros. This section is the earlier probe on 0.3-schema files.
+
 Hypothesis: slow dense point reads come from `value_array`'s composite
 primary key `(entity_id, parameter_definition_id, alternative_id)`.
 DuckDB uses an index scan only for a single-column key, so a point read
@@ -225,6 +228,57 @@ scans despite the composite unique index, yet already take 0.4-0.6 ms
 sorted key's zone maps skip almost everything. A copy with a single-column
 `series_id` and an index on it changes nothing material (cell 0.39 ms,
 window 0.42 ms, whole series 0.77 ms, the last via index scan).
+
+## 4b. The `array_id` key on the committed schema (2.0.0)
+
+Schema 0.4 adopts §4's variant: `value_array.array_id BIGINT PRIMARY KEY`
+(sequence stride 2) plus `UNIQUE` on the key triple; `read_parameter_dense`
+and `value_array_cells` (so `value_cells`) resolve `array_id` on narrow
+columns and fetch the payload through a self-join on it. Measured with
+`results_path.rs` (`dense10k-ipc reads cellsgate`) on 2026-10-23: the AMD
+Ryzen 9 5900XT host, shared, load average about 2-8 during the runs;
+bundled DuckDB 2.0.0 (`v2.0.0-dev88614`, source d54cbbe3df). "Before" is
+`main` at 4eea433 (composite key) built in its own target directory; same
+data, same harness, one commit, IPC lane. Warm min / median, ms (cold min
+in brackets, open excluded):
+
+| Read | before (4eea433) | after (`array_id`) |
+|---|---|---|
+| one whole series, dense macro | 84.78 / 86.46 [182.05] | 2.36 / 2.55 [6.08] |
+| week slice `values[4001:4168]` | 84.98 / 86.32 [133.66] | 2.35 / 3.02 [6.34] |
+| single cell `values[4001]` | 84.85 / 86.42 [184.56] | 2.46 / 2.65 [6.16] |
+| min/max only | 1.96 / 2.06 [3.37] | 2.33 / 2.52 [4.07] |
+| week × 20 series, (a) dense + client slice | 86.53 / 90.20 [185.86] | 3.60 / 4.15 [11.73] |
+| week × 20 series, (b) SQL list slice | 85.95 / 87.37 [139.35] | 3.91 / 4.19 [10.61] |
+| week × 20 series, (c) unnest on `value_array` by triple | 86.02 / 87.93 | 85.20 / 86.96 (the direct table read; unchanged by design) |
+| week × 20 series, (d) `read_parameter` + `idx1_ts` | 2 751 / 2 795 | 2 946 / 3 005 |
+| 2 adjacent series, dense macro (new row) | — | 2.52 / 2.61 [6.54] |
+| 51 series, dense macro (new row; past the 50-key limit) | — | 88.37 / 89.68 [194.57] |
+| `read_parameter`, whole parameter (new row) | — | 4 041 / 4 108 [4 506] |
+| IPC import, 87.6 M values | 1 200.4 s | 1 186.9 s, 1 218.6 s (two runs) |
+| file size | 735 064 064 B | 735 326 208 B (+256 KiB) |
+
+`EXPLAIN ANALYZE` on the after-file (Python duckdb 2.0.0): the dense macro
+and `value_cells` point reads run an `Index Scan` on the payload side
+(`Dynamic Filters: array_id = 23`, 1 row scanned); the direct triple read
+and the 51-key read run a `Sequential Scan` over all 10 000 rows (~80 ms
+of the scan time).
+
+**`value_array_cells` gate** (`cellsgate`, paired method, threshold 1.10): the
+whole-parameter `read_parameter` (8.76 M rows, `SELECT *`, Arrow), new
+single-branch self-join cells view vs the old two-branch view installed as
+TEMP views, one process, one file, threads = 8, 21 randomized-order pairs.
+Three runs: the first two were flagged discarded (1-min load average drift
+2.3× and 5.0×; the second because the bench's own 8 threads were counted —
+since fixed: the start sample is taken after a 60 s warm-up). Valid run:
+load 4.92 → 3.58 (1.37×); old median 7 579 ms, new 7 591 ms; per-pair
+ratio median **1.041**, 95 % bootstrap CI **[1.003, 1.059]** → **PASS**
+(≤ 1.10). The discarded runs gave 1.058 [1.048, 1.062] and 1.016
+[0.958, 1.052]. The new view stays.
+
+The IPC import is about 2.4× slower than the 1.5.5 figure in §1 (498 s),
+for both schemas alike: the slowdown is not the key. It is unexplained
+here (DuckDB 2.0, or host load) and is queued for investigation.
 
 ## 5. Commit cost after an array replace
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Surrogate-key variant of `value_array`, measured against the real schema.
 
+SUPERSEDED (schema 0.4-array-id): the committed schema now carries the
+`array_id` surrogate key, and the results-path bench measures it through
+the real macros (`results_path.rs` phases `reads` and `cellsgate`). This
+script is kept as the historical before/after on the 0.3 schema (composite
+primary key): it expects an input file built with that schema, and its
+commit probe's positional INSERTs do not fit the 0.4 column layout.
+
 Hypothesis under test: dense-array point / slice / whole reads are slow
 (~80-120 ms at results scale) not because of list length but because
 `value_array`'s primary key is composite (entity, parameter, alternative).

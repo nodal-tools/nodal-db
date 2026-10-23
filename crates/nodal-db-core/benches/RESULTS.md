@@ -74,6 +74,8 @@ freeze.
 | Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS | pending re-run |
 | Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below | pending re-run |
 | Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | pending re-run |
+| Point array via `read_parameter_dense` (`array_point_dense_macro`, added with the `array_id` key, schema 0.4) | — | — (bench added after the 1.5.5 run) | new | pending re-run |
+| Point array by `array_id = ?` (`array_point_by_array_id`, the index-lookup floor) | — | — (bench added after the 1.5.5 run) | new | pending re-run |
 | 10⁵ scalars, `read_parameter_scalar` (< 20 ms) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | pending re-run |
 | 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | pending re-run |
 | Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | pending re-run |
@@ -86,6 +88,18 @@ no point-query shape avoids decompressing the containing `values` segment on
 1.5.5 either. The §10 escalation stands: physical row-group tuning at build
 time, client-side caching of hot arrays, or a VMP budget amendment — queued
 for re-test again at the next DuckDB upgrade.
+
+**Schema 0.4 (`array_id` surrogate key) changes the picture for the read
+macros.** `array_triple_payload` stays as the documented slow form (a filter
+on the key triple directly on the payload scan is still a sequential scan).
+The two new benches read the same array through `read_parameter_dense`
+(narrow key resolution, then the payload fetched by `array_id` through the
+ART index) and directly by `array_id`. Their 2.0 figures wait for the quiet
+re-run with the rest of the 2.0 column. Context, not a gate figure: on the
+results-path fixture (10 000 × 8 760-value arrays, DuckDB 2.0.0 bundled, the
+shared AMD Ryzen 9 5900XT host under load, 2026-10-23) the dense-macro
+whole-series read measured 2.4 ms warm min
+(`scripts/bench/RESULTS_results_path.md` §4b).
 
 ## From/to scan degradation vs dead fraction (raw current-rows long scan, Arrow end-to-end)
 

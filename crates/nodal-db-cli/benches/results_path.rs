@@ -27,7 +27,11 @@
 //!      invariant 1; open timed separately) and warm.
 //!   4. **Long-tier reads** on the long-shape DB (cell / window / series /
 //!      min-max / canonical `read_parameter`).
-//!   5. **Row-group steel-man** — the 10k DB's `value_array` copied into
+//!   5. **`value_array_cells` gate** (`cellsgate`): the bulk canonical
+//!      `read_parameter` with the single-branch array_id self-join cells view
+//!      vs the old two-branch view, as paired interleaved A/B in one process
+//!      on one file (median per-pair ratio + bootstrap CI vs 1.10).
+//!   6. **Row-group steel-man** — the 10k DB's `value_array` copied into
 //!      scratch files at the default and a small ROW_GROUP_SIZE; same reads.
 //!
 //! Every DB write goes through the one canonicalization pipeline (CLAUDE.md
@@ -50,8 +54,8 @@
 //! With NO phase argument the bench prints usage and exits, so a bare
 //! workspace `cargo bench` (the gate) does not start a half-hour run.
 //! Phases: dense1k, dense10k, dense10k-api, dense10k-ipc, long, longreads,
-//! bindprobe, reads, rowgroup. `reads`/`rowgroup` need the 10k DBs: run them
-//! with `dense10k` (as `all` does), or across invocations via
+//! bindprobe, reads, cellsgate, rowgroup. `reads`/`cellsgate`/`rowgroup` need
+//! the 10k DBs: run them with `dense10k` (as `all` does), or across invocations via
 //! NODAL_RESULTS_DIR=<fixed workdir> + NODAL_RESULTS_KEEP=1 on the ingest
 //! run, then NODAL_RESULTS_DB=<kept .db> (and NODAL_RESULTS_LONG_DB for
 //! `longreads`) on the read run.
@@ -1152,6 +1156,317 @@ fn phase_reads(db: &Path, label: &str, scale: &Scale) {
     for (l, sql) in &window {
         report_cw(l, &time_cold_warm(db, l, sql, expect, scale));
     }
+
+    // array_id key-set shapes. `read_parameter_dense` fetches the payload by
+    // an IN filter on array_id (index scan) only while the key set stays an IN
+    // list of at most 50 keys: two ADJACENT entities exercise the dense-id
+    // rewrite the sequence stride defeats; 51 series cross the engine's
+    // dynamic-IN threshold and fall back to a scan (expected, bulk cost).
+    println!("array_id key-set shapes, read_parameter_dense whole values:");
+    let adj = read_ids(db, CLASS_DENSE, "flow00", vec![ename(11), ename(12)]);
+    let wide: Vec<String> = (100..151).map(|k| ename(k % scale.entities)).collect();
+    let wide = read_ids(db, CLASS_DENSE, "flow00", wide);
+    let shapes: [(&str, String, usize); 2] = [
+        (
+            "2 adjacent series (dense-id tripwire)",
+            format!(
+                "SELECT \"values\" FROM {dense} WHERE entity_id IN ({})",
+                in_list_i64(&adj.ids)
+            ),
+            2 * CELLS,
+        ),
+        (
+            "51 series (past the 50-key index limit)",
+            format!(
+                "SELECT \"values\" FROM {dense} WHERE entity_id IN ({})",
+                in_list_i64(&wide.ids)
+            ),
+            51 * CELLS,
+        ),
+    ];
+    for (l, sql, n) in &shapes {
+        report_cw(l, &time_cold_warm(db, l, sql, *n, scale));
+    }
+
+    // Bulk canonical read of one whole parameter (the api::read_parameter
+    // shape): exercises value_array_cells over every series.
+    println!("bulk canonical read:");
+    let bulk = scale.entities * CELLS;
+    let l = "read_parameter, whole parameter";
+    let sql = format!("SELECT v_float FROM read_parameter('{CLASS_DENSE}','flow00')");
+    report_cw(l, &time_cold_warm(db, l, &sql, bulk, scale));
+}
+
+// --- phase: value_array_cells A/B gate (paired, interleaved) ----------------
+
+/// The pre-array_id two-branch `value_array_cells` (the parity oracle of
+/// `tests/array_id_semantics.rs`), installed as a TEMP view for the A/B.
+const OLD_CELLS_SQL: &str =
+    include_str!("../../nodal-db-core/tests/fixtures/value_array_cells_two_branch.sql");
+
+/// Install TEMP copies of the canonical read chain (`value_cells` ->
+/// `value_rows` -> `read_parameter`) bound to the old two-branch cells view,
+/// built from the database's own catalog text with the one dependency
+/// renamed. Both variants then run identical SQL except for the cells view.
+fn install_old_read_chain(conn: &Connection) {
+    conn.execute_batch(
+        &OLD_CELLS_SQL.replace("value_array_cells_two_branch", "value_array_cells_old"),
+    )
+    .expect("old cells view");
+    // duckdb_views().sql / macro_definition hold the engine's normalized text
+    // ("FROM value_cells AS c"), so rename by identifier, then prove the old
+    // name is gone (a silent miss would compare the new chain with itself).
+    let rename = |text: String, from: &str, to: &str| -> String {
+        let out = replace_ident(&text, from, to);
+        assert!(
+            out.contains(to) && !has_ident(&out, from),
+            "rename {from} -> {to} failed in: {out}"
+        );
+        out
+    };
+    let view_sql = |name: &str| -> String {
+        conn.query_row(
+            "SELECT sql FROM duckdb_views() WHERE view_name = ? AND NOT internal",
+            [name],
+            |r| r.get(0),
+        )
+        .expect("view sql")
+    };
+    let cells = rename(
+        rename(view_sql("value_cells"), "value_cells", "value_cells_old"),
+        "value_array_cells",
+        "value_array_cells_old",
+    )
+    .replacen("CREATE VIEW", "CREATE TEMP VIEW", 1);
+    conn.execute_batch(&cells).expect("value_cells_old");
+    let rows = rename(
+        rename(view_sql("value_rows"), "value_rows", "value_rows_old"),
+        "value_cells",
+        "value_cells_old",
+    )
+    .replacen("CREATE VIEW", "CREATE TEMP VIEW", 1);
+    conn.execute_batch(&rows).expect("value_rows_old");
+    let body: String = conn
+        .query_row(
+            "SELECT macro_definition FROM duckdb_functions() \
+             WHERE function_name = 'read_parameter' AND function_type = 'table_macro' \
+               AND NOT internal",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read_parameter body");
+    let body = rename(body, "value_rows", "value_rows_old");
+    conn.execute_batch(&format!(
+        "CREATE TEMP MACRO read_parameter_old(class_name, parameter_name) AS TABLE {body}"
+    ))
+    .expect("read_parameter_old");
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Byte offsets of `name` occurring as a whole SQL identifier in `s`.
+fn ident_hits(s: &str, name: &str) -> Vec<usize> {
+    s.match_indices(name)
+        .filter(|(i, _)| {
+            let before = s[..*i].chars().next_back();
+            let after = s[*i + name.len()..].chars().next();
+            !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn has_ident(s: &str, name: &str) -> bool {
+    !ident_hits(s, name).is_empty()
+}
+
+fn replace_ident(s: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for i in ident_hits(s, from) {
+        out.push_str(&s[last..i]);
+        out.push_str(to);
+        last = i + from.len();
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+fn loadavg() -> String {
+    fs::read_to_string("/proc/loadavg")
+        .map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join("/"))
+        .unwrap_or_else(|_| "?".into())
+}
+
+fn load1(s: &str) -> f64 {
+    s.split('/')
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0)
+}
+
+fn cpu_model() -> String {
+    fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .unwrap_or_else(|| "?".into())
+}
+
+fn median(v: &[f64]) -> f64 {
+    let mut v = v.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// Bootstrap 95 % CI of the median (deterministic splitmix64 resampling).
+fn bootstrap_ci(v: &[f64], n_boot: usize) -> (f64, f64) {
+    let mut state = SEED ^ 0xb007;
+    let mut meds: Vec<f64> = (0..n_boot)
+        .map(|_| {
+            let sample: Vec<f64> = (0..v.len())
+                .map(|_| {
+                    state = splitmix64(state);
+                    v[(state % v.len() as u64) as usize]
+                })
+                .collect();
+            median(&sample)
+        })
+        .collect();
+    meds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    (
+        meds[(0.025 * n_boot as f64) as usize],
+        meds[(0.975 * n_boot as f64) as usize - 1],
+    )
+}
+
+/// The `value_array_cells` acceptance gate (array_id design, D9 / §6.1):
+/// `read_parameter` over one whole parameter (the `api::read_parameter`
+/// shape: `SELECT *`, Arrow end-to-end), new single-branch self-join cells
+/// view vs the old two-branch view, in ONE process on ONE file, threads fixed
+/// at 8, N interleaved pairs with a randomized order inside each pair. Load
+/// drift hits both sides of a pair alike and cancels in the per-pair ratio
+/// new/old. Pass: bootstrap 95 % CI upper bound of the median ratio <= 1.10;
+/// fail: CI lower bound > 1.10; else ambiguous (rerun with
+/// NODAL_GATE_PAIRS=61, then decide on the median). A run whose 1-minute load
+/// average changes by more than 2x is flagged as discarded. The bench itself
+/// keeps ~8 threads busy, so the start sample is taken after a warm-up of at
+/// least 60 s (the 1-minute average has absorbed the bench's own load by
+/// then); otherwise every run from an idle machine would "drift".
+fn phase_cellsgate(db: &Path) {
+    let pairs: usize = std::env::var("NODAL_GATE_PAIRS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(21);
+    println!(
+        "\n== value_array_cells gate: read_parameter bulk, new vs old cells view ({:.1} MiB) ==",
+        mib(file_bytes(db))
+    );
+    let conn = open_ro(db);
+    conn.execute_batch("SET threads = 8").expect("threads");
+    install_old_read_chain(&conn);
+    let new_sql = format!("SELECT * FROM read_parameter('{CLASS_DENSE}','flow00')");
+    let old_sql = format!("SELECT * FROM read_parameter_old('{CLASS_DENSE}','flow00')");
+    // Same rows from both variants (count + order-free checksum).
+    let chk = |m: &str| -> (i64, String) {
+        conn.query_row(
+            &format!(
+                "SELECT count(*), CAST(sum(hash(entity, alternative, idx1_ts, idx1_num, \
+                   idx1_text, v_float, v_int)) AS VARCHAR) FROM {m}('{CLASS_DENSE}','flow00')"
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("checksum")
+    };
+    let (n_new, n_old) = (chk("read_parameter"), chk("read_parameter_old"));
+    assert_eq!(n_new, n_old, "new and old read chains disagree");
+    let expect = n_new.0 as usize;
+
+    let timed = |sql: &str| -> f64 {
+        let t = Instant::now();
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let n: usize = stmt
+            .query_arrow([])
+            .expect("query_arrow")
+            .map(|b| b.num_rows())
+            .sum();
+        let m = ms(t);
+        assert_eq!(n, expect);
+        m
+    };
+    let warm = Instant::now();
+    while warm.elapsed().as_secs() < 60 {
+        timed(&old_sql);
+        timed(&new_sql);
+    }
+    let load_start = loadavg();
+    let mut state = SEED ^ 0x9a7e;
+    let (mut t_new, mut t_old, mut ratios) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..pairs {
+        state = splitmix64(state);
+        let (a, b) = if state & 1 == 0 {
+            let o = timed(&old_sql);
+            (timed(&new_sql), o)
+        } else {
+            let n = timed(&new_sql);
+            (n, timed(&old_sql))
+        };
+        t_new.push(a);
+        t_old.push(b);
+        ratios.push(a / b);
+    }
+    close(conn);
+    let load_end = loadavg();
+    let med = median(&ratios);
+    let (lo, hi) = bootstrap_ci(&ratios, 20_000);
+    let (l0, l1) = (load1(&load_start), load1(&load_end));
+    let drift = l0.max(l1) / l0.min(l1).max(0.01);
+    let verdict = if hi <= 1.10 {
+        "PASS"
+    } else if lo > 1.10 {
+        "FAIL (revert value_array_cells to the two-branch form)"
+    } else {
+        "AMBIGUOUS (rerun with NODAL_GATE_PAIRS=61; then decide on the median)"
+    };
+    let rmin = ratios.iter().cloned().fold(f64::INFINITY, f64::min);
+    let rmax = ratios.iter().cloned().fold(0.0, f64::max);
+    println!(
+        "  cpu {} ({} logical), threads=8",
+        cpu_model(),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0)
+    );
+    println!("  rows per read: {expect}; pairs: {pairs} (randomized order)");
+    println!("  load avg: start {load_start}, end {load_end} (1-min drift {drift:.2}x)");
+    println!(
+        "  old: min {:.0} / median {:.0} ms    new: min {:.0} / median {:.0} ms",
+        t_old.iter().cloned().fold(f64::INFINITY, f64::min),
+        median(&t_old),
+        t_new.iter().cloned().fold(f64::INFINITY, f64::min),
+        median(&t_new)
+    );
+    println!(
+        "  ratio new/old: median {med:.3}, 95% bootstrap CI [{lo:.3}, {hi:.3}], min {rmin:.3}, max {rmax:.3}"
+    );
+    let ratios_txt: Vec<String> = ratios.iter().map(|r| format!("{r:.3}")).collect();
+    println!("  per-pair ratios: {}", ratios_txt.join(" "));
+    if drift > 2.0 {
+        println!("  RUN DISCARDED: the 1-min load average changed by more than 2x");
+    }
+    println!("  verdict: {verdict} (threshold 1.10)");
 }
 
 // --- phase: long-tier reads -------------------------------------------------
@@ -1307,7 +1622,7 @@ fn phase_rowgroup(src: &Path, ctx: &Ctx) {
 
 // --- main -------------------------------------------------------------------
 
-const PHASES: [&str; 10] = [
+const PHASES: [&str; 11] = [
     "all",
     "dense1k",
     "dense10k",
@@ -1317,6 +1632,7 @@ const PHASES: [&str; 10] = [
     "longreads",
     "bindprobe",
     "reads",
+    "cellsgate",
     "rowgroup",
 ];
 
@@ -1358,6 +1674,7 @@ fn main() {
             "long",
             "bindprobe",
             "reads",
+            "cellsgate",
             "rowgroup",
             "longreads",
         ]
@@ -1402,7 +1719,7 @@ fn main() {
     let mut ctx = Ctx {
         baseline: baseline_bytes(&dir),
         dir: dir.clone(),
-        keep_for_reads: wants("reads") || wants("rowgroup") || keep_env,
+        keep_for_reads: wants("reads") || wants("rowgroup") || wants("cellsgate") || keep_env,
         keep_env,
         scale,
         reads_dbs: Vec::new(),
@@ -1459,6 +1776,12 @@ fn main() {
                     phase_reads(db, label, &ctx.scale);
                 }
             }
+            "cellsgate" => match ctx.reads_dbs.first() {
+                Some((_, db)) => phase_cellsgate(&db.clone()),
+                None => eprintln!(
+                    "cellsgate: no 10k DB — run together with dense10k or set NODAL_RESULTS_DB"
+                ),
+            },
             "rowgroup" => match ctx.reads_dbs.first() {
                 Some((_, db)) => {
                     let db = db.clone();

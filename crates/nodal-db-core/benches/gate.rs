@@ -83,6 +83,44 @@ fn bench_point_reads(c: &mut Criterion) {
         })
     });
 
+    // array_id surrogate key: the same point read through the dense read
+    // macro, which resolves array_id narrowly and fetches the payload by an
+    // index scan. (`array_triple_payload` above stays as the documented slow
+    // form: a direct table read by the triple scans the payload.)
+    g.bench_function("array_point_dense_macro", |b| {
+        b.iter(|| {
+            let rows = arrow_rows(
+                &conn,
+                "SELECT d.values FROM read_parameter_dense('bench_array', 'p_series') d \
+                 WHERE d.entity_id=? AND d.alternative_id=?",
+                &[&e, &a],
+            );
+            assert_eq!(rows, 1);
+            black_box(rows)
+        })
+    });
+
+    // The floor: the payload fetched directly by its array_id (`=` filter).
+    let array_id: i64 = conn
+        .query_row(
+            "SELECT array_id FROM value_array \
+             WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
+            duckdb::params![e, p, a],
+            |r| r.get(0),
+        )
+        .expect("array_id");
+    g.bench_function("array_point_by_array_id", |b| {
+        b.iter(|| {
+            let rows = arrow_rows(
+                &conn,
+                "SELECT va.values FROM value_array va WHERE va.array_id=?",
+                &[&array_id],
+            );
+            assert_eq!(rows, 1);
+            black_box(rows)
+        })
+    });
+
     // §10 mitigation context: v_min/v_max-only point read avoids the payload
     // row-group decompression entirely.
     g.bench_function("array_triple_vmin_only", |b| {

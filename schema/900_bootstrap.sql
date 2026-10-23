@@ -12,7 +12,7 @@ VALUES ('nodal_db', 'bootstrap: schema creation');
 
 -- Must match SCHEMA_VERSION in build.py (asserted after every build — F10).
 INSERT INTO metadata (id, name, value, valid_from_commit)
-VALUES (nextval('seq_metadata'), 'schema_version', '0.3-erasure-marker',
+VALUES (nextval('seq_metadata'), 'schema_version', '0.4-array-id',
         currval('seq_commit'));
 
 -- DB-identity UUID (specs/schema_interop.md §9): minted ONCE here — the

@@ -18,6 +18,7 @@ The writes below follow the normative write protocol of value_model_plan.md
 Part 5 by hand — they are what the client library will own.
 """
 import datetime
+import json
 import pathlib
 import re
 import sys
@@ -36,6 +37,28 @@ RESULTS = []
 def check(name, ok, detail=""):
     RESULTS.append(ok)
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  [{detail}]" if detail and not ok else ""))
+
+
+def payload_scans(plan):
+    """Scan types of every TABLE_SCAN of value_array that projects a payload
+    column, from an EXPLAIN (ANALYZE, FORMAT json) plan."""
+    out = []
+
+    def walk(node):
+        info = node.get("extra_info") or {}
+        if node.get("type") == "TABLE_SCAN":
+            proj = info.get("Projections", [])
+            proj = proj.split("\n") if isinstance(proj, str) else proj
+            table = str(info.get("Table", ""))
+            if table.split(".")[-1] == "value_array" and (
+                    "values" in proj or "values_int" in proj):
+                out.append(info.get("Type"))
+        for ch in node.get("children", []):
+            walk(ch)
+
+    for root in (plan.get("operator", [plan]) if isinstance(plan, dict) else plan):
+        walk(root)
+    return out
 
 
 def nextval(con, seq):
@@ -186,23 +209,27 @@ def write_array(con, c, e, p, a, axes, values, int_kind=False):
     fvals = None if int_kind else values
     ivals = values if int_kind else None
     vmin, vmax = float(min(values)), float(max(values))
+    # narrow resolve: triple -> (array_id, version), never touching the payload;
+    # every statement that touches the list columns is then keyed by array_id
     cur = con.execute(
-        "SELECT version FROM value_array WHERE entity_id=? AND parameter_definition_id=?"
-        " AND alternative_id=?", [e, p, a]).fetchone()
+        "SELECT array_id, version FROM value_array WHERE entity_id=?"
+        " AND parameter_definition_id=? AND alternative_id=?", [e, p, a]).fetchone()
     if cur:
+        aid, ver = cur
         # SQL-side pre-image copy — never client-buffered (VMP Part 5)
         con.execute(
             "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array"
-            " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-            [c, e, p, a])
+            " WHERE array_id=?", [c, aid])
         # set BOTH payload columns so the inactive one is NULLed on a kind switch
-        # (critique F4 — else the live XOR CHECK rejects the UPDATE)
+        # (critique F4 — else the live XOR CHECK rejects the UPDATE); the
+        # array_id itself is never updated
         con.execute(
             "UPDATE value_array SET valid_from_commit=?, version=?, axis1_id=?, axis2_id=?,"
             " axis3_id=?, axis4_id=?, values=?, values_int=?, v_min=?, v_max=?"
-            " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-            [c, cur[0] + 1, *axes, fvals, ivals, vmin, vmax, e, p, a])
+            " WHERE array_id=?",
+            [c, ver + 1, *axes, fvals, ivals, vmin, vmax, aid])
     else:
+        # array_id omitted: the column DEFAULT is the only minter
         con.execute(
             "INSERT INTO value_array (entity_id, parameter_definition_id, alternative_id,"
             " valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id, values,"
@@ -596,6 +623,29 @@ def main():
     check("value_timeline: one logical timeline across current + hist",
           tl == [("array", 1, c3), ("array", 2, None)], str(tl))
 
+    # ---- array_id: the physical row handle on value_array -------------------
+    cons = allrows("SELECT constraint_type, constraint_column_names FROM duckdb_constraints()"
+                   " WHERE table_name = 'value_array'"
+                   " AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')")
+    check("array_id: single-column PRIMARY KEY + UNIQUE key triple on value_array",
+          sorted(cons) == [("PRIMARY KEY", ["array_id"]),
+                           ("UNIQUE", ["entity_id", "parameter_definition_id", "alternative_id"])],
+          str(cons))
+    inc = one("SELECT increment_by FROM duckdb_sequences() WHERE sequence_name = 'seq_value_array'")
+    odd = one("SELECT count(*) FILTER (WHERE array_id % 2 = 0), count(*) FROM"
+              " (SELECT array_id FROM value_array UNION ALL SELECT array_id FROM value_array_hist)")
+    check("array_id: seq_value_array steps by 2 and every minted id is odd",
+          inc == (2,) and odd[0] == 0 and odd[1] > 0, f"{inc} / {odd}")
+    ids = one("SELECT (SELECT array_id FROM value_array WHERE entity_id = ?),"
+              " (SELECT array_id FROM value_array_hist WHERE entity_id = ?)", coal, coal)
+    check("array_id: stable across an in-place replace (hist pre-image carries the live id)",
+          ids[0] is not None and ids[0] == ids[1], str(ids))
+    hist_cols = [r[0] for r in allrows("DESCRIBE value_array_hist")]
+    live_cols = [r[0] for r in allrows("DESCRIBE value_array")]
+    check("array_id: first column of value_array and value_array_hist (SELECT * parity)",
+          hist_cols[0] == live_cols[0] == "array_id"
+          and hist_cols[:len(live_cols)] == live_cols, f"{live_cols} / {hist_cols}")
+
     # ---- audits -----------------------------------------------------------
     for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
                  "audit_type_conformance", "audit_index_accelerator", "audit_axis_integrity",
@@ -603,7 +653,8 @@ def main():
                  "audit_class_set_entity_name_dup", "audit_element_class_mismatch",
                  "audit_value_class_mismatch", "audit_value_list_membership",
                  "audit_scenario_empty", "audit_required_class_empty",
-                 "audit_realizes_cycle", "audit_dangling_semantic_ref"]:
+                 "audit_realizes_cycle", "audit_dangling_semantic_ref",
+                 "audit_array_id_coherence"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"{view} clean", n == 0, f"n={n}")
 
@@ -718,6 +769,8 @@ def main():
             con.execute("ROLLBACK")
             check(name, True)
 
+    coal_aid = one("SELECT array_id FROM value_array WHERE entity_id = ?", coal)[0]
+
     # run temporal coherence: produced_at (c2) before input (c3) is rejected
     expect_constraint(
         "run: produced_at before input commit is rejected (temporal coherence)",
@@ -741,9 +794,34 @@ def main():
         " VALUES (nextval('seq_entity'), ?, 'revspan', ?, ?)", [node, c3, c2])
     expect_constraint(
         "F2: zero-length span rejected on value_array_hist",
+        "INSERT INTO value_array_hist (array_id, entity_id, parameter_definition_id,"
+        " alternative_id, valid_from_commit, version, axis1_id, values, valid_to_commit)"
+        " VALUES (?, ?, ?, ?, ?, 1, ?, [1.0], ?)",
+        [coal_aid, node_c, demand, base, c2, ax_f, c2])
+    # array_id (surrogate key): the UNIQUE key triple rejects a second live row,
+    # and `_hist` refuses a row without the live handle
+    expect_constraint(
+        "array_id: UNIQUE key triple rejects a duplicate live value_array row",
+        "INSERT INTO value_array (entity_id, parameter_definition_id, alternative_id,"
+        " valid_from_commit, version, axis1_id, values) SELECT entity_id,"
+        " parameter_definition_id, alternative_id, valid_from_commit, version, axis1_id,"
+        " values FROM value_array WHERE array_id = ?", [coal_aid])
+    expect_constraint(
+        "array_id: value_array_hist.array_id is NOT NULL",
         "INSERT INTO value_array_hist (entity_id, parameter_definition_id, alternative_id,"
         " valid_from_commit, version, axis1_id, values, valid_to_commit)"
-        " VALUES (?, ?, ?, ?, 1, ?, [1.0], ?)", [node_c, demand, base, c2, ax_f, c2])
+        " VALUES (?, ?, ?, ?, 1, ?, [1.0], ?)", [node_c, demand, base, c2, ax_f, c3])
+    # audit_array_id_coherence fires when one id maps to two triples
+    con.execute("BEGIN")
+    con.execute(
+        "INSERT INTO value_array_hist (array_id, entity_id, parameter_definition_id,"
+        " alternative_id, valid_from_commit, version, axis1_id, values, valid_to_commit)"
+        " VALUES (?, ?, ?, ?, ?, 1, ?, [1.0], ?)",
+        [coal_aid, node_c, demand, base, c2, ax_f, c3])
+    bad = allrows("SELECT array_id, n_triples FROM audit_array_id_coherence")
+    con.execute("ROLLBACK")
+    check("array_id: audit_array_id_coherence flags an id mapped to two triples",
+          bad == [(coal_aid, 2)], str(bad))
 
     # ---- F2: overlapping dead spans with clean version tiling -> audit fires
     con.execute("BEGIN")
@@ -967,8 +1045,21 @@ def main():
     di = one("SELECT values_int FROM read_parameter_dense('node', 'land_use')")
     check("values_int: read_parameter_dense returns the int payload",
           di == ([11, 22, 33, 22, 11, 44],), str(di))
+
+    # array_id index guard (pure-SQL form): a point read through
+    # read_parameter_dense fetches the payload by array_id with an ART index
+    # scan, not a full payload scan. Plain EXPLAIN always prints a sequential
+    # scan (the choice is made at run time); only EXPLAIN ANALYZE shows it.
+    plan = json.loads(con.execute(
+        "EXPLAIN (ANALYZE, FORMAT json) SELECT values FROM"
+        " read_parameter_dense('node', 'level_profile') WHERE entity_id = ?",
+        [node_a]).fetchall()[0][1])
+    scans = payload_scans(plan)
+    check("array_id: read_parameter_dense point read uses an index scan on the payload",
+          bool(scans) and all(t == "Index Scan" for t in scans), str(scans))
     for view in ["audit_axis_integrity", "audit_array_integrity", "audit_index_accelerator",
-                 "audit_type_conformance", "audit_array_payload_xor"]:
+                 "audit_type_conformance", "audit_array_payload_xor",
+                 "audit_array_id_coherence"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"float/int additions: {view} clean", n == 0, f"n={n}")
 
@@ -1383,6 +1474,25 @@ def main():
           " (31, no stragglers)",
           census == sorted(asof_macros), str(set(census) ^ set(asof_macros)))
 
+    # Column parity: every *_asof macro projects every real (non-generated)
+    # column of its base table, in table order. value_array_asof mirrors the
+    # `_hist` layout (live columns plus the two history columns), so its base
+    # is value_array_hist.
+    def real_cols(table):
+        return [r[0] for r in allrows(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name = ? AND is_generated = 'NEVER' ORDER BY ordinal_position",
+            table)]
+
+    drift = {}
+    for m in asof_macros:
+        base_table = "value_array_hist" if m == "value_array_asof" else m[:-len("_asof")]
+        cols = [r[0] for r in allrows(f"DESCRIBE SELECT * FROM {m}(1)")]
+        if cols != real_cols(base_table):
+            drift[m] = cols
+    check("as-of macros: each projects every real column of its base table, in order",
+          not drift, str(drift))
+
     c_latest = one('SELECT max(id) FROM "commit"')[0]
     sweep = guard_sweep(c_latest)
     check("erasure guard: all 31 as-of macros silent in every shape on a"
@@ -1422,7 +1532,7 @@ def main():
     # control sweep above, before the plant.)
 
     # ---- everything green again after the hostile section's cleanups
-    for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
+    final_sweep = ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
                  "audit_type_conformance", "audit_index_accelerator",
                  "audit_cross_tier_duplicate", "audit_membership_cycle",
                  "audit_class_set_entity_name_dup", "audit_element_class_mismatch",
@@ -1431,9 +1541,23 @@ def main():
                  "audit_required_class_empty", "audit_axis_integrity",
                  "audit_array_payload_xor", "audit_position_range",
                  "audit_metadata_reserved_dup",
-                 "audit_realizes_cycle", "audit_dangling_semantic_ref"]:
+                 "audit_realizes_cycle", "audit_dangling_semantic_ref",
+                 "audit_array_id_coherence"]
+    for view in final_sweep:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"final: {view} clean after hostile section", n == 0, f"n={n}")
+
+    # Every audit_* view in the catalog must be in the final sweep (or be a
+    # report view) — the next audit cannot silently miss the sweeps.
+    # report views: never "clean" by row count (asserted elsewhere by content)
+    report_views = {"audit_health", "audit_erasure", "audit_tier_intent",
+                    "audit_entity_alternative_redundant", "audit_missing_required_value"}
+    catalog = {r[0] for r in allrows(
+        "SELECT view_name FROM duckdb_views() WHERE NOT internal"
+        " AND view_name LIKE 'audit\\_%' ESCAPE '\\'")}
+    missing = sorted(catalog - set(final_sweep) - report_views)
+    check("final: every audit_* view is in the final sweep or a known report view",
+          not missing, str(missing))
 
     # ---- the erasure marker survived to the end WITH every audit clean above,
     # and the guard is still armed (permanent-marker contract).

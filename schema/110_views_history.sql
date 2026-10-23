@@ -218,19 +218,25 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
 -- array tier: current UNION ALL `_hist` under the same span predicate
--- (VMP Part 5). Column shapes normalized to the hist layout. The erasure
--- guard sits in BOTH legs' WHERE clauses — either leg alone may carry rows.
+-- (VMP Part 5). Column shapes normalized to the hist layout: every real
+-- column of value_array_hist, in its order (array_id included — the physical
+-- row handle; table-mirror surfaces show it). The erasure guard sits in BOTH
+-- legs' WHERE clauses — either leg alone may carry rows. Kept as a plain scan:
+-- a narrow-first self-join per leg measured slower (one leg is always empty
+-- for a point read, and an empty key side still scans the payload).
 CREATE MACRO value_array_asof(c) AS TABLE
-SELECT entity_id, parameter_definition_id, alternative_id, valid_from_commit,
-       version, axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max,
+SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
+       valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
+       values, values_int, v_min, v_max,
        NULL::BIGINT AS valid_to_commit, TRUE AS content_retained
 FROM value_array
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c
 UNION ALL
-SELECT entity_id, parameter_definition_id, alternative_id, valid_from_commit,
-       version, axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max,
+SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
+       valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
+       values, values_int, v_min, v_max,
        valid_to_commit, content_retained
 FROM value_array_hist
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)

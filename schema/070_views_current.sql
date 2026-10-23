@@ -65,6 +65,8 @@ CREATE VIEW value_scalar_current AS
   SELECT * EXCLUDE (ce, cp, ca) FROM value_scalar WHERE valid_to_commit IS NULL;
 CREATE VIEW value_long_current AS
   SELECT * EXCLUDE (ce, cp, ca, c1, c2, c3, c4) FROM value_long WHERE valid_to_commit IS NULL;
+-- table-mirror view: shows every real column, including the physical row
+-- handle array_id (the logical read surface in 080 does not expose it)
 CREATE VIEW value_array_current AS
   SELECT * FROM value_array;   -- twin layout: the current table IS current state
 CREATE VIEW definition_value_scalar_current AS

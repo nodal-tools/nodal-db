@@ -26,6 +26,12 @@ CREATE SEQUENCE seq_display_mode;
 CREATE SEQUENCE seq_run;                 -- provenance keystone (Decision 13, run table)
 CREATE SEQUENCE seq_semantic_annotation; -- polymorphic ontology crosswalk (fitness 2b)
 CREATE SEQUENCE seq_erasure_marker;      -- hard-erasure trace (erasure_compaction_plan §1.1, D-E1)
+-- value_array.array_id (surrogate row handle). Stride 2: every id shares one
+-- parity, so no two ids are adjacent and a set of ids is never contiguous;
+-- DuckDB rewrites an exactly contiguous IN set into a two-sided range filter,
+-- which never uses the index. Any re-creation of this sequence (compaction,
+-- extract, hand migration) must keep INCREMENT BY and the parity.
+CREATE SEQUENCE seq_value_array INCREMENT BY 2;
 
 -- The commit table (SDP Part 1 `commit`): append-only and immutable — the one
 -- exception to the mutable-table from/to pattern. max(id) doubles as the

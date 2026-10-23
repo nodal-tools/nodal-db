@@ -75,58 +75,42 @@ WHERE a.kind = 'float' AND a.p_start_dbl IS NULL;
 
 -- Array tier decoded to cells: row-major flat index -> per-dimension
 -- positions (rank is metadata over flattened storage — VMP Part 3).
--- Zip-unnest form (critique F4a): values and range(len) unnest side by side
--- in one SELECT, so the cell value arrives with its flat position and no
+-- Zip-unnest form (critique F4a): the payload and range(len) unnest side by
+-- side in one SELECT, so the cell value arrives with its flat position and no
 -- per-cell list_extract runs (measured ~4x faster than vals[flat_pos + 1]).
+-- One branch over BOTH payload columns: exactly one of values/values_int is
+-- populated (the XOR CHECK), and the NULL one unnests as NULL padding beside
+-- the other, so float and int rows decode in the same pass.
+-- Narrow-first self-join: `k` resolves the keys without touching the list
+-- columns; `p` fetches the payload by the single-column key array_id. A
+-- selective outer filter (one value's triple) then reaches the payload scan
+-- as an IN filter on array_id, which DuckDB serves by an index scan instead
+-- of scanning the list data of the whole table.
 CREATE VIEW value_array_cells AS
--- float payloads
 SELECT entity_id, parameter_definition_id, alternative_id,
        axis1_id, axis2_id, axis3_id, axis4_id,
        (flat_pos // (n2 * n3 * n4))::INTEGER        AS i1_pos,
        ((flat_pos // (n3 * n4)) % n2)::INTEGER      AS i2_pos,
        ((flat_pos // n4) % n3)::INTEGER             AS i3_pos,
        (flat_pos % n4)::INTEGER                     AS i4_pos,
-       'float'                                      AS value_kind,
-       v                                            AS v_float,
-       NULL::BIGINT                                 AS v_int
+       CASE WHEN is_float THEN 'float' ELSE 'int' END AS value_kind,
+       vf                                           AS v_float,
+       vi                                           AS v_int
 FROM (
-  SELECT va.entity_id, va.parameter_definition_id, va.alternative_id,
-         va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id,
+  SELECT k.entity_id, k.parameter_definition_id, k.alternative_id,
+         k.axis1_id, k.axis2_id, k.axis3_id, k.axis4_id,
          coalesce(a2.length, 1) AS n2,
          coalesce(a3.length, 1) AS n3,
          coalesce(a4.length, 1) AS n4,
-         unnest(va.values) AS v,
-         unnest(range(len(va.values))) AS flat_pos
-  FROM value_array va
-  LEFT JOIN axis a2 ON a2.id = va.axis2_id
-  LEFT JOIN axis a3 ON a3.id = va.axis3_id
-  LEFT JOIN axis a4 ON a4.id = va.axis4_id
-  WHERE va.values IS NOT NULL
-)
-UNION ALL
--- int payloads (same zip-unnest decode over values_int)
-SELECT entity_id, parameter_definition_id, alternative_id,
-       axis1_id, axis2_id, axis3_id, axis4_id,
-       (flat_pos // (n2 * n3 * n4))::INTEGER        AS i1_pos,
-       ((flat_pos // (n3 * n4)) % n2)::INTEGER      AS i2_pos,
-       ((flat_pos // n4) % n3)::INTEGER             AS i3_pos,
-       (flat_pos % n4)::INTEGER                     AS i4_pos,
-       'int'                                        AS value_kind,
-       NULL::DOUBLE                                 AS v_float,
-       v                                            AS v_int
-FROM (
-  SELECT va.entity_id, va.parameter_definition_id, va.alternative_id,
-         va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id,
-         coalesce(a2.length, 1) AS n2,
-         coalesce(a3.length, 1) AS n3,
-         coalesce(a4.length, 1) AS n4,
-         unnest(va.values_int) AS v,
-         unnest(range(len(va.values_int))) AS flat_pos
-  FROM value_array va
-  LEFT JOIN axis a2 ON a2.id = va.axis2_id
-  LEFT JOIN axis a3 ON a3.id = va.axis3_id
-  LEFT JOIN axis a4 ON a4.id = va.axis4_id
-  WHERE va.values_int IS NOT NULL
+         p.values IS NOT NULL AS is_float,
+         unnest(p.values) AS vf,
+         unnest(p.values_int) AS vi,
+         unnest(range(coalesce(len(p.values), len(p.values_int)))) AS flat_pos
+  FROM value_array k
+  JOIN value_array p ON p.array_id = k.array_id
+  LEFT JOIN axis a2 ON a2.id = k.axis2_id
+  LEFT JOIN axis a3 ON a3.id = k.axis3_id
+  LEFT JOIN axis a4 ON a4.id = k.axis4_id
 );
 
 -- The tier-unifying cell view: current rows of all three tiers in one
@@ -171,7 +155,10 @@ FROM value_array_cells;
 -- scans, which costs far more than the repeated small evaluations.)
 -- Stated non-goal (VMP Part 3): this view cannot push predicates into LIST
 -- cells — engines wanting raw speed use the client library's bulk reader
--- (or the read_parameter_dense macro below).
+-- (or the read_parameter_dense macro below). Point reads of array values
+-- go through read_parameter_dense or value_cells, which fetch the payload by
+-- array_id; this view's rank branches keep a full scan of the array payload
+-- even for a point read.
 CREATE VIEW value_rows AS
 -- rank 0: scalars, no axis machinery
 SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
@@ -269,12 +256,21 @@ WITH pd_pick AS (
   JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL
   WHERE pd.valid_to_commit IS NULL
     AND lower(ec.name) = lower(class_name) AND lower(pd.name) = lower(parameter_name)
+), k AS (
+  -- narrow key resolution: never touches the list columns
+  SELECT va.array_id, va.entity_id, va.alternative_id,
+         va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id, va.v_min, va.v_max
+  FROM value_array va
+  JOIN pd_pick ON pd_pick.id = va.parameter_definition_id
 )
-SELECT va.entity_id, va.alternative_id,
-       va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id,
-       va.values, va.values_int, va.v_min, va.v_max
-FROM value_array va
-JOIN pd_pick ON pd_pick.id = va.parameter_definition_id;
+-- payload fetch by the single-column key: an outer filter on entity or
+-- alternative reaches this scan as an IN filter on array_id (index scan, up
+-- to 50 keys; larger key sets and whole-parameter reads scan, as before)
+SELECT k.entity_id, k.alternative_id,
+       k.axis1_id, k.axis2_id, k.axis3_id, k.axis4_id,
+       p.values, p.values_int, k.v_min, k.v_max
+FROM k
+JOIN value_array p ON p.array_id = k.array_id;
 
 -- Hot-path bulk read, scalar form: value_scalar only — no tier union, no
 -- axis_position hash builds (a tier-generic read pays ~25 ms of fixed

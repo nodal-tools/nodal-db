@@ -97,7 +97,20 @@ CREATE INDEX ix_value_long_triple
 -- step 1). Float OR int payload: dense-numeric is the entire performance case
 -- (VMP Part 3); the `values_int` sibling column (VMP Part 3 reserved door) now
 -- carries dense INTEGER arrays without long-tier row explosion.
+-- Keys: the key triple stays the LOGICAL identity (UNIQUE, engine-enforced:
+-- one current value per triple, VMP Part 2). `array_id` is the PHYSICAL row
+-- handle: a single-column primary key, because DuckDB fetches a list payload
+-- through an index scan only on a single-column key. Readers resolve the
+-- array_id narrowly (triple -> array_id, never touching the list columns),
+-- then fetch the payload by array_id. Semantics: minted by the column DEFAULT
+-- when a live row is inserted, kept by an in-place replace, copied verbatim
+-- into every `_hist` pre-image; a delete or tier transition followed by a
+-- re-insert mints a new id. Ids are never re-used, are non-contiguous by
+-- design (sequence stride 2), carry no meaning (not dense, not time-ordered)
+-- and are not portable between databases. Only the column DEFAULT mints an
+-- id; only verbatim copy machinery (compaction) writes one explicitly.
 CREATE TABLE value_array (
+  array_id                 BIGINT NOT NULL DEFAULT nextval('seq_value_array') PRIMARY KEY,
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
   alternative_id           BIGINT NOT NULL,
@@ -114,7 +127,7 @@ CREATE TABLE value_array (
   CHECK ((values IS NULL) != (values_int IS NULL)),  -- exactly one populated (current table only)
   v_min DOUBLE, v_max DOUBLE,        -- per-row pruning metadata (Timescale lesson, VMP Part 3);
                                       -- DOUBLE for both kinds (int min/max cast when exact, else NULL)
-  PRIMARY KEY (entity_id, parameter_definition_id, alternative_id)   -- uniqueness of the triple, engine-enforced (VMP Part 2)
+  UNIQUE (entity_id, parameter_definition_id, alternative_id)   -- uniqueness of the triple, engine-enforced (VMP Part 2)
 );
 
 -- Array-tier history twin (VMP Part 5): same columns in the same order
@@ -122,8 +135,11 @@ CREATE TABLE value_array (
 -- retained FROM value_array WHERE key`), plus the two history columns.
 -- NO foreign-key constraints: hist rows must never block dimension/axis
 -- deletion (critique #2); referential integrity of history is the
--- offload/GC protocol's job.
+-- offload/GC protocol's job. `array_id` is the live row's handle, copied
+-- verbatim (no default, no index): one id maps to exactly one triple, ever
+-- (audit_array_id_coherence).
 CREATE TABLE value_array_hist (
+  array_id                 BIGINT NOT NULL,
   entity_id                BIGINT NOT NULL,
   parameter_definition_id  BIGINT NOT NULL,
   alternative_id           BIGINT NOT NULL,

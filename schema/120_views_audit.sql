@@ -545,6 +545,28 @@ SELECT 'definition_value_array',
 FROM definition_value_array
 WHERE content_retained AND ((values IS NULL) = (values_int IS NULL));
 
+-- array_id coherence: the physical row handle maps to exactly ONE key triple
+-- across value_array and value_array_hist, ever (ids are minted by the
+-- sequence DEFAULT, kept across in-place replaces, copied verbatim into
+-- `_hist`, and never re-used). One row per offending id, with its distinct
+-- triples. Narrow: projects only array_id and the triple, never the payload.
+-- (Per-triple version uniqueness is audit_history_tiling's job; together they
+-- imply (array_id, version) is unique in `_hist`.)
+CREATE VIEW audit_array_id_coherence AS
+WITH ids AS (
+  SELECT array_id, entity_id, parameter_definition_id, alternative_id FROM value_array
+  UNION
+  SELECT array_id, entity_id, parameter_definition_id, alternative_id FROM value_array_hist
+)
+SELECT array_id,
+       count(*) AS n_triples,
+       list({'entity_id': entity_id, 'parameter_definition_id': parameter_definition_id,
+             'alternative_id': alternative_id}
+            ORDER BY entity_id, parameter_definition_id, alternative_id) AS triples
+FROM ids
+GROUP BY array_id
+HAVING count(*) > 1;
+
 -- Index-accelerator audit: long-tier denormalized iN_dt/iN_num columns must
 -- agree with the bound axis at iN_pos (derived, never authoritative).
 -- LEFT JOIN on axis_position (critique F3): a position with no rendering

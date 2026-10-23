@@ -12,7 +12,8 @@
 //!
 //! - every core create path yields the exact `v2.0.0+` tag (a future 2.x
 //!   format bump fails here loudly and is re-baselined on purpose);
-//! - an array replace on a native file logs a small WAL, with a negative
+//! - an array replace through the core's write path (`history::write_value`)
+//!   on a native file logs a small WAL, with a negative
 //!   control on a `v1.5.0`-compat file in the same test so the guard can
 //!   never pass vacuously.
 
@@ -26,11 +27,15 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{Config, Connection};
 
 use nodal_db_core::api::write_parameter;
+use nodal_db_core::axis::AxisCache;
+use nodal_db_core::canon::CanonicalValue;
 use nodal_db_core::compaction::compact;
+use nodal_db_core::encoding::{AxisBody, AxisProperties, CanonicalAxis};
+use nodal_db_core::history::write_value;
 use nodal_db_core::schema_init::{
     apply_schema_from, init_schema, init_schema_from_sources_with_default, schema_dir,
 };
-use nodal_db_core::types::WriteOptions;
+use nodal_db_core::types::{ShapedData, Tier, ValueKey, ValueKind, WriteOptions};
 
 /// The storage tag DuckDB 2.0 gives a file created in its native format.
 const NATIVE_TAG: &str = "v2.0.0+";
@@ -43,7 +48,8 @@ const CELLS: usize = 8_760;
 const T0_US: i64 = 1_704_067_200_000_000; // 2024-01-01T00:00:00
 const HOUR_US: i64 = 3_600_000_000;
 
-/// Native-file bound for the single-row replace WAL (measured ~0.07 MiB).
+/// Native-file bound for the single-row replace WAL (measured ~0.14 MiB
+/// through `history::write_value`; ~0.07 MiB for a bare list UPDATE).
 const NATIVE_WAL_MAX: u64 = 1 << 20;
 /// Negative-control floor on a `v1.5.0`-compat file (measured ~13 MiB).
 const COMPAT_WAL_MIN: u64 = 10 << 20;
@@ -189,11 +195,15 @@ fn wal_len(db: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Run the core's array-replace SHAPE on one row (pre-image copy into
-/// `value_array_hist`, then an UPDATE that rewrites the list column) on a raw
-/// connection with checkpointing deferred, and return the WAL size BEFORE
-/// close (close checkpoints the WAL away). Test-only raw SQL on a scratch DB —
-/// not a writer path (CLAUDE.md invariant 2 does not apply).
+/// Replace ONE array through the core's own write path —
+/// `history::write_value`, the function every API write funnels into (it
+/// issues the real pre-image copy into `value_array_hist` and the real
+/// `UPDATE value_array` statement) — on a raw connection with checkpointing
+/// deferred, and return the WAL size BEFORE close (close checkpoints the WAL
+/// away, which is why the `api::` entry points, which close their own
+/// connection, cannot be measured directly). The raw connection only
+/// replaces `conn::with_write_txn`'s open/BEGIN/commit-row/COMMIT wrapper;
+/// the bytes measured are the core's value_array writes.
 fn replace_one_row_wal(db: &Path) -> u64 {
     let conn = Connection::open(db).expect("open rw");
     conn.execute_batch("SET checkpoint_threshold = '1TB'")
@@ -203,16 +213,58 @@ fn replace_one_row_wal(db: &Path) -> u64 {
         before < NATIVE_WAL_MAX,
         "WAL not empty before the measured replace: {before} bytes"
     );
-    conn.execute_batch(
-        "BEGIN;
-         INSERT INTO value_array_hist
-           SELECT *, valid_from_commit + 1, TRUE FROM value_array
-           WHERE rowid = (SELECT min(rowid) FROM value_array);
-         UPDATE value_array SET values = list_reverse(values), version = version + 1
-           WHERE rowid = (SELECT min(rowid) FROM value_array);
-         COMMIT;",
+    // The core-written row (the bulk copies have synthetic entity ids).
+    let (key, pt_id): (ValueKey, Option<i64>) = conn
+        .query_row(
+            "SELECT entity_id, parameter_definition_id, alternative_id, parameter_type_id \
+             FROM value_array WHERE rowid = (SELECT min(rowid) FROM value_array)",
+            [],
+            |r| {
+                Ok((
+                    ValueKey {
+                        entity_id: r.get(0)?,
+                        parameter_definition_id: r.get(1)?,
+                        alternative_id: r.get(2)?,
+                    },
+                    r.get(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    let value = CanonicalValue {
+        tier: Tier::Array,
+        value_kind: ValueKind::Float,
+        axes: vec![CanonicalAxis {
+            length: CELLS as i32,
+            properties: AxisProperties::default(),
+            body: AxisBody::IntegerParametric { start: 0, step: 1 },
+        }],
+        shape: ShapedData::Array((0..CELLS).map(|h| h as f64 * 0.5 + 1.0).collect()),
+    };
+    conn.execute_batch("BEGIN").unwrap();
+    let c: i64 = conn
+        .query_row(
+            "INSERT INTO commit (user, message) VALUES ('tester', 'wal probe') RETURNING id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let outcome = write_value(
+        &conn,
+        c,
+        key,
+        &value,
+        &mut AxisCache::new(),
+        &WriteOptions::default(),
+        pt_id,
     )
-    .expect("replace shape");
+    .expect("core array replace");
+    conn.execute_batch("COMMIT").unwrap();
+    assert_eq!(
+        (outcome.tier, outcome.rows_written, outcome.rows_closed),
+        (Some(Tier::Array), 1, 1),
+        "the measured write was not a same-tier array replace"
+    );
     let n_arrays: i64 = conn
         .query_row("SELECT count(*) FROM value_array", [], |r| r.get(0))
         .unwrap();
@@ -283,6 +335,10 @@ fn wal_stays_small_on_array_replace() {
         compat_wal >= COMPAT_WAL_MIN,
         "negative control: v1.5.0-compat file logged only {compat_wal} B (expected >= {COMPAT_WAL_MIN}); \
          the measurement no longer distinguishes the formats"
+    );
+    assert!(
+        native_wal > 0,
+        "native file logged no WAL at all: the measurement did not observe the commit"
     );
     assert!(
         native_wal < NATIVE_WAL_MAX,

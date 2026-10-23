@@ -119,8 +119,8 @@ create_exception!(
     nodal_db,
     InternalError,
     NodalDbError,
-    "Stored-data damage the core refuses to interpret \
-     (DbError::UnknownAxisKind / DbError::MalformedAxis)."
+    "Stored-data damage the core refuses to interpret, or a failed writer-internal \
+     invariant (DbError::UnknownAxisKind / DbError::MalformedAxis / DbError::Internal)."
 );
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,19 @@
 //! tier, and a continued cross-tier version would make the new tier's first row
 //! read as "current version > 1 with no superseded rows".
 //!
+//! **Physical write mechanism (appender_write_path_PLAN D1, D4)**: every
+//! statement is plain SQL on the caller's connection, prepared once per
+//! transaction through the connection's statement cache (`prepare_cached`; the
+//! cache capacity is raised in `conn`). The bulk inserts bind each column
+//! as ONE list parameter ("columnar bind"): a long value is
+//! `INSERT … SELECT ?, unnest(?::T[]), …` per ≤ `LONG_INSERT_CHUNK` cells,
+//! an array payload is one bound `?::DOUBLE[]`. The statement text no longer
+//! depends on the cell count, so DuckDB parses it once per transaction, not
+//! once per value. The encoder is still the one [`VCols::of`]; timestamps
+//! still cross as µs through `make_timestamp`; floats arrive canonical. A
+//! columnar insert zips its `unnest`s by position and NULL-pads a short list
+//! silently, so a hard length check (all builds) guards every execution.
+//!
 //! **Retention**: the superseded row (scalar/long close-out, array `_hist` copy)
 //! keeps its content by default (`content_retained = TRUE`). `force_replace`
 //! (or an explicit `retain_override = Some(false)`) writes a stub instead —
@@ -81,13 +94,18 @@ pub fn write_value(
 
     // --- 1. Resolve the value's axes (array/long tiers) via content-verified
     // dedup, threading the caller's cache. Count created vs reused by the axis
-    // population delta (dedup itself returns only the id). ---
-    let axes_before = axis_count(conn)?;
+    // population delta (dedup itself returns only the id). A scalar has no
+    // axes: both counts are skipped (two statements per scalar value). ---
     let mut axis_ids: Vec<i64> = Vec::with_capacity(value.axes.len());
-    for ax in &value.axes {
-        axis_ids.push(dedup_or_insert(conn, cache, ax)?);
-    }
-    let axes_created = (axis_count(conn)? - axes_before) as usize;
+    let axes_created = if value.axes.is_empty() {
+        0
+    } else {
+        let axes_before = axis_count(conn)?;
+        for ax in &value.axes {
+            axis_ids.push(dedup_or_insert(conn, cache, ax)?);
+        }
+        (axis_count(conn)? - axes_before) as usize
+    };
     let axes_reused = value.axes.len() - axes_created;
 
     // --- 2. Current state: which tier (if any) holds a live row for the key. ---
@@ -378,7 +396,9 @@ pub(crate) fn rewrite_definition_string_values(
 // ---------------------------------------------------------------------------
 
 fn axis_count(conn: &Connection) -> Result<i64, DbError> {
-    Ok(conn.query_row("SELECT count(*) FROM axis", [], |r| r.get(0))?)
+    Ok(conn
+        .prepare_cached("SELECT count(*) FROM axis")?
+        .query_row([], |r| r.get(0))?)
 }
 
 /// The live state of a key triple: the tier holding its current row and, for
@@ -419,31 +439,30 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError>
         key.parameter_definition_id,
         key.alternative_id
     ];
-    let scalar: i64 = conn.query_row(
-        "SELECT count(*) FROM value_scalar WHERE entity_id=? AND parameter_definition_id=? \
-         AND alternative_id=? AND valid_to_commit IS NULL",
-        triple,
-        |r| r.get(0),
-    )?;
+    let scalar: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM value_scalar WHERE entity_id=? AND parameter_definition_id=? \
+             AND alternative_id=? AND valid_to_commit IS NULL",
+        )?
+        .query_row(triple, |r| r.get(0))?;
     if scalar > 0 {
         return Ok(Some(Live::Scalar));
     }
-    let long: i64 = conn.query_row(
-        "SELECT count(*) FROM value_long WHERE entity_id=? AND parameter_definition_id=? \
-         AND alternative_id=? AND valid_to_commit IS NULL",
-        triple,
-        |r| r.get(0),
-    )?;
+    let long: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM value_long WHERE entity_id=? AND parameter_definition_id=? \
+             AND alternative_id=? AND valid_to_commit IS NULL",
+        )?
+        .query_row(triple, |r| r.get(0))?;
     if long > 0 {
         return Ok(Some(Live::Long));
     }
     let array_id: Option<i64> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT array_id FROM value_array WHERE entity_id=? AND parameter_definition_id=? \
              AND alternative_id=?",
-            triple,
-            |r| r.get(0),
-        )
+        )?
+        .query_row(triple, |r| r.get(0))
         .optional()?;
     Ok(array_id.map(Live::Array))
 }
@@ -469,30 +488,30 @@ fn write_scalar(
     };
     let version = next_version_scalar(conn, key)?;
     let vc = VCols::of(m);
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO value_scalar \
            (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
             valid_from_commit, version, \
             content_retained, value_kind, v_float, v_int, v_bool, v_str, v_datetime, \
             v_dur_months, v_dur_micros) \
          VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)",
-        params![
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id,
-            pt_id,
-            c,
-            version as i16,
-            vc.kind,
-            vc.f,
-            vc.i,
-            vc.b,
-            vc.s,
-            vc.dt,
-            vc.dm,
-            vc.du,
-        ],
-    )?;
+    )?
+    .execute(params![
+        key.entity_id,
+        key.parameter_definition_id,
+        key.alternative_id,
+        pt_id,
+        c,
+        version as i16,
+        vc.kind,
+        vc.f,
+        vc.i,
+        vc.b,
+        vc.s,
+        vc.dt,
+        vc.dm,
+        vc.du,
+    ])?;
     Ok((version, 1, closed))
 }
 
@@ -513,28 +532,28 @@ fn close_out_scalar(
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
            AND valid_to_commit IS NULL"
     };
-    Ok(conn.execute(
-        sql,
-        params![
-            c,
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id
-        ],
-    )?)
+    Ok(conn.prepare_cached(sql)?.execute(params![
+        c,
+        key.entity_id,
+        key.parameter_definition_id,
+        key.alternative_id
+    ])?)
 }
 
 fn next_version_scalar(conn: &Connection, key: &ValueKey) -> Result<u16, DbError> {
-    let v: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) + 1 FROM value_scalar \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-        params![
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id
-        ],
-        |r| r.get(0),
-    )?;
+    let v: i32 = conn
+        .prepare_cached(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM value_scalar \
+             WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
+        )?
+        .query_row(
+            params![
+                key.entity_id,
+                key.parameter_definition_id,
+                key.alternative_id
+            ],
+            |r| r.get(0),
+        )?;
     Ok(v as u16)
 }
 
@@ -554,7 +573,11 @@ fn write_array(
     pt_id: Option<i64>,
 ) -> Result<(u16, usize, usize), DbError> {
     let (vmin, vmax) = min_max(vals);
-    let list_sql = list_value_sql(vals.len());
+    // The payload binds as ONE `?::DOUBLE[]` parameter (columnar bind, plan
+    // D2): the canonical floats verbatim, so the statement text is the same
+    // for every length and is prepared once per transaction. The explicit
+    // cast types an empty list (duckdb-rs binds `[]` as VARCHAR[]).
+    let payload = Value::List(vals.iter().map(|&v| Value::Double(v)).collect());
 
     if let Some(array_id) = live_array_id {
         // Pre-image copy to the twin — entirely in SQL (never client-buffered).
@@ -563,34 +586,25 @@ fn write_array(
         // Replace the current row in place (bump version, new payload), keyed
         // by its array_id, which is never updated. Both payload columns are set
         // so a stale values_int can't break the XOR.
-        let sql = format!(
-            "UPDATE value_array SET valid_from_commit=?, version=?, parameter_type_id=?, \
-               axis1_id=?, axis2_id=?, axis3_id=?, axis4_id=?, \
-               values={list_sql}, values_int=NULL, v_min=?, v_max=? \
-             WHERE array_id=?"
-        );
         let mut p: Vec<Value> = vec![Value::BigInt(c), Value::SmallInt(version as i16)];
         p.push(pt_id.map(Value::BigInt).unwrap_or(Value::Null));
         push_axis4(&mut p, axis_ids);
-        for v in vals {
-            p.push(Value::Double(*v));
-        }
+        p.push(payload);
         p.push(Value::Double(vmin));
         p.push(Value::Double(vmax));
         p.push(Value::BigInt(array_id));
-        conn.execute(&sql, duckdb::params_from_iter(p.iter()))?;
+        conn.prepare_cached(
+            "UPDATE value_array SET valid_from_commit=?, version=?, parameter_type_id=?, \
+               axis1_id=?, axis2_id=?, axis3_id=?, axis4_id=?, \
+               values=?::DOUBLE[], values_int=NULL, v_min=?, v_max=? \
+             WHERE array_id=?",
+        )?
+        .execute(duckdb::params_from_iter(p))?;
         Ok((version, 1, 1))
     } else {
         let version = next_version_array(conn, key)?;
         // array_id is omitted: the column DEFAULT (seq_value_array) is its
         // only minter.
-        let sql = format!(
-            "INSERT INTO value_array \
-               (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-                valid_from_commit, version, \
-                axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {list_sql}, NULL, ?, ?)"
-        );
         let mut p: Vec<Value> = vec![
             Value::BigInt(key.entity_id),
             Value::BigInt(key.parameter_definition_id),
@@ -600,12 +614,17 @@ fn write_array(
             Value::SmallInt(version as i16),
         ];
         push_axis4(&mut p, axis_ids);
-        for v in vals {
-            p.push(Value::Double(*v));
-        }
+        p.push(payload);
         p.push(Value::Double(vmin));
         p.push(Value::Double(vmax));
-        conn.execute(&sql, duckdb::params_from_iter(p.iter()))?;
+        conn.prepare_cached(
+            "INSERT INTO value_array \
+               (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+                valid_from_commit, version, \
+                axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::DOUBLE[], NULL, ?, ?)",
+        )?
+        .execute(duckdb::params_from_iter(p))?;
         Ok((version, 1, 0))
     }
 }
@@ -634,27 +653,30 @@ fn copy_array_preimage(
             axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, ?, FALSE \
          FROM value_array WHERE array_id=?"
     };
-    Ok(conn.execute(sql, params![c, array_id])?)
+    Ok(conn.prepare_cached(sql)?.execute(params![c, array_id])?)
 }
 
 fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u16, DbError> {
-    let v: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) + 1 FROM ( \
-            SELECT version FROM value_array \
-              WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-            UNION ALL \
-            SELECT version FROM value_array_hist \
-              WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?)",
-        params![
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id,
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id
-        ],
-        |r| r.get(0),
-    )?;
+    let v: i32 = conn
+        .prepare_cached(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM ( \
+                SELECT version FROM value_array \
+                  WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
+                UNION ALL \
+                SELECT version FROM value_array_hist \
+                  WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?)",
+        )?
+        .query_row(
+            params![
+                key.entity_id,
+                key.parameter_definition_id,
+                key.alternative_id,
+                key.entity_id,
+                key.parameter_definition_id,
+                key.alternative_id
+            ],
+            |r| r.get(0),
+        )?;
     Ok(v as u16)
 }
 
@@ -692,24 +714,26 @@ fn write_long(
     // versions the per-cell probe did — each position advances independently.
     let cur_versions = current_long_versions(conn, key)?;
 
-    // Encode every cell's row params up front, tracking the max new version.
-    let mut max_version = 0u16;
-    let mut rows_params: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
-    for row in rows {
-        let pos = pad4_pos(&row.positions);
-        let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
-        max_version = max_version.max(version);
-        rows_params.push(long_row_params(
-            key, pt_id, c, version, axis_ids, axes, &pos, &row.value,
-        ));
-    }
+    // Encode every cell column-wise in one pass, tracking the max new version.
+    let cols = LongColumns::build(rows, axes, &cur_versions);
+    let max_version = cols.version.iter().copied().max().unwrap_or(0) as u16;
 
-    // Batched multi-row INSERT (replaces the per-cell prepare/execute). Issued on
-    // the caller's connection inside the open write transaction — no autocommit,
-    // no separate connection; a write-write conflict or any error surfaces here
-    // or at COMMIT exactly as before, and ROLLBACK unwinds every batched row, so
-    // conflict-retry and crash atomicity are unchanged.
-    insert_long_rows(conn, &rows_params)?;
+    // Columnar-bind INSERT (plan D1): one cached statement, one execution per
+    // ≤ LONG_INSERT_CHUNK cells. Issued on the caller's connection inside the
+    // open write transaction — no autocommit, no separate connection; a
+    // write-write conflict or any error surfaces here or at COMMIT, and
+    // ROLLBACK unwinds every row, so conflict-retry and crash atomicity are
+    // unchanged. Rows land in canonical cell order (DuckDB's default
+    // `preserve_insertion_order`, which the write connection never changes).
+    let consts = LongConsts {
+        entity_id: key.entity_id,
+        parameter_definition_id: key.parameter_definition_id,
+        alternative_id: key.alternative_id,
+        parameter_type_id: pt_id,
+        valid_from_commit: c,
+        axis_ids,
+    };
+    insert_long_columns(conn, &consts, &cols)?;
 
     Ok((max_version, rows.len(), closed))
 }
@@ -722,7 +746,7 @@ fn current_long_versions(
     conn: &Connection,
     key: &ValueKey,
 ) -> Result<HashMap<[i32; 4], u16>, DbError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT i1_pos, i2_pos, i3_pos, i4_pos, MAX(version)::INTEGER \
          FROM value_long \
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
@@ -753,127 +777,239 @@ fn current_long_versions(
     Ok(map)
 }
 
-/// Rows per batched `value_long` INSERT. Chunked so the per-statement placeholder
-/// count stays bounded (≤ CHUNK × 30); one prepared statement is reused across
-/// all full-width chunks, so 8 760 cells cost ~17 prepares instead of 8 760.
-const LONG_INSERT_CHUNK: usize = 512;
+/// Cells per columnar `value_long` INSERT execution (plan D5, critique C7).
+/// Every list element is a Rust `Value` plus a transient `duckdb_value` while
+/// the bind copies it, so a whole 1 M-cell value bound at once peaks near
+/// 1 GB; 16 384 cells keep the peak at ~200 MB (mostly DuckDB's
+/// transaction-local storage) at the same speed. An 8 760-cell series is one
+/// execution. The statement text does not depend on the chunk length.
+const LONG_INSERT_CHUNK: usize = 16_384;
 
-/// Insert the pre-encoded long-cell rows with as few statement prepares as
-/// possible: a single reused prepared statement for the full-width chunks, plus
-/// one tail statement for the remainder. All executes run on `conn` inside the
-/// caller's transaction.
-fn insert_long_rows(conn: &Connection, rows_params: &[Vec<Value>]) -> Result<(), DbError> {
-    if rows_params.is_empty() {
+/// The per-key constants of a long write: bound as scalars, not lists.
+struct LongConsts<'a> {
+    entity_id: i64,
+    parameter_definition_id: i64,
+    alternative_id: i64,
+    parameter_type_id: Option<i64>,
+    valid_from_commit: i64,
+    axis_ids: &'a [i64],
+}
+
+/// The per-cell columns of one long value, built column-wise in ONE pass over
+/// the canonical rows (plan D4). Still the one encoder: the value columns come
+/// from [`VCols::of`], the accelerators from [`accel`], the positions from
+/// [`pad4_pos`] and the versions from the per-position version map. Each
+/// column holds exactly one Rust type, so each binds as a list of one `Value`
+/// variant (duckdb-rs rejects a list mixing variants).
+#[derive(Default)]
+struct LongColumns {
+    version: Vec<i16>,
+    pos: [Vec<i32>; 4],
+    dt: [Vec<Option<i64>>; 4],
+    num: [Vec<Option<i64>>; 4],
+    kind: Vec<&'static str>,
+    f: Vec<Option<f64>>,
+    i: Vec<Option<i64>>,
+    b: Vec<Option<bool>>,
+    s: Vec<Option<String>>,
+    vdt: Vec<Option<i64>>,
+    dm: Vec<Option<i32>>,
+    du: Vec<Option<i64>>,
+}
+
+impl LongColumns {
+    fn build(
+        rows: &[crate::types::LongRow],
+        axes: &[CanonicalAxis],
+        cur_versions: &HashMap<[i32; 4], u16>,
+    ) -> LongColumns {
+        let mut c = LongColumns::default();
+        for row in rows {
+            let pos = pad4_pos(&row.positions);
+            let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
+            c.version.push(version as i16);
+            // Per-dimension index accelerators, derived from the bound axis at
+            // the cell's position (audited by audit_index_accelerator; never
+            // authoritative). NULL beyond the declared rank.
+            for (d, &p) in pos.iter().enumerate() {
+                c.pos[d].push(p);
+                let (a_dt, a_num) = axes.get(d).map_or((None, None), |ax| accel(ax, p));
+                c.dt[d].push(a_dt);
+                c.num[d].push(a_num);
+            }
+            let vc = VCols::of(&row.value);
+            c.kind.push(vc.kind);
+            c.f.push(vc.f);
+            c.i.push(vc.i);
+            c.b.push(vc.b);
+            c.s.push(vc.s);
+            c.vdt.push(vc.dt);
+            c.dm.push(vc.dm);
+            c.du.push(vc.du);
+        }
+        c
+    }
+
+    fn len(&self) -> usize {
+        self.version.len()
+    }
+
+    /// Every per-cell column must hold exactly one entry per cell. Part of the
+    /// hard length check (critique C2): a short column whose chunk is all
+    /// NULL would otherwise bind as a plain NULL and pass the list check.
+    fn check_column_lengths(&self) -> Result<(), DbError> {
+        let n = self.len();
+        let lens = [
+            ("pos", self.pos.iter().map(Vec::len).collect::<Vec<_>>()),
+            ("dt", self.dt.iter().map(Vec::len).collect()),
+            ("num", self.num.iter().map(Vec::len).collect()),
+            (
+                "value",
+                vec![
+                    self.kind.len(),
+                    self.f.len(),
+                    self.i.len(),
+                    self.b.len(),
+                    self.s.len(),
+                    self.vdt.len(),
+                    self.dm.len(),
+                    self.du.len(),
+                ],
+            ),
+        ];
+        for (group, ls) in &lens {
+            if ls.iter().any(|&l| l != n) {
+                return Err(DbError::Internal(format!(
+                    "columnar insert: {group} column lengths {ls:?} differ from {n} cells"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The 30 bind values of one execution over cells `r`, in the column order
+    /// of [`LONG_INSERT_SQL`]: per-key constants as scalars, per-cell columns
+    /// as lists. A column that is NULL in every cell of the chunk binds a
+    /// plain NULL (the zip pads it).
+    fn params(&self, k: &LongConsts, r: std::ops::Range<usize>) -> Vec<Value> {
+        let mut p: Vec<Value> = Vec::with_capacity(30);
+        p.push(Value::BigInt(k.entity_id));
+        p.push(Value::BigInt(k.parameter_definition_id));
+        p.push(Value::BigInt(k.alternative_id));
+        p.push(k.parameter_type_id.map_or(Value::Null, Value::BigInt));
+        p.push(Value::BigInt(k.valid_from_commit));
+        p.push(list(clip(&self.version, &r), |&v| Value::SmallInt(v)));
+        push_axis4(&mut p, k.axis_ids);
+        for d in 0..4 {
+            p.push(list(clip(&self.pos[d], &r), |&v| Value::Int(v)));
+        }
+        for d in 0..4 {
+            p.push(opt_list(clip(&self.dt[d], &r), |&v| Value::BigInt(v)));
+            p.push(opt_list(clip(&self.num[d], &r), |&v| Value::BigInt(v)));
+        }
+        p.push(list(clip(&self.kind, &r), |&v| Value::Text(v.to_string())));
+        p.push(opt_list(clip(&self.f, &r), |&v| Value::Double(v)));
+        p.push(opt_list(clip(&self.i, &r), |&v| Value::BigInt(v)));
+        p.push(opt_list(clip(&self.b, &r), |&v| Value::Boolean(v)));
+        p.push(opt_list(clip(&self.s, &r), |v| Value::Text(v.clone())));
+        p.push(opt_list(clip(&self.vdt, &r), |&v| Value::BigInt(v)));
+        p.push(opt_list(clip(&self.dm, &r), |&v| Value::Int(v)));
+        p.push(opt_list(clip(&self.du, &r), |&v| Value::BigInt(v)));
+        p
+    }
+}
+
+/// The columnar `value_long` INSERT (plan Appendix A). Per-key constants are
+/// scalar `?`; every per-cell column is `unnest(?::T[])`, zipped by position;
+/// the timestamp columns cross as BIGINT µs through `make_timestamp`, the
+/// same conversion as every other timestamp write. 30 columns (29 + the D11
+/// `parameter_type_id` binding); `content_retained` keeps its TRUE default.
+const LONG_INSERT_SQL: &str = "INSERT INTO value_long \
+       (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+        valid_from_commit, version, \
+        axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, \
+        i1_dt, i1_num, i2_dt, i2_num, i3_dt, i3_num, i4_dt, i4_num, \
+        value_kind, v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
+     SELECT ?, ?, ?, ?, ?, unnest(?::SMALLINT[]), ?, ?, ?, ?, \
+       unnest(?::INTEGER[]), unnest(?::INTEGER[]), unnest(?::INTEGER[]), unnest(?::INTEGER[]), \
+       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
+       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
+       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
+       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
+       unnest(?::VARCHAR[]), unnest(?::DOUBLE[]), unnest(?::BIGINT[]), unnest(?::BOOLEAN[]), \
+       unnest(?::VARCHAR[]), make_timestamp(unnest(?::BIGINT[])), \
+       unnest(?::INTEGER[]), unnest(?::BIGINT[])";
+
+/// Insert one long value's cells: one cached columnar statement, executed per
+/// ≤ [`LONG_INSERT_CHUNK`] cells after the hard length check. All executes run
+/// on `conn` inside the caller's transaction; a 0-cell chunk never executes.
+fn insert_long_columns(
+    conn: &Connection,
+    k: &LongConsts,
+    cols: &LongColumns,
+) -> Result<(), DbError> {
+    let n = cols.len();
+    cols.check_column_lengths()?;
+    if n == 0 {
         return Ok(());
     }
-    let full = rows_params.len() / LONG_INSERT_CHUNK;
-    if full > 0 {
-        let sql = long_insert_sql(LONG_INSERT_CHUNK);
-        let mut stmt = conn.prepare(&sql)?;
-        for chunk in rows_params.as_chunks::<LONG_INSERT_CHUNK>().0 {
-            stmt.execute(duckdb::params_from_iter(chunk.iter().flatten()))?;
-        }
-    }
-    let rem = &rows_params[full * LONG_INSERT_CHUNK..];
-    if !rem.is_empty() {
-        let sql = long_insert_sql(rem.len());
-        conn.execute(&sql, duckdb::params_from_iter(rem.iter().flatten()))?;
+    let mut stmt = conn.prepare_cached(LONG_INSERT_SQL)?;
+    let mut lo = 0;
+    while lo < n {
+        let hi = (lo + LONG_INSERT_CHUNK).min(n);
+        let p = cols.params(k, lo..hi);
+        check_list_lengths(&p, hi - lo)?;
+        stmt.execute(duckdb::params_from_iter(p))?;
+        lo = hi;
     }
     Ok(())
 }
 
-/// A multi-row `value_long` INSERT with `n` row templates. Column order and the
-/// `make_timestamp(?)` binds for the timestamp columns are identical to the
-/// former per-cell statement — 30 columns (29 + the D11 `parameter_type_id`
-/// binding), `content_retained` left to its TRUE default.
-fn long_insert_sql(n: usize) -> String {
-    const ROW: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                        make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, make_timestamp(?), ?, \
-                        ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)";
-    let mut s = String::with_capacity(320 + n * (ROW.len() + 1));
-    s.push_str(
-        "INSERT INTO value_long \
-           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-            valid_from_commit, version, \
-            axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, \
-            i1_dt, i1_num, i2_dt, i2_num, i3_dt, i3_num, i4_dt, i4_num, \
-            value_kind, v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
-         VALUES ",
-    );
-    for i in 0..n {
-        if i > 0 {
-            s.push(',');
+/// The columnar-bind guard (plan D4, critique C2), in EVERY build. The
+/// `unnest`s of one SELECT zip by position and NULL-pad a shorter (or empty)
+/// list silently, so a list of the wrong length would write NULL into the
+/// nullable columns with no error. Every bound list must have exactly `n`
+/// elements; a plain NULL parameter is the deliberate all-NULL column. Costs
+/// a few dozen integer compares per execution.
+pub(crate) fn check_list_lengths(params: &[Value], n: usize) -> Result<(), DbError> {
+    for (i, v) in params.iter().enumerate() {
+        if let Value::List(items) = v {
+            if items.len() != n {
+                return Err(DbError::Internal(format!(
+                    "columnar insert: bind parameter {} has {} elements, expected {n}",
+                    i + 1,
+                    items.len()
+                )));
+            }
         }
-        s.push_str(ROW);
     }
-    s
+    Ok(())
 }
 
-/// One long cell's 30 bind values, in the column order of [`long_insert_sql`].
-/// The timestamp columns bind their raw µs (wrapped by `make_timestamp(?)` in
-/// the SQL); the value columns come straight from [`VCols`], so the encoder
-/// path — including its NaN canonicalization — is untouched.
-#[allow(clippy::too_many_arguments)]
-fn long_row_params(
-    key: &ValueKey,
-    pt_id: Option<i64>,
-    c: i64,
-    version: u16,
-    axis_ids: &[i64],
-    axes: &[CanonicalAxis],
-    pos: &[i32; 4],
-    value: &ScalarValue,
-) -> Vec<Value> {
-    // Per-dimension index accelerators, derived from the bound axis at the
-    // cell's position (audited by audit_index_accelerator; never authoritative).
-    let mut dt = [None::<i64>; 4];
-    let mut num = [None::<i64>; 4];
-    for (d, ax) in axes.iter().enumerate() {
-        let (a_dt, a_num) = accel(ax, pos[d]);
-        dt[d] = a_dt;
-        num[d] = a_num;
-    }
-    let vc = VCols::of(value);
-    let mut p: Vec<Value> = Vec::with_capacity(30);
-    p.push(Value::BigInt(key.entity_id));
-    p.push(Value::BigInt(key.parameter_definition_id));
-    p.push(Value::BigInt(key.alternative_id));
-    p.push(pt_id.map(Value::BigInt).unwrap_or(Value::Null));
-    p.push(Value::BigInt(c));
-    p.push(Value::SmallInt(version as i16));
-    push_axis4(&mut p, axis_ids);
-    for &ip in pos {
-        p.push(Value::Int(ip));
-    }
-    for d in 0..4 {
-        p.push(opt_bigint(dt[d]));
-        p.push(opt_bigint(num[d]));
-    }
-    p.push(Value::Text(vc.kind.to_string()));
-    p.push(opt_double(vc.f));
-    p.push(opt_bigint(vc.i));
-    p.push(opt_bool(vc.b));
-    p.push(opt_text(vc.s));
-    p.push(opt_bigint(vc.dt));
-    p.push(opt_int(vc.dm));
-    p.push(opt_bigint(vc.du));
-    p
+/// The part of `col` inside `r` (never panics: a column shorter than the range
+/// yields a shorter slice, which the length checks reject).
+fn clip<'a, T>(col: &'a [T], r: &std::ops::Range<usize>) -> &'a [T] {
+    let end = r.end.min(col.len());
+    &col[r.start.min(end)..end]
 }
 
-fn opt_bigint(v: Option<i64>) -> Value {
-    v.map(Value::BigInt).unwrap_or(Value::Null)
+/// A list parameter of one `Value` variant.
+pub(crate) fn list<T>(col: &[T], f: impl Fn(&T) -> Value) -> Value {
+    Value::List(col.iter().map(f).collect())
 }
-fn opt_int(v: Option<i32>) -> Value {
-    v.map(Value::Int).unwrap_or(Value::Null)
-}
-fn opt_double(v: Option<f64>) -> Value {
-    v.map(Value::Double).unwrap_or(Value::Null)
-}
-fn opt_bool(v: Option<bool>) -> Value {
-    v.map(Value::Boolean).unwrap_or(Value::Null)
-}
-fn opt_text(v: Option<String>) -> Value {
-    v.map(Value::Text).unwrap_or(Value::Null)
+
+/// A list parameter whose elements may be NULL; a plain `NULL` when every
+/// element is (the zip-unnest pads it, and an all-NULL list would carry no
+/// element type).
+pub(crate) fn opt_list<T>(col: &[Option<T>], f: impl Fn(&T) -> Value) -> Value {
+    if col.iter().all(Option::is_none) {
+        return Value::Null;
+    }
+    Value::List(
+        col.iter()
+            .map(|v| v.as_ref().map_or(Value::Null, &f))
+            .collect(),
+    )
 }
 
 fn close_out_long(
@@ -893,15 +1029,12 @@ fn close_out_long(
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
            AND valid_to_commit IS NULL"
     };
-    Ok(conn.execute(
-        sql,
-        params![
-            c,
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id
-        ],
-    )?)
+    Ok(conn.prepare_cached(sql)?.execute(params![
+        c,
+        key.entity_id,
+        key.parameter_definition_id,
+        key.alternative_id
+    ])?)
 }
 
 // ---------------------------------------------------------------------------
@@ -920,7 +1053,8 @@ fn close_out_tier(
         Live::Long => close_out_long(conn, key, c, retained),
         Live::Array(array_id) => {
             let moved = copy_array_preimage(conn, array_id, c, retained)?;
-            conn.execute("DELETE FROM value_array WHERE array_id=?", [array_id])?;
+            conn.prepare_cached("DELETE FROM value_array WHERE array_id=?")?
+                .execute([array_id])?;
             Ok(moved)
         }
     }
@@ -1027,20 +1161,6 @@ fn push_axis4(p: &mut Vec<Value>, axis_ids: &[i64]) {
     }
 }
 
-/// `list_value(?, …)::DOUBLE[]` with `n` element placeholders — the SQL-side
-/// array constructor (a DOUBLE[] param cannot bind directly in duckdb-rs).
-fn list_value_sql(n: usize) -> String {
-    let mut s = String::from("list_value(");
-    for i in 0..n {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push('?');
-    }
-    s.push_str(")::DOUBLE[]");
-    s
-}
-
 /// Value floats reach `write_value` already canonical (the pipeline's
 /// `canon::read_value` normalizes them); `history` never re-canonicalizes. A
 /// hand-built `CanonicalValue` (tests, out-of-contract tools) holding `-0.0` or
@@ -1098,4 +1218,207 @@ fn min_max(vals: &[f64]) -> (f64, f64) {
         lo = nan;
     }
     (lo, hi)
+}
+
+/// Constraint rejection through the NEW statements, driven at the internal
+/// entry points (appender_write_path_PLAN §7.2), plus the hard length check
+/// (critique C2). Every failure must surface as the error it is, roll the
+/// transaction back, and leave no rows and no `commit` row behind.
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::conn::with_write_txn;
+    use crate::encoding::AxisProperties;
+    use crate::schema_init::init_schema;
+    use crate::types::{LongRow, ValueKind};
+
+    const KEY: ValueKey = ValueKey {
+        entity_id: 1,
+        parameter_definition_id: 2,
+        alternative_id: 3,
+    };
+
+    fn fresh() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.duckdb");
+        init_schema(&db).unwrap();
+        (dir, db)
+    }
+
+    fn int_axis(len: i32) -> CanonicalAxis {
+        CanonicalAxis {
+            length: len,
+            properties: AxisProperties::default(),
+            body: AxisBody::IntegerParametric { start: 0, step: 1 },
+        }
+    }
+
+    fn rows(n: i32) -> Vec<LongRow> {
+        (0..n)
+            .map(|p| LongRow {
+                positions: vec![p],
+                value: ScalarValue::Float(p as f64),
+            })
+            .collect()
+    }
+
+    fn long_value(n: i32) -> CanonicalValue {
+        CanonicalValue {
+            tier: Tier::Long,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(n)],
+            shape: ShapedData::Long(rows(n)),
+        }
+    }
+
+    /// Row counts of `commit` and every value table.
+    fn counts(db: &Path) -> Vec<i64> {
+        let conn = Connection::open(db).unwrap();
+        let v = [
+            "commit",
+            "value_scalar",
+            "value_long",
+            "value_array",
+            "value_array_hist",
+        ]
+        .iter()
+        .map(|t| {
+            conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap()
+        })
+        .collect();
+        conn.close().unwrap();
+        v
+    }
+
+    /// Run `f` in a write transaction; assert it fails with a DuckDB error
+    /// whose message contains `needle`, and that nothing was persisted.
+    fn assert_rejected<F>(db: &Path, needle: &str, f: F)
+    where
+        F: FnOnce(&Connection, i64) -> Result<(), DbError>,
+    {
+        let before = counts(db);
+        let err = with_write_txn(db, "t", "reject", f).expect_err("must be rejected");
+        assert!(
+            matches!(err, DbError::Duckdb(_)),
+            "expected DbError::Duckdb, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains(needle),
+            "error {err} lacks {needle:?}"
+        );
+        assert_eq!(counts(db), before, "rollback left rows or a commit row");
+    }
+
+    fn consts(c: i64, axis_ids: &[i64]) -> LongConsts<'_> {
+        LongConsts {
+            entity_id: KEY.entity_id,
+            parameter_definition_id: KEY.parameter_definition_id,
+            alternative_id: KEY.alternative_id,
+            parameter_type_id: None,
+            valid_from_commit: c,
+            axis_ids,
+        }
+    }
+
+    fn axis_id(conn: &Connection, len: i32) -> i64 {
+        dedup_or_insert(conn, &mut AxisCache::new(), &int_axis(len)).unwrap()
+    }
+
+    #[test]
+    fn length_check_rejects_a_short_column() {
+        // A shorter list would be NULL-padded silently by the zip-unnest; the
+        // check must fail the write instead (in every build).
+        let (_d, db) = fresh();
+        let before = counts(&db);
+        let err = with_write_txn(&db, "t", "short", |conn, c| {
+            let ax = axis_id(conn, 3);
+            let mut cols = LongColumns::build(&rows(3), &[int_axis(3)], &HashMap::new());
+            cols.f.pop();
+            insert_long_columns(conn, &consts(c, &[ax]), &cols)
+        })
+        .expect_err("a short column must be rejected");
+        assert!(matches!(err, DbError::Internal(_)), "got {err:?}");
+        assert_eq!(counts(&db), before);
+
+        // An empty list against a non-empty chunk is caught too; a plain NULL
+        // (the all-NULL column) is not a list and passes.
+        assert!(check_list_lengths(&[Value::List(vec![])], 1).is_err());
+        assert!(check_list_lengths(&[Value::Null, list(&[1i32], |&v| Value::Int(v))], 1).is_ok());
+    }
+
+    #[test]
+    fn second_current_long_cell_violates_unique() {
+        let (_d, db) = fresh();
+        assert_rejected(&db, "UNIQUE constraint violation", |conn, c| {
+            let ax = axis_id(conn, 3);
+            let cols = LongColumns::build(&rows(3), &[int_axis(3)], &HashMap::new());
+            insert_long_columns(conn, &consts(c, &[ax]), &cols)?;
+            insert_long_columns(conn, &consts(c, &[ax]), &cols)
+        });
+    }
+
+    #[test]
+    fn bad_axis_on_long_violates_foreign_key() {
+        let (_d, db) = fresh();
+        assert_rejected(&db, "foreign key", |conn, c| {
+            let cols = LongColumns::build(&rows(2), &[int_axis(2)], &HashMap::new());
+            insert_long_columns(conn, &consts(c, &[999_999]), &cols)
+        });
+    }
+
+    #[test]
+    fn bad_axis_on_array_violates_foreign_key() {
+        let (_d, db) = fresh();
+        assert_rejected(&db, "foreign key", |conn, c| {
+            write_array(conn, &KEY, c, &[999_999], &[1.0, 2.0], None, true, None).map(|_| ())
+        });
+    }
+
+    #[test]
+    fn fresh_array_insert_for_a_live_triple_violates_unique() {
+        let (_d, db) = fresh();
+        assert_rejected(&db, "UNIQUE constraint violation", |conn, c| {
+            let ax = axis_id(conn, 2);
+            write_array(conn, &KEY, c, &[ax], &[1.0, 2.0], None, true, None)?;
+            write_array(conn, &KEY, c, &[ax], &[3.0, 4.0], None, true, None).map(|_| ())
+        });
+    }
+
+    #[test]
+    fn long_rewrite_in_one_commit_violates_the_span_check() {
+        // Writing one key twice in one commit closes its cells at their own
+        // valid_from_commit: a zero-length span.
+        let (_d, db) = fresh();
+        assert_rejected(&db, "CHECK constraint failed", |conn, c| {
+            let mut cache = AxisCache::new();
+            let o = WriteOptions::default();
+            write_value(conn, c, KEY, &long_value(3), &mut cache, &o, None)?;
+            write_value(conn, c, KEY, &long_value(3), &mut cache, &o, None).map(|_| ())
+        });
+    }
+
+    #[test]
+    fn empty_array_binds_as_an_empty_double_list() {
+        // The bound empty list is typed by the `?::DOUBLE[]` cast (duckdb-rs
+        // binds `[]` as VARCHAR[]). Canon never emits a 0-length array; this
+        // pins the bind mechanics only.
+        let (_d, db) = fresh();
+        with_write_txn(&db, "t", "empty", |conn, c| {
+            let ax = axis_id(conn, 1);
+            write_array(conn, &KEY, c, &[ax], &[], None, true, None)
+        })
+        .unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let (len, ty): (i64, String) = conn
+            .query_row(
+                "SELECT len(values), typeof(values) FROM value_array",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((len, ty.as_str()), (0, "DOUBLE[]"));
+    }
 }

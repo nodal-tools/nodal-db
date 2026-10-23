@@ -46,6 +46,10 @@ const MAX_ATTEMPTS: u32 = 8;
 const BACKOFF_START: Duration = Duration::from_millis(20);
 const BACKOFF_CAP: Duration = Duration::from_millis(500);
 
+/// Prepared-statement cache capacity of the write connection (see
+/// `run_txn_once`).
+const WRITE_STATEMENT_CACHE: usize = 64;
+
 /// Process-global registry of per-path serialization locks (api critique F1).
 static PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
@@ -157,6 +161,18 @@ where
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
     assert_min_version(&conn)?;
+    // The write path prepares each of its statements once per transaction
+    // through this connection's statement cache (`prepare_cached`). The
+    // history protocol alone has ~20 distinct statements (3 live-tier probes,
+    // the 3 version scans, 4 close-out variants, the scalar/long/array
+    // inserts, the array UPDATE/DELETE, 2 pre-image copies, the axis count),
+    // the axis writer 7 more, plus the api lookups; duckdb-rs's default LRU
+    // capacity of 16 would thrash on a mixed commit and silently re-prepare
+    // (appender_write_path_PLAN critique C11).
+    conn.set_prepared_statement_cache_capacity(WRITE_STATEMENT_CACHE);
+    // DuckDB's default `preserve_insertion_order` must stay on for this
+    // connection: the columnar long insert relies on it to land a value's rows
+    // in canonical cell order (series-ordered zone maps; critique C6).
 
     conn.execute_batch("BEGIN")?;
 

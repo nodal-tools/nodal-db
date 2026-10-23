@@ -66,6 +66,14 @@ pub enum DbError {
     #[error("{0}")]
     Api(String),
 
+    /// A writer-internal invariant failed before any data reached DuckDB —
+    /// e.g. the columnar-insert length check (a bound list shorter or longer
+    /// than its chunk would be NULL-padded silently by the zip-unnest). Never
+    /// a caller error: it signals a core bug, and the transaction is rolled
+    /// back like any other failure.
+    #[error("internal writer invariant violated: {0}")]
+    Internal(String),
+
     #[error(transparent)]
     Duckdb(#[from] duckdb::Error),
 

@@ -43,7 +43,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::Duckdb(_) => DatabaseError::new_err(msg),
         DbError::Encode(_) | DbError::Canon(_) => CanonError::new_err(msg),
         DbError::Arrow(_) => ArrowError::new_err(msg),
-        DbError::UnknownAxisKind { .. } | DbError::MalformedAxis { .. } => {
+        DbError::UnknownAxisKind { .. } | DbError::MalformedAxis { .. } | DbError::Internal(_) => {
             InternalError::new_err(msg)
         }
     }

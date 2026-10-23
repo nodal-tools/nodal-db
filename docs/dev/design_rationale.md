@@ -23,21 +23,41 @@ a measurement, the text says so.
   Everything else is long format, one row per cell. Readers see the
   same long format whichever tier holds a value.
 - **Why dense arrays:** complete float series, such as hourly profiles
-  and model results, are the bulk of the data. Storing them as one list
-  per value avoids per-cell keys and per-cell rows when writing and
-  bulk-reading them.
-- **Whole versus partial reads:** on DuckDB 1.5.5, reading one cell or a
-  time window of a dense array costs the same as reading the whole
-  array, and that cost depends on how much list data is stored around
-  the row, not on the array's length. Reading only an array's stored
-  minimum and maximum takes well under a millisecond.
+  and model results, are the bulk of the data. A dense array is compact
+  (about 8 bytes per value), is written and replaced as one row, carries
+  its minimum and maximum for cheap inspection, and transfers a whole
+  parameter as lists of numbers (8.76 million values in about 0.24 s in
+  the benchmark below).
+- **Dense array against long, measured** (DuckDB 2.0.0; conditions in
+  [Measured figures](#measured-figures)):
+    - *Reading one value, a slice or one cell* costs about 2.4 ms for a
+      dense array through `read_parameter_dense`, and about 0.8–1.6 ms
+      in the long tier. A slice is not cheaper than a whole dense
+      value, but both are cheap on that path.
+    - *Bulk reads* favour dense arrays: list form avoids one row per cell.
+    - *Writes* favour dense arrays: about 1 µs per value against about
+      16 µs per cell for a new long value.
+    - *Storage* favours dense arrays in nodal-db: about 8 bytes per value
+      against about 80 bytes per long cell. That gap is mostly nodal-db's
+      own long-tier overhead, not the long format: a lean long table in
+      plain DuckDB stores about 4–8 bytes per cell.
+- **Where long wins or ties:** reads of one series or a few (slightly
+  faster or level), filtered reads through the canonical
+  `read_parameter` (much faster), and whole-table aggregates (much
+  faster, measured only in plain DuckDB). Long is also the only tier for
+  sparse grids and non-float values.
+- **The tier cliff:** from two dimensions up, one missing cell moves a
+  whole value to the long tier, which today costs about ten times the
+  storage.
 - **Writes are whole-value in every tier.** Changing one cell writes a
   complete new version of the value, and the old version is kept as
-  history unless retention is switched off.
-- **Still open:** a like-for-like comparison of dense-array and long
-  storage, including when long rows are the faster choice, is waiting
-  for a reproducible benchmark (see
-  [Performance in principle](#performance-in-principle)).
+  history unless retention is switched off. For long histories, a
+  [history-free extract](../features.md#history-free-extract) writes a
+  smaller file with the current content only.
+- **Not implemented yet:** set-based writes of scalar and long values
+  are planned; a leaner long tier is under consideration; chunked
+  storage of dense arrays is parked. See
+  [Known limitations and open directions](#known-limitations-and-open-directions).
 
 ## The problem
 
@@ -80,9 +100,10 @@ column.
   value is read or written as a unit.
 - **Against:** the database engine cannot see inside a value, so SQL
   cannot filter, join or aggregate on individual cells. Reading any part
-  of a value means fetching and decoding all of it (on DuckDB 1.5.5,
-  nodal-db's dense arrays have the same read cost; see
-  [Performance in principle](#performance-in-principle)). Canonical encoding
+  of a value means fetching and decoding all of it. (nodal-db's dense
+  arrays share this for their list of numbers: a slice costs what the
+  whole list costs. Their minimum, maximum and keys stay visible to SQL;
+  see [Performance in principle](#performance-in-principle).) Canonical encoding
   and equality become the job of every application that writes values,
   and independent encoders can drift apart.
 
@@ -95,16 +116,27 @@ Every cell is a row carrying its keys, its coordinates and its value.
 
 - **For:** fully relational; handles any shape, sparse or dense, and any
   value kind; a filter on a coordinate is an ordinary `WHERE` clause.
-- **Against:** dense series pay per-row overhead on every cell, in
-  storage, write time and read time. In nodal-db's own measurements
-  (see [Measured figures](#measured-figures)), long-format writes are
-  about 50 times slower per value than dense-array writes, and returning
-  8.76 million cells in long form takes seconds rather than a few
-  hundred milliseconds. These figures come from nodal-db's long tier,
-  which also carries history columns, uniqueness indexes and per-cell
-  versions, and from read views that compute every cell's coordinates.
-  A long-only design without those would measure differently; see the
-  note in [Performance in principle](#performance-in-principle).
+- **Against:** dense series carry keys and coordinates on every cell.
+  How much that costs depends heavily on the schema around the rows:
+    - A *lean* long table, sorted by key, costs little. In plain DuckDB
+      (no nodal-db schema), a `(key, position, value)` table held 87.6
+      million hard-to-compress floats in about 7.8 bytes per value, close
+      to the 7.1–10 bytes of the same data as lists, and answered point
+      and slice reads in under 1 ms (see
+      [Raw formats](#raw-formats-without-the-nodal-db-schema)).
+    - nodal-db's *own* long tier costs much more: about 80 bytes per cell
+      and about 16 µs per written cell, against about 8 bytes and 1 µs
+      per dense-array value. Most of the size is one unique index that
+      guarantees at most one current row per cell (see
+      [Storage](#storage)); the write cost was not broken down further.
+      Returning a whole parameter in long form also takes seconds where
+      list form takes a fraction of a second, because the read views
+      compute every cell's coordinates.
+
+So a long-only design is not ruled out by the format itself. It was not
+chosen because dense arrays also give one row per value, cheap
+whole-value replacement and list-form bulk transfer (see the next
+sections).
 
 ### One dense array for everything
 
@@ -132,6 +164,28 @@ The reasoning: sparse data is naturally stored as records, dense data
 as arrays, and a store that serves both well needs both natively.
 Choosing between them is a physical storage decision, so it is hidden
 from readers: every read view and macro presents the same long format.
+
+Dense arrays are kept for complete float grids even though a lean long
+table can match them on size and point reads, because of what one row
+per value gives:
+
+- **Compact.** About 8 bytes per value in a one-commit file, with no
+  per-cell keys, and no larger than the same lists stored in plain
+  DuckDB (7.1–10 bytes per value): the tier adds little on top of the
+  format.
+- **One row per value.** A 1 000-entity × 8 760-hour result is 1 000
+  rows, not 8.76 million, in the table, in the catalog of what exists,
+  and in every history step.
+- **Cheap minimum and maximum.** Each row stores them, so a reader can
+  inspect a value's range without touching its numbers.
+- **Whole-value replace.** A new version is one row update, plus one
+  row copied to history when retention is on; no per-cell close-out.
+- **Fast bulk transfer.** `read_parameter_dense` returns each value as
+  one list of numbers, which maps directly to an Arrow list column or a
+  NumPy array.
+
+Long rows win or tie elsewhere; see
+[Dense array against long, by operation](#dense-array-against-long-by-operation).
 
 ### Smaller decisions within the chosen design
 
@@ -261,40 +315,39 @@ history without comparing values cell by cell in application code.
 
 ## Performance in principle
 
-`n` is the number of cells in the value.
-
-The table describes how each tier works; it is not a ranking of the
-two. A like-for-like comparison of dense-array and long storage (read
-and write speed, file size and memory, and the cases where each is
-faster) needs a reproducible benchmark that runs both layouts on the
-same data and DuckDB version. That benchmark is being prepared, and the
-comparison will be added here from its results.
+`n` is the number of cells in the value. The table describes how each
+tier works; measured figures for both tiers follow in
+[Measured figures](#measured-figures).
 
 | Operation | Dense array | Long |
 |---|---|---|
-| Read a whole value | One row and one list of `n` numbers. No per-cell keys. Through `read_parameter_dense` or `value_cells` the list is fetched by its `array_id` with an index scan (about 2.4 ms for one 8 760-value array in the `array_id` measurements below). A read that scans the table instead pays a fixed cost set by how much list data is stored, not by `n` (77 ms in Set A below, measured before the `array_id` key existed). | `n` rows, each with keys, positions and a value. |
-| Read a slice (a time window, or one index of a multi-dimensional value) | Costs the same as reading the whole value (see below). | A filter on positions or coordinates over the value's rows. Not benchmarked separately. |
-| Read one cell | Same as a slice. | About 1 ms in the benchmark gate. |
+| Read a whole value | One row and one list of `n` numbers, no per-cell keys. Through `read_parameter_dense` or `value_cells` the row is fetched by its `array_id` with an index scan. A read that reaches the row through a sequential scan instead pays a cost set by how much list data is stored around it, not by `n`. | `n` rows, each with keys, positions and a value. Rows of one value are stored together, so DuckDB skips most of the table using per-block minimum and maximum keys. |
+| Read a slice (a time window, or one index of a multi-dimensional value) | Costs the same as reading the whole value (see below). | A filter on positions or coordinates over the value's rows. |
+| Read one cell | Same as a slice. | Same as a slice. |
 | Write a new value | One row; the whole list is bound as one SQL list parameter. | `n` rows, inserted by one statement that binds each column as a list (up to 16 384 cells per execution). |
 | Change one cell | The whole value is rewritten: the old row (all `n` cells) is copied to `value_array_hist` and the current row is replaced. | The whole value is rewritten: all `n` current rows are closed out (marked, not copied) and `n` new rows are inserted. |
 | History growth per change | About one extra copy of the value. | About one extra copy of the value, at long-format row size. |
-| Effect of history on current reads | No effect on scans of current data: superseded arrays live in a separate table. The file grows (see below). | Small: closed-out rows share the table. Measured scan slowdown 1.41× with 18–33 % of rows closed out. |
+| Effect of history on current reads | No effect on scans of current data: superseded arrays live in a separate table. The file grows (see below). | Closed-out rows share the table; scans of current rows skip blocks that hold only closed-out rows. |
 
 Notes on the table:
 
 - **Slices of dense arrays are not cheaper than whole reads.** This was
   measured: slicing in SQL (`values[a:b]`), unnesting and filtering, and
   fetching the whole list and slicing in the client all cost the same.
-  DuckDB does not skip parts of a list column. A query that reaches the
-  list through a sequential scan (a filter on the key triple directly
-  on `value_array`, or more than 50 values at once) pays for scanning a
-  large part of the stored list data, whatever the size of the slice;
-  smaller row groups did not reduce this in the tests. Reads through
-  `read_parameter_dense` and `value_cells` fetch the row by its
-  `array_id` with an index scan instead, so a slice costs about what a
-  whole value costs, a few milliseconds. Reading only the per-row
-  minimum and maximum, without touching the list, takes well under a
-  millisecond.
+  DuckDB does not skip parts of a list column. Through
+  `read_parameter_dense` and `value_cells` that cost is small, because
+  the row is found by its `array_id`: about 2.4 ms for one 8 760-value
+  array, whether one cell, one week or the whole series is wanted. A
+  query that reaches the list through a sequential scan (a filter on the
+  key triple directly on `value_array`, or more than 50 values at once)
+  pays for scanning a large part of the stored list data, whatever the
+  size of the slice: tens of milliseconds in the measurements below.
+  The canonical `read_parameter` expands dense arrays into cells before
+  a filter applies, so a filtered read through it costs about as much as
+  reading the whole parameter. Smaller row groups did not reduce the
+  scan cost in the tests. Reading only the per-row minimum and
+  maximum, without touching the list, takes under a millisecond on the
+  table itself.
 - **Every write replaces the whole value.** The write API takes whole
   values; there is no per-cell update. Writing a value identical to the
   current one also creates a new version. Callers that want to avoid
@@ -307,8 +360,10 @@ Notes on the table:
 - **Storage size.** DuckDB compresses column data automatically; how
   much depends on the data. A dense array stores eight bytes per float
   before compression and no per-cell keys. A long row carries keys,
-  positions and typed value columns, and the long table carries indexes
-  that enforce one current row per cell. Many small commits leave the
+  positions and typed value columns (empty columns compress to almost
+  nothing), and the long table carries a unique index that guarantees
+  at most one current row per cell. That index is most of the long
+  tier's size (see [Storage](#storage)). Many small commits leave the
   file fragmented; [compaction](../features.md#compaction) repacks it.
 - **Memory on read.** A read returns whole values. Through
   `read_parameter_dense`, a dense array arrives as one list of `n`
@@ -333,81 +388,185 @@ Notes on the table:
   them down. As-of reads combine both tables and pay for scanning the
   history table's list data as well, so they slow down as history grows
   (expected from the mechanism above, not measured). The file also
-  grows with history, and opening the file costs more as it grows: in
-  Set B, opening an 805 MiB file took about 20 ms and a 1.6 GiB file
-  about 107 ms. Each read opens and closes its own connection, so it
-  pays this cost. Turning retention off for regenerated data, and
-  [compaction](../features.md#compaction), limit the growth.
+  grows with history and with the number of commits, and opening it
+  costs more (see [History and file size](#history-and-file-size)).
+  Each read opens and closes its own connection, so it pays this cost.
+  Turning retention off for regenerated data,
+  [compaction](../features.md#compaction) and a
+  [history-free extract](../features.md#history-free-extract) limit the
+  growth.
 
 ## Measured figures
 
-Two sets of measurements, both on DuckDB 1.5.5 and taken before the
-`array_id` key existed, so their dense-array point and slice reads show
-the old sequential-scan cost; the `array_id` measurements follow Set B.
-Absolute numbers depend heavily on the machine; compare within a set,
-not across sets.
+All figures below were measured with DuckDB 2.0.0 on one machine: an AMD
+Ryzen 9 5900XT (16 cores, 32 threads), 70 GB of memory, an NVMe SSD,
+Linux, release builds with the DuckDB bundled by the core. The machine
+was shared with other work; the load during each run is given with it.
+Absolute numbers depend heavily on the machine and its load; ratios
+within one table are more reliable than absolute values. Figures for
+DuckDB 1.5.5, measured earlier, remain in the results files linked
+below; they are not repeated here.
 
-**Set A, the benchmark gate** in the repository
-([`benches/RESULTS.md`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/benches/RESULTS.md)).
-Intel Core i3-6100, SATA SSD. Synthetic database written through the
-core: 1 000 dense arrays of 8 760 floats (about 70 MB of payload),
-1.23 million long rows, 100 000 scalars; 213 MB on disk. Reads use a
-warm connection and include conversion to Arrow.
+The sources:
 
-| Operation | Measured |
-|---|---|
-| One scalar value | 0.98 ms |
-| One long cell | 0.98 ms |
-| One whole dense array (8 760 values) | 77.3 ms |
-| One dense array's minimum and maximum only | 0.56 ms |
-| All 1 000 arrays as lists (`read_parameter_dense`) | 311.5 ms |
-| All 1 000 arrays as long rows (`read_parameter`, 8.76 million rows) | 7 351 ms |
-| 1.23 million long rows, long form | 2 063 ms |
-| Write one dense array (end to end, during the bulk build) | 82 ms |
-| Long-tier write, 8 760 cells, after batching (micro-benchmark) | 0.24 ms per cell (first write), 0.28 ms per cell (replace) |
-| Replace one 8 760-cell dense array, including checkpoint and reopen | 2.43 s |
-| Replace one scalar, including checkpoint and reopen | 1.24 s |
+- **Results-scale benchmark**
+  ([`crates/nodal-db-cli/benches/results_path.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-cli/benches/results_path.rs),
+  `just bench-results`; results in
+  [`scripts/bench/RESULTS_results_path.md`](https://github.com/nodal-tools/nodal-db/blob/main/scripts/bench/RESULTS_results_path.md)).
+  Dense data: 10 parameters × 1 000 entities × 8 760 hourly floats
+  (87.6 million values) with random full-precision values, chosen to be
+  hard to compress, like solver output. Long data: 1 000 series × 876
+  integer cells (every tenth hour). One full run, 1-minute load average
+  1.8–3.0 for most of it, with one excursion to 13.5 during the read
+  phases. Reads are the minimum of 15 on an open connection ("warm"),
+  or of 5 on a fresh connection with opening excluded ("cold").
+- **Benchmark gate**
+  ([`crates/nodal-db-core/benches/RESULTS.md`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/benches/RESULTS.md),
+  `cargo bench`, the 2.0.0 column). A synthetic database written
+  through the core: 1 000 dense arrays of 8 760 floats, 1.23 million
+  current long rows (integer cells), 100 000 scalars; 165 MiB on disk.
+  Reads hold an open connection and include conversion to Arrow. Load
+  average 2.2–7.0 while measuring.
+- **Write-path comparison** (`scripts/bench/ab_write_path/`). Old and
+  new core, 21 interleaved pairs per row in random order, median of the
+  per-pair ratios with a bootstrap 95 % interval; times per value
+  through `history::write_value`, commit included. Load average 2–37;
+  rows whose load changed by more than 2× were re-run at 2–7 and kept
+  their ratios within 0.01.
 
-The two replace cycles show that, at this file size, about half of an
-array replace cycle is the commit's fixed cost (checkpoint and reopening
-the file, which dominate the scalar cycle); the other half is writing
-the new array and copying the old one to history.
+### Dense array against long, by operation
 
-**Set B, results-scale data**, from
-[`crates/nodal-db-cli/benches/results_path.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-cli/benches/results_path.rs)
-(`just bench-results`; full results in
-[`scripts/bench/RESULTS_results_path.md`](https://github.com/nodal-tools/nodal-db/blob/main/scripts/bench/RESULTS_results_path.md)).
-AMD Ryzen 9 5900XT, NVMe
-SSD. Ten parameters × 1 000 entities × 8 760 hourly floats (87.6 million
-values) with random full-precision values, chosen to be hard to
-compress, like solver output.
+The dense and long data have different shapes (8 760 floats against 876
+integers per series), so per-value figures are the fairest comparison.
 
-| Measurement | Result |
-|---|---|
-| Dense-array ingest, one commit | about 280 000 values/s |
-| Long-tier ingest (876 000 integer cells) | about 5 400 values/s, about 50× slower per value |
-| Share of dense-array write time spent parsing and binding the insert statement, which then carried one parameter per cell (since replaced by one list parameter, see below) | about two thirds (about 22 ms per 8 760-value series) |
-| File size, 8.76 million dense values in one commit | 71.5 MiB (about 8.2 bytes per value, net of the empty schema) |
-| File size, same data written in 10 commits | 127 MiB, before compaction |
-| File size, 876 000 long cells in one commit | 79 MiB (about 91 bytes per cell net, including indexes) |
-| One week (168 values) from each of 20 year-long series | about 110 ms warm, 220 ms with a fresh connection (opening it not included) |
-| The same week, through `read_parameter` with a timestamp filter | about 245 ms warm |
-| Reading one whole series, or one week of it | about 116–120 ms either way |
+| Operation | Dense array | Long tier | Source |
+|---|---|---|---|
+| One whole series | 2.35 ms (8 760 values; cold 6.4 ms) | 0.77 ms (876 cells; cold 1.9 ms) | results-scale |
+| One week of one series | 2.47 ms (168 values) | 0.93 ms (17 cells) | results-scale |
+| One cell | 2.48 ms | 1.58 ms (median 2.9 ms); 1.24 ms in the gate | results-scale, gate |
+| Minimum and maximum of one series | 0.70 ms (stored per row, read from the table); 2.38 ms through `read_parameter_dense` | 1.07 ms (computed over 876 cells) | gate, results-scale |
+| One week from each of 20 series | 3.77 ms | 3.50 ms | results-scale |
+| The same through `read_parameter` with a timestamp filter | 3 010 ms | 50.4 ms | results-scale |
+| Whole parameter, list form (`read_parameter_dense`) | 240 ms for 8.76 million values (about 27 ns per value) | — | gate |
+| Whole parameter, long form (`read_parameter`) | 3 151 ms for 8.76 million cells (about 0.36 µs per cell) | 1 065 ms for 1.23 million rows (about 0.87 µs per cell) | gate |
+| Write a new 8 760-cell value | 8.0 ms (about 0.9 µs per value; 20 values per commit) | 143 ms (about 16 µs per cell) | write-path comparison |
+| Replace an 8 760-cell value | 16.1 ms (about 1.8 µs per value) | 239 ms (about 27 µs per cell) | write-path comparison |
+| Bulk ingest, one commit (Arrow-IPC import) | 875 000–1.01 million values/s | 73 300 values/s | results-scale |
+| Bulk ingest, core API, 100 series per commit | 689 000–774 000 values/s | 65 500 values/s | results-scale |
+| Storage, one commit, net of the empty schema | 8.1–8.4 bytes per value | 78 bytes per cell | results-scale |
+| Storage, many commits, before compaction | 11.4–14.9 bytes per value | 83 bytes per cell | results-scale |
 
-In Set B all 10 000 arrays fell into one storage row group, and reading
-one week of 20 series cost the same as reading one whole series: both
-scan the stored list data rather than only the requested cells.
-Rebuilding the table with smaller row groups did not help in that test.
+Reading the table:
 
-The dense and long rows in Set B hold different data (random floats
-against integers on every tenth hour), so the per-value size comparison
-is indicative only.
+- **Point, slice and whole-value reads are close.** The long tier is
+  somewhat faster on one series (about 1–1.6 ms against about 2.4 ms);
+  for 20 series the two are level. Both are well under the cost of
+  opening a connection (28 ms on a fresh connection to the
+  one-commit file), which a per-operation reader pays as well.
+- **Long wins filtered reads through `read_parameter`.** A dense array
+  is expanded into one row per cell before a coordinate filter applies,
+  so the filtered read costs about as much as reading the whole
+  parameter. For dense data, filter after `read_parameter_dense`
+  instead (the 3.77 ms row above). The dense parameter here also holds
+  ten times as many cells as the long one.
+- **Dense wins bulk reads and writes.** In list form a whole dense
+  parameter costs about 27 ns per value. Writes are about 15–18 times
+  cheaper per value than long-tier writes, and bulk ingest about 11–14
+  times faster.
+- **Dense wins storage, by about ten times.** The gap is nodal-db's own
+  long-tier overhead, not the long format; see the next two sections.
 
-**The `array_id` key, before and after.** The Set B data and harness,
-ingested through the Arrow-IPC import lane into one file per schema and
-read with the bundled DuckDB 2.0.0, on the same AMD Ryzen 9 5900XT host
-(shared with other jobs, load average about 2 to 8). Warm minimum over
-15 reads; "cold" is a fresh connection with opening excluded.
+### Storage
+
+nodal-db's long tier costs about 78 bytes per cell (one commit, net of
+the empty schema), against about 4.2 bytes for the same integer cells in
+a lean long table in plain DuckDB (next section): about 19 times more.
+
+A separate measurement of the blocks the long table and its indexes use
+(DuckDB 2.0.0, the same 876 000 integer cells written in one commit, not
+part of the repository harness) put the tier at about 69 bytes per cell,
+and attributed about 58 of them to one index: the 7-column unique index
+that guarantees at most one current row per cell. About 7 bytes were
+the copy of the time coordinate that long rows carry for time
+dimensions, and about 4 bytes the keys, positions and values
+themselves. The history and typed value columns cost almost nothing:
+DuckDB stores an all-empty or constant column segment as a constant.
+
+The dense-array tier, by contrast, adds little on top of its format:
+8.4 bytes per value at 10 000 series, within the 7.1–10.0 bytes of the
+same lists in plain DuckDB (next section).
+
+So the tier choice today reflects nodal-db's long-tier overhead as much
+as the formats themselves. A leaner long tier is under consideration
+(see [Known limitations and open directions](#known-limitations-and-open-directions)).
+
+**The tier cliff, measured.** From two dimensions up, one missing cell
+moves the whole value to the long tier. A 3 × 8 760 float grid with one
+hole becomes 26 279 long rows: at 78–83 bytes per cell about 2.0–2.2 MB,
+against about 0.22 MB as a complete dense array at 8.4 bytes per value,
+nine to ten times more. (The long figure was measured on integer cells;
+float cells were not measured in the harness.) It also costs the
+long-tier write rate, about 16 µs per cell instead of about 1 µs.
+
+### Raw formats without the nodal-db schema
+
+The same 87.6 million values in plain DuckDB 2.0.0 (Python), with no
+nodal-db schema: lists in a `(key, minimum, maximum, values)` table, and
+a lean long table `(key, position, value)`, both sorted by key, with no
+indexes. "Lean long, integer" is the long shape above (1 000 × 876
+integer cells). From the same results-scale run, one pass; warm minimum
+of 15, in ms.
+
+| | Dense lists, default row groups | Dense lists, 2 048-row groups | Lean long |
+|---|---|---|---|
+| Bytes per value, net | 9.97 | 7.12 | 7.77 (integer shape: 4.19) |
+| One cell | 98.8 | 94.2 | 0.84 |
+| One week (168 values) | 101.5 | 94.2 | 0.85 |
+| One whole series (8 760) | 98.2 | 92.9 | 0.79 |
+| Minimum and maximum of one series | 0.47 (stored) | 0.54 (stored) | 1.44 (computed) |
+| One week from each of 20 series | 336 | 95.9 | 1.74 |
+| Aggregate over the whole table | 699 | 750 | 23.2 |
+
+- A sorted, narrow long table is no larger than the lists for
+  hard-to-compress floats: sorted keys and positions compress to almost
+  nothing.
+- The raw list tables have no key index, so their point reads scan the
+  list data (about 100 ms). nodal-db's dense tier avoids this through its
+  `array_id` index (2.4 ms, above); the lean long table needs no index,
+  because DuckDB skips blocks by their key ranges.
+- A full-table aggregate is about 30 times faster on the lean long table
+  (23 ms against 699–750 ms). The same aggregate was not measured on
+  nodal-db's own tiers.
+
+### History and file size
+
+- **Opening a file** written in many commits costs noticeably more:
+  28 ms for the 701 MiB results file written in one commit, 114 ms for
+  the 958 MiB file holding the same data written in 100 commits (fresh
+  connection, results-scale run).
+- **Closed-out long rows** did not slow scans of current rows in the
+  gate: a scan of the current long rows took 14.6 ms with 17.6 % of rows
+  closed out and 14.3 ms with 33.3 %. The likely reason: after a
+  checkpoint, closed-out rows cluster into whole row groups, which the
+  scan skips by their stored ranges.
+- **A history-free extract** removes superseded versions into a new
+  file ([`nodal-db extract`](../features.md#history-free-extract)). In
+  its benchmark (`cargo bench -p nodal-db-core --bench extract`; a
+  source of 100 dense arrays × 10 versions, 90 % of the array data
+  superseded, plus a small long-tier part; load average 17–67), the
+  extract was 16.8 MiB against 43.3 MiB for a compacted copy of the
+  source (2.6 times smaller) and 73.5 MiB for the uncompacted source
+  (4.4 times). Compaction alone accounts for the first step. A fixed
+  per-file overhead and the live data remain, so the gain stays well
+  below what the dead fraction alone suggests. The benchmark showed no
+  read-speed benefit against the compacted file, and none is claimed.
+
+### The `array_id` key, before and after
+
+The results-scale data, ingested through the Arrow-IPC import lane into
+one file per schema and read with the bundled DuckDB 2.0.0, on the same
+host (load average about 2 to 8). Warm minimum over 15 reads; "cold" is
+a fresh connection with opening excluded.
 
 | Read | Before (composite key) | After (`array_id`) |
 |---|---|---|
@@ -419,27 +578,23 @@ read with the bundled DuckDB 2.0.0, on the same AMD Ryzen 9 5900XT host
 | Import of the 87.6 million values, one commit | 1 200 s | 1 187 s and 1 219 s (two runs) |
 
 The `read_parameter` path does not use the index yet and became a few
-per cent slower; a paired, interleaved comparison of the whole-parameter
+per cent slower. A paired, interleaved comparison of the whole-parameter
 `read_parameter` read (one process, one file, 21 pairs) put the cost at
-4.1 % (median ratio 1.041, 95 % bootstrap interval 1.003 to 1.059). A
+4.1 % (median ratio 1.041, 95 % bootstrap interval 1.003 to 1.059); the
+later full re-run measured 5.2 % (1.052, interval 1.043 to 1.062). A
 read of more than 50 series at once falls back to scanning the list
-data (51 series: 88 ms). The file grew by 256 KiB (0.04 %).
+data (51 series: 88 ms warm in this comparison, 24 ms warm and 179 ms
+cold in the later re-run). The file grew by 256 KiB (0.04 %).
 
-**The columnar write path, before and after.** Until this change, a long
-value was inserted with multi-row `VALUES` statements carrying 30
-parameters per cell, an array with one parameter per element, and each
-child row of a materialized axis with its own statement. DuckDB 2.0
-parses such statements about three times slower than 1.5.5. Each column
-is now bound as one list parameter (see the
-[architecture page](architecture.md)). Measured with the paired,
-interleaved harness in `scripts/bench/ab_write_path/` (21 pairs per row,
-random order within each pair, median of the per-pair ratios with a
-bootstrap 95 % interval), old and new core each built in release
-against the bundled DuckDB 2.0.0, on the same AMD Ryzen 9 5900XT host
-(shared with other jobs; load average 2 to 37; the rows whose load
-changed by more than 2× during the first run were re-run at load 2 to 7
-and kept their ratios within 0.01). Times are medians per value, through
-`history::write_value` in one transaction, commit included:
+### The columnar write path, before and after
+
+Until this change, a long value was inserted with multi-row `VALUES`
+statements carrying 30 parameters per cell, an array with one parameter
+per element, and each child row of a materialized axis with its own
+statement. DuckDB 2.0 parses such statements about three times slower
+than 1.5.5. Each column is now bound as one list parameter (see the
+[architecture page](architecture.md)). Measured with the write-path
+comparison described above:
 
 | Write | Before | After | Ratio (95 % interval) |
 |---|---|---|---|
@@ -455,35 +610,54 @@ and kept their ratios within 0.01). Times are medians per value, through
 
 The stored rows are byte-identical before and after: a physical-write
 golden test (`tests/write_path_golden.rs`) was generated by the old code
-and passes unchanged. The Set B import of the 87.6 million dense values
-through `nodal-db import` (one commit): 1 200 s before (the `array_id` row above), 97 s after (one full-scale run, load average 4 to 12), with the file size identical to the byte (735 326 208 B).
+and passes unchanged. The import of the 87.6 million dense values
+through `nodal-db import` (one commit) went from 1 200 s to 97 s (one
+full-scale run, load average 4 to 12), with the file size identical to
+the byte (735 326 208 B); the later full re-run measured 86 s.
 
 ## Known limitations and open directions
 
 - **Point and slice reads of dense arrays.** Through
   `read_parameter_dense` and `value_cells` they are index lookups by
-  `array_id` (about 2.4 ms for one 8 760-value series in the `array_id`
-  measurements above). Some reads still scan the list data of the whole
-  table, at the old cost (about 90 ms there): a read of more than 50
-  values at once, a read of a value that does not exist, a filter on the
-  key triple applied directly to `value_array`, and point reads through
-  `read_parameter`, `value_rows` and `value_array_asof`. A fast path for
-  those is planned. The index lookup depends on DuckDB's planner
-  heuristics, so a test checks the plan shape on every build.
+  `array_id` (about 2.4 ms for one 8 760-value series). Some reads
+  still scan the list data of the whole table: a read of more than 50
+  values at once and a filter on the key triple applied directly to
+  `value_array` (both measured at tens of milliseconds warm and about
+  180 ms on a fresh connection above), a read of a value that does not
+  exist, and point reads through `read_parameter`, `value_rows` and
+  `value_array_asof` (not measured separately). A fast path for those is planned. The index
+  lookup depends on DuckDB's planner heuristics, so a test checks the
+  plan shape on every build.
+- **Long-tier size.** The long tier costs about 78 bytes per cell,
+  mostly one wide unique index; a lean long table costs 4–8. A leaner
+  long tier is under consideration: it would keep the guarantee of at
+  most one current row per cell by other means, for example a narrower
+  key, a check in the writer, or a separate history table as for dense
+  arrays. Which of these to adopt is an open design decision; nothing
+  is implemented yet. It would also shrink the tier cliff below.
 - **Long-tier write speed.** Long-tier writes are still much slower
   per value than dense-array writes (about 16 µs per cell against about
-  1 µs per array value in the measurements above). Large result sets
-  are best kept dense: complete grids of float values. Closing out and
-  versioning a whole segment's keys in one statement, instead of key by
-  key, is the next planned step.
+  1 µs per array value). Large result sets are best kept dense:
+  complete grids of float values. Closing out and versioning a whole
+  segment's keys in one statement, instead of key by key, is planned.
 - **Scalar write speed.** A scalar value costs a few statements of a
   few hundred microseconds each (about 3 ms per value above), so
   scalar-heavy saves and imports manage a few hundred values per second.
   A set-based scalar write is planned.
 - **Edits rewrite whole values.** Changing one cell creates a full new
   version, in either tier. There is no per-cell history.
-- **The two-dimensional tier cliff.** One missing cell in a
-  multi-dimensional float value moves the whole value to the long tier.
+- **The multi-dimensional tier cliff.** One missing cell in a
+  multi-dimensional float value moves the whole value to the long tier,
+  at about ten times the storage today.
+- **Chunked storage of dense arrays is parked.** Storing very long
+  series in chunks could help reads and writes of series much longer
+  than a year of hours; it is not planned until such a need appears.
+  Versioning chunks separately is not pursued (see
+  [Chunks and partial versioning](#chunks-and-partial-versioning)).
+- **Long histories.** Superseded versions stay in the file until
+  removed. A [history-free extract](../features.md#history-free-extract)
+  writes a file with only the current content; the source keeps the
+  full history.
 - **Integer grids use the long tier.** The reserved integer-list column
   is not written by the core yet.
 - **Irregular one-dimensional series create their own axes.** Each gappy

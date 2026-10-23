@@ -47,6 +47,14 @@ answer will be a served API, not a protocol document.
   as a defined error (`DbError::Busy` in Rust, `nodal_db.Busy` in
   Python) after a bounded retry, not as a hang. Readers may briefly fail
   to open while a commit is in progress and should retry.
+- **Never call a table macro through an attached database.** Views of
+  an attached file (`ATTACH … AS other`, then `other.<view>`) read that
+  file, but a table macro called as `other.<macro>(…)` resolves its
+  tables in the connection's default database and silently returns that
+  database's rows. Make the other file the default with `USE other`
+  (and switch back afterwards), or open it on its own connection; never
+  store a view that calls another database's macro. A test pins this
+  DuckDB behaviour, so an engine upgrade that changes it is noticed.
 - Use DuckDB 2.0 or newer to read; see
   [DuckDB version](../usage.md#duckdb-version).
 

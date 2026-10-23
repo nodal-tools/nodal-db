@@ -171,9 +171,12 @@ removed without changing anything.
 
 Erasure is intended for output databases where results are overwritten
 on rerun. The CLI prints a warning when the target database has no `run`
-provenance rows, because that suggests a curated input database. Only
-alternative-level erasure exists today; other erasure scopes are
-**Planned**.
+provenance rows, because that suggests a curated input database.
+Alternative-level erasure is the only way rows are removed from a
+database. To get rid of old history, a
+[history-free extract](#history-free-extract) writes a new file and
+leaves the original untouched. Other erasure scopes, including pruning
+history in place, are **Planned**.
 
 ```mermaid
 %%{init: {"sequence": {"mirrorActors": false, "actorMargin": 30, "width": 120, "messageFontSize": 15, "noteFontSize": 15, "actorFontSize": 15}}}%%
@@ -215,9 +218,66 @@ preserved; space freed by erasure is returned to the operating system at
 this point. The `audit_health` view reports dead-row fractions and
 advises when compaction is worthwhile.
 
-Compaction is available from the Rust API (`compaction::compact`). A
-CLI verb is **Planned** (the `maintain` verb is reserved but not
-implemented).
+Compaction is available from the CLI (`nodal-db maintain compact`, with
+`--if-needed` to compact only when the file has grown past a threshold),
+from Python (`Database.compact()`) and from the Rust API
+(`compaction::compact`, `compaction::compact_if_needed`).
+
+## History-free extract
+
+Compaction keeps every row. A database with a long history can be much
+smaller without it: a **history-free extract** writes a new database file
+that holds exactly the content valid at one commit, without the
+superseded versions (`nodal-db extract`, `Database.extract` in Python,
+`extract::extract` in Rust). The source file is only read. It keeps the
+complete history and serves as the archive.
+
+The extract holds:
+
+- the `commit` log up to the extracted commit, unchanged, plus one new
+  commit of its own (the *extract commit*);
+- every row that was current at the extracted commit, with its version
+  number and commit stamps unchanged;
+- only the axes that the carried values use;
+- all earlier erasure markers and `run` rows;
+- the closed identity rows of alternatives and entities that a carried
+  `run` row or marker refers to, so those references still resolve.
+
+The extract gets its **own database identity**. In its extract commit it
+records a `kind='horizon'` erasure marker that names the source's
+identity (`continuation_db`) and the extracted commit
+(`horizon_commit`). Like any erasure marker, it makes as-of reads at
+commits before the extract commit fail loudly in the extract: the
+history behind them lives in the source. Reads at the extract commit or
+later are exact. `audit_history_tiling` accepts version numbers that
+start above 1 for values that existed at the horizon, and checks
+everything written afterwards as usual. The extract is an ordinary
+database: writes, erasure, compaction and further extracts all work on
+it.
+
+`--as-of N` extracts the state as it was right after commit N instead
+of the current state. It is refused when N is not a commit, when an
+erasure marker was written after N (content valid at N was removed
+later), or when some content valid at N was not retained (a history
+stub). `run` rows have no creation commit, so an as-of extract keeps
+the runs whose input and output commits are at or before N and whose
+alternative and tool entity existed at N.
+
+The extract refuses to overwrite an existing file, refuses a destination
+that has a leftover `.wal` file, and never writes the source. While it
+copies, it holds the source's lock, so writers to the source wait or get
+a `Busy` error, as during compaction.
+
+**What it buys:** mainly file size, for sharing, backup and input/output.
+Measured against a *compacted* copy of the same source (compaction alone
+already reclaims the space of old checkpoints), the gain is the dropped
+history. In the benchmark (90 % of the array data superseded) the
+extract was 2.6 times smaller than the compacted source, and 4.4 times
+smaller than the uncompacted one. A fixed per-file overhead and the live
+data remain, so the gain stays well below what the dead fraction alone
+suggests. It does not make array point reads faster,
+and it barely changes the time to open a file compared with a compacted
+file. No speed-up of current-state scans is claimed.
 
 ## Provenance
 
@@ -225,7 +285,9 @@ The `run` table records model runs: which tool ran, the input commit it
 consumed, the alternative its outputs were written to, the solver, tool
 version, status and so on. It is append-only. Every database also has a
 stable identity UUID, minted at creation and kept through compaction,
-which output databases can use to refer to their input database.
+which output databases can use to refer to their input database. A
+history-free extract is a new database and gets a new identity; its
+horizon marker names the identity of the database it came from.
 
 The core does not yet provide a dedicated API for writing `run` rows;
 that is **Planned**.

@@ -51,9 +51,11 @@ CREATE TABLE commit (
 -- updated, or themselves erased. A marker row is written in the SAME
 -- transaction as the removal it records (the removed rows carry no close-out
 -- edge — the marker IS their trace). Shaped for the whole anticipated grain
--- family (HANDOFF §8.4: alternative / horizon / entity, with detach-to-archive
--- riding kind='alternative' + continuation_db); the v1 core writes only
--- kind='alternative' and refuses the rest. The as-of guard in
+-- family (HANDOFF §8.4: alternative / horizon / entity). The core writes
+-- kind='alternative' (erase-by-alternative) and kind='horizon' (the
+-- history-free extract, which writes it into the NEW file it builds, with
+-- continuation_db = the source's identity: the untouched source is the
+-- archive); kind='entity' is not written yet. The as-of guard in
 -- 110_views_history.sql consults this table relationally on every as-of read —
 -- which is why it is a base table, not a `metadata` reserved key.
 -- Scope columns are ids, not names; the identity rows they point to are
@@ -63,13 +65,13 @@ CREATE TABLE commit (
 CREATE TABLE erasure_marker (
   id               BIGINT PRIMARY KEY DEFAULT nextval('seq_erasure_marker'),
   kind             VARCHAR NOT NULL,   -- 'alternative' | 'horizon' | 'entity'
-                                       -- (extensible tag; v1 core writes only
+                                       -- (extensible tag; the core writes
                                        --  'alternative' and refuses the rest)
   -- exactly one scope column per kind (CHECKed below):
   alternative_id   BIGINT,             -- kind='alternative': all data under it
   entity_id        BIGINT,             -- kind='entity' (future): poison removal
   horizon_commit   BIGINT REFERENCES commit(id),
-                                       -- kind='horizon' (future): superseded
+                                       -- kind='horizon' (history-free extract): superseded
                                        -- content with valid_to_commit <= this
                                        -- was removed
   at_commit        BIGINT NOT NULL REFERENCES commit(id),
@@ -77,7 +79,7 @@ CREATE TABLE erasure_marker (
   continuation_db  VARCHAR,            -- NULL = truncated (bytes gone).
                                        -- Else: the DB-identity UUID of the
                                        -- archive file now holding the removed
-                                       -- rows (detach-to-archive, future).
+                                       -- rows (the extract's source file).
   rows_removed     BIGINT NOT NULL,    -- total across tables (report detail in
                                        -- the API report, not the marker)
   bytes_estimate   BIGINT,             -- advisory payload estimate at erase time

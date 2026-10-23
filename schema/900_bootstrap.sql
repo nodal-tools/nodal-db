@@ -21,6 +21,9 @@ VALUES (nextval('seq_metadata'), 'schema_version', '0.4-array-id',
 -- so it must never be re-minted. It is DATA, not a DDL side effect: the
 -- compaction repack deletes the fresh temp's own bootstrap rows and copies the
 -- source's metadata rows verbatim, so the identity survives physical rebuilds.
+-- A history-free extract is a NEW database: it keeps the identity its own
+-- fresh bootstrap minted and never copies the source's (whose identity its
+-- horizon marker records as continuation_db).
 -- Read it with plain SQL:
 --   SELECT value FROM metadata
 --   WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL;

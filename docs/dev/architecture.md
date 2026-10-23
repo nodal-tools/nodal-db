@@ -28,10 +28,11 @@ One DuckDB file is the database. Around it:
   — `init` (schema embedded at compile time; `--template` loads a
   template right after), `import` (the
   [Arrow-IPC bulk format](arrow_import_format.md)), `erase-alternative`,
+  `extract` (a history-free copy into a new file), `maintain compact`,
   and `template load` / `plan` / `apply` / `export`. It is the write
-  boundary for clients in languages without bindings. `migrate` and
-  `maintain` are reserved verbs that are not implemented; the reconcile
-  runner in v1 is `template apply`.
+  boundary for clients in languages without bindings. `migrate` is a
+  reserved verb that is not implemented; the reconcile runner in v1 is
+  `template apply`.
 - **Python skin** (`nodal_db`,
   [`crates/nodal-db-py`](https://github.com/nodal-tools/nodal-db/tree/main/crates/nodal-db-py))
   — a thin PyO3/maturin wrapper over the core: it marshals Arrow data in
@@ -134,6 +135,8 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `verbs` | Idempotent single-purpose write verbs (`ensure_entity`, `set_scenario_alternatives`, …) used by template migration programs and importers; thin wrappers over the `structural` and `api` paths. |
 | `erasure` | Hard erasure of one alternative's data, with an `erasure_marker` trace, in one transaction. |
 | `compaction` | Physical repack: rebuild into a fresh file, full-content self-check, atomic rename. |
+| `extract` | History-free extract: a new file with the content valid at one commit, the referenced axes only, and a `kind='horizon'` erasure marker; the source is only read. |
+| `rebuild` | Crate-private machinery shared by `compaction` and `extract`: the per-table catalog maps (insertion order, generated columns, clustering keys, extract selection classes), the read-only source attach, the sequence restore, durability helpers. |
 | `template` | The template loader: parse and validate the YAML/JSON template format, load into a fresh database, reconcile against a populated one (plan / apply with hints and `run:` migration programs), export. |
 
 `crates/nodal-db-cli/src/`: `main` (verb dispatch), `template` (the
@@ -305,6 +308,15 @@ a trace; it may never be rewritten. Erasing is intended for discarding
 results that are about to be regenerated, not for curated input data.
 See [erasure with markers](../features.md#erasure-with-markers).
 
+The other writer of `erasure_marker` rows is the history-free extract
+(`extract::extract`), and it removes nothing: it never writes its source.
+It builds a new file whose lineage is "the source's commits up to H,
+then the extract commit E", and records what that file leaves out with a
+`kind='horizon'` marker (`horizon_commit` = H, `continuation_db` = the
+source's identity) in E. The new file becomes visible (by a no-clobber
+publish) only after that marker is written. Version counters are kept
+as they are, and `audit_history_tiling` is horizon-aware per key.
+
 ## 8. Compaction
 
 DuckDB's single-file storage never shrinks the file, so
@@ -318,8 +330,24 @@ is only read until the final rename. Compaction holds the per-path lock
 for the whole operation and runs outside any write transaction, so a
 failed compaction can never roll back a commit. `compact_if_needed`
 skips the rebuild below a growth threshold, and
-`erasure::erase_alternative_and_compact` chains the two operations.
-Compaction is a Rust API only; there is no CLI verb yet.
+`erasure::erase_alternative_and_compact` chains the two operations. The
+CLI verb is `nodal-db maintain compact`; Python has `Database.compact()`.
+
+The history-free extract (`extract::extract`, CLI `nodal-db extract`)
+uses the same rebuild machinery (the crate-private `rebuild` module) to
+build a *new* file instead of replacing the original: each base table
+has a selection class (commit log, trace tables, versioned rows, the
+array tier, axes), the selection SQL is generated from that map and used
+both for the copy and for the self-check, only the axes the carried
+values reference are copied, and the sequences are restored to the
+source's state. Before it writes its own commit it compares every
+table's selection with the copy and the joining views (resolution,
+membership and activation, effective units) between source and copy.
+The new file is published with a hard link, so an existing file is
+never replaced. Table macros are never called through the attached
+source: DuckDB would resolve them in the copy's catalog. Compaction
+never consults the extract's selection map, so a schema change can not
+make a compaction on the commit path fail on it.
 
 ## 9. Testing
 
@@ -368,8 +396,8 @@ The components described on this page are implemented except for the
 following:
 
 - **In development**: the editor (separate repository).
-- **Planned**: CLI `migrate` and `maintain` (verbs reserved); a CLI verb
-  for compaction.
+- **Planned**: CLI `migrate` (verb reserved); pruning history in place
+  (an extract is the supported way to drop history today).
 - **Not planned for now** (design left open, no code): a serving
   process, value inheritance, symbols, structured units, in-place
   reshape.

@@ -50,6 +50,13 @@
 -- The guard's soundness rests on optimizer behavior, not a documented engine
 -- contract: the consumer-shape sweep (smoke_test.py + tests/erasure.rs) is
 -- the PERMANENT regression tripwire for engine upgrades — never remove it.
+-- Statically empty consumer queries (LIMIT 0, WHERE false, WHERE NULL) are
+-- the one silent shape: the optimizer folds the whole filter away, guard
+-- included, and returns zero rows. Benign (the consumer asked for nothing),
+-- so the sweep does not count it as "silent past a marker".
+-- A history-free extract writes a kind='horizon' marker at its own first
+-- commit E, so every as-of read before E fails in the extract (its history
+-- lives in the source file) and reads at E or later are exact.
 -- Cost: one probe of a tiny append-only table per as-of call.
 -- ---------------------------------------------------------------------------
 

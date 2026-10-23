@@ -445,6 +445,61 @@ content erased at a later commit — see erasure_marker / audit_erasure
 `SELECT * FROM audit_erasure` shows what was erased, by whom and when.
 The file shrinks only after compaction.
 
+### Extract a database without its history
+
+A [history-free extract](features.md#history-free-extract) writes a new
+file with the current content of a database and none of its superseded
+versions. The source file is only read.
+
+=== "CLI"
+
+    ```bash
+    nodal-db extract demo.duckdb demo-slim.duckdb --note "for sharing"
+    nodal-db extract demo.duckdb demo-at-3.duckdb --as-of 3
+    ```
+
+    On a tiny database the file barely shrinks: a fixed per-file overhead
+    dominates. The size gain grows with the amount of superseded history.
+
+    ```text
+    extracted the current state (commit 4) of demo.duckdb into demo-slim.duckdb
+      source identity   ad485e98-1793-4189-b965-06d2f02f3c10
+      extract identity  e4a3d2be-3de7-4675-b234-6046029c2829
+      horizon commit 4, extract commit 5, horizon marker 1
+      size 10.8 MiB -> 10.8 MiB; 5 rows left out, 0 unreferenced axes dropped
+    note: the extract has a NEW database identity; as-of reads before commit 5 fail in it (the source keeps the full history)
+    ```
+
+=== "Python"
+
+    ```python
+    report = db.extract("demo-slim.duckdb", user="alice", note="for sharing")
+    slim = nodal_db.open("demo-slim.duckdb")
+    ```
+
+    `as_of=3` extracts the state right after commit 3. The returned
+    dict has the identities, the horizon and extract commits, the rows
+    left out per table and the file sizes.
+
+=== "Rust"
+
+    `extract::extract(src, dest, &ExtractOpts { as_of, user, note })`,
+    returning an `ExtractReport`.
+
+To compact a database in place instead (keeping all history), use
+`nodal-db maintain compact demo.duckdb` or `db.compact()`.
+
+!!! note "Identity after swapping files"
+    An extract is a new database with its own identity. If you replace
+    your working file with its extract (extract, check the result, then
+    move the extract to the old path), the database at that path now has
+    a different identity than before. Anything that refers to the old
+    identity, such as an output database that records which input
+    database it was produced from, refers to the old file. Keep that
+    file as the archive: the extract's horizon marker
+    (`SELECT continuation_db FROM erasure_marker WHERE kind = 'horizon'`)
+    names it, and its full history stays readable there.
+
 ### Import a Spine database
 
 The `nodal_spine_import` package in `python/` imports a Spine Toolbox
@@ -500,6 +555,17 @@ Read through the views and table macros (`schema/070_*.sql` to
 `schema/120_*.sql`), not the base tables. The base-table layout is not a
 stable interface; the read surface is. The [schema page](schema.md) shows
 the tables for reference.
+
+!!! warning "Do not call table macros through an attached database"
+    When one connection reads two nodal-db files (`ATTACH 'other.duckdb'
+    AS other`), views work as expected: `other.value_scalar_current`
+    reads `other.duckdb`. Table macros do not. DuckDB resolves the
+    tables inside a macro in the connection's *default* database, so
+    `other.value_scalar_asof(5)` or `other.read_parameter('unit',
+    'capacity')` silently returns rows from the default database, with
+    no error. To use a macro of another file, make it the default first
+    (`USE other`, then switch back), or open the file on its own
+    connection. Do not store a view that calls another database's macro.
 
 ### Connection discipline
 

@@ -31,10 +31,13 @@
 //!
 //! ## Marker kinds
 //! The marker table is shaped for the whole grain family (alternative /
-//! horizon / entity / detach-to-archive); the v1 core writes ONLY
-//! `kind='alternative'` with `continuation_db` NULL, and there is no API that
-//! writes any other kind — the unbuilt semantics cannot be half-used (plan
-//! §6). [`erase_alternative`] refuses non-alternative [`ObjectDeleteKey`]s.
+//! horizon / entity / detach-to-archive). This module writes ONLY
+//! `kind='alternative'` with `continuation_db` NULL; the history-free extract
+//! ([`crate::extract`]) writes `kind='horizon'`, into the new file it builds
+//! (it removes nothing from its source, which becomes the archive named by
+//! `continuation_db`). No API writes `kind='entity'` — the unbuilt semantics
+//! cannot be half-used (plan §6). [`erase_alternative`] refuses
+//! non-alternative [`ObjectDeleteKey`]s.
 //!
 //! ## Where erase may run (D-E6)
 //! The mechanism is DB-agnostic; the input-vs-output-DB policy is a client

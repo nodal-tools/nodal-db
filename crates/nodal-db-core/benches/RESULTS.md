@@ -1,27 +1,26 @@
 # Pre-freeze benchmark gate — recorded results
 
-> **Re-baseline note (2026-10-23).** The gate figures below were recorded on
-> DuckDB 1.5.5 with 1.5-format files, and are **not yet re-baselined on
-> DuckDB 2.0**. The array write and commit figures (the "1 000 × 8 760 float
-> arrays" build stage and the "Write benches" section) are known to be
-> inflated by the 1.5-format WAL behaviour: on a 1.5-format file every write
-> to `value_array` logs the whole list column to the WAL and then stalls on
-> a checkpoint (`scripts/bench/RESULTS_results_path.md` §5). DuckDB 2.0
-> creates native-format files where the same single-row replace logs
-> ~0.1 MiB (`tests/storage_format.rs`). Scalar and long-tier stages have no
-> list column and should change little; the read budgets are not expected
-> to move (2.0 does not change list reads). The 2.0 column in the tables
-> below is **pending re-run** (see its note).
+> **Re-baseline note (2026-10-24).** The 1.5.5 column was recorded on
+> DuckDB 1.5.5 with 1.5-format files on an Intel i3-6100. The **2.0.0
+> column** is current `main` (DuckDB 2.0.0, native-format files, schema 0.4
+> `array_id` key, columnar-bind write path) measured on a **different
+> machine**, an AMD Ryzen 9 5900XT. The two columns compare neither the
+> engines nor the code cleanly: read each column against the budgets, not
+> against the other. What changed in the code between them is listed under
+> "What changed since the 1.5.5 baseline" below.
 
 Plan Part 5 deliverable 4 (`specs/rust_implementation_plan.md`); budgets from
 `specs/value_model_plan.md` Part 6; methodology mirrors `specs/ddl_sketch.md`
 §10. **Recording gate**: measurements are recorded against budgets; nothing
 here fails the build (gating scope is Q6, deliberately open). Reproduce with
 `cargo bench` (builds the synthetic DB through the core write path first —
-budget ~2 h wall on this machine, dominated by the long-tier write findings
-below).
+~2 h wall on the i3-6100 at 1.5.5, dominated by the long-tier write
+findings below; ~18 min on the Ryzen host at 2.0.0 including a 3 min
+compile, 11.5 min of it the build).
 
 ## Environment
+
+**1.5.5 column.**
 
 | | |
 |---|---|
@@ -30,56 +29,82 @@ below).
 | RAM | 16 GB |
 | Disk | SATA SSD (`/dev/sda`), ext4; DB in `/tmp` (same device) |
 | DuckDB | v1.5.5 (duckdb-rs 1.10505.0, bundled) — §10 baselines were DuckDB 1.4.4 |
-| DuckDB (2.0.0 column) | v2.0.0 (duckdb-rs 1.20000.0, bundled), native-format files — **pending re-run** (see the note below this table) |
 | Profile | `bench` (inherits release, opt-level 3) |
 | criterion | 0.5.1, sample size 10 for slow benches (wall-clock accuracy over statistical polish) |
 
-**2.0.0 column status: pending re-run.** The DuckDB 2.0 upgrade (2026-10-23)
-did not publish 2.0 figures. The only machine available was a shared AMD
-Ryzen 9 5900XT host that other jobs were loading (load average swinging
-between about 2 and 35 during the session), and the 1.5.5 column was
-measured on a different machine (the i3-6100 above). A 2.0 column from that
-host would compare neither the engines nor the machines cleanly. To fill it:
-on one quiet machine, run `cargo bench` and
-`cargo bench -p nodal-db-core --bench long_write` on DuckDB 2.0, and ideally
-re-run the 1.5.5 baseline on the same machine.
+**2.0.0 column: run conditions.**
+
+| | |
+|---|---|
+| Date | 2026-10-23 23:48 to 2026-10-24 00:06 (gate), 00:06 (`long_write`) |
+| Code | `main` at `eaf2551` |
+| CPU | AMD Ryzen 9 5900XT, 16 cores / 32 threads |
+| RAM | 70 GB |
+| Disk | WD_BLACK SN850X NVMe, ext4; DB in `/tmp` (same device) |
+| OS / Rust | Linux 6.14.0-37-generic; rustc 1.98.0 |
+| DuckDB | v2.0.0 (`v2.0.0-dev88614`; duckdb-rs 1.20000.0, bundled), native-format files |
+| Load | 1-min load average 2.2-7.0 while criterion measured (00:00-00:06); 2.8-11 during the synthetic build after its own DuckDB compile finished (34 at the very start, from that compile). One other interactive process used about 0.7 of a core throughout. No other bench ran. |
+
+The 1.5.5 column has not been re-run on the Ryzen host; there is no
+same-machine 1.5.5 baseline.
+
+**What changed since the 1.5.5 baseline** (code, not machine):
+
+- DuckDB 1.5.5 → 2.0.0, and the files are native 2.0 format, so an array
+  write no longer logs the whole list column to the WAL
+  (`scripts/bench/RESULTS_results_path.md` §5).
+- Schema 0.4: `value_array.array_id` single-column primary key;
+  `read_parameter_dense` resolves the key triple on narrow columns and
+  fetches the payload through the ART index (§4b there). The
+  `array_point_dense_macro` and `array_point_by_array_id` benches were
+  added with it.
+- Long-tier writes: first the batched `write_long` (alarm #1 below), then
+  the columnar-bind write path (one list parameter per bulk column,
+  `prepare_cached` statements; section below).
+- Value-float normalization on read (`canon::read_value`, about 0.25 ns
+  per float).
+- The dev profile now compiles the bundled DuckDB at opt-level 3. This
+  does not affect these figures (the `bench` profile was already
+  optimized).
 
 ## Synthetic DB (ddl_sketch §10 scale, built THROUGH `api::write_parameter`/`ingest_segments`)
 
 1 226 400 live long rows @ 17.6% dead (140 entities × 8 760 int cells; 30
 entity-rewrites of churn), 1 000 × 8 760-cell float arrays (~70 MB, Tier A),
-100 000 single-parameter scalars. On-disk: **213 MB** after CHECKPOINT.
+100 000 single-parameter scalars. On-disk: **213 MB** after CHECKPOINT on
+1.5.5; **165 MiB** on 2.0.0 (native format, current `main`).
 
 **Build wall time — this IS the bulk-write benchmark number:**
 
-| Stage | Wall (1.5.5) | Per unit (1.5.5) | 2.0.0 |
+| Stage | Wall (1.5.5) | Per unit (1.5.5) | 2.0.0 (wall, per unit) |
 |---|---|---|---|
-| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | pending re-run |
-| 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** | pending re-run |
-| 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** | pending re-run |
-| churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite | pending re-run |
-| **Total** | **6 586.5 s (109.8 min)** | | pending re-run |
+| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | 619.3 s, **6.2 ms/entity** (5.0 ms/entity at best, 7.5 ms/entity on the last 10 k; grows with entity-table size) |
+| 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** | 14.4 s, **14.4 ms/entity** |
+| 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** | 39.6 s, **0.28 s/entity ≈ 32 µs/cell** |
+| churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite | 13.0 s, 0.43 s/rewrite |
+| **Total** | **6 586.5 s (109.8 min)** | | **687.4 s (11.5 min)**; scalars are now 90 % of it |
 
 Context: fresh read-only connection open + `SELECT 1` on the built 213 MB
-file: **534.5 ms** (median of 5). The §10 methodology (and the read benches
+file: **534.5 ms** (median of 5) on 1.5.5; **203.3 ms** on the 165 MiB
+2.0.0 file. The §10 methodology (and the read benches
 below) hold a warm connection; the per-operation open-read-close discipline
 (CLAUDE.md invariant 1) pays this per operation — worth its own look before
 freeze.
 
 ## Read benches vs VMP Part 6 budgets (warm RO connection, end-to-end to Arrow)
 
-| Read (budget) | §10 baseline (1.4.4, ref machine) | Measured (1.5.5, this machine) | Status | 2.0.0 |
-|---|---|---|---|---|
-| Point scalar, triple (< 5 ms) | 1.2 ms | **0.98 ms** | PASS | pending re-run |
-| Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS | pending re-run |
-| Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below | pending re-run |
-| Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | pending re-run |
-| Point array via `read_parameter_dense` (`array_point_dense_macro`, added with the `array_id` key, schema 0.4) | — | — (bench added after the 1.5.5 run) | new | pending re-run |
-| Point array by `array_id = ?` (`array_point_by_array_id`, the index-lookup floor) | — | — (bench added after the 1.5.5 run) | new | pending re-run |
-| 10⁵ scalars, `read_parameter_scalar` (< 20 ms) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | pending re-run |
-| 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | pending re-run |
-| Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | pending re-run |
-| Model-load context: 1.23 M long rows canonical (< 3 s) | 587 ms | **2 063 ms** | PASS | pending re-run |
+| Read (budget) | §10 baseline (1.4.4, ref machine) | Measured (1.5.5, i3-6100) | Status (1.5.5) | 2.0.0 (Ryzen) | Status (2.0.0) |
+|---|---|---|---|---|---|
+| Point scalar, triple (< 5 ms) | 1.2 ms | **0.98 ms** | PASS | **0.97 ms** | PASS |
+| Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS | **1.24 ms** | PASS |
+| Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below | **50.6 ms** | RECORDED-OVER as the direct-table form; the budget is met through the macro (next rows) |
+| Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | **0.70 ms** | (context) |
+| Point array via `read_parameter_dense` (`array_point_dense_macro`, added with the `array_id` key, schema 0.4) | — | — (bench added after the 1.5.5 run) | new | **2.52 ms** | **PASS** (< 5 ms; the API path for a point array) |
+| Point array by `array_id = ?` (`array_point_by_array_id`, the index-lookup floor) | — | — (bench added after the 1.5.5 run) | new | **0.61 ms** | (floor) |
+| 10⁵ scalars, `read_parameter_scalar` (< 20 ms) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | **22.5 ms** | **OVER** (+12 %; the same raw-scan parity residual, see below) |
+| 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | **240.1 ms** | **PASS** |
+| Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | **3 151 ms** | recorded |
+| Model-load context: 1.23 M long rows canonical (< 3 s) | 587 ms | **2 063 ms** | PASS | **1 065 ms** | PASS |
 
 **Point-array residual on 1.5.5 — re-measured, NOT improved.** 77 ms vs the
 < 5 ms budget (was 27–31 ms on 1.4.4 on a faster machine). The cost is still
@@ -94,20 +119,38 @@ macros.** `array_triple_payload` stays as the documented slow form (a filter
 on the key triple directly on the payload scan is still a sequential scan).
 The two new benches read the same array through `read_parameter_dense`
 (narrow key resolution, then the payload fetched by `array_id` through the
-ART index) and directly by `array_id`. Their 2.0 figures wait for the quiet
-re-run with the rest of the 2.0 column. Context, not a gate figure: on the
-results-path fixture (10 000 × 8 760-value arrays, DuckDB 2.0.0 bundled, the
-shared AMD Ryzen 9 5900XT host under load, 2026-10-23) the dense-macro
-whole-series read measured 2.4 ms warm min
-(`scripts/bench/RESULTS_results_path.md` §4b).
+ART index) and directly by `array_id`. On 2.0.0 (Ryzen) the dense macro
+reads one point array in **2.52 ms**, inside the < 5 ms budget, and the
+bare `array_id` lookup in 0.61 ms; the direct triple read still takes
+50.6 ms. The point-array budget is therefore met through the API path
+(`read_parameter_dense`), not through an arbitrary triple filter on
+`value_array`. The results-path fixture agrees (10 000 arrays: 2.35 ms
+warm min, `scripts/bench/RESULTS_results_path.md` §6).
+
+**10⁵-scalar budget on 2.0.0: over by 12 % (22.5 ms vs 20 ms).** Not
+diagnosed further in this run. It is the residual `ddl_sketch.md` §10
+already recorded: there the raw current-state scan alone took 20.1 ms
+against the 20 ms budget and `read_parameter_scalar` added ~4 ms of name
+joins (24.5 ms), and the 1.5.5 run here was over too (30.0 ms). The cost
+is the DuckDB → Arrow materialization of 100 000 rows × 10 columns plus
+the two name joins, not something the 2.0 upgrade or the write-path
+changes touched (the macro is unchanged since 1.5.5). Closing it needs a
+narrower export (fewer columns) or a budget amendment, both owner
+decisions.
 
 ## From/to scan degradation vs dead fraction (raw current-rows long scan, Arrow end-to-end)
 
-| Dead fraction | Scan | vs 0% dead |
-|---|---|---|
-| 0% (pre-churn, builder-measured, median of 5) | 16.1 ms | 1.00× |
-| 17.6% | 22.8 ms | **1.41×** |
-| 33.3% | 22.7 ms | **1.41×** |
+| Dead fraction | Scan (1.5.5) | vs 0% dead (1.5.5) | Scan (2.0.0) | vs 17.6% (2.0.0) |
+|---|---|---|---|---|
+| 0% (pre-churn, builder-measured, median of 5) | 16.1 ms | 1.00× | 27.3 ms | (not comparable, see below) |
+| 17.6% | 22.8 ms | **1.41×** | 14.6 ms | 1.00× |
+| 33.3% | 22.7 ms | **1.41×** | 14.3 ms | **0.98×** |
+
+On 2.0.0 the builder's 0 %-dead figure (a median of 5 on a connection
+opened right after the post-build CHECKPOINT, while the build had just
+finished) is slower than both criterion figures (warm, 10 samples), so the
+ratio against it says nothing about dead rows. The comparable pair is
+17.6 % → 33.3 %: flat (0.98×), as on 1.5.5.
 
 Better than the research baseline (1.6× @ 20%, 2.5× @ 56%): degradation is
 present but flat between 17.6% and 33% — churn-generated dead rows cluster
@@ -117,16 +160,24 @@ zonemaps skip fully-dead groups, exactly the VMP Part 6 prediction. PASS
 
 ## Write benches (per cycle, each = one `write_parameter` commit + CHECKPOINT)
 
-| Bench | Measured (1.5.5) | Baseline / note | 2.0.0 |
+| Bench | Measured (1.5.5) | Baseline / note | 2.0.0 (Ryzen) |
 |---|---|---|---|
-| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | pending re-run |
-| Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope | pending re-run |
-| Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below | pending re-run |
-| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | pending re-run |
+| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | **499 ms** |
+| Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope | **967 ms** |
+| Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below | **803 ms** |
+| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | **1.128 s → 11.3 ms/entity** (2.0 build average 6.2 ms/entity) |
 
 The one-current generated-column unique indexes (`one_current_long` at
 7-column width, `one_current_scalar`) are maintained by every write above —
 their cost is inside these numbers, not separately measurable here.
+
+On 2.0.0 the three replace cycles are now all under 1 s, so the cycle is
+dominated by the fixed cost (CHECKPOINT and the RW open/close on the
+165 MiB file), not the row writes: the long replace that took 38 s on
+1.5.5 is 0.8 s. The array cycle (967 ms) is the slowest of the three;
+its pre-image copy into `value_array_hist` was the composite-key
+sequential scan on 1.5.5 (`RESULTS_results_path.md` §5) and was not
+re-profiled here.
 
 ## Alarming findings (write path; physical/implementation-level, logical model untouched)
 
@@ -154,6 +205,20 @@ their cost is inside these numbers, not separately measurable here.
    |---|---|---|---|
    | first-write | 26.5 s | 2.11 s | 3.03 ms → **0.24 ms** (~12.6×) |
    | replace cycle | 29.5 s | 2.42 s | 3.37 ms → **0.28 ms** (~12.2×) |
+
+   **2.0.0 column (current `main`, columnar-bind path, Ryzen host, run
+   conditions above; `long_write` ran 00:06, load average 2.8-3.2):**
+
+   | 8 760-cell op | criterion estimate [95 % CI] | per cell |
+   |---|---|---|
+   | first-write (`long_insert_8760`) | **272 ms** [222, 299] | 31 µs |
+   | replace cycle (`long_replace_8760`) | **499 ms** [474, 518] | 57 µs |
+
+   Different machine from the before/after rows above, so no ratio is
+   given. The insert figure is slower than the A/B harness's 143 ms for
+   the same shape (Columnar-bind section below) and has a wide interval:
+   this bench keeps writing fresh entities into one file across all
+   iterations, so later iterations insert into a larger table.
 2. **Per-entity write cost did not melt away in release.** The ~44 ms/entity
    DEBUG fact (F4 scale test, array tier) measures **82 ms/entity in release
    end-to-end** for the same 1000 × 8760 shape — the dominant cost is the
@@ -161,10 +226,20 @@ their cost is inside these numbers, not separately measurable here.
    per-entity resolve probes, all DuckDB-side statement work. Scalars:
    11–24 ms/entity (grows with entity-table size; per-entity `resolve_entity`
    name probes are un-indexed scans). Same follow-up as (1): batching.
+
+   **2.0.0 (columnar-bind path):** arrays 14.4 ms/entity end to end in the
+   gate build; scalars 5.0-7.5 ms/entity, still growing with the entity
+   table, and now 90 % of the gate's build time. The remaining scalar cost
+   is statement count, not insert mechanics (Columnar-bind section below).
 3. **CHECKPOINT + open/close ≈ 1.2 s on a 213 MB file** puts a floor under
    every open-write-close commit cycle; and a fresh RO open costs ~535 ms.
    Fine for batch tools, material for interactive editors — worth measuring
    on NVMe-class hardware before drawing conclusions.
+
+   **2.0.0 on NVMe (Ryzen host):** the scalar replace cycle, which is
+   mostly this floor, is 0.50 s on the 165 MiB file, and a fresh RO open
+   + `SELECT 1` is 203 ms. Smaller, but still material for an editor that
+   opens per operation (CLAUDE.md invariant 1).
 
 ## Columnar-bind write path (2026-10-23, DuckDB 2.0.0)
 
@@ -179,7 +254,7 @@ the two `axis_count` probes). Stored rows are byte-identical
 supersedes the "batched multi-row INSERT" mechanism of alarm #1 and is
 the "batching" follow-up of alarm #2.
 
-Not the gate's 2.0 column (that still waits for the quiet re-run):
+Measured separately from the gate's 2.0 column:
 paired, interleaved A/B, old (`main` before the change) and new core
 each built in release against the bundled DuckDB 2.0.0, harness
 `scripts/bench/ab_write_path/` (its `long_insert` / `long_replace`

@@ -424,3 +424,88 @@ fn rows_written_earlier_in_a_commit_are_visible_to_its_object_delete() {
         "the 3 long cells written earlier in this commit are visible"
     );
 }
+
+// --- axis child rows (plan D8) -----------------------------------------------
+
+/// Materialized axes larger than one columnar chunk: their child rows must
+/// round-trip (a fresh dedup reconstructs each from the DB and byte-compares
+/// it, so it returns the same id), and the label ids minted by the column
+/// DEFAULT must follow position order.
+#[test]
+fn materialized_axes_across_a_chunk_round_trip() {
+    use nodal_db_core::axis::dedup_or_insert;
+    use nodal_db_core::encoding::{LabelPos, TimePatternPos, TimePatternTerm};
+
+    let (_d, db) = fresh_db();
+    let n = 16_390usize;
+    let axes = [
+        CanonicalAxis {
+            length: n as i32,
+            properties: AxisProperties::default(),
+            body: AxisBody::DatetimeMaterialized {
+                coords: (0..n as i64).map(|i| i * 3_600_000_000 + i % 5).collect(),
+            },
+        },
+        CanonicalAxis {
+            length: n as i32,
+            properties: AxisProperties::default(),
+            body: AxisBody::Label {
+                positions: (0..n)
+                    .map(|i| LabelPos {
+                        ordinal: i as i32,
+                        label: format!("l{i:05}"),
+                    })
+                    .collect(),
+            },
+        },
+        CanonicalAxis {
+            length: 3,
+            properties: AxisProperties::default(),
+            body: AxisBody::TimePattern {
+                positions: (0..3)
+                    .map(|i| TimePatternPos {
+                        ordinal: i,
+                        terms: (1..=(i + 1) as i16)
+                            .map(|m| TimePatternTerm {
+                                unit: "M".into(),
+                                range_start: m,
+                                range_end: m,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            },
+        },
+    ];
+    let dedup_all = |msg: &str| -> Vec<i64> {
+        with_write_txn(&db, "t", msg, |conn, _c| {
+            let mut cache = AxisCache::new();
+            axes.iter()
+                .map(|a| dedup_or_insert(conn, &mut cache, a))
+                .collect()
+        })
+        .unwrap()
+    };
+    let ids = dedup_all("axes");
+    assert_eq!(
+        dedup_all("axes again"),
+        ids,
+        "every axis reconstructs byte-identically"
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let out_of_order: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM (SELECT id, lag(id) OVER (ORDER BY pos) AS prev \
+             FROM axis_label WHERE axis_id = ?) WHERE id <= prev",
+            [ids[1]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(out_of_order, 0, "label ids follow position order");
+    let terms: i64 = conn
+        .query_row("SELECT count(*) FROM axis_time_pattern", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(terms, 6);
+    conn.close().unwrap();
+}

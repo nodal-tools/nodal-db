@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 
+use duckdb::types::Value;
 use duckdb::Connection;
 
 use crate::encoding::{
@@ -31,6 +32,7 @@ use crate::encoding::{
     LabelPos, PeriodPos, TimePatternPos, TimePatternTerm,
 };
 use crate::error::DbError;
+use crate::history::{clip, exec_columnar, list, opt_list};
 
 /// A client-side dedup cache, scoped to one write session (Phase 3 threads it
 /// across a batch so a handful of axes serving thousands of values are looked
@@ -398,74 +400,143 @@ fn insert_axis(conn: &Connection, axis: &CanonicalAxis, hash: u64) -> Result<i64
         |r| r.get(0),
     )?;
 
-    // Child rows for materialized kinds.
+    // Child rows for materialized kinds: ONE columnar statement per kind
+    // (appender_write_path_PLAN D8) instead of one prepare + execute per
+    // coordinate: positions and coordinates bind as lists and are zipped by
+    // `unnest`, chunked and length-checked like the long insert. Timestamps
+    // still cross as µs through `make_timestamp`, and every float coordinate
+    // still goes through `canonical_axis_f64` first (same function, same
+    // place); dedup, the content hash and `ensure_wellformed` are upstream.
+    let id = Value::BigInt(new_id);
+    let positions = |n: usize| -> Vec<i32> { (0..n as i32).collect() };
     match &axis.body {
         AxisBody::DatetimeMaterialized { coords } => {
-            for (pos, ts) in coords.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO axis_datetime (axis_id, pos, ts) VALUES (?, ?, make_timestamp(?))",
-                    duckdb::params![new_id, pos as i32, ts],
-                )?;
-            }
+            let pos = positions(coords.len());
+            exec_columnar(
+                conn,
+                "INSERT INTO axis_datetime (axis_id, pos, ts) \
+                 SELECT ?, unnest(?::INTEGER[]), make_timestamp(unnest(?::BIGINT[]))",
+                coords.len(),
+                |r| {
+                    vec![
+                        id.clone(),
+                        list(clip(&pos, &r), |&v| Value::Int(v)),
+                        list(clip(coords, &r), |&v| Value::BigInt(v)),
+                    ]
+                },
+            )?;
         }
         AxisBody::IntegerMaterialized { coords } => {
-            for (pos, num) in coords.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO axis_integer (axis_id, pos, num) VALUES (?, ?, ?)",
-                    duckdb::params![new_id, pos as i32, num],
-                )?;
-            }
+            let pos = positions(coords.len());
+            exec_columnar(
+                conn,
+                "INSERT INTO axis_integer (axis_id, pos, num) \
+                 SELECT ?, unnest(?::INTEGER[]), unnest(?::BIGINT[])",
+                coords.len(),
+                |r| {
+                    vec![
+                        id.clone(),
+                        list(clip(&pos, &r), |&v| Value::Int(v)),
+                        list(clip(coords, &r), |&v| Value::BigInt(v)),
+                    ]
+                },
+            )?;
         }
         AxisBody::FloatMaterialized { coords } => {
-            for (pos, coord) in coords.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO axis_float (axis_id, pos, coord) VALUES (?, ?, ?)",
-                    duckdb::params![new_id, pos as i32, canonical_axis_f64(*coord)?],
-                )?;
-            }
+            let pos = positions(coords.len());
+            let canon: Vec<f64> = coords
+                .iter()
+                .map(|&c| canonical_axis_f64(c))
+                .collect::<Result<_, _>>()?;
+            exec_columnar(
+                conn,
+                "INSERT INTO axis_float (axis_id, pos, coord) \
+                 SELECT ?, unnest(?::INTEGER[]), unnest(?::DOUBLE[])",
+                canon.len(),
+                |r| {
+                    vec![
+                        id.clone(),
+                        list(clip(&pos, &r), |&v| Value::Int(v)),
+                        list(clip(&canon, &r), |&v| Value::Double(v)),
+                    ]
+                },
+            )?;
         }
-        AxisBody::Label { positions } => {
-            for (pos, p) in positions.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO axis_label (axis_id, pos, label, ordinal) VALUES (?, ?, ?, ?)",
-                    duckdb::params![new_id, pos as i32, p.label, p.ordinal],
-                )?;
-            }
+        AxisBody::Label { positions: lp } => {
+            let pos = positions(lp.len());
+            // `axis_label.id` comes from its column DEFAULT, minted row by row
+            // in position order (insertion order is preserved).
+            exec_columnar(
+                conn,
+                "INSERT INTO axis_label (axis_id, pos, label, ordinal) \
+                 SELECT ?, unnest(?::INTEGER[]), unnest(?::VARCHAR[]), unnest(?::INTEGER[])",
+                lp.len(),
+                |r| {
+                    vec![
+                        id.clone(),
+                        list(clip(&pos, &r), |&v| Value::Int(v)),
+                        list(clip(lp, &r), |p| Value::Text(p.label.clone())),
+                        list(clip(lp, &r), |p| Value::Int(p.ordinal)),
+                    ]
+                },
+            )?;
         }
-        AxisBody::Period { positions } => {
-            for (pos, p) in positions.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO axis_period (axis_id, pos, start_ts, end_ts, years_presented)
-                     VALUES (?, ?, make_timestamp(?), make_timestamp(?), ?)",
-                    duckdb::params![
-                        new_id,
-                        pos as i32,
-                        p.start_ts,
-                        p.end_ts,
-                        p.years_presented.map(canonical_axis_f64).transpose()?
-                    ],
-                )?;
-            }
+        AxisBody::Period { positions: pp } => {
+            let pos = positions(pp.len());
+            let years: Vec<Option<f64>> = pp
+                .iter()
+                .map(|p| p.years_presented.map(canonical_axis_f64).transpose())
+                .collect::<Result<_, _>>()?;
+            exec_columnar(
+                conn,
+                "INSERT INTO axis_period (axis_id, pos, start_ts, end_ts, years_presented) \
+                 SELECT ?, unnest(?::INTEGER[]), make_timestamp(unnest(?::BIGINT[])), \
+                        make_timestamp(unnest(?::BIGINT[])), unnest(?::DOUBLE[])",
+                pp.len(),
+                |r| {
+                    vec![
+                        id.clone(),
+                        list(clip(&pos, &r), |&v| Value::Int(v)),
+                        list(clip(pp, &r), |p| Value::BigInt(p.start_ts)),
+                        list(clip(pp, &r), |p| Value::BigInt(p.end_ts)),
+                        opt_list(clip(&years, &r), |&v| Value::Double(v)),
+                    ]
+                },
+            )?;
         }
-        AxisBody::TimePattern { positions } => {
-            for (pos, p) in positions.iter().enumerate() {
-                for (i, t) in p.terms.iter().enumerate() {
-                    conn.execute(
-                        "INSERT INTO axis_time_pattern
-                           (axis_id, pos, ordinal, term_no, unit, range_start, range_end)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        duckdb::params![
-                            new_id,
-                            pos as i32,
-                            p.ordinal,
-                            (i + 1) as i32,
-                            t.unit,
-                            t.range_start,
-                            t.range_end,
-                        ],
-                    )?;
+        AxisBody::TimePattern { positions: tp } => {
+            // One row per (position, term), terms numbered from 1 in order.
+            let mut pos = Vec::new();
+            let mut ordinal = Vec::new();
+            let mut term_no = Vec::new();
+            let mut terms = Vec::new();
+            for (i, p) in tp.iter().enumerate() {
+                for (t, term) in p.terms.iter().enumerate() {
+                    pos.push(i as i32);
+                    ordinal.push(p.ordinal);
+                    term_no.push((t + 1) as i32);
+                    terms.push(term);
                 }
             }
+            exec_columnar(
+                conn,
+                "INSERT INTO axis_time_pattern \
+                   (axis_id, pos, ordinal, term_no, unit, range_start, range_end) \
+                 SELECT ?, unnest(?::INTEGER[]), unnest(?::INTEGER[]), unnest(?::INTEGER[]), \
+                        unnest(?::VARCHAR[]), unnest(?::SMALLINT[]), unnest(?::SMALLINT[])",
+                terms.len(),
+                |r| {
+                    vec![
+                        id.clone(),
+                        list(clip(&pos, &r), |&v| Value::Int(v)),
+                        list(clip(&ordinal, &r), |&v| Value::Int(v)),
+                        list(clip(&term_no, &r), |&v| Value::Int(v)),
+                        list(clip(&terms, &r), |t| Value::Text(t.unit.clone())),
+                        list(clip(&terms, &r), |t| Value::SmallInt(t.range_start)),
+                        list(clip(&terms, &r), |t| Value::SmallInt(t.range_end)),
+                    ]
+                },
+            )?;
         }
         // Parametric forms have no child rows.
         AxisBody::DatetimeParametric { .. }

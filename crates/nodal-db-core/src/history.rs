@@ -777,13 +777,14 @@ fn current_long_versions(
     Ok(map)
 }
 
-/// Cells per columnar `value_long` INSERT execution (plan D5, critique C7).
+/// Rows per columnar-bind execution (plan D5, critique C7): the long insert
+/// and the axis child rows.
 /// Every list element is a Rust `Value` plus a transient `duckdb_value` while
 /// the bind copies it, so a whole 1 M-cell value bound at once peaks near
 /// 1 GB; 16 384 cells keep the peak at ~200 MB (mostly DuckDB's
 /// transaction-local storage) at the same speed. An 8 760-cell series is one
 /// execution. The statement text does not depend on the chunk length.
-const LONG_INSERT_CHUNK: usize = 16_384;
+pub(crate) const LONG_INSERT_CHUNK: usize = 16_384;
 
 /// The per-key constants of a long write: bound as scalars, not lists.
 struct LongConsts<'a> {
@@ -948,16 +949,29 @@ fn insert_long_columns(
     k: &LongConsts,
     cols: &LongColumns,
 ) -> Result<(), DbError> {
-    let n = cols.len();
     cols.check_column_lengths()?;
+    exec_columnar(conn, LONG_INSERT_SQL, cols.len(), |r| cols.params(k, r))
+}
+
+/// Run one columnar-bind statement (`INSERT … SELECT ?, unnest(?::T[]), …`)
+/// over `n` rows: prepared once through the statement cache, executed per
+/// ≤ [`LONG_INSERT_CHUNK`] rows with the bind values `params(range)`, each
+/// execution gated by the hard length check. `n == 0` executes nothing.
+/// Shared by the long insert and the axis child-row inserts (`axis`).
+pub(crate) fn exec_columnar(
+    conn: &Connection,
+    sql: &str,
+    n: usize,
+    params: impl Fn(std::ops::Range<usize>) -> Vec<Value>,
+) -> Result<(), DbError> {
     if n == 0 {
         return Ok(());
     }
-    let mut stmt = conn.prepare_cached(LONG_INSERT_SQL)?;
+    let mut stmt = conn.prepare_cached(sql)?;
     let mut lo = 0;
     while lo < n {
         let hi = (lo + LONG_INSERT_CHUNK).min(n);
-        let p = cols.params(k, lo..hi);
+        let p = params(lo..hi);
         check_list_lengths(&p, hi - lo)?;
         stmt.execute(duckdb::params_from_iter(p))?;
         lo = hi;
@@ -988,7 +1002,7 @@ pub(crate) fn check_list_lengths(params: &[Value], n: usize) -> Result<(), DbErr
 
 /// The part of `col` inside `r` (never panics: a column shorter than the range
 /// yields a shorter slice, which the length checks reject).
-fn clip<'a, T>(col: &'a [T], r: &std::ops::Range<usize>) -> &'a [T] {
+pub(crate) fn clip<'a, T>(col: &'a [T], r: &std::ops::Range<usize>) -> &'a [T] {
     let end = r.end.min(col.len());
     &col[r.start.min(end)..end]
 }

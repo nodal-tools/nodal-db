@@ -458,7 +458,8 @@ fn compact_clusters_from_to_tiers_current_first() {
 /// `just full` release gate). The CI-tier guarantee is the ordering assert
 /// above; the MECHANISM is contiguous validity-vector filtering, NOT
 /// row-group skipping (critique M2 — do not re-metric this on row-group
-/// counts; 1.5.5 does not skip row groups on liveness).
+/// counts; 1.5.5 does not skip row groups on liveness — not re-measured on
+/// 2.0.0).
 #[test]
 #[ignore = "bench-style wall-time ratio; run in the release gate (just full)"]
 fn clustered_current_scan_is_measurably_faster() {
@@ -549,7 +550,8 @@ fn clustered_current_scan_is_measurably_faster() {
 // --- (h2) valid-WAL replay pin (LOAD-BEARING engine behavior) ----------------
 
 /// PIN of the engine behavior the pre-rename WAL unlink rests on: DuckDB
-/// 1.5.5 REPLAYS a valid `<db>.wal` on read-only open/ATTACH, so a
+/// (1.5.5; re-verified on 2.0.0) REPLAYS a valid `<db>.wal` on read-only
+/// open/ATTACH, so a
 /// crashed-writer's committed-but-uncheckpointed content is carried into the
 /// compaction copy BEFORE the stale sidecar is removed — nothing durable is
 /// ever discarded. Like the guard's consumer-shape sweep, this is a permanent
@@ -599,8 +601,8 @@ fn compact_carries_stale_wal_content_and_unlinks_it() {
 /// A `<db>.wal` left by a previously-crashed writer must not survive a
 /// compaction swap: its content is already in the copied file (the RO
 /// open/ATTACH replays it), and replaying it against the freshly-swapped file
-/// on the next RW open is the hazard. DuckDB 1.5.5 silently tolerates an
-/// unparseable WAL (verified), so the unlink is hygiene + hazard removal, not
+/// on the next RW open is the hazard. DuckDB silently tolerates an
+/// unparseable WAL (verified on 1.5.5; re-verified on 2.0.0), so the unlink is hygiene + hazard removal, not
 /// crash-recovery interference.
 #[test]
 fn compact_unlinks_stale_wal_sidecar_after_swap() {
@@ -613,7 +615,7 @@ fn compact_unlinks_stale_wal_sidecar_after_swap() {
     };
     // Simulate the crashed-writer leftover (header-invalid: DuckDB ignores it
     // on open, so the compaction's source probe still succeeds — verified
-    // engine semantics on 1.5.5).
+    // engine semantics on 1.5.5; re-verified on 2.0.0).
     std::fs::write(&wal, b"stale wal from a crashed writer").unwrap();
 
     let report = compact(&db).expect("compact with stale wal present");

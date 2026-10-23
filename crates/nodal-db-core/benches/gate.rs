@@ -67,7 +67,8 @@ fn bench_point_reads(c: &mut Criterion) {
     });
 
     // The known §10 residual: full list-payload point read (~27-31 ms on
-    // 1.4.4 vs the < 5 ms budget; re-measured here on 1.5.5).
+    // 1.4.4 vs the < 5 ms budget; re-measured here on 1.5.5; 2.0.0 re-run
+    // pending, see RESULTS.md).
     let (e, p, a) = s.keys.array;
     g.bench_function("array_triple_payload", |b| {
         b.iter(|| {

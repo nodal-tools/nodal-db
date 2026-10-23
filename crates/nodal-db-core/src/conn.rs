@@ -23,9 +23,10 @@
 //!   it never shares them.
 //!
 //! NOTE for Phase 3 (documented, not implemented here): the write-conflict
-//! retry loop the history protocol needs must match the DuckDB **1.5.5**
-//! wording `Conflict on tuple deletion!` (1.4.4 said `Conflict on update!`),
-//! so a robust matcher keys on the `Conflict` substring, not the full phrase.
+//! retry loop the history protocol needs keys on the `Conflict` substring, not
+//! a full phrase: DuckDB's wording depends on the operation, not the version
+//! (`Conflict on update!` for an UPDATE, `Conflict on tuple deletion!` for a
+//! DELETE; identical on 1.5.5 and 2.0.0).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -234,8 +235,9 @@ fn has_commit_table(conn: &Connection) -> bool {
 }
 
 /// Is this a DuckDB write-write conflict (VMP Part 5 retry trigger)? Matched on
-/// the robust `Conflict` substring, not the full phrase: DuckDB 1.5.5 says
-/// `Conflict on tuple deletion!`, 1.4.4 said `Conflict on update!`.
+/// the robust `Conflict` substring, not the full phrase: the wording depends on
+/// the operation (`Conflict on update!` for an UPDATE, `Conflict on tuple
+/// deletion!` for a DELETE; identical on DuckDB 1.5.5 and 2.0.0).
 fn is_conflict(e: &DbError) -> bool {
     matches!(e, DbError::Duckdb(_)) && e.to_string().contains("Conflict")
 }

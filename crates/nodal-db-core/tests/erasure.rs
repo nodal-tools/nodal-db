@@ -814,7 +814,8 @@ fn erase_and_compact_wrapper_chains_the_two_primitives() {
 /// below the payload/2 bound, while any surviving copy of A's payload would
 /// blow it.
 ///
-/// Engine finding (measured on the bundled 1.5.5 line, recorded here so the
+/// Engine finding (measured on the bundled 1.5.5 line; the test re-passes on
+/// 2.0.0, the figures below were not re-measured; recorded here so the
 /// bound is read honestly): a same-transaction INSERT-then-DELETE is netted
 /// out by the engine at COMMIT — a verbatim hist-move-then-delete writes
 /// ~nothing to disk (0.3 MB vs 26 MB when the copies survive). So the file

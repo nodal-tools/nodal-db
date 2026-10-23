@@ -1,9 +1,11 @@
 //! Two focused history-layer guards (Phase 3a):
 //!   - **F1 writer-boundary guard**: a malformed materialized axis (length !=
 //!     child count, or empty) is rejected in RELEASE at the axis write boundary.
-//!   - **Conflict wording**: DuckDB 1.5.5's write-write conflict really contains
-//!     the `Conflict` substring the retry matcher keys on — pinned so a version
-//!     bump that changes the phrase (1.4.4 said `Conflict on update!`) is caught.
+//!   - **Conflict wording**: DuckDB's write-write conflict really contains the
+//!     `Conflict` substring the retry matcher keys on — pinned so a version bump
+//!     that changes the phrase is caught. The full phrase depends on the
+//!     operation (`Conflict on update!` vs `Conflict on tuple deletion!`), on
+//!     1.5.5 and 2.0.0 alike.
 
 use std::path::PathBuf;
 

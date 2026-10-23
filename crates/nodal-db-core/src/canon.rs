@@ -31,13 +31,14 @@ use crate::types::{
     DeclaredType, IndexKind, LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind,
 };
 
-/// Smallest timestamp (µs since the Unix epoch) the store accepts: DuckDB
-/// 1.5.5's TIMESTAMP minimum, 290309-12-22 (BC) 00:00:00. DuckDB *writes*
+/// Smallest timestamp (µs since the Unix epoch) the store accepts: DuckDB's
+/// TIMESTAMP minimum (unchanged 1.5.5 → 2.0.0), 290309-12-22 (BC) 00:00:00. DuckDB *writes*
 /// values below it (down to `i64::MIN`) without complaint, but every later
 /// read of the column then fails with a conversion error, so the pipeline
 /// rejects them up front.
 pub const TS_MIN_US: i64 = -9_223_372_022_400_000_000;
-/// Largest timestamp (µs) the store accepts: DuckDB 1.5.5's TIMESTAMP maximum,
+/// Largest timestamp (µs) the store accepts: DuckDB's TIMESTAMP maximum
+/// (unchanged 1.5.5 → 2.0.0),
 /// 294247-01-10 04:00:54.775806. `i64::MAX` is DuckDB's `infinity` sentinel
 /// (and `-i64::MAX` its `-infinity`, below `TS_MIN_US`); neither is a
 /// storable timestamp.

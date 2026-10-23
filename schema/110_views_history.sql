@@ -12,7 +12,8 @@
 
 -- ---------------------------------------------------------------------------
 -- The as-of erasure guard (erasure_compaction_plan §1.3, decision D-E3
--- 2026-09-19; critique B1/M1 — both verified empirically on DuckDB 1.5.5).
+-- 2026-09-19; critique B1/M1 — both verified empirically on DuckDB 1.5.5;
+-- re-verified on 2.0.0 by the erasure tests).
 --
 -- Every macro body below carries, as the FIRST conjunct of its WHERE clause:
 --
@@ -33,7 +34,7 @@
 -- "simplify" this; the alternatives were tried and are silently broken):
 -- DuckDB's projection pushdown prunes unreferenced projections, deleting an
 -- error() expression that rides a projection. Verified failures with a
--- matching marker present, on this project's DuckDB 1.5.5:
+-- matching marker present, on DuckDB 1.5.5 (the guard re-verified on 2.0.0):
 --   (a) a CROSS JOIN guard whose column the body never references — rows
 --       returned, NO error;
 --   (b) a NULL-padded UNION-ALL guard leg — body rows returned PLUS a phantom

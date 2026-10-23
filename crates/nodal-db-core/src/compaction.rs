@@ -237,7 +237,10 @@ fn generated_for(table: &str) -> &'static [&'static str] {
 ///   - otherwise (append-only tables, axis children, the all-live
 ///     `value_array`) ⇒ `ORDER BY <keys>` — natural/key order, locality only.
 ///
-/// **Mechanism, stated correctly** (critique M2, empirical on DuckDB 1.5.5):
+/// **Mechanism, stated correctly** (critique M2, empirical on DuckDB 1.5.5;
+/// the compaction tests re-pass on 2.0.0, and 2.0.0 does not change list
+/// reads or list-segment skipping — the liveness-skipping claim itself was not
+/// re-measured on 2.0.0):
 /// the current-first win is **cheap contiguous validity-vector filtering**
 /// (~2× faster current-state scans on a 2 M-row/50%-dead fixture), NOT
 /// row-group skipping — 1.5.5 does not use null-count segment stats to
@@ -752,7 +755,7 @@ fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(), DbError> {
 }
 
 /// Restore each fresh sequence to the source's state (B2, confirmed on bundled
-/// 1.5.5). The fresh sequences sit at their DDL start after `init_schema`; left
+/// 1.5.5; re-verified on 2.0.0). The fresh sequences sit at their DDL start after `init_schema`; left
 /// there, the next auto-created id would be 1 and collide with copied ids /
 /// violate a `one_current_*` index.
 ///

@@ -127,8 +127,8 @@ Mutable rows carry `valid_from_commit` and `valid_to_commit`. An update
 **closes out** the current row by setting `valid_to_commit` and inserts a
 new row with a higher `version`. Deleting a value or an object closes it
 out the same way. For dense-array values, the previous row is copied from
-`value_array` to a `value_array_hist` table in the same transaction. History is never
-rewritten.
+`value_array` to a `value_array_hist` table in the same transaction,
+keeping its `array_id` row handle. History is never rewritten.
 
 Audit views check that history is consistent, for example
 `audit_history_tiling` for version continuity.

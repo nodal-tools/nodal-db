@@ -545,7 +545,7 @@ SELECT 'definition_value_array',
 FROM definition_value_array
 WHERE content_retained AND ((values IS NULL) = (values_int IS NULL));
 
--- array_id coherence: the physical row handle maps to exactly ONE key triple
+-- Coherence of array_id, the dense-array row handle: it maps to exactly ONE key triple
 -- across value_array and value_array_hist, ever (ids are minted by the
 -- sequence DEFAULT, kept across in-place replaces, copied verbatim into
 -- `_hist`, and never re-used). One row per offending id, with its distinct

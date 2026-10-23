@@ -539,9 +539,10 @@ From `schema/050_values.sql`: `value_array`, `value_array_hist`, `value_long`, `
 erDiagram
     direction LR
     value_array {
-        BIGINT entity_id PK,FK
-        BIGINT parameter_definition_id PK,FK
-        BIGINT alternative_id PK,FK
+        BIGINT array_id PK
+        BIGINT entity_id FK,UK
+        BIGINT parameter_definition_id FK,UK
+        BIGINT alternative_id FK,UK
         BIGINT parameter_type_id FK
         BIGINT axis1_id FK
         BIGINT axis2_id FK
@@ -565,6 +566,7 @@ erDiagram
 erDiagram
     direction LR
     value_array_hist {
+        BIGINT array_id
         BIGINT entity_id FK
         BIGINT parameter_definition_id FK
         BIGINT alternative_id FK
@@ -639,9 +641,10 @@ erDiagram
 
     | Table | Column | Type | Null | Key |
     | --- | --- | --- | --- | --- |
-    | `value_array` | `entity_id` | `BIGINT` |  | PK,FK |
-    | `value_array` | `parameter_definition_id` | `BIGINT` |  | PK,FK |
-    | `value_array` | `alternative_id` | `BIGINT` |  | PK,FK |
+    | `value_array` | `array_id` | `BIGINT` |  | PK |
+    | `value_array` | `entity_id` | `BIGINT` |  | FK,UK |
+    | `value_array` | `parameter_definition_id` | `BIGINT` |  | FK,UK |
+    | `value_array` | `alternative_id` | `BIGINT` |  | FK,UK |
     | `value_array` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `value_array` | `valid_from_commit` | `BIGINT` |  | FK |
     | `value_array` | `version` | `SMALLINT` |  |  |
@@ -653,6 +656,7 @@ erDiagram
     | `value_array` | `values_int` | `BIGINT[]` | yes |  |
     | `value_array` | `v_min` | `DOUBLE` | yes |  |
     | `value_array` | `v_max` | `DOUBLE` | yes |  |
+    | `value_array_hist` | `array_id` | `BIGINT` |  |  |
     | `value_array_hist` | `entity_id` | `BIGINT` |  | FK |
     | `value_array_hist` | `parameter_definition_id` | `BIGINT` |  | FK |
     | `value_array_hist` | `alternative_id` | `BIGINT` |  | FK |

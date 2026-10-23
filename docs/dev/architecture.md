@@ -224,6 +224,19 @@ and
   pre-images to a `_hist` twin, entirely in SQL so the engine guarantees
   atomicity. Version counters are partitioned per tier per key and
   checked by the `audit_history_tiling` view.
+- **Dense arrays are fetched by `array_id`.** DuckDB uses an index scan
+  only for a single-column key, so `value_array` has a surrogate
+  `array_id` primary key next to the `UNIQUE` key triple. The writer
+  resolves a value's `array_id` on narrow columns and keys every
+  statement that touches the list payload (the pre-image copy, the
+  in-place update, the delete) by it; the read macros do the same with a
+  self-join. `array_id` is a physical handle, never canonical content: it
+  is minted only by the column default, never updated, copied verbatim
+  into `_hist` and by compaction, and checked by
+  `audit_array_id_coherence` (one id, one key triple). Its sequence steps
+  by 2, which keeps id sets non-contiguous so lookups use the index.
+  Compaction re-creates sequences with their full specification
+  (increment included) so the stride survives.
 - **Float normalization**: the canonicalization pipeline stores every
   `-0.0` as `+0.0` and every value NaN as the one quiet NaN
   (`0x7ff8000000000000`), using the same function the canonical encoding
@@ -331,9 +344,17 @@ the release gate that adds the `#[ignore]`d slow tests and benchmarks):
 The benchmark gate lives in `crates/nodal-db-core/benches/`, with
 results recorded in
 [`benches/RESULTS.md`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/benches/RESULTS.md);
-it is re-run at each DuckDB upgrade. One known residual is recorded
-there: a point read of a single dense-array value is slower than its
-target, because DuckDB decompresses the containing segment.
+it is re-run at each DuckDB upgrade. Dense-array point reads go through
+the `array_id` index: `read_parameter_dense` and `value_cells` resolve
+the key triple to `array_id` on narrow columns, then fetch the list
+payload by an index scan. Reads of a value that does not exist, and
+reads of more than 50 values at once, still scan the payload of the
+whole table (as before the key existed), as do point reads through
+`value_rows`, `read_parameter` and `value_array_asof`. The index-scan
+choice is made at run time and depends on engine heuristics, so
+`crates/nodal-db-core/tests/array_id_index_scan.rs` checks it with
+`EXPLAIN ANALYZE` on every `cargo test`, including a negative control
+that shows the fallback for dense ids.
 
 CI runs `cargo test --workspace` and the schema smoke suite.
 

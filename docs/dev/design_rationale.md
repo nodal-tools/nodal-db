@@ -272,7 +272,7 @@ comparison will be added here from its results.
 
 | Operation | Dense array | Long |
 |---|---|---|
-| Read a whole value | One row and one list of `n` numbers. No per-cell keys. On DuckDB 1.5.5 a single-value read also pays a fixed cost set by how much list data is stored around the row, not by `n` (77 ms for one 8 760-value array in Set A below). | `n` rows, each with keys, positions and a value. |
+| Read a whole value | One row and one list of `n` numbers. No per-cell keys. Through `read_parameter_dense` or `value_cells` the list is fetched by its `array_id` with an index scan (about 2.4 ms for one 8 760-value array in the `array_id` measurements below). A read that scans the table instead pays a fixed cost set by how much list data is stored, not by `n` (77 ms in Set A below, measured before the `array_id` key existed). | `n` rows, each with keys, positions and a value. |
 | Read a slice (a time window, or one index of a multi-dimensional value) | Costs the same as reading the whole value (see below). | A filter on positions or coordinates over the value's rows. Not benchmarked separately. |
 | Read one cell | Same as a slice. | About 1 ms in the benchmark gate. |
 | Write a new value | One row, but the list is currently passed as one SQL parameter per cell, which dominates the cost. | `n` rows, written in batched multi-row inserts. |
@@ -285,12 +285,16 @@ Notes on the table:
 - **Slices of dense arrays are not cheaper than whole reads.** This was
   measured: slicing in SQL (`values[a:b]`), unnesting and filtering, and
   fetching the whole list and slicing in the client all cost the same.
-  DuckDB 1.5.5 does not skip parts of a list column: a query that
-  touches the list data of even one row pays for scanning a large part
-  of the stored list data around it, whatever the size of the slice.
-  Smaller row groups did not reduce this in the tests. Reading only the
-  per-row minimum and maximum, without touching the list, takes well
-  under a millisecond.
+  DuckDB does not skip parts of a list column. A query that reaches the
+  list through a sequential scan (a filter on the key triple directly
+  on `value_array`, or more than 50 values at once) pays for scanning a
+  large part of the stored list data, whatever the size of the slice;
+  smaller row groups did not reduce this in the tests. Reads through
+  `read_parameter_dense` and `value_cells` fetch the row by its
+  `array_id` with an index scan instead, so a slice costs about what a
+  whole value costs, a few milliseconds. Reading only the per-row
+  minimum and maximum, without touching the list, takes well under a
+  millisecond.
 - **Every write replaces the whole value.** The write API takes whole
   values; there is no per-cell update. Writing a value identical to the
   current one also creates a new version. Callers that want to avoid
@@ -337,8 +341,11 @@ Notes on the table:
 
 ## Measured figures
 
-Two sets of measurements, both on DuckDB 1.5.5. Absolute numbers depend
-heavily on the machine; compare within a set, not across sets.
+Two sets of measurements, both on DuckDB 1.5.5 and taken before the
+`array_id` key existed, so their dense-array point and slice reads show
+the old sequential-scan cost; the `array_id` measurements follow Set B.
+Absolute numbers depend heavily on the machine; compare within a set,
+not across sets.
 
 **Set A, the benchmark gate** in the repository
 ([`benches/RESULTS.md`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/benches/RESULTS.md)).
@@ -396,16 +403,40 @@ The dense and long rows in Set B hold different data (random floats
 against integers on every tenth hour), so the per-value size comparison
 is indicative only.
 
+**The `array_id` key, before and after.** The Set B data and harness,
+ingested through the Arrow-IPC import lane into one file per schema and
+read with the bundled DuckDB 2.0.0, on the same AMD Ryzen 9 5900XT host
+(shared with other jobs, load average about 2 to 8). Warm minimum over
+15 reads; "cold" is a fresh connection with opening excluded.
+
+| Read | Before (composite key) | After (`array_id`) |
+|---|---|---|
+| One whole series, `read_parameter_dense` | 84.8 ms (cold 182 ms) | 2.4 ms (cold 6.1 ms) |
+| One week of one series, or one cell | 85.0 / 84.9 ms | 2.4 / 2.5 ms |
+| One week from each of 20 series, `read_parameter_dense` | 86.5 ms | 3.6 ms |
+| The same through `read_parameter` with a timestamp filter | 2 751 ms | 2 946 ms |
+| One series' minimum and maximum only | 2.0 ms | 2.3 ms |
+| Import of the 87.6 million values, one commit | 1 200 s | 1 187 s and 1 219 s (two runs) |
+
+The `read_parameter` path does not use the index yet and became a few
+per cent slower; a paired, interleaved comparison of the whole-parameter
+`read_parameter` read (one process, one file, 21 pairs) put the cost at
+4.1 % (median ratio 1.041, 95 % bootstrap interval 1.003 to 1.059). A
+read of more than 50 series at once falls back to scanning the list
+data (51 series: 88 ms). The file grew by 256 KiB (0.04 %).
+
 ## Known limitations and open directions
 
-- **Point and slice reads of dense arrays.** On DuckDB 1.5.5 they cost as
-  much as reading the whole array, and more than its size suggests: 77 ms in Set A,
-  about 110 ms in Set B, against a project target of under 5 ms for a
-  single-value read. Ways around it today: use the per-array minimum and
-  maximum where they are enough, cache arrays in the client, and read
-  through `read_parameter_dense` rather than the long-form views. The
-  benchmark is re-run at each DuckDB upgrade in case the engine starts
-  skipping list data.
+- **Point and slice reads of dense arrays.** Through
+  `read_parameter_dense` and `value_cells` they are index lookups by
+  `array_id` (about 2.4 ms for one 8 760-value series in the `array_id`
+  measurements above). Some reads still scan the list data of the whole
+  table, at the old cost (about 90 ms there): a read of more than 50
+  values at once, a read of a value that does not exist, a filter on the
+  key triple applied directly to `value_array`, and point reads through
+  `read_parameter`, `value_rows` and `value_array_asof`. A fast path for
+  those is planned. The index lookup depends on DuckDB's planner
+  heuristics, so a test checks the plan shape on every build.
 - **Dense-array write speed.** Each array is inserted with one SQL
   parameter per cell. Batching array inserts, as was already done for
   the long tier (about 12× faster there), is the identified next

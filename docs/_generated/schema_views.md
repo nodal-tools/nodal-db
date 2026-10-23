@@ -132,6 +132,7 @@ From `schema/120_views_audit.sql`.
 
 | Name | Kind | Purpose |
 | --- | --- | --- |
+| `audit_array_id_coherence` | view | Coherence of array_id, the dense-array row handle |
 | `audit_array_integrity` | view | Array-integrity |
 | `audit_array_payload_xor` | view | Retained-row payload XOR |
 | `audit_axis_integrity` | view | Axis-content integrity |

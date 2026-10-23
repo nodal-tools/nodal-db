@@ -46,6 +46,33 @@ The DDL files form layers, each building on the ones before:
   whose rows are never versioned: the append-only `commit`, `axis` (and its
   per-kind child tables), `run` and `erasure_marker`, plus `value_array`,
   which holds current rows only.
+- **`array_id`, the dense-array row handle.** `value_array`'s primary key
+  is a surrogate `array_id`; the key triple (`entity_id`,
+  `parameter_definition_id`, `alternative_id`) stays the logical identity
+  and is enforced by a `UNIQUE` constraint. `value_array_hist` carries the
+  same `array_id` as its first column, copied from the live row it
+  superseded. An `array_id` is a physical handle, not an identity: it
+  stays the same while a value is replaced in place, a delete or tier
+  change followed by a new write gets a new one, and ids are never
+  re-used. Ids are non-contiguous by design (the sequence steps by 2,
+  which keeps id sets non-contiguous so lookups use the index); do not
+  assume they are dense, ordered by time or portable between databases.
+  The table-shaped views `value_array_current` and `value_array_asof`
+  show the column; the logical read surface (`read_parameter*`,
+  `value_cells`, `value_rows`) does not.
+  To read one array's payload in plain SQL, resolve the id on the narrow
+  columns first and fetch the list by it, or use `read_parameter_dense`:
+
+  ```sql
+  SELECT p.values
+  FROM value_array k JOIN value_array p USING (array_id)
+  WHERE k.entity_id = 42 AND k.parameter_definition_id = 7
+    AND k.alternative_id = 1;
+  ```
+
+  A filter on the key triple directly on the list-carrying scan
+  (`SELECT values FROM value_array WHERE entity_id = …`) reads the list
+  data of the whole table instead.
 - **One current row, case-insensitive names.** Hidden generated `cur_*`
   columns back unique indexes that allow exactly one current row per id
   and case-insensitive name uniqueness; they are omitted from the diagrams.

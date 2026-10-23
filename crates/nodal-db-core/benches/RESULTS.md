@@ -193,11 +193,53 @@ this bench isolates.
 `cargo bench -p nodal-db-core --bench canon` runs it; `test = false` keeps it
 out of `cargo test --workspace`.
 
+## History-free extract (2026-10-23, `benches/extract.rs`)
+
+Source built through the core write path: 100 entities × 10 versions of an
+8 760-cell float array (one commit per version; 90 % of the array tier is
+superseded history) plus 10 long-tier int series × 336 cells × 10 versions
+(one commit per entity-version). Three files measured: the source as
+written, a compacted copy (`compaction::compact`), and the head extract.
+Release build, DuckDB 2.0.0, on the shared AMD Ryzen 9 5900XT (16C/32T)
+with other jobs loading it (load average about 17–67 during the session),
+so the millisecond timings are indicative only. Medians of 15; open + cookie
+uses a fresh read-only connection per sample.
+
+| file | size | RO open + cookie | current long scan | array point read |
+|---|---|---|---|---|
+| source | 73.5 MiB | 155.4 ms | 1.4 ms | 2.7 ms |
+| compacted source | 43.3 MiB | 45.4 ms | 1.4 ms | 2.9 ms |
+| head extract | 16.8 MiB | 44.7 ms | 2.3 ms | 2.9 ms |
+
+Compaction 2.6 s, extract 1.6 s; 31 141 rows left out, no axis dropped
+(every version reused the same axes).
+
+Reading, honestly scoped:
+
+- **Size is the benefit.** Against the raw source the extract is 4.4×
+  smaller, but compaction alone already gets 1.7× of that (free blocks of
+  old checkpoints). Against the **compacted** source the extract's own gain
+  is **2.6×** at a 90 % dead array tier. That is well below the 10× the
+  dead fraction alone would suggest: a fixed per-file overhead (an empty
+  schema file is about 2 MiB, and every table with rows claims its own
+  blocks) plus the live payload stay.
+- **No read-speed claim.** The array point read is unchanged (current array
+  reads never touch `value_array_hist`), and RO open + cookie matches the
+  compacted file (the raw source's 155 ms is the uncompacted file, not
+  history). The long-tier scan here is tiny (3 360 live rows) and within
+  noise; the larger long-tier scan gain seen in the plan's toy spike is not
+  reproduced by this bench and is not claimed.
+
+`cargo bench -p nodal-db-core --bench extract` runs it (a few minutes;
+`-- --quick` for a smaller source); `test = false` keeps it out of
+`cargo test --workspace`.
+
 ## Not covered here (unchanged scope)
 
 - Scenario-resolved slice (unbudgeted; in the plan's bench list, not in this
   gate's first cut — add when `maintain`/compaction lands).
-- Compaction wall time (needs `maintain`, out of scope — plan Part 5).
+- Compaction wall time at gate scale (the extract bench above times it on
+  its own 73 MiB source only).
 - Julia end-to-end read (Q6 flag; Julia impl out of scope, gate stays open).
 
 ## Bench wiring

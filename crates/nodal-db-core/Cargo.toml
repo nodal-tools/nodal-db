@@ -38,6 +38,14 @@ name = "long_write"
 harness = false
 test = false
 
+# History-free extract: size and read timings of a churned source, its
+# compacted copy and its head extract (RESULTS.md "History-free extract").
+# A few minutes; `-- --quick` for a smaller source.
+[[bench]]
+name = "extract"
+harness = false
+test = false
+
 # Pure canonicalization-pipeline bench (no DB): per-cell cost of
 # `canon::canonicalize` on array- and long-tier shapes. Pure, but kept out of
 # `cargo test --workspace` like the others (the 1 M-cell case is slow).

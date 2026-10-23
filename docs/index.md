@@ -1,12 +1,12 @@
 # nodal-db
 
 nodal-db is a general-purpose database format for structured, versioned
-data. It is designed for modelling: model inputs, alternatives and
-scenarios, and aggregated outputs. Its features may also suit other
-kinds of structured data. Everything lives in a single
+data. It is designed especially for modelling purposes: model inputs,
+alternatives and scenarios, and aggregated outputs. However, its features may also suit other
+use cases that require well structured data. Everything lives in a single
 [DuckDB](https://duckdb.org) file. Every write goes through one Rust
-core, which stores each value in a single deterministic form and keeps the
-history of every change. Anyone can read the file with plain SQL.
+core, which stores each value in a single deterministic form and keeps an attributable
+history of changes. Anyone can read the file with plain SQL.
 
 ## The problem it addresses
 
@@ -56,7 +56,8 @@ created them and the commit that closed them out. As-of macros
 reconstruct the database at any earlier commit. The one sanctioned form
 of physical removal, erasure, always leaves an `erasure_marker` row, and
 as-of reads that would cross removed content fail instead of returning an
-incomplete answer.
+incomplete answer. When user wants to drop history, a new snapshot can be
+extracted.
 
 **A DuckDB file anyone can read.** The database is an ordinary DuckDB
 file. A set of SQL views and table macros (`read_parameter`,
@@ -101,8 +102,8 @@ other client.
 
 ## History
 
-nodal-db's first use case is planning-scale energy-system modelling,
-which is where it comes from. Its examples, such as nodes, units and
+nodal-db's first use case is planning-scale energy-system modelling.
+Its examples, such as nodes, units and
 demand series, come from that field, but nothing in the schema or the
 core is specific to it.
 

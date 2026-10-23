@@ -486,8 +486,8 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
     if src_version != SCHEMA_VERSION {
         return Err(DbError::Api(format!(
             "compaction refused: source schema_version {src_version:?} != current {SCHEMA_VERSION:?} \
-             (compaction copies named columns against the current DDL; pre-freeze the \
-             migration story is re-init/re-import — erasure_compaction_plan §9 step 1)"
+             (compaction copies named columns against the current schema; to migrate, \
+             re-init a fresh database and re-import)"
         )));
     }
 

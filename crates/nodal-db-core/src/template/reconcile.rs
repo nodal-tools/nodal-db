@@ -457,10 +457,10 @@ impl fmt::Display for Action {
                 )
             }
             Action::SetPresentation { .. } => {
-                write!(f, "store parameter groups (presentation document, D8)")
+                write!(f, "store parameter groups (presentation document)")
             }
             Action::SetAuditRules { doc } => match doc {
-                Some(_) => write!(f, "store audit_rules document (D4)"),
+                Some(_) => write!(f, "store audit_rules document"),
                 None => write!(f, "clear audit_rules document"),
             },
             Action::StampIdentity {
@@ -1145,8 +1145,8 @@ pub fn apply(
 
 fn blocked_error(p: &ReconcilePlan) -> DbError {
     DbError::Api(format!(
-        "template apply refused: {} blocking conflict(s) (the in-place reshape door is \
-         deliberately deferred — see template_ir_plan §4.2):\n  - {}",
+        "template apply refused: {} blocking conflict(s) (in-place reshape of existing \
+         declarations is not supported yet):\n  - {}",
         p.blocked.len(),
         p.blocked.join("\n  - ")
     ))
@@ -3551,7 +3551,7 @@ fn execute_step(
                         return Err(DbError::Api(format!(
                             "rename_parameter: {class}.{to} already exists (set \
                              on_collision: drop_source to close the stale source \
-                             instead — the v28 shape)"
+                             instead)"
                         )))
                     }
                     OnCollision::DropSource => {

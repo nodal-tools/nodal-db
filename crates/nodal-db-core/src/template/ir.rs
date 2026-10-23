@@ -1212,7 +1212,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             let keys: Vec<&str> = u.registry_extras.keys().map(|k| k.as_str()).collect();
             warns.push(format!(
                 "unit {:?}: registry fields [{}] are authoring/audit metadata — \
-                 not persisted, dropped at load (D7)",
+                 not persisted, dropped at load",
                 u.name,
                 keys.join(", ")
             ));
@@ -1254,7 +1254,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                     } else if set_ix.contains_key(&fold(n)) {
                         warns.push(format!(
                             "class {:?} dimension {}: bare name {n:?} also matches a class_set; \
-                             it resolves as the CLASS (§2.2 shadowing rule)",
+                             it resolves as the CLASS (a class name shadows a class_set name)",
                             c.name,
                             di + 1
                         ));
@@ -1317,7 +1317,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                         match ty.kind.as_str() {
                             "indexed" => match ty.dims.as_deref() {
                                 None | Some([]) => errs.push(format!(
-                                    "{tloc}: kind \"indexed\" requires a non-empty dims list (D3)"
+                                    "{tloc}: kind \"indexed\" requires a non-empty dims list"
                                 )),
                                 Some(dims) => {
                                     if dims.len() > 4 {
@@ -1416,7 +1416,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                     if keys[a] == keys[b] {
                         errs.push(format!(
                             "{loc}: declared type members {} and {} are indistinguishable \
-                             ({}) — exactly-one-member matching would be impossible (D2a)",
+                             ({}) — exactly-one-member matching would be impossible",
                             a,
                             b,
                             eff[a].describe()

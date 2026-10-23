@@ -102,7 +102,7 @@ pub enum EncodeError {
     /// orderable/parametric, and NaN has no ordering, so a NaN axis float is
     /// rejected at the writer boundary, never hashed. (VALUE floats, by
     /// contrast, canonicalize NaN — see [`NanPolicy`].)
-    #[error("NaN is not an encodable axis value (spec §3.3.1)")]
+    #[error("NaN is not allowed as an index coordinate")]
     NanForbidden,
 }
 
@@ -241,7 +241,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             debug_assert_eq!(
                 axis.length as usize,
                 coords.len(),
-                "length must equal materialized coord count (spec §5.3)"
+                "length must equal materialized coord count"
             );
             for ts in coords {
                 out.extend_from_slice(&ts.to_le_bytes());
@@ -255,7 +255,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             debug_assert_eq!(
                 axis.length as usize,
                 coords.len(),
-                "length must equal materialized coord count (spec §5.3)"
+                "length must equal materialized coord count"
             );
             for n in coords {
                 out.extend_from_slice(&n.to_le_bytes());
@@ -269,7 +269,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             debug_assert_eq!(
                 axis.length as usize,
                 coords.len(),
-                "length must equal materialized coord count (spec §5.3)"
+                "length must equal materialized coord count"
             );
             for c in coords {
                 push_double(&mut out, *c, NanPolicy::Reject)?;
@@ -279,7 +279,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             debug_assert_eq!(
                 axis.length as usize,
                 positions.len(),
-                "length must equal position count (spec §5.3)"
+                "length must equal position count"
             );
             for p in positions {
                 out.extend_from_slice(&p.ordinal.to_le_bytes());
@@ -290,7 +290,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             debug_assert_eq!(
                 axis.length as usize,
                 positions.len(),
-                "length must equal position count (spec §5.3)"
+                "length must equal position count"
             );
             for p in positions {
                 out.extend_from_slice(&p.start_ts.to_le_bytes());
@@ -308,7 +308,7 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             debug_assert_eq!(
                 axis.length as usize,
                 positions.len(),
-                "length must equal position count (spec §5.3)"
+                "length must equal position count"
             );
             for p in positions {
                 out.extend_from_slice(&p.ordinal.to_le_bytes());

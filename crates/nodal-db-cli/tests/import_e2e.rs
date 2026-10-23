@@ -399,6 +399,11 @@ fn assert_error_leaves_db_untouched(db: &Path, out: &Output, class: &str) {
         stderr.contains(class),
         "expected {class} in stderr, got: {stderr}"
     );
+    // Messages are self-explanatory: no references into private design docs.
+    assert!(
+        !stderr.contains('§') && !stderr.contains("specs/"),
+        "private spec ref leaked: {stderr}"
+    );
     assert_eq!(commits(db), 1, "nothing imported (bootstrap commit only)");
 }
 

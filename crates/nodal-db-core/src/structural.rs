@@ -676,8 +676,8 @@ pub(crate) fn check_class_dims(
     } else {
         Err(DbError::Api(format!(
             "ensure_entity_class: {name:?} already exists with dimensions [{}], not [{}] — \
-             in-place re-dimensioning is the deferred reshape door (create a new class and \
-             migrate, the v25/v58 shape)",
+             in-place re-dimensioning (reshape) is not supported; create a new class and \
+             migrate the data",
             have.join(", "),
             want.join(", ")
         )))
@@ -841,7 +841,7 @@ pub(crate) fn validate_type_decls(
             "indexed" => match ty.dims.as_deref() {
                 None | Some([]) => {
                     return Err(DbError::Api(format!(
-                        "{loc}: kind \"indexed\" requires a non-empty dims list (D3)"
+                        "{loc}: kind \"indexed\" requires a non-empty dims list"
                     )))
                 }
                 Some(dims) => {
@@ -884,7 +884,7 @@ pub(crate) fn validate_type_decls(
             if keys[i] == keys[j] {
                 return Err(DbError::Api(format!(
                     "{what} {class}.{name}: declared members {i} and {j} are indistinguishable \
-                     ({}) — exactly-one-member matching would be impossible (D2a)",
+                     ({}) — exactly-one-member matching would be impossible",
                     types[i].describe()
                 )));
             }
@@ -980,7 +980,7 @@ pub(crate) fn prepare_structural(
             if !set_scenarios.insert(fold(scenario)) {
                 return Err(DbError::Api(format!(
                     "structural: two SetScenarioAlternatives target scenario {scenario:?} in one \
-                     commit — one declarative set per scenario per commit (§4.3 M3)"
+                     commit — one declarative set per scenario per commit"
                 )));
             }
         }
@@ -1034,7 +1034,7 @@ pub(crate) fn prepare_structural(
     let orphan = |kind: &str, name: &str| {
         DbError::Api(format!(
             "structural: {kind} {name:?} is both structurally referenced and object-deleted in \
-             one commit — the same-commit guard would leave a live orphan (§4.1 M2)"
+             one commit — the same-commit guard would leave a live orphan"
         ))
     };
     for ch in changes {

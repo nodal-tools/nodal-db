@@ -37,10 +37,10 @@ enum Command {
     Init {
         /// Path of the DuckDB file to create.
         db: PathBuf,
-        /// Seed one default alternative with this name (decision D3). Omitted ⇒
-        /// no alternative is seeded (the value write path auto-creates on first
+        /// Seed one default alternative with this name. Omitted ⇒ no
+        /// alternative is seeded (the value write path auto-creates on first
         /// use); the DB is never implicitly given a `Base`. A template's seed
-        /// alternative maps HERE, never to IR content (template_ir_plan §1.2).
+        /// alternative maps HERE, never to template content.
         #[arg(long)]
         alternative: Option<String>,
         /// Load this template (YAML or JSON IR) right after the schema.
@@ -55,24 +55,27 @@ enum Command {
         #[arg(long, num_args = 0..=1)]
         schema_dir: Option<Option<PathBuf>>,
     },
-    /// Ingest an Arrow-IPC bulk container (specs/arrow_ipc_bulk_format.md)
-    /// through the one core canonicalizer, atomically (one commit).
+    /// Import an Arrow-IPC bulk file into an existing database, atomically
+    /// (one commit).
+    ///
+    /// File format and error classes (E1–E10):
+    /// https://nodal-tools.github.io/nodal-db/dev/arrow_import_format/
     Import {
         /// Arrow-IPC bulk container (concatenated IPC streams).
         file: PathBuf,
-        /// Target DuckDB file.
+        /// Target database (must already exist; create it with `nodal-db init`).
         #[arg(long)]
         db: PathBuf,
-        /// Target alternative when segments do not stamp their own
-        /// (spec §4.3: when both are present they must match).
+        /// Target alternative for segments that do not name their own; if a
+        /// segment also names one, the two must match (case-insensitively).
         #[arg(long)]
         alternative: Option<String>,
-        /// Assertion (not a selector, spec OPEN-Q3-6b): every segment must
-        /// target this class, else the import errors.
+        /// Assertion, not a filter: every segment must target this class,
+        /// else the import fails (E4).
         #[arg(long)]
         class: Option<String>,
-        /// Assertion (not a selector): every segment must target this
-        /// parameter, else the import errors.
+        /// Assertion, not a filter: every segment must target this
+        /// parameter, else the import fails (E4).
         #[arg(long)]
         parameter: Option<String>,
         /// Commit author; defaults to the OS username (must be non-empty).
@@ -81,18 +84,20 @@ enum Command {
         /// Commit message (may be empty).
         #[arg(long, default_value = "")]
         message: String,
-        /// Replace identical current values instead of no-op'ing them
-        /// (core WriteOptions.force_replace, applied to ALL segments).
+        /// Keep no content for the versions this import replaces: each
+        /// replaced value's previous version stays in history only as a
+        /// content-less stub (as if the parameter had retain_content = FALSE).
+        /// New versions are written either way. Applies to all segments.
         #[arg(long)]
         force_replace: bool,
     },
     /// Hard-erase one alternative's data (physical removal WITH a trace:
     /// closes the identity row, DELETEs every alternative-keyed row across
-    /// all tiers, and writes an erasure_marker in the same transaction —
-    /// specs/erasure_compaction_plan.md). Bytes return to the OS at the next
-    /// compaction. NOTE (D-E6): the mechanism is DB-agnostic; running it
-    /// against a curated INPUT database is almost certainly a mistake — the
-    /// sanctioned customer is output-DB overwrite-on-rerun.
+    /// all tiers, and writes an erasure_marker in the same transaction).
+    /// Bytes return to the OS at the next compaction. NOTE: the mechanism
+    /// works on any database; running it against a curated input database is
+    /// almost certainly a mistake — the intended use is overwriting an output
+    /// database on rerun.
     EraseAlternative {
         /// Target DuckDB file.
         db: PathBuf,
@@ -119,8 +124,7 @@ enum Command {
     Migrate,
     /// Not implemented in v1 core (verb reserved).
     Maintain,
-    /// Template IR operations: load / plan / apply / export
-    /// (specs/template_ir_plan.md).
+    /// Template IR operations: load / plan / apply / export.
     Template {
         #[command(subcommand)]
         command: template::TemplateCommand,
@@ -284,7 +288,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!(
                         "warning: {} has no `run` provenance rows — this looks like a \
                          curated INPUT database, not a tool-produced output DB. Erase is \
-                         mechanism-agnostic (D-E6) and will proceed, but the sanctioned \
+                         mechanism-agnostic and will proceed, but the sanctioned \
                          use is output-DB overwrite-on-rerun.",
                         db.display()
                     );

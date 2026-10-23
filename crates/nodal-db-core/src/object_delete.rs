@@ -558,8 +558,8 @@ pub(crate) fn erase_scope_legs(kind: ObjectKind) -> Option<Vec<EraseLeg>> {
         .collect();
     debug_assert!(
         kind == ObjectKind::Alternative || scope.is_empty(),
-        "erase flags set on a kind ({kind:?}) whose erase grain is not designed \
-         (erasure_compaction_plan §6)"
+        "erase flags set on a kind ({kind:?}): erase flags are only supported for \
+         alternatives"
     );
     Some(scope)
 }

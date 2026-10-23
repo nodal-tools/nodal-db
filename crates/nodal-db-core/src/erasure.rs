@@ -413,8 +413,8 @@ fn assert_schema_version(db: &Path) -> Result<(), DbError> {
     if found != expected {
         return Err(DbError::Api(format!(
             "erase refused: database schema_version {found:?} != current {expected:?} \
-             (erase writes against the current DDL; pre-freeze the migration story is \
-             re-init/re-import — erasure_compaction_plan §9 step 1)"
+             (erase writes against the current schema; to migrate, re-init a fresh \
+             database and re-import)"
         )));
     }
     Ok(())
@@ -477,8 +477,8 @@ pub fn erase_alternative_and_compact(
 fn validate_erase_key(alt: &ObjectDeleteKey) -> Result<&str, DbError> {
     if alt.kind != ObjectKind::Alternative {
         return Err(DbError::Api(format!(
-            "erase for {} is not implemented in v1 (the erasure_marker kind is reserved; \
-             only erase-by-alternative exists — erasure_compaction_plan §6)",
+            "erase for {} is not implemented in v1 (only erasing an alternative is \
+             supported)",
             alt.kind.tag()
         )));
     }

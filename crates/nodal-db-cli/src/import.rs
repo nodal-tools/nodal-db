@@ -84,7 +84,8 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     if bytes.len() >= 6 && &bytes[..6] == b"ARROW1" {
         bail!(
             "E1: {} is in the Arrow IPC *file* (Feather / random-access) format; \
-             this importer accepts only the IPC *stream* format (spec §2.1)",
+             this importer accepts only the IPC *stream* format \
+             (pyarrow: pa.ipc.new_stream, not new_file)",
             args.file.display()
         );
     }
@@ -318,7 +319,7 @@ fn split_segments(bytes: &[u8]) -> Result<Vec<RawSegment>> {
             Termination::LegacyEos => bail!(
                 "E10: segment {ordinal} ends with the legacy (pre-Arrow-0.15) 4-byte \
                  end-of-stream marker, not the 8-byte marker the format requires \
-                 (§2.2.1) — likely a legacy-format IPC stream; rewrite it with a \
+                 — likely a legacy-format IPC stream; rewrite it with a \
                  modern Arrow writer"
             ),
             Termination::BareEof => bail!(
@@ -447,7 +448,7 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
     if version.0 != 1 {
         bail!(
             "E3: segment {ordinal}: format version {ver} has major {} but this reader \
-             supports major 1 only — no fallback parsing is attempted (§3.2)",
+             supports major 1 only — no fallback parsing is attempted",
             version.0
         );
     }
@@ -475,7 +476,7 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
         Some("dense") => Form::Dense,
         Some(other) => bail!(
             "E4: segment {ordinal} ({class}:{parameter}): unknown spinal:form {other:?} \
-             (this reader supports long | dense; a newer minor version may add forms — §3.2)"
+             (this reader supports long | dense; a newer format minor version may add forms)"
         ),
         None => bail!("E4: segment {ordinal} ({class}:{parameter}): spinal:form is missing"),
     };
@@ -539,7 +540,7 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
             if m.to_lowercase() != f.to_lowercase() {
                 bail!(
                     "E4: segment {ordinal} ({}:{}): spinal:alternative {m:?} conflicts with \
-                     --alternative {f:?} (no precedence — a conflict is always a mistake, §4.3)",
+                     --alternative {f:?} (neither takes precedence: they must match, case-insensitively)",
                     meta.class,
                     meta.parameter
                 );
@@ -635,7 +636,8 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
             if i != 0 {
                 bail!(
                     "E6: {tag}: column named {:?} at position {i}, but the entity column \
-                     must be position 0 (§5.1.1 name tripwire)",
+                     must be position 0 (columns are positional; the name \"entity\" is \
+                     reserved for the first)",
                     field.name()
                 );
             }
@@ -645,7 +647,8 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
             if i != ncols - 1 {
                 bail!(
                     "E6: {tag}: column named {:?} at position {i}, but the value column \
-                     must be the last (§5.1.1 name tripwire)",
+                     must be the last (columns are positional; the name \"value\" is \
+                     reserved for the last)",
                     field.name()
                 );
             }
@@ -654,7 +657,7 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
     if !saw_entity && !saw_value {
         println!(
             "warning: {tag}: no column named 'entity' or 'value' — columns are \
-             interpreted positionally (§5.1.1)"
+             interpreted positionally"
         );
     }
     Ok(())
@@ -670,7 +673,8 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
 fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, ArrayRef)> {
     match field.data_type() {
         DataType::RunEndEncoded(_, _) => bail!(
-            "E6: {tag}: column {:?} is run-end encoded — forbidden in format 1.0 (§2.4)",
+            "E6: {tag}: column {:?} is run-end encoded — not supported in format \
+             1.0; write it plain or dictionary-encoded",
             field.name()
         ),
         DataType::Dictionary(_, value_type) => {
@@ -694,7 +698,7 @@ fn microsecond_target(tag: &str, field: &Field) -> Result<Option<DataType>> {
         DataType::Timestamp(TimeUnit::Nanosecond, _) => bail!(
             "E6: {tag}: column {:?} is timestamp[ns]; nanosecond truncation is lossy and \
              never silent — cast to microseconds producer-side \
-             (pandas: .astype(\"datetime64[us]\")) (§5.2.1)",
+             (pandas: .astype(\"datetime64[us]\"))",
             field.name()
         ),
         DataType::Timestamp(unit, tz) => {
@@ -821,10 +825,14 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
                 DataType::Float64 | DataType::Boolean if is_value => true,
                 other => bail!(
                     "E6: {tag}: {} column {:?} has unsupported Arrow type {other:?} \
-                     ({})",
+                     (accepted: {})",
                     if is_value { "value" } else { "dimension" },
                     field.name(),
-                    if is_value { "§5.3" } else { "§5.2" }
+                    if is_value {
+                        "float64, int64, bool, utf8, timestamp[s|ms|us]"
+                    } else {
+                        "timestamp[s|ms|us], int64, utf8"
+                    }
                 ),
             };
             debug_assert!(ok);
@@ -851,7 +859,7 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
         {
             bail!(
                 "E6: {tag}: label dimension {:?} has no spinal:label_domain field \
-                 metadata (required on every label dimension, §7.2)",
+                 metadata (required on every label dimension)",
                 field.name()
             );
         }
@@ -904,7 +912,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 3 {
         bail!(
-            "E6: {tag}: a rank-0 dense segment is meaningless — use long form (§6.1); \
+            "E6: {tag}: a rank-0 dense segment is meaningless — use long form; \
              got {ncols} column(s)"
         );
     }
@@ -939,7 +947,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         let field = &fields[d + 1];
         let DataType::List(child) = field.data_type() else {
             bail!(
-                "E6: {tag}: dense dimension {:?} must be List<...>, got {:?} (§6.1)",
+                "E6: {tag}: dense dimension {:?} must be List<...>, got {:?}",
                 field.name(),
                 field.data_type()
             );
@@ -947,7 +955,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         let kind = match child.data_type() {
             DataType::Timestamp(TimeUnit::Nanosecond, _) => bail!(
                 "E6: {tag}: dimension {:?} is List<timestamp[ns]>; cast to microseconds \
-                 producer-side (§5.2.1)",
+                 producer-side (pandas: .astype(\"datetime64[us]\"))",
                 field.name()
             ),
             DataType::Timestamp(unit, tz) => DimKind::Ts {
@@ -959,14 +967,16 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                 if !field.metadata().contains_key("spinal:label_domain") {
                     bail!(
                         "E6: {tag}: label dimension {:?} has no spinal:label_domain field \
-                         metadata (required, §7.2/§7.3)",
+                         metadata (required on the outer list field of every label \
+                         dimension)",
                         field.name()
                     );
                 }
                 DimKind::Label
             }
             other => bail!(
-                "E6: {tag}: dense dimension {:?} has unsupported element type {other:?} (§5.2)",
+                "E6: {tag}: dense dimension {:?} has unsupported element type {other:?} \
+                 (accepted: timestamp[s|ms|us], int64, utf8)",
                 field.name()
             ),
         };
@@ -978,7 +988,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
     match value_field.data_type() {
         DataType::List(child) if child.data_type() == &DataType::Float64 => {}
         other => bail!(
-            "E6: {tag}: dense value column must be List<Float64> in format 1.0 (§6.5), \
+            "E6: {tag}: dense value column must be List<Float64> in format 1.0, \
              got {other:?}"
         ),
     }
@@ -996,12 +1006,15 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
 
     for row in 0..nrows {
         if entity.is_null(row) {
-            bail!("E6: {tag}: null entity in dense row {row} (nulls are forbidden everywhere in dense form, §6.4)");
+            bail!(
+                "E6: {tag}: null entity in dense row {row} (nulls are not allowed anywhere \
+                 in the dense form)"
+            );
         }
         let ent = entity.value(row).to_string();
         // §6.4: each entity at most one row per segment (folded like the core).
         if !seen_entities.insert(ent.to_ascii_lowercase()) {
-            bail!("E6: {tag}: entity {ent:?} appears in more than one dense row (§6.4)");
+            bail!("E6: {tag}: entity {ent:?} appears in more than one dense row");
         }
 
         // Per-dimension coordinate lists.
@@ -1010,7 +1023,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             let list = cols[d + 1].as_any().downcast_ref::<ListArray>().unwrap();
             if list.is_null(row) {
                 bail!(
-                    "E6: {tag}: null {:?} dim list in dense row {row} (entity {ent:?}) (§6.4)",
+                    "E6: {tag}: null {:?} dim list in dense row {row} (entity {ent:?})",
                     fields[d + 1].name()
                 );
             }
@@ -1030,7 +1043,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                 bail!(
                     "E8: {tag}: empty {:?} dim list in dense row {row} (entity {ent:?}) — \
                      an empty dim list would expand the entity to nothing; absence is \
-                     expressed in long form, never by an empty dense axis (§6.2, §9.3)",
+                     expressed in long form, never by an empty dense axis",
                     fields[d + 1].name()
                 );
             }
@@ -1041,7 +1054,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                     bail!(
                         "E8: {tag}: duplicate coordinate {} in dimension {:?} of dense row \
                          {row} (entity {ent:?}) — a duplicate would expand to duplicate \
-                         index tuples (§6.2)",
+                         index tuples",
                         c.describe(),
                         fields[d + 1].name()
                     );
@@ -1055,7 +1068,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         // real stored value the core canonicalizes (§5.3.1): dense stays a
         // complete grid, so a NaN keeps the entity on the array tier.
         if value_list.is_null(row) {
-            bail!("E6: {tag}: null value list in dense row {row} (entity {ent:?}) (§6.4)");
+            bail!("E6: {tag}: null value list in dense row {row} (entity {ent:?})");
         }
         let vals_arr = value_list.value(row);
         let vals = vals_arr.as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1064,7 +1077,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             if vals.is_null(k) {
                 bail!(
                     "E6: {tag}: null payload cell {k} in dense row {row} (entity {ent:?}) — \
-                     a null cell has no meaning in dense form; use long (§6.4)"
+                     a null cell has no meaning in dense form; use the long form"
                 );
             }
             payload.push(vals.value(k));
@@ -1073,7 +1086,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         // Row-major expansion via the core helper (§6.3) — the same law as
         // reconstruct, by construction.
         let expanded = expand_dense_row(&dim_lists, &payload).map_err(|e| {
-            anyhow!("E8: {tag}: dense row {row} (entity {ent:?}): {e} (§6.2 row-major law)")
+            anyhow!("E8: {tag}: dense row {row} (entity {ent:?}): {e} (values are row-major: the last dimension varies fastest)")
         })?;
         for (coords, v) in expanded {
             out_entity.push(ent.clone());
@@ -1169,7 +1182,7 @@ fn extract_coords(
         if arr.is_null(k) {
             bail!(
                 "E6: {tag}: null coordinate {k} in {dim_name:?} dim list of dense row {row} \
-                 (entity {ent:?}) (§6.4)"
+                 (entity {ent:?})"
             );
         }
         let coord = match kind {

@@ -5,11 +5,11 @@ The generic mechanism (importer.py) asks the profile exactly four things:
 1. the template identity to stamp (``template_name``, ``role``),
 2. where the source stores its schema version (``version_of``),
 3. how to NAME the index dimensions of an observed value shape
-   (``dim_names`` — the D3 fan-out recurrence at the import boundary:
+   (``dim_names``:
    index-column names are the discriminator, so observed shapes must be
    normalized to the head template's declared dimension names or the final
    reconcile would see never-declared members and skip their narrowing),
-4. results-section class renames (``rename_class`` — the L2 space-name map).
+4. results-section class renames (``rename_class``).
 
 Everything else is generic. Tool-specific profiles subclass `Profile` and
 live with the tool they serve, not in this package.

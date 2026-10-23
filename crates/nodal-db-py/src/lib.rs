@@ -321,7 +321,7 @@ impl Database {
 
     /// Apply structural (create/rename/set-ranks/activation/membership) changes
     /// in one atomic commit — the structural-only convenience over
-    /// `commit_changes` (structural_write_api_plan §6). `changes` is a list of
+    /// `commit_changes`. `changes` is a list of
     /// `"op"`-keyed dicts.
     #[pyo3(signature = (changes, *, user, message = String::new()))]
     fn commit_structural<'py>(
@@ -410,7 +410,7 @@ impl Database {
     /// AND `run:` programs), then the additive reconcile diff in one commit.
     /// On a fresh database this IS the load.
     ///
-    /// `programs` is the D13 registration surface: a `{name: callable}` dict
+    /// `programs` is the registration surface: a `{name: callable}` dict
     /// of plain Python callables, registered as `run:` migration programs
     /// for the duration of THIS call only. Each is invoked as
     /// `program(db_path, user)` and must do all its writes through the
@@ -560,8 +560,8 @@ impl Database {
         .map_err(db_err)
     }
 
-    /// Versioned `entity_class.active_by_default` header update (the v56
-    /// Batch F flip). Idempotent: an equal flag burns no commit.
+    /// Versioned `entity_class.active_by_default` header update.
+    /// Idempotent: an equal flag burns no commit.
     #[pyo3(signature = (class_name, active_by_default, *, user))]
     fn set_class_active_by_default(
         &self,
@@ -577,11 +577,9 @@ impl Database {
         .map_err(db_err)
     }
 
-    /// Drop an orphan value list at runtime (the ninth verb; Track-B replay
-    /// finding, plan §1.6 addendum). Refuses a list a current definition still
-    /// binds — rebind/drop those definitions first (v56 D.3's close-out +
-    /// recreate rebind does exactly that before calling this). Idempotent: a
-    /// missing list is a no-op.
+    /// Drop an orphan value list at runtime. Refuses a list a current
+    /// definition still binds — rebind/drop those definitions first.
+    /// Idempotent: a missing list is a no-op.
     #[pyo3(signature = (list, *, user))]
     fn drop_value_list(&self, py: Python<'_>, list: String, user: String) -> PyResult<()> {
         let path = self.path.clone();
@@ -612,7 +610,7 @@ impl Database {
     /// `types` and a `value_list`, the rank-0 member is inferred from the
     /// list; with neither, the definition loads typeless. An EXISTING
     /// definition is returned as-is — never re-declared, never widened
-    /// (D-F4: the sanctioned mid-chain retype is close-out + recreate).
+    /// (to change the type, close out the definition and recreate it).
     /// Returns the definition id.
     #[pyo3(signature = (class_name, name, *, types = None, value_list = None,
                         description = None, user))]

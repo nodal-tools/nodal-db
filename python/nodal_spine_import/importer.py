@@ -1,4 +1,4 @@
-"""The generic Spine-DB -> nodal-db importer (finale plan §4, D-F2/D-F6).
+"""The generic Spine-DB -> nodal-db importer.
 
 Mechanics
 ---------
@@ -9,7 +9,7 @@ Mechanics
    string ("40.0" -> "40").
 3. Synthesize a BOOTSTRAP TEMPLATE carrying the source vocabulary as found —
    value lists, classes (dims, ``active_by_default``), parameter definitions
-   with OBSERVED-SHAPE declared type sets (D-F6: the union of shapes actually
+   with OBSERVED-SHAPE declared type sets (the union of shapes actually
    observed in stored values; value-less definitions typeless), value-list
    bindings, descriptions, and literal scalar defaults — and ``template_apply``
    it onto a fresh nodal DB. Loading vocabulary through the one template
@@ -17,7 +17,7 @@ Mechanics
    stamps ``template_name``/``template_version`` in the same stroke.
 4. Write sections through the skin, one commit (group) per section:
    alternatives -> scenarios -> entities -> activation (ALL classes' rows,
-   as found — no class allowlist, critique M2) -> values (bind-by-
+   as found — no class allowlist) -> values (bind-by-
    construction: every batch instantiates the member its observed shape
    declared) -> the final, non-optional identity stamp (an idempotent
    verification no-op, since the bootstrap template already stamped).
@@ -25,8 +25,7 @@ Mechanics
    ambiguous member picks, and the `parameter_type_list` drift table
    ("declared X, observed Y — chain will repair"). Zero silent drops.
 
-Allowlist posture (specs/schema_interop.md §3.6 + finale plan critique
-MINOR 9): allowlist OFF for migration-range imports — vocabulary imports as
+Allowlist posture: allowlist OFF for migration-range imports — vocabulary imports as
 found. The closed-allowlist mode exists for curated non-migration imports
 and is out of scope here.
 """
@@ -42,7 +41,7 @@ from pathlib import Path
 import pyarrow as pa
 
 #: Names are free-text (was #2373 charset [A-Za-z0-9_]+; relaxed for
-#: Spine/FlexTool interop). The importer enforces only a hygiene floor,
+#: Spine interop). The importer enforces only a hygiene floor,
 #: matching the Rust writer's canonical predicate (types.rs::charset_ok):
 #: a name must be non-empty, equal to its trimmed form (no leading/trailing
 #: whitespace), and free of ASCII control characters (bytes < 0x20 or 0x7f).
@@ -62,7 +61,7 @@ class ImportError_(Exception):
 
 def normalize_version(raw) -> str:
     """Normalize a source version to the canonical integer string
-    (finale plan §4, critique MINOR 5: "40.0" -> "40")."""
+    ("40.0" -> "40")."""
     if raw is None:
         raise ImportError_(
             "cannot determine the source database's schema version — the "
@@ -79,8 +78,8 @@ def normalize_version(raw) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Value flattening (restricted_map_typing_FINDINGS: flat tables, label kinds,
-# Spine Array -> integer-position axis)
+# Value flattening (flat tables, label kinds, Spine Array -> integer-position
+# axis)
 # ---------------------------------------------------------------------------
 
 
@@ -96,7 +95,7 @@ def _leaf(value):
     """Classify one leaf value -> (kind, converted) or None (unrepresentable).
 
     Numeric leaves normalize to float (Spine's own scalar number type is
-    float; FlexTool numerics are floats throughout)."""
+    float)."""
     import spinedb_api
 
     if value is None:
@@ -184,7 +183,7 @@ class ImportReport:
     template_name: str = ""
     template_version: str = ""
     counts: dict = field(default_factory=dict)
-    #: "declared {..}, observed {..} — chain will repair" rows (D-F6).
+    #: "declared {..}, observed {..} — chain will repair" rows.
     drift_table: list = field(default_factory=list)
     #: loud residue: unconsumed constructs / unflattenable values / ambiguous
     #: member picks — counted and named, zero silent drops.
@@ -367,7 +366,7 @@ class SpineImporter:
             if null_values:
                 rep.residue.append(f"{null_values} null parameter value(s) dropped")
 
-            # ---- drift table (declared vs observed, D-F6) ----------------
+            # ---- drift table (declared vs observed) ----------------------
             declared_by_def: dict[tuple, set] = {}
             for t in declared_types:
                 key = (t["entity_class_name"], t["parameter_definition_name"])
@@ -487,7 +486,7 @@ class SpineImporter:
                     )
             rep.counts["scenarios"] = len(scenarios)
 
-            # -- activation: ALL classes' rows, as found (critique M2) --
+            # -- activation: ALL classes' rows, as found --
             activation_changes = []
             for ea in ent_alts:
                 ent_name = ea.get("entity_name") or "__".join(ea["entity_byname"])
@@ -749,7 +748,7 @@ class SpineImporter:
         float member, bool with bool; typeless definitions accept any scalar
         literal)."""
         scalar_kinds = {t["kind"] for t in types if t["kind"] != "indexed"}
-        # D-F6: a value-less definition imports TYPELESS, and the loader
+        # A value-less definition imports TYPELESS, and the loader
         # (correctly) refuses a default on a typeless parameter — the default
         # goes to the drift report instead; the head reconcile owns the
         # end-state default. A list binding carries an inferred member, so a

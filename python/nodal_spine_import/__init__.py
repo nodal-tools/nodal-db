@@ -1,7 +1,6 @@
 """nodal_spine_import — generic Spine-DB -> nodal-db importer.
 
-Home and posture per specs/flextool_port_finale_plan.md §4 (decisions D-F2
-and D-F6, jkiviluo 2026-09-22):
+Design posture:
 
 - The MECHANISM is Spine-generic (`SpineImporter` + `Profile`); everything
   tool-specific (template identity, dimension-name normalization against the

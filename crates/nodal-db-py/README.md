@@ -1,12 +1,11 @@
 # nodal-db-py — the thin Python skin (`import nodal_db`)
 
-The **write-path SDK** for nodal-db
-(`specs/engine_portability_FINDINGS.md` §7): a **logic-free marshaling
+The **write-path SDK** for nodal-db: a **logic-free marshaling
 layer** over the one Rust core. It marshals Arrow tables and scalars in,
 calls `nodal-db-core`, and translates `DbError` into a Python exception
 hierarchy out. It implements **no** canonicalization, tier, history, or
 reconcile rule — a rule you cannot find in `nodal-db-core` does not
-exist here either (CLAUDE.md invariant 2). For reads beyond the
+exist here either (one canonicalizer, never two). For reads beyond the
 conveniences below, SQL is the API: any DuckDB client reads the
 views/macros directly (`docs/dev/building_against_nodal-db.md`).
 
@@ -14,22 +13,22 @@ views/macros directly (`docs/dev/building_against_nodal-db.md`).
 
 `nodal_db.open(path)` returns a handle that holds the **path only —
 never a connection**. Every method opens a fresh per-operation
-connection inside the core and closes it before returning (CLAUDE.md
-invariant 1: an idle handle starves every writer). Keeping a `Database`
+connection inside the core and closes it before returning (an idle
+connection would starve every writer). Keeping a `Database`
 object alive in a notebook is free and blocks nobody; there is no
 `close()` because there is nothing to close. `query()` returns a
 `pyarrow.RecordBatchReader` backed by already-materialized batches, not
 by a live connection.
 
-## Usage sketch (FlexTool-flavored)
+## Usage sketch
 
 ```python
 import pyarrow as pa
 import nodal_db
 
 # A tool initializes its store once, then loads its template.
-db = nodal_db.init("flextool.duckdb", default_alternative="Base")
-db.template_apply("flextool_template.yaml", user="flextool")
+db = nodal_db.init("model.duckdb", default_alternative="Base")
+db.template_apply("template.yaml", user="my_tool")
 
 # Interactive writes: logical-long Arrow batches; the CORE decides the
 # storage tier and auto-creates missing referents (with warnings).
@@ -38,7 +37,7 @@ capacity = pa.record_batch({
     "value":  pa.array([400.0, 250.0], pa.float64()),
 })
 report = db.write_parameter("unit", "capacity", "Base", capacity,
-                            user="jkiviluo", message="initial capacities")
+                            user="analyst", message="initial capacities")
 assert report["tiers"] == ["scalar"]
 
 # A time series: dimension columns between entity and value; Arrow
@@ -48,14 +47,14 @@ flow = pa.record_batch({
     "time":   pa.array([...], pa.timestamp("us")),
     "value":  pa.array([1.0, 2.0, 3.0], pa.float64()),
 })
-db.write_parameter("unit", "flow", "scenario_a", flow, user="jkiviluo")
+db.write_parameter("unit", "flow", "scenario_a", flow, user="analyst")
 
 # An editor save: writes + deletes, atomically, ONE commit row.
 db.commit_changes(
     segments=[{"class": "unit", "parameter": "capacity",
                "alternative": "Base", "batch": capacity}],
     deletes=[("unit", "capacity", "Base", "old_plant")],
-    user="jkiviluo",
+    user="analyst",
 )
 
 # Reads: the convenience wrapper, or plain SQL against the read surface.
@@ -65,11 +64,11 @@ table = db.query("SELECT * FROM read_parameter('unit', 'capacity')").read_all()
 # Rerun-overwrite lifecycle: hard-erase a superseded result alternative
 # (the marker + as-of guard are the core's; expect_present is the
 # ordering belt — the erase refuses unless the replacement run exists).
-db.erase_alternative("run_2026_09_01", user="flextool",
+db.erase_alternative("run_2026_09_01", user="my_tool",
                      expect_present=["run_2026_09_22"])
 ```
 
-### Migration programs (template `run:` steps — template_ir_plan D13)
+### Migration programs (template `run:` steps)
 
 Tenants register **plain Python callables** as migration programs for
 the duration of one `template_apply` call. The IR names them; the
@@ -82,7 +81,7 @@ def backfill_efficiency(db_path, user):
     inner = nodal_db.open(db_path)
     inner.write_parameter("unit", "efficiency", "Base", some_batch, user=user)
 
-db.template_apply("flextool_template_v70.yaml", user="flextool",
+db.template_apply("template_v2.yaml", user="my_tool",
                   programs={"backfill_efficiency": backfill_efficiency})
 ```
 

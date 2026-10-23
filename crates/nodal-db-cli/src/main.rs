@@ -199,6 +199,7 @@ fn main() -> anyhow::Result<()> {
             expect_present,
             user,
         } => {
+            import::require_db(&db)?;
             use nodal_db_core::erasure;
             use nodal_db_core::types::{ObjectDeleteKey, ObjectKind, ObjectRef};
             let key = ObjectDeleteKey {

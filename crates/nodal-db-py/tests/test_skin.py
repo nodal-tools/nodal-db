@@ -572,3 +572,19 @@ def test_out_of_range_timestamp_value_is_canon_error(db):
     batch = scalar_batch(["n1"], [-(2**63)], pa.timestamp("us"))
     with pytest.raises(nodal_db.CanonError, match="outside the supported range"):
         db.write_parameter("node", "when", "Base", batch, user="tester")
+
+
+def test_write_after_file_removed_is_api_error_and_creates_nothing(tmp_path):
+    """A write whose database file has gone away is refused before any open:
+    DuckDB's read-write open would otherwise recreate an empty file."""
+    path = tmp_path / "gone.duckdb"
+    handle = nodal_db.init(str(path), default_alternative="Base")
+    path.unlink()
+    wal = tmp_path / "gone.duckdb.wal"
+    if wal.exists():
+        wal.unlink()
+    with pytest.raises(nodal_db.ApiError, match="no database file"):
+        handle.write_parameter(
+            "unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="tester"
+        )
+    assert not path.exists()

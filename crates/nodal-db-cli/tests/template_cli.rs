@@ -145,3 +145,41 @@ fn template_verbs_end_to_end() {
             .arg(&json_tpl),
     );
 }
+
+/// `template plan` / `apply` / `export` on a missing database fail cleanly
+/// and create nothing.
+#[test]
+fn template_verbs_on_missing_db_fail_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let tpl = dir.path().join("sample.yaml");
+    std::fs::write(&tpl, SAMPLE).unwrap();
+    let db = dir.path().join("nope.duckdb");
+
+    let err = run_err(
+        bin()
+            .args(["template", "plan"])
+            .arg(&tpl)
+            .arg("--db")
+            .arg(&db),
+    );
+    assert!(err.contains("no such database file"), "{err}");
+    let err = run_err(
+        bin()
+            .args(["template", "apply"])
+            .arg(&tpl)
+            .arg("--db")
+            .arg(&db),
+    );
+    assert!(err.contains("no such database file"), "{err}");
+    let out = dir.path().join("out.yaml");
+    let err = run_err(
+        bin()
+            .args(["template", "export"])
+            .arg("--db")
+            .arg(&db)
+            .arg("--out")
+            .arg(&out),
+    );
+    assert!(err.contains("no such database file"), "{err}");
+    assert!(!db.exists(), "no database may be created");
+}

@@ -1680,3 +1680,95 @@ fn native_micros_timestamp_out_of_range_is_e6() {
         assert!(!stderr.contains("Conversion Error"), "{stderr}");
     }
 }
+
+// --- --db must name an existing, initialized database ----------------------
+
+/// A missing --db is a usage error (no E-class), raised before the container
+/// is read, and nothing is created at the path.
+#[test]
+fn import_into_missing_db_is_usage_error_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("nope.sdb");
+    let file = write_file(
+        dir.path(),
+        "in.arrows",
+        &long_segment("node", "profile", 1, &[("n1", 0, 1.0)]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no such database file") && stderr.contains("nodal-db init"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("E6"),
+        "a usage error carries no E-class: {stderr}"
+    );
+    assert!(!db.exists(), "no database may be created");
+    assert!(!dir.path().join("nope.sdb.wal").exists());
+}
+
+/// An existing DuckDB file that nodal-db never initialized is E6 naming the
+/// cause, not a raw Catalog Error; the foreign file is left as it was.
+#[test]
+fn import_into_uninitialized_duckdb_is_e6_naming_init() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("foreign.duckdb");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE x(i INT); INSERT INTO x VALUES (7);")
+            .unwrap();
+        conn.close().unwrap();
+    }
+    let file = write_file(
+        dir.path(),
+        "in.arrows",
+        &long_segment("node", "profile", 1, &[("n1", 0, 1.0)]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("E6") && stderr.contains("not an initialized nodal-db database"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Catalog Error"), "{stderr}");
+    let conn = Connection::open(&db).unwrap();
+    let x: i64 = conn
+        .query_row("SELECT count(*) FROM x", [], |r| r.get(0))
+        .unwrap();
+    let commit_tables: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'commit'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.close().unwrap();
+    assert_eq!((x, commit_tables), (1, 0), "foreign file untouched");
+}
+
+/// erase-alternative (with and without --preview) on a missing path: a clean
+/// message, no raw DuckDB IO error, nothing created.
+#[test]
+fn erase_alternative_missing_db_is_clean_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("nope.sdb");
+    for preview in [false, true] {
+        let mut cmd = Command::new(bin());
+        cmd.arg("erase-alternative")
+            .arg(&db)
+            .arg("Base")
+            .args(["--user", "t"]);
+        if preview {
+            cmd.arg("--preview");
+        }
+        let out = cmd.output().expect("run erase-alternative");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("no such database file"), "{stderr}");
+        assert!(!stderr.contains("IO Error"), "{stderr}");
+        assert!(!db.exists());
+    }
+}

@@ -151,6 +151,7 @@ where
 {
     // In-process per-path serialization (critique F1): held across the whole
     // open-use-close so a sibling thread can never hold a second instance.
+    require_db_file(db_path)?;
     let lock = path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
@@ -158,12 +159,17 @@ where
 
     conn.execute_batch("BEGIN")?;
 
+    // Set when the `commit` row insert itself fails: the cue to check (after
+    // the rollback) whether the file is a nodal-db database at all.
+    let mut commit_insert_failed = false;
     let result = (|| {
-        let commit_id: i64 = conn.query_row(
-            "INSERT INTO commit (user, message) VALUES (?, ?) RETURNING id",
-            duckdb::params![user, message],
-            |r| r.get(0),
-        )?;
+        let commit_id: i64 = conn
+            .query_row(
+                "INSERT INTO commit (user, message) VALUES (?, ?) RETURNING id",
+                duckdb::params![user, message],
+                |r| r.get(0),
+            )
+            .inspect_err(|_| commit_insert_failed = true)?;
         let value = f(&conn, commit_id)?;
         // COMMIT is inside the fallible block: DuckDB can raise the write-write
         // `Conflict` here (not only at the conflicting statement), and the retry
@@ -180,10 +186,51 @@ where
         Err(e) => {
             // Best-effort rollback; propagate the original error either way.
             let _ = conn.execute_batch("ROLLBACK");
+            // Probe only on this failure path (a successful insert proves the
+            // table exists), and only after the rollback: the failed statement
+            // leaves the transaction aborted, which would reject the probe.
+            let e = if commit_insert_failed && !has_commit_table(&conn) {
+                DbError::Api(format!(
+                    "{:?} is not an initialized nodal-db database (no `commit` table); \
+                     create it with init first",
+                    db_path.display().to_string()
+                ))
+            } else {
+                e
+            };
             let _ = conn.close();
             Err(e)
         }
     }
+}
+
+/// Refuse a missing database path BEFORE any open: DuckDB's RW open creates
+/// the file, which would leave an empty database behind on a typo'd path.
+/// Mirrors the Python skin's `open` check. (Not in `open_with_retry` itself:
+/// compaction deliberately creates its temp file through it.)
+fn require_db_file(db_path: &Path) -> Result<(), DbError> {
+    if db_path.is_file() {
+        return Ok(());
+    }
+    Err(DbError::Api(format!(
+        "no database file at {:?} (create one with init first)",
+        db_path.display().to_string()
+    )))
+}
+
+/// Does the open database have nodal-db's `commit` table? A probe error
+/// counts as "present", so the caller keeps the original error rather than
+/// masking it.
+fn has_commit_table(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT count(*) FROM duckdb_tables() \
+         WHERE database_name = current_database() AND schema_name = 'main' \
+           AND table_name = 'commit'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(true)
 }
 
 /// Is this a DuckDB write-write conflict (VMP Part 5 retry trigger)? Matched on
@@ -237,6 +284,7 @@ where
 {
     // Reads serialize too (critique F1): an in-process RO instance open during
     // a write has the same dual-instance hazard as a second writer.
+    require_db_file(db_path)?;
     let lock = path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadOnly)?;

@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use nodal_db_core::template as tpl;
 
-use crate::import::resolve_user_from;
+use crate::import::{require_db, resolve_user_from};
 
 #[derive(Subcommand)]
 pub enum TemplateCommand {
@@ -85,6 +85,7 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
             message,
         } => apply_file(&file, &db, user.as_deref(), &message, None),
         TemplateCommand::Plan { file, db } => {
+            require_db(&db)?;
             let t = parse(&file)?;
             let p = tpl::plan(&db, &t).map_err(anyhow::Error::from)?;
             print!("{p}");
@@ -98,6 +99,7 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
             expect_commit,
         } => apply_file(&file, &db, user.as_deref(), &message, expect_commit),
         TemplateCommand::Export { db, out, json } => {
+            require_db(&db)?;
             let (t, warnings) = tpl::export(&db).map_err(anyhow::Error::from)?;
             for w in &warnings {
                 eprintln!("warning: {w}");
@@ -143,6 +145,7 @@ fn apply_file(
     message: &str,
     expect_commit: Option<i64>,
 ) -> Result<()> {
+    require_db(db)?;
     let t = parse(file)?;
     let user = resolve_user_from(user)?;
     let registry = tpl::MigrationRegistry::new();

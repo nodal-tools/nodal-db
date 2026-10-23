@@ -269,3 +269,65 @@ fn duplicate_case_aliased_target_is_rejected_before_db_work() {
         "no DB work happened"
     );
 }
+
+/// A missing database path is refused before any open: DuckDB's RW open would
+/// otherwise create an empty file on a typo'd path (non-CLI callers too).
+#[test]
+fn ingest_into_missing_path_errors_without_creating_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("missing.duckdb");
+    let err = ingest_segments(
+        &db,
+        vec![seg("node", "demand", "Base", scalar_batch("n1", 1.0))],
+        "tester",
+        "",
+        WriteOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, nodal_db_core::error::DbError::Api(m) if m.contains("no database file")),
+        "{err:?}"
+    );
+    assert!(!db.exists(), "no file may be created");
+    assert!(!dir.path().join("missing.duckdb.wal").exists());
+}
+
+/// An existing DuckDB file that is not an initialized nodal-db database is a
+/// clean API error naming the cause (not a raw Catalog Error), and the
+/// rollback leaves the foreign file untouched.
+#[test]
+fn ingest_into_uninitialized_db_is_api_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("foreign.duckdb");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE x(i INT); INSERT INTO x VALUES (7);")
+            .unwrap();
+        conn.close().unwrap();
+    }
+    let err = ingest_segments(
+        &db,
+        vec![seg("node", "demand", "Base", scalar_batch("n1", 1.0))],
+        "tester",
+        "",
+        WriteOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, nodal_db_core::error::DbError::Api(m) if m.contains("not an initialized")),
+        "{err:?}"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM x"),
+        1,
+        "foreign table intact"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'commit'"
+        ),
+        0,
+        "no commit table created"
+    );
+}

@@ -70,6 +70,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     // is even read (critique F5): a missing author is not a payload error and
     // must not wear an E-class after a possibly-large decode.
     let user = resolve_user(args)?;
+    require_db(&args.db)?;
 
     let bytes = std::fs::read(&args.file)
         .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?;
@@ -249,6 +250,20 @@ pub(crate) fn resolve_user_from(explicit: Option<&str>) -> Result<String> {
                  is set to a non-blank value (pass --user <name>)"
             )
         })
+}
+
+/// `--db` must name an existing database (created by `nodal-db init`). A plain
+/// usage error with no E-class, checked before any work: DuckDB's read-write
+/// open would otherwise create an empty file at a typo'd path. `pub(crate)`:
+/// every verb that takes an existing database uses it.
+pub(crate) fn require_db(db: &std::path::Path) -> Result<()> {
+    if !db.is_file() {
+        bail!(
+            "--db {}: no such database file (create it with `nodal-db init`)",
+            db.display()
+        );
+    }
+    Ok(())
 }
 
 fn resolve_user(args: &ImportArgs) -> Result<String> {

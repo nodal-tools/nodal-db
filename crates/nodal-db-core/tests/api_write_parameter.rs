@@ -1573,6 +1573,64 @@ fn array_id_is_stable_across_replace_and_copied_into_hist() {
     assert_eq!(audit, 0);
 }
 
+/// Non-ASCII case-aliases (critique C2 of set_based_scalar_write_PLAN): the
+/// up-front dedup folds ASCII only, so `"Ä"` and `"ä"` reach the resolver,
+/// which folds by DuckDB's Unicode `lower()`. Two spellings of one entity
+/// are the same ambiguity as `"N1"`/`"n1"` and raise the same Api error,
+/// whether the entity is missing or already exists. Nothing is written.
+#[test]
+fn unicode_case_aliased_entity_names_are_rejected_as_api_errors() {
+    let (_dir, db) = fresh_db();
+    let expect = "entity names \"Äx\" and \"äx\" resolve to the same entity \
+                  (name resolution is case-insensitive); use one spelling per batch";
+    // Both missing.
+    let err = write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch2(&["Äx", "äx"], &[1.0, 2.0]),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect_err("Unicode case alias must be rejected");
+    assert!(
+        matches!(err, nodal_db_core::error::DbError::Api(_)),
+        "{err:?}"
+    );
+    assert_eq!(err.to_string(), expect);
+    assert_eq!(count(&db, "SELECT count(*) FROM entity"), 0);
+    // One of them exists.
+    write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch("Äx", 1.0),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "seed",
+    )
+    .expect("seed");
+    let err = write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch2(&["Äx", "äx"], &[3.0, 4.0]),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect_err("Unicode case alias must be rejected");
+    assert_eq!(err.to_string(), expect);
+    assert_eq!(count(&db, "SELECT count(*) FROM value_scalar"), 1);
+}
+
 // --- error order and sequence ids (set_based_scalar_write_PLAN §3.5, §5.3) --
 //
 // The messages below were captured from the per-key entity resolver and

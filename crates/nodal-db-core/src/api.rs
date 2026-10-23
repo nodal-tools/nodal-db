@@ -758,9 +758,12 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         if name.trim().is_empty() {
             return Err(DbError::Api(format!("empty entity name in row {row}")));
         }
-        // Dedup by the same fold DB resolution uses (`lower(name)`; ASCII per
-        // the #2373 charset) so case-aliases cannot double-write one entity.
-        // Aliased spellings are ambiguous, not mergeable (critique F3).
+        // Dedup by an ASCII case fold so case-aliases cannot double-write one
+        // entity. Aliased spellings are ambiguous, not mergeable (critique
+        // F3). Entity names are free text, and DB resolution folds by
+        // DuckDB's Unicode `lower()`: a non-ASCII alias (`"Ä"`/`"ä"`) passes
+        // here and is rejected with the same error by `resolve_entities`,
+        // which groups by the fold DuckDB returns.
         let idx = *slot.entry(name.to_ascii_lowercase()).or_insert_with(|| {
             names.push(name.clone());
             rows.push(Vec::new());
@@ -827,15 +830,32 @@ fn write_prepared(
         retain_override: Some(effective_retain),
     };
 
-    for (name, idx) in p.names.iter().zip(p.rows.iter()) {
-        let entity_id = resolve_entity(
-            conn,
-            commit_id,
-            class_id,
-            &p.class,
-            name,
-            &mut report.warnings,
-        )?;
+    // Every entity of the segment is resolved up front in one set-based
+    // round (set_based_scalar_write_PLAN §3.4, D7). The per-entity
+    // canonicalization below is pure, so its order relative to resolution is
+    // only observable through which error comes first; an N-D refusal keeps
+    // the per-entity order (§3.5): the entities before the first missing name
+    // are canonicalized first, and their error wins.
+    let resolved = resolve_entities(
+        conn,
+        commit_id,
+        class_id,
+        &p.class,
+        &p.names,
+        &mut report.warnings,
+    )?;
+    let entity_ids = match resolved {
+        Resolved::Ids(ids) => ids,
+        Resolved::NdRefused { first_missing, err } => {
+            for idx in &p.rows[..first_missing] {
+                let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
+                canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
+            }
+            return Err(err);
+        }
+    };
+
+    for (&entity_id, idx) in entity_ids.iter().zip(p.rows.iter()) {
         let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
         let value = canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
         let key = ValueKey {
@@ -1078,48 +1098,158 @@ fn resolve_alternative(
     Ok(id)
 }
 
-fn resolve_entity(
+/// The outcome of [`resolve_entities`].
+enum Resolved {
+    /// One entity id per input name, in input order.
+    Ids(Vec<i64>),
+    /// The class is N-D and `first_missing` is the first name (in input
+    /// order) without a current entity: auto-creating it is refused with
+    /// `err`. Nothing was inserted. The caller canonicalizes the entities
+    /// before it first, so a canon error there still wins (plan §3.5).
+    NdRefused { first_missing: usize, err: DbError },
+}
+
+/// The entity lookup of [`resolve_entities`]: every input name with its
+/// ordinal, its DuckDB `lower()` fold and the id of the current entity of the
+/// class holding that folded name (NULL when missing). The fold is DuckDB's,
+/// returned to Rust, never recomputed there (CLAUDE.md invariant 2).
+const ENTITY_LOOKUP_SQL: &str = "WITH k AS (SELECT unnest(?::VARCHAR[]) AS n, \
+                                         unnest(?::BIGINT[]) AS i) \
+     SELECT k.i, lower(k.n), e.id FROM k \
+     LEFT JOIN entity e ON e.cur_cls = ? AND e.cur_name = lower(k.n)";
+
+/// The columnar auto-create insert of [`resolve_entities`]; RETURNING yields
+/// the rows in input order (hard-checked).
+const ENTITY_INSERT_SQL: &str = "INSERT INTO entity (entity_class_id, name, valid_from_commit) \
+     SELECT ?, unnest(?::VARCHAR[]), ? RETURNING id, name";
+
+/// Resolve every entity name of one segment in one set-based round
+/// (set_based_scalar_write_PLAN §3.4, D7): one lookup statement, at most one
+/// N-D probe, and one columnar insert per ≤ `LONG_INSERT_CHUNK` missing
+/// names. This is the write path's one decision-B entity auto-create site.
+///
+/// Names are resolved by DuckDB's `lower()` (Unicode). Two distinct input
+/// spellings that DuckDB folds to the same name are ambiguous and rejected
+/// with the same Api error `prepare_segment` raises for ASCII case-aliases
+/// (critique C2: the up-front dedup folds ASCII only, so `"Ä"`/`"ä"` reach
+/// here). Missing names are inserted in input order; their `AutoCreated`
+/// warnings follow in the same order, as the per-entity resolver pushed
+/// them. Never auto-creates into an N-D class (critique F10): an N-D
+/// entity's identity is its member tuple, which the batch does not carry.
+fn resolve_entities(
     conn: &Connection,
     commit_id: i64,
     class_id: i64,
     class: &str,
-    name: &str,
+    names: &[String],
     warnings: &mut Vec<Warning>,
-) -> Result<i64, DbError> {
-    if let Some(id) = opt_id(
-        conn,
-        "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)",
-        class_id,
-        name,
-    )? {
-        return Ok(id);
+) -> Result<Resolved, DbError> {
+    use crate::history::LONG_INSERT_CHUNK;
+    use duckdb::types::Value;
+
+    let n = names.len();
+    let mut ids: Vec<Option<i64>> = vec![None; n];
+    let mut folds: Vec<Option<String>> = vec![None; n];
+    {
+        let names_list = Value::List(names.iter().map(|s| Value::Text(s.clone())).collect());
+        let ord_list = Value::List((0..n as i64).map(Value::BigInt).collect());
+        let mut stmt = conn.prepare_cached(ENTITY_LOOKUP_SQL)?;
+        let rows = stmt.query_map(params![names_list, ord_list, class_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (i, fold, id) = row?;
+            let i = usize::try_from(i)
+                .ok()
+                .filter(|&i| i < n && folds[i].is_none())
+                .ok_or_else(|| {
+                    DbError::Internal(format!("entity lookup: unexpected ordinal {i}"))
+                })?;
+            folds[i] = Some(fold);
+            ids[i] = id;
+        }
     }
-    // Never auto-create into an N-D class (critique F10): an N-D entity's
-    // identity is its member tuple, which the batch does not carry — a hollow
-    // member-less entity would be a trap, not a convenience.
-    let ndims: i64 = conn.query_row(
-        "SELECT count(*) FROM entity_class_dimension WHERE cur_c = ?",
-        params![class_id],
-        |r| r.get(0),
-    )?;
-    if ndims > 0 {
-        return Err(DbError::Api(format!(
-            "cannot auto-create entity {name:?} in {ndims}-dimensional class {class:?}: \
-             an N-D entity needs explicit membership (entity_element rows); create it first"
-        )));
+    if folds.iter().any(Option::is_none) {
+        return Err(DbError::Internal(
+            "entity lookup: a name came back without its row".into(),
+        ));
     }
-    let id: i64 = conn.query_row(
-        "INSERT INTO entity (entity_class_id, name, valid_from_commit) VALUES (?, ?, ?) RETURNING id",
-        params![class_id, name, commit_id],
-        |r| r.get(0),
-    )?;
-    warnings.push(Warning {
-        kind: WarningKind::AutoCreated,
-        object_type: "entity".into(),
-        name: name.into(),
-        id,
-    });
-    Ok(id)
+
+    // Fold collisions (critique C2), in input order.
+    let mut first_by_fold: HashMap<&str, usize> = HashMap::with_capacity(n);
+    for (i, fold) in folds.iter().enumerate() {
+        let fold = fold.as_deref().unwrap_or_default();
+        if let Some(&j) = first_by_fold.get(fold) {
+            return Err(DbError::Api(format!(
+                "entity names {:?} and {:?} resolve to the same entity \
+                 (name resolution is case-insensitive); use one spelling per batch",
+                names[j], names[i]
+            )));
+        }
+        first_by_fold.insert(fold, i);
+    }
+
+    let missing: Vec<usize> = (0..n).filter(|&i| ids[i].is_none()).collect();
+    if let Some(&m) = missing.first() {
+        let ndims: i64 = conn
+            .prepare_cached("SELECT count(*) FROM entity_class_dimension WHERE cur_c = ?")?
+            .query_row(params![class_id], |r| r.get(0))?;
+        if ndims > 0 {
+            let name = &names[m];
+            return Ok(Resolved::NdRefused {
+                first_missing: m,
+                err: DbError::Api(format!(
+                    "cannot auto-create entity {name:?} in {ndims}-dimensional class {class:?}: \
+                     an N-D entity needs explicit membership (entity_element rows); create it first"
+                )),
+            });
+        }
+        let mut stmt = conn.prepare_cached(ENTITY_INSERT_SQL)?;
+        let mut last_id = i64::MIN;
+        for chunk in missing.chunks(LONG_INSERT_CHUNK) {
+            let list = Value::List(
+                chunk
+                    .iter()
+                    .map(|&i| Value::Text(names[i].clone()))
+                    .collect(),
+            );
+            let rows: Vec<(i64, String)> = stmt
+                .query_map(params![class_id, list, commit_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<Result<_, _>>()?;
+            // Hard check (plan D10): the rows come back in input order with
+            // strictly increasing ids, i.e. exactly what one insert per name
+            // in that order would have minted.
+            if rows.len() != chunk.len() {
+                return Err(DbError::Internal(format!(
+                    "entity insert: {} rows returned for {} names",
+                    rows.len(),
+                    chunk.len()
+                )));
+            }
+            for (&i, (id, name)) in chunk.iter().zip(rows) {
+                if name != names[i] || id <= last_id {
+                    return Err(DbError::Internal(format!(
+                        "entity insert: RETURNING out of input order at {name:?} (id {id})"
+                    )));
+                }
+                last_id = id;
+                ids[i] = Some(id);
+                warnings.push(Warning {
+                    kind: WarningKind::AutoCreated,
+                    object_type: "entity".into(),
+                    name: name.clone(),
+                    id,
+                });
+            }
+        }
+    }
+    Ok(Resolved::Ids(ids.into_iter().flatten().collect()))
 }
 
 /// Resolve the parameter definition within `class_id`, auto-creating it (and its

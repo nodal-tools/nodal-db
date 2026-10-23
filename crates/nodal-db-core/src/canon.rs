@@ -23,8 +23,8 @@ use duckdb::arrow::array::{
 use duckdb::arrow::record_batch::RecordBatch;
 
 use crate::encoding::{
-    datetime_coord, datetime_reproduces, encode_value, hash_axis, integer_regular_step, AxisBody,
-    CanonicalAxis, Duration, EncodeError, LabelPos, ValueContent,
+    canonical_value_f64, datetime_coord, datetime_reproduces, encode_value, hash_axis,
+    integer_regular_step, AxisBody, CanonicalAxis, Duration, EncodeError, LabelPos, ValueContent,
 };
 use crate::tier;
 use crate::types::{
@@ -391,7 +391,12 @@ pub fn canonicalize(
 /// value column's index, for the range error.
 fn read_value(col: &ValCol, row: usize, column: usize) -> Result<Option<ScalarValue>, CanonError> {
     Ok(match col {
-        ValCol::Float(a) if !a.is_null(row) => Some(ScalarValue::Float(a.value(row))),
+        // The one storage-normalization point for value floats: -0.0 -> +0.0,
+        // every NaN -> the one quiet NaN (the encoder's own definition), so
+        // what is stored is exactly what is hashed.
+        ValCol::Float(a) if !a.is_null(row) => {
+            Some(ScalarValue::Float(canonical_value_f64(a.value(row))))
+        }
         ValCol::Int(a) if !a.is_null(row) => Some(ScalarValue::Int(a.value(row))),
         ValCol::Bool(a) if !a.is_null(row) => Some(ScalarValue::Bool(a.value(row))),
         ValCol::Str(a) if !a.is_null(row) => Some(ScalarValue::Str(a.value(row).to_string())),

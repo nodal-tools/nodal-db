@@ -185,6 +185,24 @@ def _apply_nan_at(content: dict, indices: list) -> dict:
     return content
 
 
+def _apply_nan_bits_at(content: dict, pairs: list) -> dict:
+    """Set the measure at each ``[flat_index, "0x…"]`` to the double with exactly
+    those bits (NaN sign/signaling/payload variants JSON cannot spell). Same
+    indexing as ``nan_at``. Python floats keep the bits through ``struct``."""
+    t = content["type"]
+    for i, bits in pairs:
+        x = struct.unpack("<d", struct.pack("<Q", int(bits, 16)))[0]
+        if t == "Scalar":
+            if i != 0 or "Float" not in content["value"]:
+                raise AssertionError("nan_bits_at on a Scalar needs one Float index 0")
+            content["value"]["Float"] = x
+        elif t == "Array":
+            content["values"][i] = x
+        else:
+            raise AssertionError(f"nan_bits_at not supported for content type {t!r}")
+    return content
+
+
 def check_vector(path: pathlib.Path) -> bool:
     vector = json.loads(path.read_text())
     name = path.name
@@ -194,6 +212,9 @@ def check_vector(path: pathlib.Path) -> bool:
     nan_at = vector.get("nan_at")
     if nan_at is not None:
         content = _apply_nan_at(content, nan_at)
+    nan_bits_at = vector.get("nan_bits_at")
+    if nan_bits_at is not None:
+        content = _apply_nan_bits_at(content, nan_bits_at)
 
     got = encode_value(vector["key"], content)
     got_hex = got.hex()

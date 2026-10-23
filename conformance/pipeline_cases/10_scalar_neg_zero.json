@@ -1,0 +1,13 @@
+{
+  "description": "rank-0 scalar float -0.0 -> stored as +0.0 (value floats are normalized at storage, the same rule the canonical encoding applies); the runner compares float bits, so a -0.0 shape would fail",
+  "value_kind": "Float",
+  "declared": [],
+  "rows": [
+    { "dims": [], "value": -0.0 }
+  ],
+  "expected": {
+    "tier": "Scalar",
+    "axes": [],
+    "shape": { "Scalar": { "Float": 0.0 } }
+  }
+}

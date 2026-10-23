@@ -1,0 +1,33 @@
+{
+  "description": "Sibling of v11 with the same shape: plain nan_at at flat indices 1..5 and +0.0 at index 6. Must encode byte-for-byte (and hash) identically to v11.",
+  "key": {
+    "entity_id": 1,
+    "parameter_definition_id": 2,
+    "alternative_id": 3
+  },
+  "content": {
+    "type": "Array",
+    "axis_hashes": [
+      16820818339860931418
+    ],
+    "values": [
+      1.5,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      3.5
+    ]
+  },
+  "nan_at": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "expected_canonical_hex": "01000000000000000200000000000000030000000000000005000000666c6f617401015a63c9da288d6fe9010108000000000000000000f83f000000000000f87f000000000000f87f000000000000f87f000000000000f87f000000000000f87f00000000000000000000000000000c40",
+  "expected_hash_u64": 11749083793093910058
+}

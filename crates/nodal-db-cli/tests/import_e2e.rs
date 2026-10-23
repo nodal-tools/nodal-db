@@ -1772,3 +1772,148 @@ fn erase_alternative_missing_db_is_clean_and_creates_nothing() {
         assert!(!db.exists());
     }
 }
+
+// --- value floats are stored canonical ---------------------------------------
+
+/// (input bits, expected stored bits): -0.0 -> +0.0, every NaN -> 0x7ff8….
+const FLOAT_PATTERNS: [(u64, u64); 9] = [
+    (0x8000_0000_0000_0000, 0x0000_0000_0000_0000),
+    (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+    (0xfff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+    (0x7ff0_0000_0000_0001, 0x7ff8_0000_0000_0000),
+    (0x7fff_ffff_ffff_ffff, 0x7ff8_0000_0000_0000),
+    (0xfff0_0000_0000_0001, 0x7ff8_0000_0000_0000),
+    (0xfff0_0000_0000_0000, 0xfff0_0000_0000_0000),
+    (0x8000_0000_0000_0001, 0x8000_0000_0000_0001),
+    (0x3ff8_0000_0000_0000, 0x3ff8_0000_0000_0000),
+];
+
+fn pattern_inputs() -> Vec<f64> {
+    FLOAT_PATTERNS
+        .iter()
+        .map(|(i, _)| f64::from_bits(*i))
+        .collect()
+}
+
+fn pattern_expected() -> Vec<u64> {
+    FLOAT_PATTERNS.iter().map(|(_, e)| *e).collect()
+}
+
+fn stored_bits(db: &Path, sql: &str) -> Vec<u64> {
+    let conn = Connection::open(db).unwrap();
+    let v: Vec<u64> = conn
+        .prepare(sql)
+        .unwrap()
+        .query_map([], |r| r.get::<_, f64>(0))
+        .unwrap()
+        .map(|x| x.unwrap().to_bits())
+        .collect();
+    conn.close().unwrap();
+    v
+}
+
+/// Long form: a full-grid entity (array tier) and a sparse entity (long tier),
+/// both carrying -0.0 and NaN bit patterns in the Float64 value column.
+#[test]
+fn long_form_float_values_are_stored_canonical() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let n = FLOAT_PATTERNS.len() as i64;
+    let mut ent = Vec::new();
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    let mut v = Vec::new();
+    for (h, x) in pattern_inputs().into_iter().enumerate() {
+        // "grid": (h, 0) for every h -> full grid -> array tier.
+        ent.push("grid");
+        a.push(h as i64);
+        b.push(0i64);
+        v.push(x);
+        // "sparse": (h, h % 3) -> not a full grid -> long tier.
+        ent.push("sparse");
+        a.push(h as i64);
+        b.push(h as i64 % 3);
+        v.push(x);
+    }
+    assert_eq!(a.len() as i64, 2 * n);
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ],
+        segment_metadata("node", "profile", "long", 1),
+    ));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(ent)) as ArrayRef,
+            Arc::new(Int64Array::from(a)) as ArrayRef,
+            Arc::new(Int64Array::from(b)) as ArrayRef,
+            Arc::new(Float64Array::from(v)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let file = write_file(dir.path(), "floats.arrows", &stream(schema, &[batch]));
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stored_bits(&db, "SELECT unnest(values) FROM value_array"),
+        pattern_expected(),
+        "array tier"
+    );
+    assert_eq!(
+        stored_bits(&db, "SELECT v_float FROM value_long ORDER BY i1_pos"),
+        pattern_expected(),
+        "long tier"
+    );
+}
+
+/// Dense form (List<Float64>): the same patterns, array tier.
+#[test]
+fn dense_form_float_values_are_stored_canonical() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let n = FLOAT_PATTERNS.len() as i64;
+    let mut steps = ListBuilder::new(Int64Builder::new());
+    steps.values().append_slice(&(0..n).collect::<Vec<_>>());
+    steps.append(true);
+    let steps = Arc::new(steps.finish()) as ArrayRef;
+    let mut vals = ListBuilder::new(Float64Builder::new());
+    vals.values().append_slice(&pattern_inputs());
+    vals.append(true);
+    let vals = Arc::new(vals.finish()) as ArrayRef;
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("step", steps.data_type().clone(), false),
+            Field::new("value", vals.data_type().clone(), false),
+        ],
+        segment_metadata("node", "price", "dense", 1),
+    ));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+            steps,
+            vals,
+        ],
+    )
+    .unwrap();
+    let file = write_file(dir.path(), "dfloats.arrows", &stream(schema, &[batch]));
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stored_bits(&db, "SELECT unnest(values) FROM value_array"),
+        pattern_expected()
+    );
+}

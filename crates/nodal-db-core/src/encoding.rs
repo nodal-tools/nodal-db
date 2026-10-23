@@ -162,23 +162,45 @@ enum NanPolicy {
     Canonicalize,
 }
 
-/// A canonical `DOUBLE` (spec §3.3): `-0.0` normalized to `+0.0`; a NaN either
-/// rejected (axis, [`NanPolicy::Reject`]) or canonicalized to the one quiet NaN
-/// (value, [`NanPolicy::Canonicalize`]); then the 8 IEEE-754 binary64 bytes
-/// little-endian.
-fn push_double(out: &mut Vec<u8>, x: f64, nan: NanPolicy) -> Result<(), EncodeError> {
+/// The canonical stored and encoded form of a VALUE float (spec §3.3.1):
+/// `-0.0` becomes `+0.0`, every NaN becomes the one quiet NaN
+/// ([`CANONICAL_NAN_BITS`]), everything else is unchanged. The one definition
+/// shared by the encoder (hash) and the write pipeline (storage), so the two
+/// cannot drift. Idempotent.
+#[inline]
+pub fn canonical_value_f64(x: f64) -> f64 {
     if x.is_nan() {
-        return match nan {
-            NanPolicy::Reject => Err(EncodeError::NanForbidden),
-            NanPolicy::Canonicalize => {
-                out.extend_from_slice(&CANONICAL_NAN_BITS.to_le_bytes());
-                Ok(())
-            }
-        };
+        f64::from_bits(CANONICAL_NAN_BITS)
+    } else if x == 0.0 {
+        // `-0.0 == 0.0` is true, so this catches every negative-zero pattern.
+        0.0
+    } else {
+        x
     }
-    // `-0.0 == 0.0` is true, so this catches every negative-zero bit pattern.
-    let canon = if x == 0.0 { 0.0_f64 } else { x };
-    out.extend_from_slice(&canon.to_le_bytes());
+}
+
+/// The canonical form of an AXIS float (spec §3.3.1): `-0.0` becomes `+0.0`;
+/// NaN is rejected (axis coordinates must be orderable).
+#[inline]
+pub fn canonical_axis_f64(x: f64) -> Result<f64, EncodeError> {
+    if x.is_nan() {
+        Err(EncodeError::NanForbidden)
+    } else if x == 0.0 {
+        Ok(0.0)
+    } else {
+        Ok(x)
+    }
+}
+
+/// A canonical `DOUBLE` (spec §3.3): the role's canonical form
+/// ([`canonical_axis_f64`] / [`canonical_value_f64`]), then the 8 IEEE-754
+/// binary64 bytes little-endian.
+fn push_double(out: &mut Vec<u8>, x: f64, nan: NanPolicy) -> Result<(), EncodeError> {
+    let c = match nan {
+        NanPolicy::Reject => canonical_axis_f64(x)?,
+        NanPolicy::Canonicalize => canonical_value_f64(x),
+    };
+    out.extend_from_slice(&c.to_bits().to_le_bytes());
     Ok(())
 }
 
@@ -656,6 +678,92 @@ mod value_tests {
         );
         // And it does NOT error (the whole point — values keep the array tier).
         assert!(encode_value(&key, &ValueContent::Scalar(&ScalarValue::Float(f64::NAN))).is_ok());
+    }
+
+    /// The value-float pattern table: (input bits, expected canonical bits).
+    const PATTERNS: [(u64, u64); 15] = [
+        (0x8000_0000_0000_0000, 0x0000_0000_0000_0000), // -0.0
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000), // +0.0
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000), // canonical NaN
+        (0xfff8_0000_0000_0000, 0x7ff8_0000_0000_0000), // negative quiet NaN
+        (0x7ff0_0000_0000_0001, 0x7ff8_0000_0000_0000), // signaling NaN
+        (0x7ff4_0000_0000_0000, 0x7ff8_0000_0000_0000), // signaling, high payload
+        (0x7fff_ffff_ffff_ffff, 0x7ff8_0000_0000_0000), // quiet, max payload
+        (0xfff0_0000_0000_0001, 0x7ff8_0000_0000_0000), // negative signaling
+        (0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000), // +inf
+        (0xfff0_0000_0000_0000, 0xfff0_0000_0000_0000), // -inf
+        (0x0000_0000_0000_0001, 0x0000_0000_0000_0001), // +min subnormal
+        (0x8000_0000_0000_0001, 0x8000_0000_0000_0001), // -min subnormal
+        (0x3ff8_0000_0000_0000, 0x3ff8_0000_0000_0000), // 1.5
+        (0xbff8_0000_0000_0000, 0xbff8_0000_0000_0000), // -1.5
+        (0x4059_0000_0000_0000, 0x4059_0000_0000_0000), // 100.0
+    ];
+
+    #[test]
+    fn canonical_value_f64_follows_the_pattern_table_and_is_idempotent() {
+        for (input, expected) in PATTERNS {
+            let c = super::canonical_value_f64(f64::from_bits(input));
+            assert_eq!(c.to_bits(), expected, "input {input:#018x}");
+            assert_eq!(
+                super::canonical_value_f64(c).to_bits(),
+                c.to_bits(),
+                "idempotent on {input:#018x}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_axis_f64_rejects_nan_and_normalizes_zero() {
+        for (input, expected) in PATTERNS {
+            let x = f64::from_bits(input);
+            match super::canonical_axis_f64(x) {
+                Ok(c) => {
+                    assert!(!x.is_nan());
+                    assert_eq!(c.to_bits(), expected, "input {input:#018x}");
+                }
+                Err(e) => {
+                    assert!(x.is_nan(), "only NaN is rejected: {input:#018x}");
+                    assert_eq!(e, EncodeError::NanForbidden);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoding_is_invariant_under_value_canonicalization() {
+        // encode(x) == encode(c(x)) byte-for-byte: storing c(x) changes no hash.
+        let key = ValueKey {
+            entity_id: 1,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        for (input, _) in PATTERNS {
+            let x = f64::from_bits(input);
+            let c = super::canonical_value_f64(x);
+            let a = encode_value(&key, &ValueContent::Scalar(&ScalarValue::Float(x))).unwrap();
+            let b = encode_value(&key, &ValueContent::Scalar(&ScalarValue::Float(c))).unwrap();
+            assert_eq!(a, b, "scalar {input:#018x}");
+        }
+        let raw: Vec<f64> = PATTERNS.iter().map(|(i, _)| f64::from_bits(*i)).collect();
+        let canon: Vec<f64> = raw.iter().map(|x| super::canonical_value_f64(*x)).collect();
+        let hashes = [7u64];
+        let a = encode_value(
+            &key,
+            &ValueContent::Array {
+                axis_hashes: &hashes,
+                values: &raw,
+            },
+        )
+        .unwrap();
+        let b = encode_value(
+            &key,
+            &ValueContent::Array {
+                axis_hashes: &hashes,
+                values: &canon,
+            },
+        )
+        .unwrap();
+        assert_eq!(a, b, "array payload");
     }
 
     #[test]

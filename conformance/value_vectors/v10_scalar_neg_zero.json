@@ -1,0 +1,16 @@
+{
+  "description": "Scalar float -0.0 (spec §3.3.1): canonicalizes to +0.0, so the measure bytes are eight zero bytes and the hash equals the same key with +0.0. Spelled -0.0 (never -0: serde_json reads -0 through its integer path and drops the sign).",
+  "key": {
+    "entity_id": 1,
+    "parameter_definition_id": 2,
+    "alternative_id": 3
+  },
+  "content": {
+    "type": "Scalar",
+    "value": {
+      "Float": -0.0
+    }
+  },
+  "expected_canonical_hex": "01000000000000000200000000000000030000000000000005000000666c6f6174000001010000000000000000",
+  "expected_hash_u64": 13392964778821541591
+}

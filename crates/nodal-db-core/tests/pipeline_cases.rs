@@ -22,7 +22,9 @@ use serde_json::Value as Json;
 
 use nodal_db_core::canon::{canonicalize, LabelDomain};
 use nodal_db_core::encoding::CanonicalAxis;
-use nodal_db_core::types::{DeclaredType, IndexKind, ShapedData, Tier, ValueKey, ValueKind};
+use nodal_db_core::types::{
+    DeclaredType, IndexKind, ScalarValue, ShapedData, Tier, ValueKey, ValueKind,
+};
 
 #[derive(Deserialize)]
 struct Case {
@@ -181,6 +183,19 @@ fn build_batch(case: &Case) -> RecordBatch {
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("build record batch")
 }
 
+/// Every float measure of a shaped payload, as raw bits, in payload order.
+fn float_bits(shape: &ShapedData) -> Vec<u64> {
+    let of = |m: &ScalarValue| match m {
+        ScalarValue::Float(x) => Some(x.to_bits()),
+        _ => None,
+    };
+    match shape {
+        ShapedData::Scalar(m) => of(m).into_iter().collect(),
+        ShapedData::Array(vals) => vals.iter().map(|x| x.to_bits()).collect(),
+        ShapedData::Long(rows) => rows.iter().filter_map(|r| of(&r.value)).collect(),
+    }
+}
+
 #[test]
 fn pipeline_cases_match() {
     let files = case_files();
@@ -224,6 +239,14 @@ fn pipeline_cases_match() {
         assert_eq!(
             cv.shape, case.expected.shape,
             "{name}: shape ({})",
+            case.description
+        );
+        // Bitwise too: the derived `PartialEq` treats -0.0 == 0.0 and never
+        // matches NaN, so it cannot see float normalization.
+        assert_eq!(
+            float_bits(&cv.shape),
+            float_bits(&case.expected.shape),
+            "{name}: float bits ({})",
             case.description
         );
 

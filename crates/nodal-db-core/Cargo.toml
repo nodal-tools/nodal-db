@@ -37,3 +37,11 @@ test = false
 name = "long_write"
 harness = false
 test = false
+
+# Pure canonicalization-pipeline bench (no DB): per-cell cost of
+# `canon::canonicalize` on array- and long-tier shapes. Pure, but kept out of
+# `cargo test --workspace` like the others (the 1 M-cell case is slow).
+[[bench]]
+name = "canon"
+harness = false
+test = false

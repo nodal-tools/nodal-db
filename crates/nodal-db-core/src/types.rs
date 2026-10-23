@@ -130,7 +130,9 @@ impl ScalarValue {
     /// single definition so they cannot drift.
     pub(crate) fn identity_string(&self) -> String {
         match self {
-            ScalarValue::Float(f) => format!("f:{f}"),
+            // Canonical first, so -0.0 and 0.0 (and every NaN) share one
+            // identity, matching what is stored.
+            ScalarValue::Float(f) => format!("f:{}", crate::encoding::canonical_value_f64(*f)),
             ScalarValue::Int(i) => format!("i:{i}"),
             ScalarValue::Bool(b) => format!("b:{b}"),
             ScalarValue::Str(s) => format!("s:{s}"),
@@ -550,4 +552,27 @@ pub struct ObjectDeletePreview {
     pub found: bool,
     pub cascade: CascadeCounts,
     pub blockers: Vec<Blocker>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScalarValue;
+
+    #[test]
+    fn float_identity_string_is_canonical() {
+        // -0.0 and 0.0 are one stored value, so one identity; every NaN too.
+        let f = |x: f64| ScalarValue::Float(x).identity_string();
+        assert_eq!(f(-0.0), f(0.0));
+        let nans = [
+            0x7ff8_0000_0000_0000u64,
+            0xfff8_0000_0000_0000,
+            0x7ff0_0000_0000_0001,
+            0x7fff_ffff_ffff_ffff,
+            0xfff0_0000_0000_0001,
+        ];
+        for b in nans {
+            assert_eq!(f(f64::from_bits(b)), f(f64::NAN), "{b:#018x}");
+        }
+        assert_ne!(f(1.5), f(-1.5));
+    }
 }

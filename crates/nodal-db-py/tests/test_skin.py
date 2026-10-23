@@ -588,3 +588,37 @@ def test_write_after_file_removed_is_api_error_and_creates_nothing(tmp_path):
             "unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="tester"
         )
     assert not path.exists()
+
+
+def test_value_floats_are_stored_canonical(db):
+    """-0.0 is stored as +0.0 and every NaN as the one quiet NaN
+    0x7ff8000000000000, whatever sign or payload bits it arrived with."""
+    import struct
+
+    import duckdb
+
+    patterns = [
+        (0x8000000000000000, 0x0000000000000000),  # -0.0
+        (0xFFF8000000000000, 0x7FF8000000000000),  # negative quiet NaN
+        (0x7FF0000000000001, 0x7FF8000000000000),  # signaling NaN
+        (0x7FFFFFFFFFFFFFFF, 0x7FF8000000000000),  # quiet NaN, max payload
+        (0x3FF8000000000000, 0x3FF8000000000000),  # 1.5
+    ]
+    n = len(patterns)
+    raw = struct.pack(f"<{n}Q", *(i for i, _ in patterns))
+    values = pa.Array.from_buffers(pa.float64(), n, [None, pa.py_buffer(raw)])
+    entities = [f"e{i}" for i in range(n)]
+    db.write_parameter(
+        "node", "x", "Base", pa.record_batch({"entity": pa.array(entities), "value": values}),
+        user="tester",
+    )
+    con = duckdb.connect(db.path, read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT e.name, vs.v_float FROM value_scalar vs "
+            "JOIN entity e ON e.id = vs.entity_id ORDER BY e.name"
+        ).fetchall()
+    finally:
+        con.close()
+    got = [struct.unpack("<Q", struct.pack("<d", v))[0] for _, v in rows]
+    assert got == [e for _, e in patterns]

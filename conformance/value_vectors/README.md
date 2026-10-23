@@ -25,6 +25,7 @@ Each `*.json`:
 | `key` | object | `{entity_id, parameter_definition_id, alternative_id}` (i64) |
 | `content` | object | the value content, tagged by `type` (below) |
 | `nan_at` | [int] (optional) | flat measure indices set to NaN before encoding (JSON has no NaN literal): index 0 = a `Scalar` float measure; element index into an `Array` payload. The value encoder **canonicalizes** each NaN to `0x7ff8000000000000` — the one quiet NaN, analogous to `-0.0 → +0.0` (§3.3.1) — it does **not** reject it (unlike the axis encoder). The `expected_*` fields reflect the canonicalized value |
+| `nan_bits_at` | [[int, string]] (optional) | `[flat_index, "0x…"]` pairs: the measure at `flat_index` (same indexing as `nan_at`) is set to the double with exactly these 64 bits before encoding — NaN sign/signaling/payload variants JSON cannot spell. Every NaN canonicalizes to `0x7ff8000000000000` regardless of its bits. The placeholder in `values` at such a slot MUST be a non-NaN number, so a runner that ignores this field fails its hash check instead of passing |
 | `expected_canonical_hex` | string | canonical bytes, lower-case hex |
 | `expected_hash_u64` | number | XXH3-64/seed-0 of those bytes, unsigned decimal |
 

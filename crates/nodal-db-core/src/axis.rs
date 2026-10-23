@@ -27,8 +27,8 @@ use std::collections::HashMap;
 use duckdb::Connection;
 
 use crate::encoding::{
-    encode_axis, hash_axis, AxisBody, AxisProperties, CanonicalAxis, Duration, LabelPos, PeriodPos,
-    TimePatternPos, TimePatternTerm,
+    canonical_axis_f64, encode_axis, hash_axis, AxisBody, AxisProperties, CanonicalAxis, Duration,
+    LabelPos, PeriodPos, TimePatternPos, TimePatternTerm,
 };
 use crate::error::DbError;
 
@@ -361,9 +361,11 @@ fn insert_axis(conn: &Connection, axis: &CanonicalAxis, hash: u64) -> Result<i64
             p_start_int = Some(*start);
             p_step_int = Some(*step);
         }
+        // Axis floats are stored canonical (-0.0 -> +0.0). The NaN arm never
+        // fires: encode_axis already rejected NaN earlier in dedup_or_insert.
         AxisBody::FloatParametric { start, step } => {
-            p_start_dbl = Some(*start);
-            p_step_dbl = Some(*step);
+            p_start_dbl = Some(canonical_axis_f64(*start)?);
+            p_step_dbl = Some(canonical_axis_f64(*step)?);
         }
         _ => {}
     }
@@ -418,7 +420,7 @@ fn insert_axis(conn: &Connection, axis: &CanonicalAxis, hash: u64) -> Result<i64
             for (pos, coord) in coords.iter().enumerate() {
                 conn.execute(
                     "INSERT INTO axis_float (axis_id, pos, coord) VALUES (?, ?, ?)",
-                    duckdb::params![new_id, pos as i32, coord],
+                    duckdb::params![new_id, pos as i32, canonical_axis_f64(*coord)?],
                 )?;
             }
         }
@@ -435,7 +437,13 @@ fn insert_axis(conn: &Connection, axis: &CanonicalAxis, hash: u64) -> Result<i64
                 conn.execute(
                     "INSERT INTO axis_period (axis_id, pos, start_ts, end_ts, years_presented)
                      VALUES (?, ?, make_timestamp(?), make_timestamp(?), ?)",
-                    duckdb::params![new_id, pos as i32, p.start_ts, p.end_ts, p.years_presented],
+                    duckdb::params![
+                        new_id,
+                        pos as i32,
+                        p.start_ts,
+                        p.end_ts,
+                        p.years_presented.map(canonical_axis_f64).transpose()?
+                    ],
                 )?;
             }
         }

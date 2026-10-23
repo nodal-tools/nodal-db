@@ -24,6 +24,13 @@ struct VVector {
     /// 0x7ff8000000000000 (spec §3.3.1) — it accepts NaN, never rejects it.
     #[serde(default)]
     nan_at: Vec<usize>,
+    /// `[flat_index, "0x…"]` pairs: set the measure at `flat_index` to the f64
+    /// with exactly these bits before encoding (sign/signaling/payload NaN
+    /// variants JSON cannot spell). Same indexing as `nan_at`. The placeholder
+    /// in `values` at such a slot is a non-NaN number, so a runner that ignores
+    /// this field fails its hash check instead of passing.
+    #[serde(default)]
+    nan_bits_at: Vec<(usize, String)>,
     expected_canonical_hex: Option<String>,
     expected_hash_u64: Option<u64>,
 }
@@ -60,6 +67,14 @@ fn vectors_dir() -> PathBuf {
         .join("conformance/value_vectors")
 }
 
+/// `"0x7ff0000000000001"` -> the f64 with exactly those bits.
+fn from_hex_bits(s: &str) -> f64 {
+    let h = s
+        .strip_prefix("0x")
+        .expect("nan_bits_at bits must be 0x-prefixed hex");
+    f64::from_bits(u64::from_str_radix(h, 16).expect("nan_bits_at bits must be hex"))
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -91,13 +106,11 @@ fn value_vectors_match() {
         let cells_owned: Vec<(Vec<i32>, ScalarValue)>;
         let content = match &v.content {
             ContentSpec::Scalar { value } => {
-                scalar_owned = if v.nan_at.is_empty() {
-                    value.clone()
-                } else {
-                    match value {
-                        ScalarValue::Float(_) => ScalarValue::Float(f64::NAN),
-                        _ => panic!("{name}: nan_at on a Scalar needs a Float measure"),
-                    }
+                scalar_owned = match (value, v.nan_at.as_slice(), v.nan_bits_at.as_slice()) {
+                    (_, [], []) => value.clone(),
+                    (ScalarValue::Float(_), [_], []) => ScalarValue::Float(f64::NAN),
+                    (ScalarValue::Float(_), [], [(0, b)]) => ScalarValue::Float(from_hex_bits(b)),
+                    _ => panic!("{name}: nan_at/nan_bits_at on a Scalar need one Float index 0"),
                 };
                 ValueContent::Scalar(&scalar_owned)
             }
@@ -109,6 +122,9 @@ fn value_vectors_match() {
                     let mut vv = values.clone();
                     for &i in &v.nan_at {
                         vv[i] = f64::NAN;
+                    }
+                    for (i, b) in &v.nan_bits_at {
+                        vv[*i] = from_hex_bits(b);
                     }
                     vv
                 };

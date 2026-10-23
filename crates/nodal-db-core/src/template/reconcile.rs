@@ -2573,7 +2573,8 @@ fn insert_member_row(conn: &Connection, c: i64, row: &MemberRow) -> Result<(), D
             row.description,
             row.semantic_link,
             row.value_kind,
-            row.v_float,
+            // A row the writer binds from client-held floats is canonical.
+            row.v_float.map(crate::encoding::canonical_value_f64),
             row.v_int,
             row.v_bool,
             row.v_str,

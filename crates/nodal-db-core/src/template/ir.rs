@@ -49,6 +49,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::encoding::canonical_value_f64;
 use crate::encoding::content_hash as xxh3_hash;
 use crate::error::DbError;
 use crate::types::{fold, ScalarValue};
@@ -472,8 +473,9 @@ impl Lit {
     /// consumes, or an error string.
     pub fn resolve(&self, kind: &str) -> Result<ScalarValue, String> {
         match (kind, self) {
-            ("float", Lit::Float(f)) => Ok(ScalarValue::Float(*f)),
-            ("float", Lit::Int(i)) => Ok(ScalarValue::Float(*i as f64)),
+            // Every float the template produces is canonical (-0.0 -> +0.0).
+            ("float", Lit::Float(f)) => Ok(ScalarValue::Float(canonical_value_f64(*f))),
+            ("float", Lit::Int(i)) => Ok(ScalarValue::Float(canonical_value_f64(*i as f64))),
             ("int", Lit::Int(i)) => Ok(ScalarValue::Int(*i)),
             ("bool", Lit::Bool(b)) => Ok(ScalarValue::Bool(*b)),
             ("string", Lit::Str(s)) => Ok(ScalarValue::Str(s.clone())),

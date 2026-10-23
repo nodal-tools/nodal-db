@@ -69,6 +69,7 @@ pub fn write_value(
     opts: &WriteOptions,
     parameter_type_id: Option<i64>,
 ) -> Result<WriteOutcome, DbError> {
+    debug_assert_value_floats_canonical(value);
     let retained = keeps_content(opts);
 
     // --- 1. Resolve the value's axes (array/long tiers) via content-verified
@@ -1020,16 +1021,61 @@ fn list_value_sql(n: usize) -> String {
     s
 }
 
+/// Value floats reach `write_value` already canonical (the pipeline's
+/// `canon::read_value` normalizes them); `history` never re-canonicalizes. A
+/// hand-built `CanonicalValue` (tests, out-of-contract tools) holding `-0.0` or
+/// a non-canonical NaN is caught here in debug builds.
+fn debug_assert_value_floats_canonical(value: &CanonicalValue) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let ok = |x: f64| x.to_bits() == crate::encoding::canonical_value_f64(x).to_bits();
+    let scalar_ok = |m: &ScalarValue| match m {
+        ScalarValue::Float(x) => ok(*x),
+        _ => true,
+    };
+    let all_ok = match &value.shape {
+        ShapedData::Scalar(m) => scalar_ok(m),
+        ShapedData::Array(vals) => vals.iter().all(|x| ok(*x)),
+        ShapedData::Long(rows) => rows.iter().all(|r| scalar_ok(&r.value)),
+    };
+    debug_assert!(
+        all_ok,
+        "write_value got a non-canonical value float (-0.0 or a non-canonical NaN); \
+         values must come from the canonicalization pipeline"
+    );
+}
+
+/// `v_min` / `v_max` pruning metadata under DuckDB's total order, where NaN
+/// sorts above every number: any NaN makes `v_max` NaN, and an all-NaN array
+/// has `v_min` NaN too. (Skipping NaN would let a range-pruned query skip an
+/// array whose NaN cells match, and `audit_array_integrity`, which compares
+/// against `list_aggregate(values, 'min'/'max')`, would flag it.) Inputs are
+/// canonical, so a NaN result is the canonical NaN.
 fn min_max(vals: &[f64]) -> (f64, f64) {
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
+    let mut any_nan = false;
+    let mut any_num = false;
     for &v in vals {
+        if v.is_nan() {
+            any_nan = true;
+            continue;
+        }
+        any_num = true;
         if v < lo {
             lo = v;
         }
         if v > hi {
             hi = v;
         }
+    }
+    let nan = f64::from_bits(crate::encoding::CANONICAL_NAN_BITS);
+    if any_nan {
+        hi = nan;
+    }
+    if !any_num {
+        lo = nan;
     }
     (lo, hi)
 }

@@ -1572,3 +1572,143 @@ fn array_id_is_stable_across_replace_and_copied_into_hist() {
     assert_eq!(hist, vec![(live_id, 1), (live_id, 2)]);
     assert_eq!(audit, 0);
 }
+
+// --- error order and sequence ids (set_based_scalar_write_PLAN §3.5, §5.3) --
+//
+// The messages below were captured from the per-key entity resolver and
+// scalar writer (before the set-based switch); the batched resolver must
+// raise the same first error with the same text.
+
+/// An N-D class `flow` (one dimension over `node`) holding one existing
+/// entity `f0` created by direct SQL, so `f0` resolves and any other name
+/// is missing.
+fn nd_class_with_f0(db: &std::path::Path) {
+    let conn = Connection::open(db).unwrap();
+    let node: i64 = conn
+        .query_row(
+            "INSERT INTO entity_class (name, valid_from_commit) VALUES ('node', 1) RETURNING id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let flow: i64 = conn
+        .query_row(
+            "INSERT INTO entity_class (name, valid_from_commit) VALUES ('flow', 1) RETURNING id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO entity_class_dimension \
+           (entity_class_id, position, dimension_class_id, valid_from_commit) \
+         VALUES (?, 1, ?, 1)",
+        duckdb::params![flow, node],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entity (entity_class_id, name, valid_from_commit) VALUES (?, 'f0', 1)",
+        duckdb::params![flow],
+    )
+    .unwrap();
+    conn.close().unwrap();
+}
+
+fn write_err(db: &std::path::Path, class: &str, entities: &[&str], vals: &[f64]) -> String {
+    write_parameter(
+        db,
+        class,
+        "p",
+        "Base",
+        scalar_batch2(entities, vals),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect_err("must fail")
+    .to_string()
+}
+
+/// The first error of an N-D batch is the per-entity one in order: a canon
+/// error of an entity BEFORE the first missing name wins over the N-D
+/// refusal; a canon error AFTER it does not.
+#[test]
+fn nd_batch_error_order_matches_per_entity_order() {
+    let (_dir, db) = fresh_db();
+    nd_class_with_f0(&db);
+    // f0 (existing) has two values (a canon error), f1 is missing.
+    let msg = write_err(&db, "flow", &["f0", "f0", "f1"], &[1.0, 2.0, 3.0]);
+    assert_eq!(
+        msg,
+        "rank-0 scalar must have exactly one non-null value, got 2"
+    );
+    // f0 is fine, f1 is missing (the N-D refusal), f2 has a canon error.
+    let msg = write_err(
+        &db,
+        "flow",
+        &["f0", "f1", "f2", "f2"],
+        &[1.0, 2.0, 3.0, 4.0],
+    );
+    assert_eq!(
+        msg,
+        "cannot auto-create entity \"f1\" in 1-dimensional class \"flow\": an N-D entity \
+         needs explicit membership (entity_element rows); create it first"
+    );
+    assert_eq!(count(&db, "SELECT count(*) FROM value_scalar"), 0);
+    assert_eq!(count(&db, "SELECT count(*) FROM entity"), 1);
+}
+
+/// A failed commit that had auto-created entities leaves no trace in the
+/// ids a later successful commit mints: the rolled-back sequence
+/// consumption never reaches the file (the core opens a fresh database
+/// instance per transaction).
+#[test]
+fn entity_ids_after_a_failed_commit_are_contiguous() {
+    let (_dir, db) = fresh_db();
+    write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch2(&["a", "b"], &[1.0, 2.0]),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "seed",
+    )
+    .expect("seed");
+    // Four missing names; the second has two values (a canon error).
+    let msg = write_err(
+        &db,
+        "node",
+        &["m0", "m1", "m1", "m2", "m3"],
+        &[1.0, 2.0, 3.0, 4.0, 5.0],
+    );
+    assert_eq!(
+        msg,
+        "rank-0 scalar must have exactly one non-null value, got 2"
+    );
+    let r = write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch("c", 3.0),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "after",
+    )
+    .expect("write after failure");
+    let minted: Vec<i64> = r
+        .warnings
+        .iter()
+        .filter(|w| w.object_type == "entity")
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(minted, vec![3], "the next id after a, b is 3");
+    assert_eq!(
+        count(&db, "SELECT max(id) FROM entity WHERE cur_name = 'c'"),
+        3
+    );
+}

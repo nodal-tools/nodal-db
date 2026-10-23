@@ -532,12 +532,28 @@ pub(crate) fn check_catalog(
     Ok(())
 }
 
+/// The catalog alias every rebuild attaches its source under. Deliberately
+/// unlikely as a file stem: DuckDB names a database's default catalog after
+/// its file name up to the first dot, so the temp `src.duckdb.compact.1.tmp`
+/// is catalog `src`, and an alias equal to that name made `ATTACH` fail
+/// ("database with name ... already exists"). [`attach_source_ro`] refuses
+/// the remaining collision loudly.
+pub(crate) const SRC: &str = "nodal_rebuild_source";
+
 /// ATTACH the source read-only on the temp connection, mapping a busy file lock
 /// to [`DbError::Busy`] (same UX as a busy commit).
 pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(), DbError> {
     // Single-quote-escape the path for the SQL literal.
+    let current: String = conn.query_row("SELECT current_database()", [], |r| r.get(0))?;
+    if current == SRC {
+        return Err(DbError::Api(format!(
+            "the database file name {:?} collides with the rebuild's internal catalog \
+             alias; rename the file",
+            src_path.display().to_string()
+        )));
+    }
     let lit = src_path.display().to_string().replace('\'', "''");
-    let sql = format!("ATTACH '{lit}' AS src (READ_ONLY)");
+    let sql = format!("ATTACH '{lit}' AS {SRC} (READ_ONLY)");
     conn.execute_batch(&sql).map_err(|e| {
         if e.to_string().contains("Could not set lock") {
             DbError::Busy { attempts: 1 }
@@ -596,9 +612,11 @@ pub(crate) fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
         // Source state for THIS sequence (B2b: filter by database_name).
         let row: Option<SeqState> = conn
             .query_row(
-                "SELECT last_value, start_value, increment_by, min_value, max_value, cycle \
-                 FROM duckdb_sequences() \
-                 WHERE database_name = 'src' AND sequence_name = ?",
+                &format!(
+                    "SELECT last_value, start_value, increment_by, min_value, max_value, cycle \
+                     FROM duckdb_sequences() \
+                     WHERE database_name = '{SRC}' AND sequence_name = ?"
+                ),
                 [&seq],
                 |r| {
                     Ok(SeqState {

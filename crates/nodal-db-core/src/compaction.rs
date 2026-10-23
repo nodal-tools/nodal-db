@@ -56,7 +56,8 @@ use crate::conn::{open_with_retry, path_lock};
 use crate::error::DbError;
 use crate::rebuild::{
     assert_temp_schema_version, attach_source_ro, check_catalog, cluster_order,
-    discover_real_columns, fsync_dir, fsync_file, q, remove_temp, restore_sequences, TABLE_ORDER,
+    discover_real_columns, fsync_dir, fsync_file, q, remove_temp, restore_sequences, SRC,
+    TABLE_ORDER,
 };
 use crate::schema_init::init_schema;
 
@@ -330,7 +331,7 @@ fn repack_into(
         // unaffected.
         let order = cluster_order(table, cols)?;
         let sql = format!(
-            "INSERT INTO {t} ({list}) SELECT {list} FROM src.{t}{order}",
+            "INSERT INTO {t} ({list}) SELECT {list} FROM {SRC}.{t}{order}",
             t = q(table)
         );
         conn.execute_batch(&sql)?;
@@ -346,7 +347,7 @@ fn repack_into(
     let rows_per_table = self_check(conn, &real_cols)?;
 
     // Detach the source, then settle blocks and read the final count.
-    conn.execute_batch("DETACH src")?;
+    conn.execute_batch(&format!("DETACH {SRC}"))?;
     conn.execute_batch("CHECKPOINT")?;
     let _ = temp_path; // (temp file identity is the caller's concern)
     let blocks_after: i64 =
@@ -383,7 +384,7 @@ fn self_check(
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
             })?)
         };
-        let (src_c, src_h) = probe(&format!("src.{}", q(table)))?;
+        let (src_c, src_h) = probe(&format!("{SRC}.{}", q(table)))?;
         let (tmp_c, tmp_h) = probe(&q(table))?;
         if src_c != tmp_c || src_h != tmp_h {
             return Err(DbError::Api(format!(
@@ -557,7 +558,7 @@ mod tests {
             }
             let list = cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
             let _ = conn.execute_batch(&format!(
-                "INSERT INTO {t} ({list}) SELECT {list} FROM src.{t}",
+                "INSERT INTO {t} ({list}) SELECT {list} FROM {SRC}.{t}",
                 t = q(table)
             ));
         }

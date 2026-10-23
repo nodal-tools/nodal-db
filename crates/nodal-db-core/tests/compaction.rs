@@ -836,3 +836,19 @@ fn compact_twice_keeps_unused_sequences_in_place() {
         0
     );
 }
+
+/// A database file whose name starts with `src.`: the rebuild's temp
+/// (`src.duckdb.compact.<pid>.tmp`) gets DuckDB's default catalog name `src`,
+/// which used to collide with the alias the source was attached under
+/// ("database with name src already exists").
+#[test]
+fn compact_a_file_named_src() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("src.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    write_scalar(&db, "Widget", "size", "Base", "w1", 1.0);
+    let id = db_identity(&db).unwrap();
+    compact(&db).expect("compaction of src.duckdb");
+    assert_eq!(db_identity(&db).unwrap(), id);
+    write_scalar(&db, "Widget", "size", "Base", "w1", 2.0);
+}

@@ -1052,6 +1052,13 @@ fn t9_refusals_leave_no_dest_and_no_temp() {
         temps_in(dir.path())
     );
 
+    // Files named like a catalog alias still work (DuckDB names a file's
+    // catalog after its name up to the first dot).
+    let src_named = dir.path().join("src.duckdb");
+    extract(src, &src_named, &opts("t")).expect("dest named src.duckdb");
+    let again = dir.path().join("src.again.duckdb");
+    extract(&src_named, &again, &opts("t")).expect("source named src.duckdb");
+
     // An orphan temp from a crashed extract is swept by the next one.
     let orphan = dir.path().join("fresh.duckdb.extract.999999.0.tmp");
     std::fs::write(&orphan, b"orphan").unwrap();

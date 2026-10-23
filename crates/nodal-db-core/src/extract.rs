@@ -44,7 +44,7 @@
 //!   holds the source's file lock through the copy (cross-process exclusion:
 //!   a concurrent writer sees `Busy` for the duration, as with compaction).
 //! - **Table macros are never called through the attached catalog.** A
-//!   table macro reached as `src.some_macro(…)` binds its body's unqualified
+//!   table macro reached as `{SRC}.some_macro(…)` binds its body's unqualified
 //!   names in the caller's default catalog and silently reads the wrong
 //!   database (pinned by a tripwire test). Views bind to their own catalog,
 //!   so the self-check compares `src.<view>` with the temp's view.
@@ -61,7 +61,7 @@ use crate::error::DbError;
 use crate::rebuild::{
     assert_temp_schema_version, attach_source_ro, check_catalog, check_selection, cluster_order,
     discover_real_columns, fsync_dir, fsync_file, q, remove_temp, restore_sequences, selection_for,
-    Selection, TABLE_ORDER,
+    Selection, SRC, TABLE_ORDER,
 };
 use crate::schema_init::init_schema;
 
@@ -299,7 +299,10 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
     attach_source_ro(conn, src)?;
 
     let source_identity = preflight_source(conn)?;
-    let src_max: i64 = conn.query_row("SELECT max(id) FROM src.\"commit\"", [], |r| r.get(0))?;
+    let src_max: i64 =
+        conn.query_row(&format!("SELECT max(id) FROM {SRC}.\"commit\""), [], |r| {
+            r.get(0)
+        })?;
     let mode = match opts.as_of {
         None => Mode::Head,
         Some(n) => Mode::AsOf(n),
@@ -347,19 +350,19 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
     // ---- E, the new identity row, the horizon marker ----------------------
     let src_rows: u64 = TABLE_ORDER
         .iter()
-        .map(|t| count(conn, &format!("SELECT count(*) FROM src.{}", q(t))))
+        .map(|t| count(conn, &format!("SELECT count(*) FROM {SRC}.{}", q(t))))
         .sum::<Result<u64, DbError>>()?;
     let carried: u64 = rows_per_table.iter().map(|(_, n)| n).sum();
     let rows_removed = src_rows.saturating_sub(carried);
-    let axes_src = count(conn, "SELECT count(*) FROM src.axis")?;
+    let axes_src = count(conn, &format!("SELECT count(*) FROM {SRC}.axis"))?;
     let axes_kept = count(conn, "SELECT count(*) FROM axis")?;
     let cells = "coalesce(len(\"values\"), len(values_int), 0)";
     let cells_src = count(
         conn,
         &format!(
-            "SELECT CAST((SELECT coalesce(sum({cells}), 0) FROM src.value_array) \
-                  + (SELECT coalesce(sum({cells}), 0) FROM src.value_array_hist) \
-                  + (SELECT coalesce(sum({cells}), 0) FROM src.definition_value_array) \
+            "SELECT CAST((SELECT coalesce(sum({cells}), 0) FROM {SRC}.value_array) \
+                  + (SELECT coalesce(sum({cells}), 0) FROM {SRC}.value_array_hist) \
+                  + (SELECT coalesce(sum({cells}), 0) FROM {SRC}.definition_value_array) \
                   AS BIGINT)"
         ),
     )?;
@@ -432,7 +435,9 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
         }
     };
 
-    conn.execute_batch("DROP TABLE temp._extract_axes; DETACH src; CHECKPOINT;")?;
+    conn.execute_batch(&format!(
+        "DROP TABLE temp._extract_axes; DETACH {SRC}; CHECKPOINT;"
+    ))?;
 
     Ok(ExtractReport {
         source_identity,
@@ -456,8 +461,10 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
 fn preflight_source(conn: &Connection) -> Result<String, DbError> {
     let versions: Vec<String> = strings(
         conn,
-        "SELECT value FROM src.metadata \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+        &format!(
+            "SELECT value FROM {SRC}.metadata \
+             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL"
+        ),
     )
     .map_err(|e| {
         DbError::Api(format!(
@@ -472,8 +479,10 @@ fn preflight_source(conn: &Connection) -> Result<String, DbError> {
     }
     let ids = strings(
         conn,
-        "SELECT value FROM src.metadata \
-         WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",
+        &format!(
+            "SELECT value FROM {SRC}.metadata \
+             WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL"
+        ),
     )?;
     if ids.len() != 1 {
         return Err(DbError::Api(format!(
@@ -502,7 +511,7 @@ fn preflight_as_of(
 ) -> Result<(), DbError> {
     if count(
         conn,
-        &format!("SELECT count(*) FROM src.\"commit\" WHERE id = {n}"),
+        &format!("SELECT count(*) FROM {SRC}.\"commit\" WHERE id = {n}"),
     )? != 1
     {
         return Err(DbError::Api(format!(
@@ -512,7 +521,7 @@ fn preflight_as_of(
     let versions = strings(
         conn,
         &format!(
-            "SELECT value FROM src.metadata WHERE lower(name) = 'schema_version' \
+            "SELECT value FROM {SRC}.metadata WHERE lower(name) = 'schema_version' \
              AND valid_from_commit <= {n} AND (valid_to_commit IS NULL OR valid_to_commit > {n})"
         ),
     )?;
@@ -525,7 +534,7 @@ fn preflight_as_of(
     let later = strings(
         conn,
         &format!(
-            "SELECT CAST(at_commit AS VARCHAR) FROM src.erasure_marker \
+            "SELECT CAST(at_commit AS VARCHAR) FROM {SRC}.erasure_marker \
              WHERE at_commit > {n} ORDER BY at_commit"
         ),
     )?;
@@ -549,7 +558,7 @@ fn preflight_as_of(
             )
         };
         legs.push(format!(
-            "SELECT parameter_definition_id FROM src.{} WHERE {at_n} AND NOT content_retained",
+            "SELECT parameter_definition_id FROM {SRC}.{} WHERE {at_n} AND NOT content_retained",
             q(table)
         ));
     }
@@ -557,8 +566,8 @@ fn preflight_as_of(
         conn,
         &format!(
             "SELECT DISTINCT ec.name || '.' || pd.name FROM ({}) s \
-             JOIN src.parameter_definition pd ON pd.id = s.parameter_definition_id \
-             JOIN src.entity_class ec ON ec.id = pd.entity_class_id \
+             JOIN {SRC}.parameter_definition pd ON pd.id = s.parameter_definition_id \
+             JOIN {SRC}.entity_class ec ON ec.id = pd.entity_class_id \
              QUALIFY row_number() OVER (PARTITION BY s.parameter_definition_id \
                                         ORDER BY pd.version DESC, ec.version DESC) = 1 \
              ORDER BY 1",
@@ -631,26 +640,26 @@ impl Sel<'_> {
         let plain = list(self.cols(table));
         let h = self.h;
         Ok(match selection_for(table)? {
-            Selection::CommitLog => format!("SELECT {plain} FROM src.{t} t WHERE t.\"id\" <= {h}"),
+            Selection::CommitLog => format!("SELECT {plain} FROM {SRC}.{t} t WHERE t.\"id\" <= {h}"),
             Selection::Trace if table == "run" => match self.mode {
-                Mode::Head => format!("SELECT {plain} FROM src.{t} t"),
+                Mode::Head => format!("SELECT {plain} FROM {SRC}.{t} t"),
                 // X14: a run whose outputs landed after N did not exist at N.
                 // `run` has no creation edge, so this is an approximation,
                 // narrowed by requiring its result alternative and tool entity
                 // to have existed by N.
                 Mode::AsOf(n) => format!(
-                    "SELECT {plain} FROM src.{t} t \
+                    "SELECT {plain} FROM {SRC}.{t} t \
                      WHERE t.\"input_commit_id\" <= {n} \
                        AND (t.\"produced_at_commit_id\" IS NULL OR t.\"produced_at_commit_id\" <= {n}) \
-                       AND EXISTS (SELECT 1 FROM src.\"alternative\" a \
+                       AND EXISTS (SELECT 1 FROM {SRC}.\"alternative\" a \
                                    WHERE a.\"id\" = t.\"result_alternative_id\" \
                                      AND a.\"valid_from_commit\" <= {n}) \
-                       AND EXISTS (SELECT 1 FROM src.\"entity\" x \
+                       AND EXISTS (SELECT 1 FROM {SRC}.\"entity\" x \
                                    WHERE x.\"id\" = t.\"tool_entity_id\" \
                                      AND x.\"valid_from_commit\" <= {n})"
                 ),
             },
-            Selection::Trace => format!("SELECT {plain} FROM src.{t} t WHERE t.\"at_commit\" <= {h}"),
+            Selection::Trace => format!("SELECT {plain} FROM {SRC}.{t} t WHERE t.\"at_commit\" <= {h}"),
             Selection::Versioned => {
                 let main_list = self.versioned_list(table);
                 let live = self.live("t");
@@ -660,13 +669,13 @@ impl Sel<'_> {
                 } else {
                     ""
                 };
-                let mut s = format!("SELECT {main_list} FROM src.{t} t WHERE {live}{extra}");
+                let mut s = format!("SELECT {main_list} FROM {SRC}.{t} t WHERE {live}{extra}");
                 if let Some(refs) = self.trace_refs(table)? {
                     let live_x = self.live("x");
                     s.push_str(&format!(
-                        " UNION ALL SELECT {plain} FROM src.{t} t \
+                        " UNION ALL SELECT {plain} FROM {SRC}.{t} t \
                          WHERE t.\"id\" IN ({refs}) AND t.\"valid_from_commit\" <= {h} \
-                           AND NOT EXISTS (SELECT 1 FROM src.{t} x \
+                           AND NOT EXISTS (SELECT 1 FROM {SRC}.{t} x \
                                            WHERE x.\"id\" = t.\"id\" AND {live_x}) \
                          QUALIFY row_number() OVER \
                            (PARTITION BY t.\"id\" ORDER BY t.\"version\" DESC) = 1"
@@ -675,22 +684,22 @@ impl Sel<'_> {
                 s
             }
             Selection::ArrayLive => match self.mode {
-                Mode::Head => format!("SELECT {plain} FROM src.{t} t"),
+                Mode::Head => format!("SELECT {plain} FROM {SRC}.{t} t"),
                 // Promotion: the hist row valid at N becomes the live row,
                 // keeping its array_id (exactly one row per key is valid at N).
                 Mode::AsOf(n) => format!(
-                    "SELECT {plain} FROM src.{t} t WHERE t.\"valid_from_commit\" <= {n} \
-                     UNION ALL SELECT {plain} FROM src.\"value_array_hist\" t \
+                    "SELECT {plain} FROM {SRC}.{t} t WHERE t.\"valid_from_commit\" <= {n} \
+                     UNION ALL SELECT {plain} FROM {SRC}.\"value_array_hist\" t \
                      WHERE t.\"valid_from_commit\" <= {n} AND t.\"valid_to_commit\" > {n}"
                 ),
             },
-            Selection::ArrayHist => format!("SELECT {plain} FROM src.{t} t WHERE FALSE"),
+            Selection::ArrayHist => format!("SELECT {plain} FROM {SRC}.{t} t WHERE FALSE"),
             Selection::Axis => format!(
-                "SELECT {plain} FROM src.{t} t \
+                "SELECT {plain} FROM {SRC}.{t} t \
                  WHERE t.\"id\" IN (SELECT axis_id FROM temp._extract_axes)"
             ),
             Selection::AxisChild => format!(
-                "SELECT {plain} FROM src.{t} t \
+                "SELECT {plain} FROM {SRC}.{t} t \
                  WHERE t.\"axis_id\" IN (SELECT axis_id FROM temp._extract_axes)"
             ),
         })
@@ -783,7 +792,7 @@ fn self_check_derived_views(conn: &Connection) -> Result<(), DbError> {
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
             )?)
         };
-        let a = probe(&format!("src.{}", q(view)))?;
+        let a = probe(&format!("{SRC}.{}", q(view)))?;
         let b = probe(&q(view))?;
         if a != b {
             return Err(DbError::Api(format!(

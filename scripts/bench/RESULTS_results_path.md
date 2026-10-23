@@ -11,6 +11,7 @@ It is a recording benchmark: nothing here gates a build.
 |---|---|---|
 | `crates/nodal-db-cli/benches/results_path.rs` | Ingest (core API loop and Arrow-IPC import), file size, bind cost of the array INSERT, read paths, the `value_array_cells` A/B gate (`cellsgate`), row-group steel-man, long-tier reads. DuckDB as bundled by the core. | `just bench-results` (full: ~30-40 min on 1.5.5, 21 min on current `main`, §6) or `just bench-results --quick` (~1 min) |
 | `scripts/bench/raw_duckdb_layout.py` | Dense `DOUBLE[]` lists against a lean sorted `(k, pos, v)` long table in plain DuckDB, no nodal-db schema. Any DuckDB version. | runs after the Rust bench in `just bench-results`; alone: `just bench-raw-layout <python> [--quick]` |
+| `scripts/bench/long_tier_size_breakdown.py` | Where the long tier's bytes go: `value_long` built from the real schema, then without its one-current unique index, its triple index, its foreign keys and its `i1_dt` column, against a lean table (§7.1). Optional cross-check on a core-written file. | `just bench-long-size [--core-db <file>]` (~15 s) |
 | `scripts/bench/surrogate_key_variant.py` | Superseded by schema 0.4 (§4b); needs a 0.3-schema input file. The real `value_array` (composite primary key) against a copy with a single-column `array_id` key; the long tier's equivalent; commit cost after an array replace. Any DuckDB version. | `just bench-sk-variant <python> --db <file> [--long-db <file>] [--commit-probe] [--commit-probe-native]` (input files: see the script's docstring) |
 
 All data is deterministic (splitmix64, fixed seed); the raw-DuckDB script
@@ -32,7 +33,9 @@ with no phase argument the bench prints its usage and exits.
 | DuckDB (Python) | 1.5.5 (project `.venv`), 2.0.0 (throwaway venv); Python 3.12.3, numpy 2.5, pyarrow 25 / 26 |
 
 Section 6 is the full re-run on current `main` (DuckDB 2.0.0) and has its
-own run conditions; it is the current set of figures. Sections 1-5 are kept
+own run conditions; it is the current set of figures. Section 7 adds the
+long-tier size breakdown and a one-year-of-minutes array, measured later
+the same day. Sections 1-5 are kept
 as recorded.
 
 **Load caveat (sections 1-5).** The machine was shared with other workloads during these
@@ -498,6 +501,85 @@ ROW_GROUP_SIZE 2048 595.3 MiB (7.12), long 649.0 MiB (7.77), long_int
 
 Reproduces §3's 2.0.0 column within a few percent: the conclusions of §3
 stand unchanged.
+
+## 7. Long-tier size breakdown and one very long array (2026-10-24)
+
+Two additions on `main` at `257812a` (DuckDB 2.0.0), on the same AMD Ryzen
+9 5900XT host as §6 (Linux 6.14.0-37-generic). The machine was shared:
+1-min load average 3.4-5.5 during §7.1 and 9-14 during §7.2.
+
+### 7.1 Where the long tier's bytes go
+
+`scripts/bench/long_tier_size_breakdown.py` (`just bench-long-size`;
+Python duckdb 2.0.0 from the project `.venv`, numpy 2.5.4, pyarrow
+26.0.0, Python 3.12.3). It builds the real schema with `schema/build.py`,
+writes the long-tier shape of §6.1 (1 000 series × 876 integer cells, the
+same values as `results_path.rs`) into `value_long` the way the one-commit
+import does (one transaction, one INSERT per series, `SET threads = 1`),
+and removes one part of the schema per variant. Sizes are DuckDB's used
+blocks after CHECKPOINT, net of the same file before the insert; one
+block is 256 KiB, so the resolution is about 0.3 B/cell. Three runs gave
+identical figures.
+
+| Variant | Used B/cell |
+|---|---|
+| A: schema as built (foreign keys, `one_current_long`, `ix_value_long_triple`) | 69.13 |
+| B: A without `one_current_long` | 11.67 |
+| C: B without `ix_value_long_triple` | 11.07 |
+| D: C without the foreign keys (`value_long` re-created from the catalog DDL, REFERENCES removed) | 10.47 |
+| E: D without the `i1_dt` accelerator column | 4.19 |
+| L: lean `(k INTEGER, pos INTEGER, v BIGINT)`, no nodal-db schema | 4.19 |
+
+| Part | B/cell | Share of 69.13 |
+|---|---|---|
+| `one_current_long`, the 7-column one-current unique index | 57.46 | 83 % |
+| `i1_dt`, the copy of the time coordinate | 6.28 | 9 % |
+| keys, positions, values and all other columns (variant E) | 4.19 | 6 % |
+| `ix_value_long_triple` | 0.60 | 1 % |
+| foreign keys (commit, axis) | 0.60 | 1 % |
+
+- With the indexes, foreign keys and `i1_dt` removed, `value_long` stores
+  this shape in the same 4.19 B/cell as the lean table (§3, §6.3). The
+  history columns, the empty typed value columns and the unused index
+  columns cost nothing measurable: every one of them is stored as a
+  constant segment (`pragma_storage_info` compression `Constant`).
+- **Cross-check on a file written by the core** (`--core-db` on the
+  `ipc_long_r0.db` kept from a `results_path.rs -- long` run, net of an
+  empty schema): 77.51 B/cell as written; 20.05 without
+  `one_current_long` (the same 57.46 B/cell); 19.45 also without
+  `ix_value_long_triple`; 8.38 with `value_long` dropped altogether. So
+  `value_long` and its indexes account for 69.13 B/cell in the core's
+  file too, the same as variant A. The remaining 8.4 B/cell are the other
+  tables the import fills (1 000 entities, the commit, the parameter
+  definition, the axis, ...) and their indexes: about 7 MiB in total for
+  this file, which does not grow with the number of cells per series.
+  This is the difference between 69 B/cell here and the 78 B/cell net
+  file size of §6.1.
+
+### 7.2 One very long array through the core
+
+`results_path.rs` phase `bigarray` (`cargo bench -p nodal-db-cli --bench
+results_path -- bigarray`; also part of `all`; bundled DuckDB
+`v2.0.0-dev88614`, `bench` profile). One float series of a year at
+one-minute resolution (525 600 values, full-precision noise) is written
+through `api::write_parameter` into a fresh file, then replaced once.
+Arrays are one row, so the whole list is canonicalized and bound as one
+parameter. Peak memory is the resident-set high-water mark during the call
+minus the RSS at its start (Linux `/proc/self/clear_refs`), with the input
+batch built before the call; it includes DuckDB's own allocations. Two
+invocations of three fresh files each, load average 9-14:
+
+| | Wall per call, commit included | Peak RSS above the start |
+|---|---|---|
+| First write | 587-796 ms | 165-190 MiB |
+| Replace (pre-image copy to `value_array_hist`, in-place update) | 1 309-1 560 ms | 138-180 MiB |
+
+That is about 1.1-1.5 µs per value for the first write and 2.5-3.0 µs per
+value for the replace, somewhat more per value than the 8 760-value
+array figures of §4c (0.9 and 1.8 µs, 20 values per commit, at lower
+load). An earlier probe of the bind step alone, outside the core (176 ms,
+135 MB peak, `specs/Done/appender_write_path_PLAN.md` C7), is superseded
+by these end-to-end figures.
 
 ## Mapping to the earlier Set B figures
 

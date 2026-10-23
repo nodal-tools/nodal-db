@@ -57,6 +57,12 @@ bench-results *ARGS:
 bench-raw-layout python=py *ARGS:
     {{python}} scripts/bench/raw_duckdb_layout.py {{ARGS}}
 
+# Opt-in, ~15 s; results: scripts/bench/RESULTS_results_path.md §7.1. Optional
+# cross-check on a core-written file: `just bench-long-size --core-db <file>`.
+# Long-tier size breakdown (value_long from schema/*.sql, one part removed per variant).
+bench-long-size *ARGS:
+    {{py}} scripts/bench/long_tier_size_breakdown.py {{ARGS}}
+
 # Input files: `NODAL_RESULTS_DIR=/tmp/nr NODAL_RESULTS_KEEP=1 cargo bench -p nodal-db-cli
 # --bench results_path -- dense10k long`, then `--db /tmp/nr/ipc_dense_10p_r0.db`.
 # Surrogate-key value_array variant + commit-after-replace probe (any duckdb Python;

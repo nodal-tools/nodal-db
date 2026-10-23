@@ -21,6 +21,10 @@
 //!   2. **Bind probe** — the array INSERT's statement mechanics in isolation:
 //!      the former 8760-placeholder `list_value(?,…)::DOUBLE[]` form next to
 //!      the one bound `?::DOUBLE[]` list parameter `history.rs` uses now.
+//!      Next to it, the **big array** phase (`bigarray`): one 525 600-value
+//!      float series (a year of minutes) written and then replaced through
+//!      `write_parameter`, with wall time and peak RSS above the call's
+//!      start (Linux).
 //!   3. **Reads** on the 10k-series DBs: one week (168 points) x 20 series
 //!      via four SQL shapes, plus one series' whole value / week slice /
 //!      single cell / min-max only. Cold (fresh per-operation RO connection,
@@ -54,7 +58,7 @@
 //! With NO phase argument the bench prints usage and exits, so a bare
 //! workspace `cargo bench` (the gate) does not start a half-hour run.
 //! Phases: dense1k, dense10k, dense10k-api, dense10k-ipc, long, longreads,
-//! bindprobe, reads, cellsgate, rowgroup. `reads`/`cellsgate`/`rowgroup` need
+//! bindprobe, bigarray, reads, cellsgate, rowgroup. `reads`/`cellsgate`/`rowgroup` need
 //! the 10k DBs: run them with `dense10k` (as `all` does), or across invocations via
 //! NODAL_RESULTS_DIR=<fixed workdir> + NODAL_RESULTS_KEEP=1 on the ingest
 //! run, then NODAL_RESULTS_DB=<kept .db> (and NODAL_RESULTS_LONG_DB for
@@ -877,6 +881,112 @@ fn phase_bindprobe() -> (f64, f64) {
     (prep.median, exec.median)
 }
 
+/// Linux peak-RSS probe: reset the high-water mark (`/proc/self/clear_refs`
+/// "5", Linux >= 4.0) and return the current RSS in bytes; `peak_rss` then
+/// reads the high-water mark since the reset. None where unsupported.
+fn reset_peak_rss() -> Option<u64> {
+    fs::write("/proc/self/clear_refs", "5").ok()?;
+    proc_status_kib("VmRSS:").map(|k| k * 1024)
+}
+
+fn peak_rss() -> Option<u64> {
+    proc_status_kib("VmHWM:").map(|k| k * 1024)
+}
+
+fn proc_status_kib(key: &str) -> Option<u64> {
+    let s = fs::read_to_string("/proc/self/status").ok()?;
+    let line = s.lines().find(|l| l.starts_with(key))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Big-array phase: one float series of a year at one-minute resolution
+/// (525 600 values; arrays are one row, so the whole list is canonicalized
+/// and bound as one parameter) written through `api::write_parameter` into a
+/// fresh file, then replaced once with new values (pre-image copy to
+/// `value_array_hist` + in-place update). Times each call (commit included)
+/// and the peak resident memory above the RSS at the call's start (Linux
+/// only): the input batch is built before the measurement starts, so the
+/// figure is the write's own transient memory, DuckDB's included.
+fn phase_bigarray(ctx: &Ctx) {
+    const MINUTES: usize = 525_600;
+    const MINUTE_US: i64 = 60 * 1_000_000;
+    let reps = if ctx.scale.quick { 1 } else { 3 };
+    println!(
+        "\n== big array: one {MINUTES}-value float series (one year of minutes), write_parameter, {reps} fresh file(s) =="
+    );
+    let batch = |p: usize| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![ename(0); MINUTES])) as ArrayRef,
+                Arc::new(TimestampMicrosecondArray::from(
+                    (0..MINUTES as i64)
+                        .map(|m| T0_US + m * MINUTE_US)
+                        .collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(Float64Array::from(
+                    (0..MINUTES).map(|m| fval(p, 0, m)).collect::<Vec<_>>(),
+                )) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    };
+    let write = |db: &Path, b: RecordBatch| -> (f64, Option<u64>) {
+        let base = reset_peak_rss();
+        let t = Instant::now();
+        write_parameter(
+            db,
+            CLASS_DENSE,
+            "minute_profile",
+            ALT,
+            b,
+            &[],
+            WriteOptions::default(),
+            USER,
+            "bench big array",
+        )
+        .expect("big array write");
+        let wall = ms(t);
+        let mem = match (base, peak_rss()) {
+            (Some(b0), Some(pk)) => Some(pk.saturating_sub(b0)),
+            _ => None,
+        };
+        (wall, mem)
+    };
+    let fmt_mem = |m: Option<u64>| match m {
+        Some(b) => format!("{:.0} MiB", mib(b)),
+        None => "n/a".into(),
+    };
+    for rep in 0..reps {
+        let db = ctx.dir.join(format!("bigarray_r{rep}.db"));
+        init_schema(&db).expect("schema init");
+        let (b1, b2) = (batch(0), batch(1));
+        let (w1, m1) = write(&db, b1);
+        let (rows, cells) = array_counts(&db);
+        assert_eq!(
+            (rows, cells),
+            (1, MINUTES as i64),
+            "big array row/cell count"
+        );
+        let (w2, m2) = write(&db, b2);
+        println!(
+            "  rep {rep}: first write {w1:>7.1} ms, peak RSS +{}   replace {w2:>7.1} ms, peak RSS +{}",
+            fmt_mem(m1),
+            fmt_mem(m2)
+        );
+        let _ = fs::remove_file(&db);
+    }
+}
+
 // --- read helpers -----------------------------------------------------------
 
 /// Run a query end-to-end to Arrow and count materialized points: for a list
@@ -1655,7 +1765,7 @@ fn phase_rowgroup(src: &Path, ctx: &Ctx) {
 
 // --- main -------------------------------------------------------------------
 
-const PHASES: [&str; 11] = [
+const PHASES: [&str; 12] = [
     "all",
     "dense1k",
     "dense10k",
@@ -1664,6 +1774,7 @@ const PHASES: [&str; 11] = [
     "long",
     "longreads",
     "bindprobe",
+    "bigarray",
     "reads",
     "cellsgate",
     "rowgroup",
@@ -1706,6 +1817,7 @@ fn main() {
             "dense10k",
             "long",
             "bindprobe",
+            "bigarray",
             "reads",
             "cellsgate",
             "rowgroup",
@@ -1798,6 +1910,7 @@ fn main() {
                 phase_long(&mut ctx, keep_long);
             }
             "bindprobe" => bind = Some(phase_bindprobe()),
+            "bigarray" => phase_bigarray(&ctx),
             "reads" => {
                 if ctx.reads_dbs.is_empty() {
                     eprintln!(

@@ -79,6 +79,12 @@ pub mod compaction;
 /// [`compaction`] and the history-free extract.
 pub(crate) mod rebuild;
 
+/// History-free extract: a new database file holding exactly the content
+/// valid at one commit of a source, with a `kind='horizon'` erasure marker as
+/// the trace of the omitted history; the source is only read and becomes the
+/// archive.
+pub mod extract;
+
 /// Hard erasure: physical removal with a trace — erase-by-alternative plus the
 /// `erasure_marker` write, one atomic transaction; the sanctioned exception to
 /// append-only history (`specs/erasure_compaction_plan.md`).

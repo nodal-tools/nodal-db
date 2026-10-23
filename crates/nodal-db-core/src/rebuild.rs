@@ -73,6 +73,128 @@ pub(crate) const TABLE_ORDER: &[&str] = &[
     "semantic_annotation",
 ];
 
+/// How the history-free extract selects one base table's rows
+/// (`crate::extract`). Compaction copies every row of every table and never
+/// consults this map; only the extract's own catalog check requires coverage,
+/// so a new table can never make a compaction on the commit path fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Selection {
+    /// `commit`: every commit up to the horizon, verbatim.
+    CommitLog,
+    /// Append-only trace tables (`erasure_marker`, `run`): kept (as of N:
+    /// filtered to what existed at N).
+    Trace,
+    /// Every table with a `valid_to_commit` column except `value_array_hist`:
+    /// the rows valid at the horizon.
+    Versioned,
+    /// `value_array`: all live rows (as of N: live rows from <= N plus the
+    /// `_hist` rows valid at N, promoted to live).
+    ArrayLive,
+    /// `value_array_hist`: never carried (as of N it feeds `ArrayLive`).
+    ArrayHist,
+    /// `axis`: only the axes the carried value rows reference.
+    Axis,
+    /// The six `axis_*` child tables: the children of the carried axes.
+    AxisChild,
+}
+
+/// The extract's selection class per base table. Must cover every
+/// [`TABLE_ORDER`] entry exactly (checked by [`check_selection`]).
+pub(crate) const SELECTION: &[(&str, Selection)] = &[
+    ("commit", Selection::CommitLog),
+    ("axis", Selection::Axis),
+    ("erasure_marker", Selection::Trace),
+    ("metadata", Selection::Versioned),
+    ("entity_metadata", Selection::Versioned),
+    ("parameter_value_metadata", Selection::Versioned),
+    ("run", Selection::Trace),
+    ("alternative", Selection::Versioned),
+    ("scenario", Selection::Versioned),
+    ("scenario_alternative", Selection::Versioned),
+    ("entity_alternative", Selection::Versioned),
+    ("membership", Selection::Versioned),
+    ("axis_datetime", Selection::AxisChild),
+    ("axis_period", Selection::AxisChild),
+    ("axis_label", Selection::AxisChild),
+    ("axis_integer", Selection::AxisChild),
+    ("axis_float", Selection::AxisChild),
+    ("axis_time_pattern", Selection::AxisChild),
+    ("display_mode", Selection::Versioned),
+    ("entity_class_display_mode", Selection::Versioned),
+    ("entity_class", Selection::Versioned),
+    ("class_set", Selection::Versioned),
+    ("class_set_member", Selection::Versioned),
+    ("entity_class_dimension", Selection::Versioned),
+    ("entity", Selection::Versioned),
+    ("entity_element", Selection::Versioned),
+    ("entity_location", Selection::Versioned),
+    ("units_of_measure", Selection::Versioned),
+    ("parameter_value_list", Selection::Versioned),
+    ("list_value", Selection::Versioned),
+    ("parameter_definition", Selection::Versioned),
+    ("entity_parameter_unit", Selection::Versioned),
+    ("parameter_type", Selection::Versioned),
+    ("parameter_type_dimension", Selection::Versioned),
+    ("value_scalar", Selection::Versioned),
+    ("value_long", Selection::Versioned),
+    ("value_array", Selection::ArrayLive),
+    ("value_array_hist", Selection::ArrayHist),
+    ("definition_value_scalar", Selection::Versioned),
+    ("definition_value_long", Selection::Versioned),
+    ("definition_value_array", Selection::Versioned),
+    ("semantic_annotation", Selection::Versioned),
+];
+
+/// The selection class of one table; a table missing from [`SELECTION`] is a
+/// hard error (the same drift discipline as [`cluster_order`]).
+pub(crate) fn selection_for(table: &str) -> Result<Selection, DbError> {
+    SELECTION
+        .iter()
+        .find(|(t, _)| *t == table)
+        .map(|(_, s)| *s)
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "extract catalog drift: table {table:?} has no SELECTION entry \
+                 (a schema edit added a table; update rebuild::SELECTION)"
+            ))
+        })
+}
+
+/// The extract's catalog check for [`SELECTION`], against the live real
+/// columns: every table is classed, no class names a missing table, and the
+/// classes agree with the columns (`Versioned` iff the table has a
+/// `valid_to_commit` column, apart from `value_array_hist`; `AxisChild`
+/// tables carry `axis_id`). Not part of compaction's [`check_catalog`].
+pub(crate) fn check_selection(real_cols: &[(String, Vec<String>)]) -> Result<(), DbError> {
+    if SELECTION.len() != TABLE_ORDER.len() {
+        return Err(DbError::Api(format!(
+            "extract catalog drift: SELECTION has {} entries, TABLE_ORDER {} \
+             (update rebuild::SELECTION)",
+            SELECTION.len(),
+            TABLE_ORDER.len()
+        )));
+    }
+    for (table, cols) in real_cols {
+        let class = selection_for(table)?;
+        let has = |c: &str| cols.iter().any(|x| x == c);
+        let ok = match class {
+            Selection::Versioned => has("valid_to_commit"),
+            Selection::ArrayHist => has("valid_to_commit") && has("array_id"),
+            Selection::AxisChild => has("axis_id") && !has("valid_to_commit"),
+            Selection::CommitLog | Selection::Trace | Selection::ArrayLive | Selection::Axis => {
+                !has("valid_to_commit")
+            }
+        };
+        if !ok {
+            return Err(DbError::Api(format!(
+                "extract catalog drift: table {table:?} no longer fits its selection \
+                 class {class:?} (update rebuild::SELECTION)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The authoritative per-table `GENERATED ALWAYS AS … VIRTUAL` column set
 /// (design §2.2, verified table-by-table against the DDL). These recompute from
 /// the base columns and CANNOT be inserted into, so they are excluded from both

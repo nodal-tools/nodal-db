@@ -465,7 +465,7 @@ fn read_baseline(db_path: &Path) -> Option<u64> {
 
 /// Write the baseline atomically (temp sidecar + rename), best-effort. A failure
 /// is swallowed — the worst case is one extra or skipped future compaction.
-fn write_baseline(db_path: &Path, bytes: u64) {
+pub(crate) fn write_baseline(db_path: &Path, bytes: u64) {
     let final_path = baseline_path(db_path);
     // Distinct temp name (pid-tagged) that CANNOT match the orphan-temp sweep
     // (`…compaction-baseline.<pid>.tmp` does not start with `…compact.`).

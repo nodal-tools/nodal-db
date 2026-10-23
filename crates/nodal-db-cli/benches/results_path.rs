@@ -18,9 +18,9 @@
 //!      Shapes: dense hourly year (8760 floats) per (entity, parameter,
 //!      alternative) at 1k and 10k series (8.76 M / 87.6 M values), and a
 //!      long-tier shape (sparse int series, every 10th hour).
-//!   2. **Bind probe** — the 8760-placeholder `list_value(?,…)::DOUBLE[]`
-//!      INSERT that `history.rs` generates per array, in isolation (the
-//!      statement-building share of the array write).
+//!   2. **Bind probe** — the array INSERT's statement mechanics in isolation:
+//!      the former 8760-placeholder `list_value(?,…)::DOUBLE[]` form next to
+//!      the one bound `?::DOUBLE[]` list parameter `history.rs` uses now.
 //!   3. **Reads** on the 10k-series DBs: one week (168 points) x 20 series
 //!      via four SQL shapes, plus one series' whole value / week slice /
 //!      single cell / min-max only. Cold (fresh per-operation RO connection,
@@ -791,10 +791,13 @@ fn phase_long(ctx: &mut Ctx, keep: bool) {
 
 // --- phase: bind probe ------------------------------------------------------
 
-/// Isolates the statement mechanics of an array write (history.rs
-/// `list_value_sql`): an 8760-placeholder `list_value(?,...)::DOUBLE[]`
-/// INSERT's prepare (parse) and execute (bind + insert) cost. In-memory DB,
-/// scratch table — no pipeline. Returns (prepare median, execute median).
+/// Isolates the statement mechanics of an array write: the former
+/// 8760-placeholder `list_value(?,...)::DOUBLE[]` INSERT (the core's mechanism
+/// until the columnar-bind switch; kept to record the DuckDB 2.0 prepare
+/// regression) and the current one bound `?::DOUBLE[]` list parameter, each
+/// as prepare (parse) and execute (bind + insert) cost. In-memory DB, scratch
+/// table — no pipeline. Returns the `list_value` lane's (prepare median,
+/// execute median).
 fn phase_bindprobe() -> (f64, f64) {
     println!("\n== bind probe: 8760-placeholder list_value INSERT (in-memory scratch table) ==");
     let conn = Connection::open_in_memory().expect("open");
@@ -841,6 +844,36 @@ fn phase_bindprobe() -> (f64, f64) {
             .collect(),
     );
     report("execute (bind 8761 params + insert), prepared stmt", &exec);
+
+    // The core's current mechanism (appender_write_path_PLAN D2): the payload
+    // bound as ONE `?::DOUBLE[]` list parameter. The statement text does not
+    // depend on the length, so it is prepared once per transaction.
+    let bound_sql = "INSERT INTO t VALUES (?, ?::DOUBLE[])";
+    let bprep = stats(
+        (0..10)
+            .map(|_| {
+                let t = Instant::now();
+                let stmt = conn.prepare(bound_sql).expect("prepare");
+                let m = ms(t);
+                drop(stmt);
+                m
+            })
+            .collect(),
+    );
+    report("prepare of the bound-list INSERT (2 params)", &bprep);
+    let mut stmt = conn.prepare(bound_sql).expect("prepare");
+    let bexec = stats(
+        (0..30)
+            .map(|i| {
+                let list = Value::List((0..CELLS).map(|h| Value::Double(fval(0, i, h))).collect());
+                let t = Instant::now();
+                stmt.execute(params_from_iter([Value::BigInt(i as i64), list]))
+                    .expect("execute");
+                ms(t)
+            })
+            .collect(),
+    );
+    report("execute (bind one 8760-element list + insert)", &bexec);
     (prep.median, exec.median)
 }
 
@@ -1806,7 +1839,7 @@ fn main() {
     if let Some((prep, exec)) = bind {
         let mech = prep + exec;
         println!("\n== statement-building share ==");
-        println!("  prepare + execute of one 8760-value list_value INSERT: {mech:.1} ms/series");
+        println!("  prepare + execute of one 8760-value list_value INSERT (former mechanism): {mech:.1} ms/series");
         for (lane, v) in [
             ("core API loop", ctx.api_ms_per_series),
             ("Arrow-IPC import", ctx.ipc_ms_per_series),

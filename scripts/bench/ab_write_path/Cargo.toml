@@ -1,0 +1,18 @@
+# Paired A/B write-path harness (appender_write_path_PLAN §8). Not a
+# workspace member: build it once against each core under comparison and
+# drive both binaries with ab.py. See ab.py for the procedure.
+[package]
+name = "ab_write_path"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: keeps it out of the repository workspace.
+[workspace]
+
+[dependencies]
+# Points at this checkout's core. For the "old" arm, copy this directory
+# into an extracted old tree (`git archive <rev>`) at the same relative
+# place and build it there.
+nodal-db-core = { path = "../../../crates/nodal-db-core" }
+tempfile = "3.27.0"

@@ -73,8 +73,10 @@ commit each). Lane (b) is one Arrow-IPC container ingested by
 
 ### Statement-building share of an array write
 
-The core writes each array with one INSERT carrying one SQL parameter per
-cell (`list_value(?, …)`). Measured in isolation (in-memory table):
+At the time of this section (1.5.5) the core wrote each array with one
+INSERT carrying one SQL parameter per cell (`list_value(?, …)`); it now
+binds the list as one parameter (§4c). Measured in isolation (in-memory
+table):
 
 | | min | median |
 |---|---|---|
@@ -277,8 +279,45 @@ ratio median **1.041**, 95 % bootstrap CI **[1.003, 1.059]** → **PASS**
 [0.958, 1.052]. The new view stays.
 
 The IPC import is about 2.4× slower than the 1.5.5 figure in §1 (498 s),
-for both schemas alike: the slowdown is not the key. It is unexplained
-here (DuckDB 2.0, or host load) and is queued for investigation.
+for both schemas alike: the slowdown is not the key. (Explained and fixed
+in §4c: DuckDB 2.0 parses the per-element `list_value(?, …)` INSERT
+several times slower than 1.5.5.)
+
+## 4c. Columnar-bind write path (2.0.0)
+
+The core now binds each bulk column as ONE list parameter: a long value
+is `INSERT … SELECT ?, unnest(?::T[]), …` per ≤ 16 384 cells, an array
+payload one `?::DOUBLE[]`, a materialized axis's child rows one such
+statement per kind (`specs/appender_write_path_PLAN.md`; the stored
+rows are byte-identical, pinned by `tests/write_path_golden.rs`).
+Measured with `results_path.rs` (`dense10k-ipc long bindprobe`, full
+scale, one run) on 2026-10-23: the AMD Ryzen 9 5900XT host, shared, load
+average 4-12 during the run; bundled DuckDB 2.0.0 (`v2.0.0-dev88614`),
+release.
+
+| | before (§4b, `array_id`) | after |
+|---|---|---|
+| IPC import, 87.6 M dense values, one commit | 1 200.4 s (1 186.9 / 1 218.6 s) | **97.3 s** (900 k values/s) |
+| file size after it | 735 326 208 B | 735 326 208 B (identical) |
+| long, 876 000 cells, core API loop (2 runs) | not re-measured on 2.0 | 13.9 / 13.9 s (63 k values/s) |
+| long, same, IPC import (2 runs) | 215.0 s on 1.5.5 (§1) | 12.9 / 12.8 s (68 k values/s) |
+
+Bind probe on the same run (in-memory table, 8 760 values): the former
+`list_value(?, …)` INSERT costs 86.5 ms to prepare (median, under this
+run's load; 13.5 ms on 1.5.5 in §1) and 17.8 ms to execute; the bound
+`?::DOUBLE[]` INSERT costs 0.27 ms to prepare and 1.42 ms to execute.
+
+Paired, interleaved A/B of the write paths (old and new core in release,
+21 pairs per row, median per-pair ratio new/old with a bootstrap 95 %
+CI; harness `scripts/bench/ab_write_path/`): new 8 760-cell long value
+0.080 [0.080, 0.081] (1 781 → 143 ms), long replace 0.127 [0.124,
+0.129], new 8 760-value array 0.073 [0.072, 0.074] (111 → 8.0 ms),
+array replace 0.134 [0.133, 0.137], a new irregular 8 760-point datetime
+axis 0.027 [0.027, 0.028] (5.9 s → 0.16 s), scalar insert 0.42 [0.40,
+0.45], scalar replace 0.48 [0.47, 0.49], `write_parameter` with 100 new
+scalar entities 0.62 [0.60, 0.65]; a current-cell read of a long value
+1.01 [0.97, 1.03] (unchanged). The import slowdown queued in §4b was
+the 2.0 statement-parse cost of the per-element placeholders.
 
 ## 5. Commit cost after an array replace
 

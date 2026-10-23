@@ -3,4 +3,4 @@
 # into DuckDB, so it needs the same pinned engine as dev-requirements.txt).
 # Kept separate so the test CI venv stays lean. Install with `just docs-venv`.
 zensical==0.0.71
-duckdb==1.5.5
+duckdb==2.0.0

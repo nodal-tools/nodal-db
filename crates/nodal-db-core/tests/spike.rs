@@ -1,12 +1,13 @@
 //! Phase-0 de-risk spike (rust_implementation_plan.md Part 7, risks R1/R2).
 //!
-//! Confirms the duckdb-rs *bundled* DuckDB matches the 1.4.4-verified
-//! semantics the schema rests on. Every check here is a STOP-gate: a
+//! Confirms the duckdb-rs *bundled* DuckDB matches the verified semantics the
+//! schema rests on (verified on 1.4.4 originally; re-verified on 2.0.0).
+//! The test name keeps its historical `144`. Every check here is a STOP-gate: a
 //! divergence means the whole history mechanism / one-current guard may not
 //! hold and must be escalated, not papered over.
 //!
 //! Checks:
-//!   4a  bundled DuckDB version >= 1.4
+//!   4a  bundled DuckDB version >= MINIMUM_DUCKDB (2.0)
 //!   4b  schema/*.sql applies cleanly in numbered order
 //!   4c  generated-column one-current unique index rejects a 2nd current row
 //!   4d  DOUBLE[] LIST value round-trips (through duckdb::arrow — risk R2)
@@ -60,7 +61,7 @@ fn apply_schema(conn: &Connection) {
     }
 }
 
-/// Parse the bundled version string (e.g. "v1.4.4") into (major, minor).
+/// Parse the bundled version string (e.g. "v2.0.0") into (major, minor).
 fn bundled_version(conn: &Connection) -> (u32, u32, String) {
     let raw: String = conn
         .query_row("SELECT version()", [], |r| r.get(0))
@@ -84,7 +85,7 @@ fn spike_bundled_duckdb_matches_144_semantics() {
     drop(tmp);
     let conn = Connection::open(&db_path).expect("open duckdb file");
 
-    // ---- 4a: bundled version >= 1.4 --------------------------------------
+    // ---- 4a: bundled version >= 2.0 --------------------------------------
     let (major, minor, raw) = bundled_version(&conn);
     println!("bundled DuckDB version: {raw} (parsed {major}.{minor})");
     assert!(

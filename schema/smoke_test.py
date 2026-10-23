@@ -233,6 +233,15 @@ def main():
     con = duckdb.connect(str(db))
     ts = datetime.datetime
 
+    # ---- storage format: build.py must create DuckDB's native 2.0 format.
+    # A 1.5-format file (a stale duckdb 1.x venv, or a compatibility setting)
+    # logs the whole list column to the WAL on every value_array write.
+    tag = con.execute(
+        "SELECT tags['storage_version'] FROM duckdb_databases()"
+        " WHERE database_name = current_database()").fetchone()[0]
+    check("storage format: built file is native DuckDB 2.0 (v2.0.0+)",
+          tag == "v2.0.0+", str(tag))
+
     # ---- DB-identity UUID (schema_interop.md §9): minted once at init by
     # 900_bootstrap.sql. Captured BEFORE any writes; asserted well-formed here,
     # distinct per init, and (at suite end) unchanged across the whole flow.

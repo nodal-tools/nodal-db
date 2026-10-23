@@ -41,6 +41,23 @@ fn init_db(dir: &Path) -> PathBuf {
         "init failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // The deployment create path must produce DuckDB's native 2.0 storage
+    // format (1.5-format files log the whole list column to the WAL on every
+    // array write; see nodal-db-core/tests/storage_format.rs).
+    let conn = Connection::open(&db).expect("open init'd db");
+    let tag: String = conn
+        .query_row(
+            "SELECT tags['storage_version'] FROM duckdb_databases() \
+             WHERE database_name = current_database()",
+            [],
+            |r| r.get(0),
+        )
+        .expect("storage_version tag");
+    conn.close().expect("close");
+    assert_eq!(
+        tag, "v2.0.0+",
+        "nodal-db init did not create a native-format file"
+    );
     db
 }
 

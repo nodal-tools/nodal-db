@@ -22,7 +22,7 @@ pub enum DbError {
 
     /// The bundled DuckDB is older than the line the schema semantics were
     /// verified on (mirrors `build.py`'s version gate; risk R1).
-    #[error("bundled DuckDB {found} < required {}.{} (schema verified on 1.4.x)",
+    #[error("bundled DuckDB {found} < required {}.{} (schema verified on 2.0.x)",
             MINIMUM_DUCKDB.0, MINIMUM_DUCKDB.1)]
     VersionTooOld { found: String },
 

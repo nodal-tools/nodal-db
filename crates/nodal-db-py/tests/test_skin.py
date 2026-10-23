@@ -220,6 +220,26 @@ def test_busy_on_externally_locked_file(db):
         proc.wait()
 
 
+def test_init_creates_native_storage_format(db):
+    # nodal_db.init must create DuckDB's native 2.0 storage format (a
+    # 1.5-format file logs the whole list column to the WAL on every array
+    # write). Reading the tag needs a duckdb >= 2.0 client: the [test] extra.
+    duckdb = pytest.importorskip(
+        "duckdb",
+        reason="python 'duckdb' package missing — install the declared test "
+        "deps (pip install 'nodal-db[test]')",
+    )
+    con = duckdb.connect(db.path, read_only=True)
+    try:
+        (tag,) = con.execute(
+            "SELECT tags['storage_version'] FROM duckdb_databases() "
+            "WHERE database_name = current_database()"
+        ).fetchone()
+    finally:
+        con.close()
+    assert tag == "v2.0.0+"
+
+
 # ---------------------------------------------------------------------------
 # template: load / plan / apply through the skin, and the D13 centerpiece
 # ---------------------------------------------------------------------------

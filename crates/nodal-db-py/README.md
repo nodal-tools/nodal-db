@@ -143,19 +143,18 @@ retryable outcomes, never hangs.
 - **Out**: `pyarrow.RecordBatch` (`read_parameter`) and
   `pyarrow.RecordBatchReader` (`query`), exported zero-copy.
 - The bridge is the maintained `arrow-pyarrow` crate (split out of
-  arrow-rs), **pinned `=58.4.0`** to the workspace `arrow` pin — one
+  arrow-rs), **pinned `=60.0.0`** to the workspace `arrow` pin — one
   arrow in the tree, so imported batches ARE the core's `RecordBatch`
   type at compile time. Version coupling is three-way and matched-bump:
   duckdb-rs ⇒ `arrow` ⇒ `arrow-pyarrow` (whose pyo3 requirement then
-  dictates the `pyo3` line; 58.4.0 ⇒ pyo3 ^0.28). See the root
+  dictates the `pyo3` line; 60.0.0 ⇒ pyo3 ^0.29). See the root
   `Cargo.toml` comments. Runtime needs `pyarrow>=16` (PyCapsule
   interface both directions).
 
 ## Building
 
-Wheels are abi3: **one wheel per platform, CPython ≥ 3.9** (abi3-py39 —
-the documented floor; in practice `pyarrow>=16` raises the effective
-floor to its own supported Pythons).
+Wheels are abi3: **one wheel per platform, CPython ≥ 3.11** (abi3-py311 —
+the documented floor, the same one the DuckDB 2.0 Python client needs).
 
 ```sh
 python -m venv .venv && . .venv/bin/activate

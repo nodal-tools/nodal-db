@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "nodal-db"
 description = "Thin Python skin over the nodal-db core: marshal Arrow in, call the one canonicalizer, translate errors out."
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "EUPL-1.2" }
 dynamic = ["version"]
 # pyarrow is required at runtime by the Arrow bridge (arrow-pyarrow constructs
@@ -17,8 +17,11 @@ dependencies = ["pyarrow>=16"]
 # The pytest suite's own deps: `pip install 'nodal-db[test]'` (or install the
 # built wheel with the [test] extra). `duckdb` is REQUIRED by
 # test_busy_on_externally_locked_file — it holds a cross-process RW lock to
-# prove the Busy taxonomy mapping; without it that test skips loudly.
-test = ["pytest", "duckdb"]
+# prove the Busy taxonomy mapping; without it that test skips loudly. It is
+# `>=2.0` because the core writes the native DuckDB 2.0 storage format: a 1.x
+# client cannot open the file at all, so the test would fail on a storage
+# error instead of proving the lock.
+test = ["pytest", "duckdb>=2.0"]
 
 [tool.maturin]
 module-name = "nodal_db"

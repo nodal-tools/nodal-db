@@ -7,8 +7,10 @@ Executes the numbered .sql files in this directory in lexical order inside
 one transaction per file. Stdlib + duckdb only.
 
 Build hygiene (critique F10): the DuckDB version is gated (everything in
-ddl_sketch.md section 1 is verified on 1.4.x — a silent behavior drift in
-e.g. generated-column indexes would otherwise go unnoticed), the build runs
+ddl_sketch.md section 1 is verified on 2.0.x — a silent behavior drift in
+e.g. generated-column indexes would otherwise go unnoticed; and an older
+engine would write the 1.5 storage format, whose WAL logs the whole list
+column on every array write), the build runs
 against a temp file that is atomically renamed into place (a failure in
 file N cannot leave a half-built target), stale WAL files next to a
 replaced target are removed, and the bootstrap schema_version is asserted
@@ -23,8 +25,11 @@ import duckdb
 SCHEMA_DIR = pathlib.Path(__file__).resolve().parent
 
 # The engine facts the DDL rests on are verified on this DuckDB line
-# (ddl_sketch.md section 1); refuse to build on anything older.
-MINIMUM_DUCKDB = (1, 4)
+# (ddl_sketch.md section 1); refuse to build on anything older. This gate is
+# load-bearing: DuckDB >= 2.0 creates files in the native 2.0 storage format
+# (tag v2.0.0+), which is what keeps array-write commits cheap. A stale venv
+# with duckdb 1.x would silently build a 1.5-format file instead.
+MINIMUM_DUCKDB = (2, 0)
 
 # Must match the bootstrap row in 900_bootstrap.sql.
 SCHEMA_VERSION = "0.3-erasure-marker"
@@ -35,7 +40,7 @@ def check_duckdb_version() -> None:
     if ver < MINIMUM_DUCKDB:
         sys.exit(
             f"error: duckdb {duckdb.__version__} < required "
-            f"{'.'.join(map(str, MINIMUM_DUCKDB))} (schema verified on 1.4.x)")
+            f"{'.'.join(map(str, MINIMUM_DUCKDB))} (schema verified on 2.0.x)")
 
 
 def sql_files():

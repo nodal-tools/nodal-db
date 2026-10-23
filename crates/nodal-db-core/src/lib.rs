@@ -11,10 +11,16 @@
 /// R2 one-arrow-version rule.
 pub use duckdb;
 
-/// Minimum bundled DuckDB version the schema semantics were verified on.
+/// Minimum bundled DuckDB version the schema semantics are verified on.
 /// Mirrors `schema/build.py`'s `MINIMUM_DUCKDB`. Asserted at connection open
 /// (see the Phase-0 spike) and, later, by `conn`.
-pub const MINIMUM_DUCKDB: (u32, u32) = (1, 4);
+///
+/// 2.0 because the project writes DuckDB's native 2.0 storage format
+/// (`storage_version` tag `v2.0.0+`; readers need DuckDB >= 2.0) and the
+/// schema is verified only on 2.0. Native files are what make an array
+/// replace commit cheap: the 1.5 format logs the whole list column to the
+/// WAL on every write. The tests in `tests/storage_format.rs` guard that.
+pub const MINIMUM_DUCKDB: (u32, u32) = (2, 0);
 
 /// Plain FFI-friendly data types for the pipeline (Phase 2).
 pub mod types;

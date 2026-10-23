@@ -3,5 +3,5 @@
 #   python3 -m venv .venv && .venv/bin/pip install -r dev-requirements.txt
 # (or `just venv`). DuckDB is pinned to the engine version the Rust core
 # bundles, so the smoke suite and any file it writes are storage-compatible.
-duckdb==1.5.5
+duckdb==2.0.0
 xxhash

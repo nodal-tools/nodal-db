@@ -14,7 +14,7 @@ nodal-db-core = { path = "../nodal-db-core" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
-# Direct arrow for IPC only — pinned =58.4.0 to duckdb's re-export (risk R2;
+# Direct arrow for IPC only — pinned =60.0.0 to duckdb's re-export (risk R2;
 # see the workspace Cargo.toml comment: duckdb bumps require a matched bump).
 arrow = { workspace = true }
 

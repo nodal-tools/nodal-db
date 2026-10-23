@@ -11,30 +11,35 @@ strip = true
 
 # Versions are pinned once here and referenced from each crate via
 # `workspace = true`. The de-risk spike (Phase 0) gates the duckdb-rs choice:
-# its bundled DuckDB must be >= 1.4 (the line the schema was verified on).
+# its bundled DuckDB must be >= 2.0 (the line the schema is verified on;
+# native 2.0 storage format, see crates/nodal-db-core/src/lib.rs).
 # arrow is normally consumed only through `duckdb::arrow` so exactly one arrow
 # major is ever in the tree (risk R2) — with ONE sanctioned exception, the
 # direct pinned `arrow` line below (R2 partially re-opened; see its comment).
 [workspace.dependencies]
-# duckdb-rs versions its crate to encode the bundled DuckDB release; 1.10505.0
-# bundles DuckDB 1.5.5. The bundled DuckDB must stay >= 1.4 (the line the
-# schema was verified on).
+# duckdb-rs versions its crate to encode the bundled DuckDB release in the
+# MINOR number: 1.20000.0 bundles DuckDB 2.0.0, so DuckDB 2.0.1 will be
+# 1.20001.0. The pin is EXACT (=) on purpose: `~1.20000.0` would exclude
+# 2.0.1, and a caret would allow any 1.x. Every engine change is a deliberate,
+# gate-tested matched bump that keeps the bundled engine in lockstep with the
+# `duckdb==` pin in dev-requirements.txt / docs-requirements.txt. The bundled
+# DuckDB must stay >= 2.0 (MINIMUM_DUCKDB in nodal-db-core).
 # MATCHED-BUMP REQUIRED (three-way): any duckdb-rs bump that changes the
 # re-exported arrow version REQUIRES bumping BOTH the `arrow` pin below AND
 # the `arrow-pyarrow` pin (further below) to the identical version — and
 # arrow-pyarrow's own pyo3 requirement then dictates the `pyo3` line.
-duckdb = { version = "1.10505.0", features = ["bundled"] }
+duckdb = { version = "=1.20000.0", features = ["bundled"] }
 # R2 partially re-opened (specs/arrow_ipc_bulk_format.md §2.4, critique F12):
 # the `nodal-db import` boundary needs arrow's IPC reader/writer, which
 # `duckdb::arrow` does NOT re-export (duckdb pulls arrow without the `ipc`
-# feature). This direct dependency is pinned EXACTLY (=58.4.0) to the arrow
-# version duckdb 1.10505.0 re-exports so cargo unifies both into ONE crate —
+# feature). This direct dependency is pinned EXACTLY (=60.0.0) to the arrow
+# version duckdb 1.20000.0 re-exports so cargo unifies both into ONE crate —
 # type identity is proven at compile time in nodal-db-cli (an IPC-read
 # RecordBatch crosses into the core's duckdb::arrow-typed API with no
 # conversion). A duckdb-rs bump is therefore a version-locked, THREE-line
 # affair: bump duckdb, bump this pin, and bump `arrow-pyarrow` below to the
 # same version (which in turn dictates the `pyo3` line).
-arrow = { version = "=58.4.0", default-features = false, features = ["ipc", "ipc_compression"] }
+arrow = { version = "=60.0.0", default-features = false, features = ["ipc", "ipc_compression"] }
 thiserror = "2.0.20"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 # NFC normalization. Pinned to =0.1.24 because that release's tables are
@@ -59,10 +64,12 @@ serde_norway = "0.9.42"
 # MATCHED-BUMP REQUIRED (three-way): a duckdb-rs bump that changes the
 # re-exported arrow version requires bumping `arrow` AND `arrow-pyarrow` to
 # the identical version — and arrow-pyarrow's own pyo3 requirement then
-# dictates the `pyo3` line below (58.4.0 requires pyo3 ^0.28).
-arrow-pyarrow = "=58.4.0"
-# abi3-py39: one wheel per platform, CPython >= 3.9 (the documented floor).
-pyo3 = { version = "0.28.3", features = ["abi3-py39"] }
+# dictates the `pyo3` line below (60.0.0 requires pyo3 ^0.29).
+arrow-pyarrow = "=60.0.0"
+# abi3-py311: one wheel per platform, CPython >= 3.11 — one Python floor
+# across the skin, the dev venvs and the docs (the DuckDB 2.0 Python client
+# needs 3.11+).
+pyo3 = { version = "0.29.3", features = ["abi3-py311"] }
 clap = { version = "4.6.6", features = ["derive"] }
 anyhow = "1.0.104"
 tempfile = "3.27.0"

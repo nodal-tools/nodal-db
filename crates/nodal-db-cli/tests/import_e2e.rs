@@ -11,8 +11,9 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, DictionaryArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
     ListBuilder, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondBuilder,
+    TimestampNanosecondArray, TimestampSecondArray, TimestampSecondBuilder,
 };
+use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Int32Type, Schema, TimeUnit};
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow::ipc::{CompressionType, MetadataVersion};
@@ -1309,4 +1310,373 @@ fn init_onto_existing_db_refuses() {
         stderr.contains("already exists; refusing to re-apply schema"),
         "clean refusal expected: {stderr}"
     );
+}
+
+// --- timestamp upcast and range (never a silent NULL) ----------------------
+
+/// One long-form segment of `node:when` from explicit columns: entity, then
+/// the given (field, array) columns (dims..., value last).
+fn ts_segment(entities: &[&str], cols: Vec<(Field, ArrayRef)>) -> Vec<u8> {
+    let mut fields = vec![Field::new("entity", DataType::Utf8, false)];
+    let mut arrays: Vec<ArrayRef> =
+        vec![Arc::new(StringArray::from(entities.to_vec())) as ArrayRef];
+    for (f, a) in cols {
+        fields.push(f);
+        arrays.push(a);
+    }
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        segment_metadata("node", "when", "long", 1),
+    ));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    stream(schema, &[batch])
+}
+
+fn int_dim(v: Vec<i64>) -> (Field, ArrayRef) {
+    (
+        Field::new("step", DataType::Int64, false),
+        Arc::new(Int64Array::from(v)) as ArrayRef,
+    )
+}
+
+fn ts_value_s(v: Vec<i64>) -> (Field, ArrayRef) {
+    (
+        Field::new("value", DataType::Timestamp(TimeUnit::Second, None), true),
+        Arc::new(TimestampSecondArray::from(v)) as ArrayRef,
+    )
+}
+
+/// The exact silent-drop repro: a timestamp[s] value whose ×10⁶ upcast
+/// overflows i64 used to become NULL (= absence) and vanish with exit 0.
+#[test]
+fn long_value_timestamp_upcast_overflow_is_e6_not_silent_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let big = 1i64 << 62;
+    let file = write_file(
+        dir.path(),
+        "ovf.arrows",
+        &ts_segment(
+            &["n1", "n1"],
+            vec![int_dim(vec![1, 2]), ts_value_s(vec![0, big])],
+        ),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in [
+        "overflow",
+        "4611686018427387904",
+        "\"value\"",
+        "row 1",
+        "\"n1\"",
+    ] {
+        assert!(stderr.contains(needle), "missing {needle:?}: {stderr}");
+    }
+}
+
+/// Rank 0: the overflow is named, not the misleading "exactly one non-null
+/// value, got 0" the vanished cell used to produce.
+#[test]
+fn long_scalar_timestamp_upcast_overflow_names_overflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let value = (
+        Field::new(
+            "value",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        ),
+        Arc::new(TimestampMillisecondArray::from(vec![i64::MAX])) as ArrayRef,
+    );
+    let file = write_file(dir.path(), "ovf0.arrows", &ts_segment(&["n1"], vec![value]));
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("overflow"), "{stderr}");
+    assert!(
+        !stderr.contains("rank-0 scalar must have exactly one non-null value"),
+        "{stderr}"
+    );
+}
+
+/// A dimension column: the overflow is named, not "null index coordinate".
+#[test]
+fn long_dimension_timestamp_upcast_overflow_is_e6_naming_overflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let dim = (
+        Field::new("t", DataType::Timestamp(TimeUnit::Second, None), false),
+        Arc::new(TimestampSecondArray::from(vec![1i64 << 62])) as ArrayRef,
+    );
+    let value = (
+        Field::new("value", DataType::Float64, true),
+        Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+    );
+    let file = write_file(
+        dir.path(),
+        "ovfd.arrows",
+        &ts_segment(&["n1"], vec![dim, value]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("overflow") && stderr.contains("dimension column"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("null index coordinate"), "{stderr}");
+}
+
+/// The reported row is relative to the segment, not to the record batch.
+#[test]
+fn long_overflow_row_is_segment_relative_across_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("step", DataType::Int64, false),
+            Field::new("value", DataType::Timestamp(TimeUnit::Second, None), true),
+        ],
+        segment_metadata("node", "when", "long", 1),
+    ));
+    let mk = |steps: Vec<i64>, vals: Vec<i64>| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["n1", "n1"])) as ArrayRef,
+                Arc::new(Int64Array::from(steps)) as ArrayRef,
+                Arc::new(TimestampSecondArray::from(vals)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    };
+    let b0 = mk(vec![0, 1], vec![0, 1]);
+    let b1 = mk(vec![2, 3], vec![1i64 << 62, 2]);
+    let file = write_file(
+        dir.path(),
+        "rows.arrows",
+        &stream(schema.clone(), &[b0, b1]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("row 2"),
+        "segment-relative row expected: {stderr}"
+    );
+}
+
+/// A NULL timestamp value cell is still absence, whatever bits lie under the
+/// null slot: the checked upcast must not multiply (and reject) them.
+#[test]
+fn long_null_timestamp_value_cell_is_still_absence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let vals = TimestampSecondArray::new(
+        vec![0, i64::MAX].into(),
+        Some(NullBuffer::from(vec![true, false])),
+    );
+    let value = (
+        Field::new("value", DataType::Timestamp(TimeUnit::Second, None), true),
+        Arc::new(vals) as ArrayRef,
+    );
+    let file = write_file(
+        dir.path(),
+        "null.arrows",
+        &ts_segment(&["n1", "n1"], vec![int_dim(vec![1, 2]), value]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = read_parameter(&db, "node", "when", "Base").expect("read back");
+    assert_eq!(
+        got.num_rows(),
+        1,
+        "the null cell is absent, the other is stored"
+    );
+}
+
+/// An upcast s column keeps its timezone, so the core still reports the
+/// normalization (the existing tz test uses µs, which is never upcast).
+#[test]
+fn second_unit_tz_timestamp_keeps_timezone_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let tz: Arc<str> = Arc::from("Europe/Helsinki");
+    let dim = (
+        Field::new(
+            "t",
+            DataType::Timestamp(TimeUnit::Second, Some(tz.clone())),
+            false,
+        ),
+        Arc::new(TimestampSecondArray::from(vec![3_600i64, 7_200]).with_timezone(tz)) as ArrayRef,
+    );
+    let value = (
+        Field::new("value", DataType::Float64, true),
+        Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef,
+    );
+    let file = write_file(
+        dir.path(),
+        "tz_s.arrows",
+        &ts_segment(&["n1", "n1"], vec![dim, value]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("timezone-normalized") && stdout.contains("Europe/Helsinki"),
+        "TimezoneNormalized warning must print: {stdout}"
+    );
+}
+
+/// Below DuckDB's minimum without any i64 overflow: an i64-only check misses
+/// this (the value used to be written and then poison every read).
+#[test]
+fn long_negative_second_timestamp_below_duckdb_min_is_e6() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let raw = -9_223_372_036_854i64;
+    let file = write_file(
+        dir.path(),
+        "neg.arrows",
+        &ts_segment(&["n1"], vec![int_dim(vec![1]), ts_value_s(vec![raw])]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("overflow") && stderr.contains(&raw.to_string()),
+        "{stderr}"
+    );
+}
+
+/// The same below-minimum value as a dense timestamp[s] coordinate.
+#[test]
+fn dense_negative_second_timestamp_below_duckdb_min_is_e6() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let raw = -9_223_372_036_854i64;
+    let mut ts = ListBuilder::new(TimestampSecondBuilder::new());
+    ts.values().append_value(raw);
+    ts.append(true);
+    let ts = Arc::new(ts.finish()) as ArrayRef;
+    let mut vals = ListBuilder::new(Float64Builder::new());
+    vals.values().append_value(1.0);
+    vals.append(true);
+    let vals = Arc::new(vals.finish()) as ArrayRef;
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("t", ts.data_type().clone(), false),
+            Field::new("value", vals.data_type().clone(), false),
+        ],
+        segment_metadata("node", "price", "dense", 1),
+    ));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+            ts,
+            vals,
+        ],
+    )
+    .unwrap();
+    let file = write_file(dir.path(), "dneg.arrows", &stream(schema, &[batch]));
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&raw.to_string()), "{stderr}");
+}
+
+/// The bounds are exactly DuckDB's: both edges import AND read back cleanly.
+#[test]
+fn timestamp_range_edges_round_trip() {
+    const MAX: i64 = 9_223_372_036_854_775_806;
+    const MIN: i64 = -9_223_372_022_400_000_000;
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let dim = (
+        Field::new("t", DataType::Timestamp(TimeUnit::Microsecond, None), false),
+        Arc::new(TimestampMicrosecondArray::from(vec![MAX, MIN])) as ArrayRef,
+    );
+    let value = (
+        Field::new(
+            "value",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Arc::new(TimestampMicrosecondArray::from(vec![MIN, MAX])) as ArrayRef,
+    );
+    let file = write_file(
+        dir.path(),
+        "edges.arrows",
+        &ts_segment(&["e1", "e2"], vec![dim, value]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let conn = Connection::open_with_flags(
+        &db,
+        nodal_db_core::duckdb::Config::default()
+            .access_mode(nodal_db_core::duckdb::AccessMode::ReadOnly)
+            .unwrap(),
+    )
+    .unwrap();
+    let rows: Vec<(String, i64, i64)> = conn
+        .prepare(
+            "SELECT entity, epoch_us(idx1_ts), epoch_us(v_datetime) \
+             FROM read_parameter('node', 'when') ORDER BY entity",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    assert_eq!(
+        rows,
+        vec![("e1".to_string(), MAX, MIN), ("e2".to_string(), MIN, MAX)]
+    );
+}
+
+/// Native µs input is not upcast, so the core's range check is what rejects
+/// it: i64::MIN (used to be accepted and poison reads) and i64::MAX (DuckDB's
+/// `infinity`, used to surface a raw conversion error).
+#[test]
+fn native_micros_timestamp_out_of_range_is_e6() {
+    for bad in [i64::MIN, i64::MAX] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = init_db(dir.path());
+        let value = (
+            Field::new(
+                "value",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Arc::new(TimestampMicrosecondArray::from(vec![bad])) as ArrayRef,
+        );
+        let file = write_file(
+            dir.path(),
+            "us.arrows",
+            &ts_segment(&["n1"], vec![int_dim(vec![1]), value]),
+        );
+        let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+        assert_error_leaves_db_untouched(&db, &out, "E6");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("outside the supported range"), "{stderr}");
+        assert!(!stderr.contains("Conversion Error"), "{stderr}");
+    }
 }

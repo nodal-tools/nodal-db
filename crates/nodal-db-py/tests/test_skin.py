@@ -564,3 +564,11 @@ def test_stamped_db_refuses_unregistered_ladder_program(db, tmp_path):
     db.stamp_template_identity("synth", "2", user="t")
     with pytest.raises(nodal_db.ApiError, match="synth_v3_backfill"):
         db.template_apply(str(ladder), user="t")
+
+
+def test_out_of_range_timestamp_value_is_canon_error(db):
+    """A µs timestamp below the store's range (DuckDB would write it and then
+    fail every read of the column) is rejected by the core pipeline."""
+    batch = scalar_batch(["n1"], [-(2**63)], pa.timestamp("us"))
+    with pytest.raises(nodal_db.CanonError, match="outside the supported range"):
+        db.write_parameter("node", "when", "Base", batch, user="tester")

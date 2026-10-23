@@ -31,6 +31,24 @@ use crate::types::{
     DeclaredType, IndexKind, LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind,
 };
 
+/// Smallest timestamp (µs since the Unix epoch) the store accepts: DuckDB
+/// 1.5.5's TIMESTAMP minimum, 290309-12-22 (BC) 00:00:00. DuckDB *writes*
+/// values below it (down to `i64::MIN`) without complaint, but every later
+/// read of the column then fails with a conversion error, so the pipeline
+/// rejects them up front.
+pub const TS_MIN_US: i64 = -9_223_372_022_400_000_000;
+/// Largest timestamp (µs) the store accepts: DuckDB 1.5.5's TIMESTAMP maximum,
+/// 294247-01-10 04:00:54.775806. `i64::MAX` is DuckDB's `infinity` sentinel
+/// (and `-i64::MAX` its `-infinity`, below `TS_MIN_US`); neither is a
+/// storable timestamp.
+pub const TS_MAX_US: i64 = 9_223_372_036_854_775_806;
+
+/// Is `us` inside the store's timestamp range `[TS_MIN_US, TS_MAX_US]`?
+#[inline]
+pub fn timestamp_in_range(us: i64) -> bool {
+    (TS_MIN_US..=TS_MAX_US).contains(&us)
+}
+
 /// A caller-supplied ordered domain for one label dimension (VMP Part 3 step 2).
 /// `labels[i]` has ordinal `i`; present labels take their ordinal from this list.
 #[derive(Clone, Debug)]
@@ -107,6 +125,11 @@ pub enum CanonError {
     UnsupportedKind(IndexKind),
     #[error("value_kind {0:?} is not yet supported as a pipeline value column")]
     UnsupportedValueKind(ValueKind),
+    #[error(
+        "timestamp {value} µs in column {column} is outside the supported range \
+         (290309 BC to 294247 AD)"
+    )]
+    TimestampOutOfRange { value: i64, column: usize },
     #[error(transparent)]
     Encode(#[from] EncodeError),
 }
@@ -210,7 +233,7 @@ pub fn canonicalize(
     let n = batch.num_rows();
     let mut kept: Vec<(Vec<RawCoord>, ScalarValue)> = Vec::new();
     for row in 0..n {
-        let measure = match read_value(&value_col, row) {
+        let measure = match read_value(&value_col, row, rank)? {
             Some(m) => m,
             None => continue, // NULL value tuple is absent (VMP Part 3 step 1).
         };
@@ -364,14 +387,27 @@ pub fn canonicalize(
     })
 }
 
-fn read_value(col: &ValCol, row: usize) -> Option<ScalarValue> {
-    match col {
+/// Read one value cell; `Ok(None)` is a NULL cell (absent). `column` is the
+/// value column's index, for the range error.
+fn read_value(col: &ValCol, row: usize, column: usize) -> Result<Option<ScalarValue>, CanonError> {
+    Ok(match col {
         ValCol::Float(a) if !a.is_null(row) => Some(ScalarValue::Float(a.value(row))),
         ValCol::Int(a) if !a.is_null(row) => Some(ScalarValue::Int(a.value(row))),
         ValCol::Bool(a) if !a.is_null(row) => Some(ScalarValue::Bool(a.value(row))),
         ValCol::Str(a) if !a.is_null(row) => Some(ScalarValue::Str(a.value(row).to_string())),
-        ValCol::DateTime(a) if !a.is_null(row) => Some(ScalarValue::DateTime(a.value(row))),
+        ValCol::DateTime(a) if !a.is_null(row) => {
+            Some(ScalarValue::DateTime(checked_ts(a.value(row), column)?))
+        }
         _ => None,
+    })
+}
+
+/// Reject a timestamp outside the store's range (`TS_MIN_US..=TS_MAX_US`).
+fn checked_ts(us: i64, column: usize) -> Result<i64, CanonError> {
+    if timestamp_in_range(us) {
+        Ok(us)
+    } else {
+        Err(CanonError::TimestampOutOfRange { value: us, column })
     }
 }
 
@@ -381,7 +417,7 @@ fn read_coord(dc: &DimCol, row: usize, dim: usize) -> Result<RawCoord, CanonErro
             if a.is_null(row) {
                 return Err(CanonError::NullCoord(dim));
             }
-            Ok(RawCoord::Num(a.value(row)))
+            Ok(RawCoord::Num(checked_ts(a.value(row), dim)?))
         }
         DimCol::Int(a) => {
             if a.is_null(row) {

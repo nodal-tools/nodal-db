@@ -14,15 +14,17 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampSecondArray,
+    Array, ArrayRef, Float64Array, Int64Array, ListArray, PrimitiveArray, StringArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampSecondArray,
 };
 use arrow::compute::cast;
+use arrow::datatypes::{ArrowTimestampType, TimestampMillisecondType, TimestampSecondType};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 
 use nodal_db_core::api::{ingest_segments, Segment};
+use nodal_db_core::canon::timestamp_in_range;
 use nodal_db_core::error::DbError;
 use nodal_db_core::reconstruct::expand_dense_row;
 use nodal_db_core::types::{Tier, WarningKind, WriteOptions};
@@ -584,11 +586,19 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
     check_name_tripwires(&tag, &raw.schema)?;
 
     match meta.form {
-        Form::Long => raw
-            .batches
-            .iter()
-            .map(|b| normalize_long_batch(&tag, b))
-            .collect(),
+        Form::Long => {
+            // Row numbers in messages are relative to the segment, not to the
+            // record batch: producers think in tables, batch splits are arbitrary.
+            let mut row_offset = 0usize;
+            raw.batches
+                .iter()
+                .map(|b| {
+                    let r = normalize_long_batch(&tag, b, row_offset);
+                    row_offset += b.num_rows();
+                    r
+                })
+                .collect()
+        }
         Form::Dense => raw
             .batches
             .iter()
@@ -637,6 +647,11 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
 
 /// Decode a dictionary-encoded column to its plain value type (§2.4); reject
 /// run-end encoding (forbidden in 1.0, MUST-reject).
+///
+/// `cast`'s default `safe: true` (failure → NULL) is harmless here: the target
+/// is the dictionary's own value type, so the value cast is the identity, and
+/// unpacking is a `take` by keys that errors on an out-of-range key rather
+/// than nulling it. A NULL key decodes to NULL, which is the cell's meaning.
 fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, ArrayRef)> {
     match field.data_type() {
         DataType::RunEndEncoded(_, _) => bail!(
@@ -678,12 +693,94 @@ fn microsecond_target(tag: &str, field: &Field) -> Result<Option<DataType>> {
     }
 }
 
+/// µs multiplier for an accepted wire timestamp unit; `None` for ns (rejected
+/// by `microsecond_target` / the dense gate before this is reached).
+fn micros_factor(unit: &TimeUnit) -> Option<i64> {
+    match unit {
+        TimeUnit::Second => Some(1_000_000),
+        TimeUnit::Millisecond => Some(1_000),
+        TimeUnit::Microsecond => Some(1),
+        TimeUnit::Nanosecond => None,
+    }
+}
+
+/// Upcast the valid slots of one s/ms timestamp array to µs with
+/// `checked_mul`, requiring each result to lie in the store's timestamp range.
+/// Null slots are skipped (the bits under a null are unspecified) and stay
+/// null. `Err((row, raw))` names the first failing slot.
+fn upcast_slots<T: ArrowTimestampType>(
+    col: &ArrayRef,
+    factor: i64,
+) -> std::result::Result<TimestampMicrosecondArray, (usize, i64)> {
+    let a = col
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .expect("field type and array type agree");
+    let mut values: Vec<i64> = Vec::with_capacity(a.len());
+    for (row, &v) in a.values().iter().enumerate() {
+        if a.is_null(row) {
+            values.push(0); // masked by the null buffer
+            continue;
+        }
+        match v.checked_mul(factor).filter(|u| timestamp_in_range(*u)) {
+            Some(u) => values.push(u),
+            None => return Err((row, v)),
+        }
+    }
+    Ok(TimestampMicrosecondArray::new(
+        values.into(),
+        a.nulls().cloned(),
+    ))
+}
+
+/// Checked s/ms→µs upcast of one long-form column. NOT `arrow::compute::cast`:
+/// its default `safe: true` turns an overflowing multiply into NULL, and a
+/// NULL value cell is legal absence — the cell would vanish with exit 0
+/// (§9.3). Same checked multiply as the dense path, plus the store's range
+/// (`canon::TS_MIN_US..=TS_MAX_US`). The timezone is preserved so the core
+/// still reports the normalization (§5.2.2). `row_offset` makes the reported
+/// row relative to the segment.
+fn upcast_ts_checked(
+    tag: &str,
+    role: &str,
+    field: &Field,
+    col: &ArrayRef,
+    entity: Option<&StringArray>,
+    row_offset: usize,
+) -> Result<ArrayRef> {
+    let DataType::Timestamp(unit, tz) = field.data_type() else {
+        bail!("E6: {tag}: column {:?} is not a timestamp", field.name());
+    };
+    let factor = micros_factor(unit).expect("ns is rejected before the upcast");
+    let (unit_name, res) = match unit {
+        TimeUnit::Second => ("s", upcast_slots::<TimestampSecondType>(col, factor)),
+        TimeUnit::Millisecond => ("ms", upcast_slots::<TimestampMillisecondType>(col, factor)),
+        _ => unreachable!("only s/ms columns are upcast"),
+    };
+    match res {
+        Ok(arr) => Ok(Arc::new(arr.with_timezone_opt(tz.clone())) as ArrayRef),
+        Err((row, raw)) => {
+            let ent = entity
+                .filter(|e| row < e.len() && !e.is_null(row))
+                .map(|e| format!(" (entity {:?})", e.value(row)))
+                .unwrap_or_default();
+            bail!(
+                "E6: {tag}: {role} column {:?}, row {}{ent}: timestamp[{unit_name}] value {raw} \
+                 overflows the supported timestamp range when converted to microseconds \
+                 (×{factor}); supported timestamps run from 290309 BC to 294247 AD",
+                field.name(),
+                row_offset + row
+            )
+        }
+    }
+}
+
 /// Normalize one long-form batch (§5): dictionary decode, type gate for dims
 /// (§5.2) and value (§5.3), s/ms→µs upcast, label-domain presence (§7.2).
 /// Field metadata is preserved throughout. A NaN VALUE is a legal stored value
 /// (§5.3.1) — the core canonicalizes it; only NaN axis/coordinate floats are
 /// rejected, and no dimension column here is float.
-fn normalize_long_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
+fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 2 {
         bail!("E6: {tag}: long form needs at least (entity, value) columns, got {ncols}");
@@ -717,9 +814,15 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             };
             debug_assert!(ok);
             if let Some(target) = microsecond_target(tag, &field)? {
-                let up = cast(&col, &target).map_err(|e| {
-                    anyhow!("E6: {tag}: timestamp upcast on {:?}: {e}", field.name())
-                })?;
+                let up = upcast_ts_checked(
+                    tag,
+                    if is_value { "value" } else { "dimension" },
+                    &field,
+                    &col,
+                    cols.first()
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray>()),
+                    row_offset,
+                )?;
                 (field.with_data_type(target), up)
             } else {
                 (field, col)
@@ -833,12 +936,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                 field.name()
             ),
             DataType::Timestamp(unit, tz) => DimKind::Ts {
-                factor: match unit {
-                    TimeUnit::Second => 1_000_000,
-                    TimeUnit::Millisecond => 1_000,
-                    TimeUnit::Microsecond => 1,
-                    TimeUnit::Nanosecond => unreachable!(),
-                },
+                factor: micros_factor(unit).expect("ns is rejected above"),
                 tz: tz.clone(),
             },
             DataType::Int64 => DimKind::Int,
@@ -1079,14 +1177,19 @@ fn extract_coords(
                         .value(k),
                 };
                 // Checked upcast (critique F10): an overflowing ×factor would
-                // wrap in release and store a garbage instant silently.
-                let up = raw.checked_mul(*factor).ok_or_else(|| {
-                    anyhow!(
-                        "E6: {tag}: timestamp coordinate {raw} (upcast ×{factor} to µs) in \
-                         {dim_name:?} dim list of dense row {row} (entity {ent:?}) overflows \
-                         the microsecond timestamp range (§5.2.1)"
-                    )
-                })?;
+                // wrap in release and store a garbage instant silently; a value
+                // outside the store's range would be written but unreadable.
+                let up = raw
+                    .checked_mul(*factor)
+                    .filter(|u| timestamp_in_range(*u))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "E6: {tag}: timestamp coordinate {raw} (upcast ×{factor} to µs) in \
+                             {dim_name:?} dim list of dense row {row} (entity {ent:?}) overflows \
+                             the supported timestamp range; supported timestamps run from \
+                             290309 BC to 294247 AD"
+                        )
+                    })?;
                 Coord::Ts(up)
             }
             DimKind::Int => Coord::Int(arr.as_any().downcast_ref::<Int64Array>().unwrap().value(k)),

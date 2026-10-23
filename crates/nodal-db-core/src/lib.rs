@@ -74,6 +74,11 @@ pub mod object_delete;
 /// clustered current-first (erasure_compaction_plan §4.1, always-on).
 pub mod compaction;
 
+/// The shared whole-file rebuild machinery (catalog maps, real-column
+/// discovery, RO source ATTACH, sequence restore, durability helpers) used by
+/// [`compaction`] and the history-free extract.
+pub(crate) mod rebuild;
+
 /// Hard erasure: physical removal with a trace — erase-by-alternative plus the
 /// `erasure_marker` write, one atomic transaction; the sanctioned exception to
 /// append-only history (`specs/erasure_compaction_plan.md`).

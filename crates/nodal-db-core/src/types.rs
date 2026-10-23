@@ -394,8 +394,12 @@ pub struct Blocker {
 /// by a report field).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectDeleteResult {
-    Deleted { closed_out: CascadeCounts },
-    Restricted { blockers: Vec<Blocker> },
+    Deleted {
+        closed_out: CascadeCounts,
+    },
+    Restricted {
+        blockers: Vec<Blocker>,
+    },
     /// Target did not resolve, or already closed out, or was created in this
     /// same commit (the `valid_from < commit_id` guard matched nothing) —
     /// folded into one variant so an idempotent whole-save retry is safe (D4).
@@ -547,4 +551,3 @@ pub struct ObjectDeletePreview {
     pub cascade: CascadeCounts,
     pub blockers: Vec<Blocker>,
 }
-

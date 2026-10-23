@@ -141,7 +141,11 @@ fn bench_bulk_reads(c: &mut Criterion) {
     // recorded, not the budget path — §10: ~4.2 s, VMP allows dense form).
     g.bench_function("arrays_70mb_read_parameter_canonical", |b| {
         b.iter(|| {
-            let rows = arrow_rows(&conn, "SELECT * FROM read_parameter('bench_array', 'p_series')", &[]);
+            let rows = arrow_rows(
+                &conn,
+                "SELECT * FROM read_parameter('bench_array', 'p_series')",
+                &[],
+            );
             assert_eq!(rows, ARRAY_ENTITIES * CELLS);
             black_box(rows)
         })
@@ -152,7 +156,11 @@ fn bench_bulk_reads(c: &mut Criterion) {
     // the raw number doubles as the ~17%-dead degradation point.
     g.bench_function("model_load_long_1p23m_canonical", |b| {
         b.iter(|| {
-            let rows = arrow_rows(&conn, "SELECT * FROM read_parameter('bench_long', 'p_long')", &[]);
+            let rows = arrow_rows(
+                &conn,
+                "SELECT * FROM read_parameter('bench_long', 'p_long')",
+                &[],
+            );
             assert_eq!(rows, LONG_ENTITIES * CELLS);
             black_box(rows)
         })
@@ -193,7 +201,12 @@ fn bench_writes(c: &mut Criterion) {
     g.bench_function("replace_scalar_cycle_ckpt", |b| {
         b.iter(|| {
             let seq = next_seq();
-            write_scalars(&db, &["s000000".to_string()], &[seq as f64], "bench scalar replace");
+            write_scalars(
+                &db,
+                &["s000000".to_string()],
+                &[seq as f64],
+                "bench scalar replace",
+            );
             checkpoint(&db);
         })
     });

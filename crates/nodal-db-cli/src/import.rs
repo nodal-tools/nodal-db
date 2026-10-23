@@ -73,7 +73,10 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?;
     // E1: not an IPC stream — empty file or the IPC *file* (Feather) magic.
     if bytes.is_empty() {
-        bail!("E1: {} is empty (0 bytes) — not an Arrow IPC stream", args.file.display());
+        bail!(
+            "E1: {} is empty (0 bytes) — not an Arrow IPC stream",
+            args.file.display()
+        );
     }
     if bytes.len() >= 6 && &bytes[..6] == b"ARROW1" {
         bail!(
@@ -100,7 +103,10 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         if m.version != first_version {
             bail!(
                 "E3: segments disagree on spinal:format_version ({}.{} vs {}.{})",
-                first_version.0, first_version.1, m.version.0, m.version.1
+                first_version.0,
+                first_version.1,
+                m.version.0,
+                m.version.1
             );
         }
         if m.segment_count != first_count {
@@ -135,7 +141,9 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             bail!(
                 "E7: duplicate target {}:{} (alternative {:?}) across segments \
                  (comparison is case-insensitive)",
-                meta.class, meta.parameter, alternative
+                meta.class,
+                meta.parameter,
+                alternative
             );
         }
         let batches = normalize_segment(raw, meta)?;
@@ -155,15 +163,14 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         retain_override: None,
     };
     let n_segments = segments.len();
-    let report = ingest_segments(&args.db, segments, &user, &args.message, opts).map_err(
-        |e| match e {
+    let report =
+        ingest_segments(&args.db, segments, &user, &args.message, opts).map_err(|e| match e {
             // E9: busy / conflict budget exhausted at commit.
             DbError::Busy { .. } | DbError::Conflict { .. } => anyhow!("E9: {e}"),
             // Everything else the core rejects is the E6 malformed-payload
             // class (core-surfaced canonicalization errors, §9.1).
             other => anyhow!("E6: {other}"),
-        },
-    )?;
+        })?;
 
     // Success summary + warnings (warnings MUST be printed — decision B).
     let tiers: Vec<&str> = report
@@ -190,7 +197,10 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     for w in &report.warnings {
         match &w.kind {
             WarningKind::AutoCreated => {
-                println!("warning: auto-created {} {:?} (id {})", w.object_type, w.name, w.id)
+                println!(
+                    "warning: auto-created {} {:?} (id {})",
+                    w.object_type, w.name, w.id
+                )
             }
             WarningKind::TimezoneNormalized { column, tz } => println!(
                 "warning: timezone-normalized column {column:?} (tz {tz}); \
@@ -198,12 +208,12 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             ),
             // Import never issues deletes, but the match is exhaustive: surface
             // these consistently if the shared write path ever emits one.
-            WarningKind::UnknownReferent { key_index, level } => println!(
-                "warning: unknown {level} for delete key {key_index} (skipped)"
-            ),
-            WarningKind::NothingToDelete { key_index } => println!(
-                "warning: nothing to delete for key {key_index} (no live value)"
-            ),
+            WarningKind::UnknownReferent { key_index, level } => {
+                println!("warning: unknown {level} for delete key {key_index} (skipped)")
+            }
+            WarningKind::NothingToDelete { key_index } => {
+                println!("warning: nothing to delete for key {key_index} (no live value)")
+            }
         }
     }
     Ok(())
@@ -300,7 +310,11 @@ fn split_segments(bytes: &[u8]) -> Result<Vec<RawSegment>> {
             ),
         }
         pos = end;
-        out.push(RawSegment { ordinal, schema, batches });
+        out.push(RawSegment {
+            ordinal,
+            schema,
+            batches,
+        });
     }
     Ok(out)
 }
@@ -337,7 +351,10 @@ fn classify_termination(seg: &[u8]) -> Result<Termination> {
             if pos + 8 > seg.len() {
                 return Ok(Termination::BareEof);
             }
-            (i32::from_le_bytes(seg[pos + 4..pos + 8].try_into().unwrap()), 8usize)
+            (
+                i32::from_le_bytes(seg[pos + 4..pos + 8].try_into().unwrap()),
+                8usize,
+            )
         } else {
             // Pre-0.15 framing: the length arrives without a continuation
             // sentinel (arrow-rs reads both; the format accepts only modern).
@@ -347,7 +364,11 @@ fn classify_termination(seg: &[u8]) -> Result<Termination> {
             // An EOS frame — genuine only when it sits exactly at the stop
             // position (an EOS the reader read past cannot terminate anything).
             return Ok(if pos + header == seg.len() {
-                if header == 8 { Termination::Eos } else { Termination::LegacyEos }
+                if header == 8 {
+                    Termination::Eos
+                } else {
+                    Termination::LegacyEos
+                }
             } else {
                 Termination::BareEof
             });
@@ -394,7 +415,9 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
     // E2: format id.
     match md.get("spinal:format").map(String::as_str) {
         Some("spinal-db-bulk") => {}
-        Some(other) => bail!("E2: segment {ordinal}: spinal:format is {other:?}, expected \"spinal-db-bulk\""),
+        Some(other) => {
+            bail!("E2: segment {ordinal}: spinal:format is {other:?}, expected \"spinal-db-bulk\"")
+        }
         None => bail!("E2: segment {ordinal}: spinal:format metadata key is missing"),
     }
 
@@ -460,7 +483,14 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
         }
     }
 
-    Ok(SegMeta { class, parameter, alternative, form, version, segment_count })
+    Ok(SegMeta {
+        class,
+        parameter,
+        alternative,
+        form,
+        version,
+        segment_count,
+    })
 }
 
 /// `MAJOR.MINOR`, decimal, no leading zeros (§3.1).
@@ -493,7 +523,8 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
                 bail!(
                     "E4: segment {ordinal} ({}:{}): spinal:alternative {m:?} conflicts with \
                      --alternative {f:?} (no precedence — a conflict is always a mistake, §4.3)",
-                    meta.class, meta.parameter
+                    meta.class,
+                    meta.parameter
                 );
             }
             Ok(m.clone())
@@ -503,7 +534,8 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
         (None, None) => bail!(
             "E4: segment {ordinal} ({}:{}): no alternative — neither spinal:alternative \
              metadata nor --alternative was given",
-            meta.class, meta.parameter
+            meta.class,
+            meta.parameter
         ),
     }
 }
@@ -543,14 +575,25 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
     // write, no metadata-only auto-create.
     let total_rows: usize = raw.batches.iter().map(RecordBatch::num_rows).sum();
     if total_rows == 0 {
-        bail!("E6: {tag}: zero rows across {} record batch(es) — nothing to import", raw.batches.len());
+        bail!(
+            "E6: {tag}: zero rows across {} record batch(es) — nothing to import",
+            raw.batches.len()
+        );
     }
 
     check_name_tripwires(&tag, &raw.schema)?;
 
     match meta.form {
-        Form::Long => raw.batches.iter().map(|b| normalize_long_batch(&tag, b)).collect(),
-        Form::Dense => raw.batches.iter().map(|b| expand_dense_batch(&tag, b)).collect(),
+        Form::Long => raw
+            .batches
+            .iter()
+            .map(|b| normalize_long_batch(&tag, b))
+            .collect(),
+        Form::Dense => raw
+            .batches
+            .iter()
+            .map(|b| expand_dense_batch(&tag, b))
+            .collect(),
     }
 }
 
@@ -601,8 +644,12 @@ fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, 
             field.name()
         ),
         DataType::Dictionary(_, value_type) => {
-            let plain = cast(col, value_type)
-                .map_err(|e| anyhow!("E6: {tag}: cannot decode dictionary column {:?}: {e}", field.name()))?;
+            let plain = cast(col, value_type).map_err(|e| {
+                anyhow!(
+                    "E6: {tag}: cannot decode dictionary column {:?}: {e}",
+                    field.name()
+                )
+            })?;
             Ok((field.clone().with_data_type((**value_type).clone()), plain))
         }
         _ => Ok((field.clone(), col.clone())),
@@ -649,8 +696,7 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
     let mut fields: Vec<Field> = Vec::with_capacity(ncols);
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(ncols);
     for i in 0..ncols {
-        let (field, col) =
-            decode_encodings(tag, batch.schema().field(i), batch.column(i))?;
+        let (field, col) = decode_encodings(tag, batch.schema().field(i), batch.column(i))?;
         let (field, col) = if i == 0 {
             (field, col) // entity column: the core validates Utf8 + nulls
         } else {
@@ -671,15 +717,18 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             };
             debug_assert!(ok);
             if let Some(target) = microsecond_target(tag, &field)? {
-                let up = cast(&col, &target)
-                    .map_err(|e| anyhow!("E6: {tag}: timestamp upcast on {:?}: {e}", field.name()))?;
+                let up = cast(&col, &target).map_err(|e| {
+                    anyhow!("E6: {tag}: timestamp upcast on {:?}: {e}", field.name())
+                })?;
                 (field.with_data_type(target), up)
             } else {
                 (field, col)
             }
         };
         // §7.2: a label dimension without spinal:label_domain is E6.
-        if i > 0 && i < ncols - 1 && field.data_type() == &DataType::Utf8
+        if i > 0
+            && i < ncols - 1
+            && field.data_type() == &DataType::Utf8
             && !field.metadata().contains_key("spinal:label_domain")
         {
             bail!(
@@ -759,7 +808,10 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| {
-            anyhow!("E6: {tag}: dense entity column must be Utf8, got {:?}", fields[0].data_type())
+            anyhow!(
+                "E6: {tag}: dense entity column must be Utf8, got {:?}",
+                fields[0].data_type()
+            )
         })?;
 
     // Dimension columns: List<T> with T per §5.2 (ns rejected, s/ms upcast);
@@ -817,7 +869,10 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
              got {other:?}"
         ),
     }
-    let value_list = cols[ncols - 1].as_any().downcast_ref::<ListArray>().unwrap();
+    let value_list = cols[ncols - 1]
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
 
     // Expand row by row (one row = one entity, §6.1).
     let nrows = batch.num_rows();
@@ -846,7 +901,14 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                     fields[d + 1].name()
                 );
             }
-            let coords = extract_coords(tag, fields[d + 1].name(), &dim_kinds[d], &list.value(row), row, &ent)?;
+            let coords = extract_coords(
+                tag,
+                fields[d + 1].name(),
+                &dim_kinds[d],
+                &list.value(row),
+                row,
+                &ent,
+            )?;
             // A zero-length dim list would expand the whole row to zero long
             // tuples — the entity would vanish without error, violating §9.3's
             // no-silent-drop rule (critique F2). The spec never legalizes an
@@ -931,7 +993,10 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                 if let Some(tz) = tz {
                     arr = arr.with_timezone(Arc::clone(tz));
                 }
-                (DataType::Timestamp(TimeUnit::Microsecond, tz.clone()), Arc::new(arr) as ArrayRef)
+                (
+                    DataType::Timestamp(TimeUnit::Microsecond, tz.clone()),
+                    Arc::new(arr) as ArrayRef,
+                )
             }
             DimKind::Int => {
                 let vals: Vec<i64> = out_dims[d]
@@ -941,7 +1006,10 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                         _ => unreachable!(),
                     })
                     .collect();
-                (DataType::Int64, Arc::new(Int64Array::from(vals)) as ArrayRef)
+                (
+                    DataType::Int64,
+                    Arc::new(Int64Array::from(vals)) as ArrayRef,
+                )
             }
             DimKind::Label => {
                 let vals: Vec<String> = out_dims[d]
@@ -951,15 +1019,21 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
                         _ => unreachable!(),
                     })
                     .collect();
-                (DataType::Utf8, Arc::new(StringArray::from(vals)) as ArrayRef)
+                (
+                    DataType::Utf8,
+                    Arc::new(StringArray::from(vals)) as ArrayRef,
+                )
             }
         };
-        long_fields.push(
-            Field::new(name, dt, false).with_metadata(fields[d + 1].metadata().clone()),
-        );
+        long_fields
+            .push(Field::new(name, dt, false).with_metadata(fields[d + 1].metadata().clone()));
         long_cols.push(col);
     }
-    long_fields.push(Field::new(fields[ncols - 1].name(), DataType::Float64, false));
+    long_fields.push(Field::new(
+        fields[ncols - 1].name(),
+        DataType::Float64,
+        false,
+    ));
     long_cols.push(Arc::new(Float64Array::from(out_values)) as ArrayRef);
 
     RecordBatch::try_new(Arc::new(Schema::new(long_fields)), long_cols)
@@ -988,9 +1062,21 @@ fn extract_coords(
         let coord = match kind {
             DimKind::Ts { factor, .. } => {
                 let raw = match *factor {
-                    1_000_000 => arr.as_any().downcast_ref::<TimestampSecondArray>().unwrap().value(k),
-                    1_000 => arr.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(k),
-                    _ => arr.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap().value(k),
+                    1_000_000 => arr
+                        .as_any()
+                        .downcast_ref::<TimestampSecondArray>()
+                        .unwrap()
+                        .value(k),
+                    1_000 => arr
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(k),
+                    _ => arr
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap()
+                        .value(k),
                 };
                 // Checked upcast (critique F10): an overflowing ×factor would
                 // wrap in release and store a garbage instant silently.
@@ -1004,9 +1090,13 @@ fn extract_coords(
                 Coord::Ts(up)
             }
             DimKind::Int => Coord::Int(arr.as_any().downcast_ref::<Int64Array>().unwrap().value(k)),
-            DimKind::Label => {
-                Coord::Label(arr.as_any().downcast_ref::<StringArray>().unwrap().value(k).to_string())
-            }
+            DimKind::Label => Coord::Label(
+                arr.as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(k)
+                    .to_string(),
+            ),
         };
         out.push(coord);
     }

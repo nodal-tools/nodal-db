@@ -48,7 +48,10 @@ fn commits(db: &Path) -> i64 {
 }
 
 fn scalar(kind: &str) -> TypeDecl {
-    TypeDecl { kind: kind.into(), dims: None }
+    TypeDecl {
+        kind: kind.into(),
+        dims: None,
+    }
 }
 
 fn indexed(dims: &[(&str, &str)]) -> TypeDecl {
@@ -56,7 +59,10 @@ fn indexed(dims: &[(&str, &str)]) -> TypeDecl {
         kind: "indexed".into(),
         dims: Some(
             dims.iter()
-                .map(|(n, k)| DimSpec { name: (*n).into(), kind: (*k).into() })
+                .map(|(n, k)| DimSpec {
+                    name: (*n).into(),
+                    kind: (*k).into(),
+                })
                 .collect(),
         ),
     }
@@ -73,7 +79,11 @@ fn ensure_alternative_creates_once_with_description() {
     let id = ensure_alternative(&db, "floor", Some("the v38 floor"), "tester").unwrap();
     assert!(id > 0);
     assert_eq!(
-        qs(&db, "SELECT description FROM alternative WHERE cur_name = 'floor'").as_deref(),
+        qs(
+            &db,
+            "SELECT description FROM alternative WHERE cur_name = 'floor'"
+        )
+        .as_deref(),
         Some("the v38 floor")
     );
     let after_create = commits(&db);
@@ -82,7 +92,10 @@ fn ensure_alternative_creates_once_with_description() {
     assert_eq!(id, id2, "case-insensitive resolution");
     assert_eq!(commits(&db), after_create, "no-op burns no commit");
     assert!(ensure_alternative(&db, "  ", None, "tester").is_err());
-    assert!(ensure_alternative(&db, "x", None, " ").is_err(), "user required");
+    assert!(
+        ensure_alternative(&db, "x", None, " ").is_err(),
+        "user required"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -96,13 +109,8 @@ fn set_scenario_alternatives_replaces_whole_list_order_only() {
     for a in ["base", "high", "floor"] {
         ensure_alternative(&db, a, None, "tester").unwrap();
     }
-    let sid = set_scenario_alternatives(
-        &db,
-        "s1",
-        &["base".into(), "high".into()],
-        "tester",
-    )
-    .unwrap();
+    let sid =
+        set_scenario_alternatives(&db, "s1", &["base".into(), "high".into()], "tester").unwrap();
     assert!(sid > 0);
     let order = |db: &Path| -> Vec<(String, i64)> {
         let conn = Connection::open(db).unwrap();
@@ -139,26 +147,28 @@ fn set_scenario_alternatives_replaces_whole_list_order_only() {
         vec![("floor".into(), 1), ("base".into(), 2), ("high".into(), 3)]
     );
     assert_eq!(
-        q1(&db, "SELECT max(version) FROM scenario_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT max(version) FROM scenario_alternative WHERE valid_to_commit IS NULL"
+        ),
         2,
         "pre-existing (scenario, alternative) pairs revise, not restart"
     );
     // History: the replaced ranking's rows are closed, not erased.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM scenario_alternative WHERE valid_to_commit IS NOT NULL"),
+        q1(
+            &db,
+            "SELECT count(*) FROM scenario_alternative WHERE valid_to_commit IS NOT NULL"
+        ),
         2
     );
 
     // Strict resolution + caller-contract checks.
     let err = set_scenario_alternatives(&db, "s1", &["ghost".into()], "tester").unwrap_err();
     assert!(format!("{err}").contains("ghost"));
-    assert!(set_scenario_alternatives(
-        &db,
-        "s1",
-        &["base".into(), "BASE".into()],
-        "tester"
-    )
-    .is_err());
+    assert!(
+        set_scenario_alternatives(&db, "s1", &["base".into(), "BASE".into()], "tester").is_err()
+    );
 
     // Empty list clears the ranking (declarative replace).
     set_scenario_alternatives(&db, "s1", &[], "tester").unwrap();
@@ -178,14 +188,20 @@ fn activation_verbs_write_update_close_and_noop() {
     ensure_entity(&db, "constraint", Some("c1"), &[], "tester").unwrap();
 
     // Strict resolution: entity/class/alternative must exist.
-    assert!(set_entity_activation(&db, "constraint", "ghost", "base", Some(true), "tester")
-        .is_err());
+    assert!(
+        set_entity_activation(&db, "constraint", "ghost", "base", Some(true), "tester").is_err()
+    );
     assert!(set_entity_activation(&db, "ghost", "c1", "base", Some(true), "tester").is_err());
-    assert!(set_entity_activation(&db, "constraint", "c1", "ghost", Some(true), "tester")
-        .is_err());
+    assert!(set_entity_activation(&db, "constraint", "c1", "ghost", Some(true), "tester").is_err());
 
     set_entity_activation(&db, "constraint", "c1", "base", Some(true), "tester").unwrap();
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL AND active"), 1);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL AND active"
+        ),
+        1
+    );
     let n = commits(&db);
     // Equal state: no commit.
     set_entity_activation(&db, "constraint", "c1", "base", Some(true), "tester").unwrap();
@@ -193,13 +209,27 @@ fn activation_verbs_write_update_close_and_noop() {
     // Flip: close-out + successor (version 2).
     set_entity_activation(&db, "constraint", "c1", "base", Some(false), "tester").unwrap();
     assert_eq!(
-        q1(&db, "SELECT version FROM entity_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT version FROM entity_alternative WHERE valid_to_commit IS NULL"
+        ),
         2
     );
     // None: close the row (v56 Batch F's entity_alternative deletion).
     set_entity_activation(&db, "constraint", "c1", "base", None, "tester").unwrap();
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL"), 0);
-    assert!(q1(&db, "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NOT NULL") >= 2);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL"
+        ),
+        0
+    );
+    assert!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NOT NULL"
+        ) >= 2
+    );
     let n = commits(&db);
     set_entity_activation(&db, "constraint", "c1", "base", None, "tester").unwrap();
     assert_eq!(commits(&db), n, "closing an absent row is a no-op");
@@ -219,7 +249,10 @@ fn set_class_active_by_default_is_a_versioned_header_update() {
     set_class_active_by_default(&db, "reserve_cls", false, "tester").unwrap();
     assert_eq!(q1(&db, "SELECT CAST(active_by_default AS BIGINT) FROM entity_class WHERE cur_name = 'reserve_cls'"), 0);
     assert_eq!(
-        q1(&db, "SELECT version FROM entity_class WHERE cur_name = 'reserve_cls'"),
+        q1(
+            &db,
+            "SELECT version FROM entity_class WHERE cur_name = 'reserve_cls'"
+        ),
         2,
         "revise_* family: close-out + successor, same id"
     );
@@ -241,16 +274,33 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
          classes: [{name: cls}]\n",
     )
     .unwrap();
-    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM list_value lv JOIN parameter_value_list p \
-                 ON p.cur_id = lv.parameter_value_list_id WHERE p.cur_name = 'yes_no'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM list_value lv JOIN parameter_value_list p \
+                 ON p.cur_id = lv.parameter_value_list_id WHERE p.cur_name = 'yes_no'"
+        ),
         2
     );
 
     // Bind a definition to the list (§3.5 inference: rank-0 string member).
     let pd = ensure_parameter_definition(
-        &db, "cls", "is_enabled", &[], Some("yes_no"), None, "tester",
+        &db,
+        "cls",
+        "is_enabled",
+        &[],
+        Some("yes_no"),
+        None,
+        "tester",
     )
     .unwrap();
     assert!(pd > 0);
@@ -264,7 +314,10 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
     );
     // The refusal touched nothing: the list is still current, members intact.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'yes_no'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'yes_no'"
+        ),
         1
     );
 
@@ -285,7 +338,10 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
     )
     .unwrap();
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_definition WHERE cur_name = 'is_enabled'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name = 'is_enabled'"
+        ),
         0
     );
 
@@ -293,14 +349,20 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
     // gone (no current row), members closed too (history retained, not erased).
     drop_value_list(&db, "yes_no", "tester").unwrap();
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'yes_no'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'yes_no'"
+        ),
         0,
         "the orphan list is closed out — no current row"
     );
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM list_value \
+        q1(
+            &db,
+            "SELECT count(*) FROM list_value \
                  WHERE valid_to_commit IS NULL AND parameter_value_list_id \
-                 IN (SELECT id FROM parameter_value_list WHERE cur_name IS NULL)"),
+                 IN (SELECT id FROM parameter_value_list WHERE cur_name IS NULL)"
+        ),
         0,
         "the closed list's members are closed too"
     );
@@ -310,7 +372,11 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
     let n = commits(&db);
     drop_value_list(&db, "ghost_list", "tester").unwrap();
     drop_value_list(&db, "yes_no", "tester").unwrap();
-    assert_eq!(commits(&db), n, "a missing/absent list drop burns no commit");
+    assert_eq!(
+        commits(&db),
+        n,
+        "a missing/absent list drop burns no commit"
+    );
 
     // Caller-contract guards.
     assert!(drop_value_list(&db, "  ", "tester").is_err(), "empty name");
@@ -337,12 +403,18 @@ fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
     )
     .unwrap();
     assert_eq!(
-        q1(&db, &format!("SELECT count(*) FROM entity_class_dimension WHERE cur_c = {nd}")),
+        q1(
+            &db,
+            &format!("SELECT count(*) FROM entity_class_dimension WHERE cur_c = {nd}")
+        ),
         3
     );
     let n = commits(&db);
     // Idempotent (matching dims): same ids, no commits.
-    assert_eq!(ensure_entity_class(&db, "flowGroup", &[], "tester").unwrap(), fg);
+    assert_eq!(
+        ensure_entity_class(&db, "flowGroup", &[], "tester").unwrap(),
+        fg
+    );
     assert_eq!(
         ensure_entity_class(
             &db,
@@ -385,10 +457,13 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
     )
     .unwrap();
     assert_eq!(
-        q1(&db, &format!(
-            "SELECT count(*) FROM parameter_type WHERE parameter_definition_id = {pd} \
+        q1(
+            &db,
+            &format!(
+                "SELECT count(*) FROM parameter_type WHERE parameter_definition_id = {pd} \
              AND valid_to_commit IS NULL"
-        )),
+            )
+        ),
         2
     );
     // Existing: returned AS-IS — never re-declared, never widened (D-F4).
@@ -404,12 +479,19 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
     )
     .unwrap();
     assert_eq!(pd, pd2);
-    assert_eq!(commits(&db), n, "existing definition is a no-op, no widen door");
     assert_eq!(
-        q1(&db, &format!(
-            "SELECT count(*) FROM parameter_type WHERE parameter_definition_id = {pd} \
+        commits(&db),
+        n,
+        "existing definition is a no-op, no widen door"
+    );
+    assert_eq!(
+        q1(
+            &db,
+            &format!(
+                "SELECT count(*) FROM parameter_type WHERE parameter_definition_id = {pd} \
              AND valid_to_commit IS NULL"
-        )),
+            )
+        ),
         2,
         "declared set unchanged"
     );
@@ -422,7 +504,15 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
          classes: [{name: seedcls}]\n",
     )
     .unwrap();
-    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     let pd3 = ensure_parameter_definition(
         &db,
         "solve",
@@ -434,43 +524,66 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
     )
     .unwrap();
     assert_eq!(
-        qs(&db, &format!(
-            "SELECT value_kind FROM parameter_type WHERE parameter_definition_id = {pd3} \
+        qs(
+            &db,
+            &format!(
+                "SELECT value_kind FROM parameter_type WHERE parameter_definition_id = {pd3} \
              AND valid_to_commit IS NULL"
-        ))
+            )
+        )
         .as_deref(),
         Some("string")
     );
     assert!(
-        q1(&db, &format!(
-            "SELECT parameter_value_list_id FROM parameter_definition WHERE cur_id = {pd3}"
-        )) > 0
+        q1(
+            &db,
+            &format!(
+                "SELECT parameter_value_list_id FROM parameter_definition WHERE cur_id = {pd3}"
+            )
+        ) > 0
     );
 
     // Typeless creation (auto-materializes on first write).
     let pd4 =
         ensure_parameter_definition(&db, "solve", "freeform", &[], None, None, "tester").unwrap();
     assert_eq!(
-        q1(&db, &format!(
-            "SELECT count(*) FROM parameter_type WHERE parameter_definition_id = {pd4}"
-        )),
+        q1(
+            &db,
+            &format!("SELECT count(*) FROM parameter_type WHERE parameter_definition_id = {pd4}")
+        ),
         0
     );
 
     // Validation: indistinguishable members, bad kinds, missing class/list.
     assert!(ensure_parameter_definition(
-        &db, "solve", "dup", &[scalar("float"), scalar("float")], None, None, "tester"
+        &db,
+        "solve",
+        "dup",
+        &[scalar("float"), scalar("float")],
+        None,
+        None,
+        "tester"
     )
     .is_err());
     assert!(ensure_parameter_definition(
-        &db, "solve", "bad", &[scalar("floaty")], None, None, "tester"
+        &db,
+        "solve",
+        "bad",
+        &[scalar("floaty")],
+        None,
+        None,
+        "tester"
     )
     .is_err());
-    assert!(
-        ensure_parameter_definition(&db, "ghost", "p", &[], None, None, "tester").is_err()
-    );
+    assert!(ensure_parameter_definition(&db, "ghost", "p", &[], None, None, "tester").is_err());
     assert!(ensure_parameter_definition(
-        &db, "solve", "p", &[], Some("ghost_list"), None, "tester"
+        &db,
+        "solve",
+        "p",
+        &[],
+        Some("ghost_list"),
+        None,
+        "tester"
     )
     .is_err());
 }
@@ -506,7 +619,10 @@ fn ensure_entity_0d_nd_default_name_and_tuple_guard() {
         Some("g1__u1__n1")
     );
     assert_eq!(
-        q1(&db, &format!("SELECT count(*) FROM entity_element WHERE cur_e = {e}")),
+        q1(
+            &db,
+            &format!("SELECT count(*) FROM entity_element WHERE cur_e = {e}")
+        ),
         3
     );
     let n = commits(&db);
@@ -522,7 +638,10 @@ fn ensure_entity_0d_nd_default_name_and_tuple_guard() {
         .unwrap(),
         e
     );
-    assert_eq!(ensure_entity(&db, "flowGroup", Some("g1"), &[], "tester").unwrap(), g);
+    assert_eq!(
+        ensure_entity(&db, "flowGroup", Some("g1"), &[], "tester").unwrap(),
+        g
+    );
     assert_eq!(commits(&db), n);
     // Same name over a DIFFERENT tuple: loud, never a silent alias.
     ensure_entity(&db, "node", Some("n2"), &[], "tester").unwrap();
@@ -535,8 +654,7 @@ fn ensure_entity_0d_nd_default_name_and_tuple_guard() {
     )
     .is_err());
     // Arity and missing-element guards.
-    assert!(ensure_entity(&db, "flowGroup__unit__node", None, &["g1".into()], "tester")
-        .is_err());
+    assert!(ensure_entity(&db, "flowGroup__unit__node", None, &["g1".into()], "tester").is_err());
     assert!(ensure_entity(
         &db,
         "flowGroup__unit__node",
@@ -558,7 +676,12 @@ fn ensure_entity_0d_nd_default_name_and_tuple_guard() {
 fn stamp_template_identity_guards_and_restamps() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    let meta = |k: &str| qs(&db, &format!("SELECT value FROM metadata WHERE cur_name = '{k}'"));
+    let meta = |k: &str| {
+        qs(
+            &db,
+            &format!("SELECT value FROM metadata WHERE cur_name = '{k}'"),
+        )
+    };
 
     // Fresh stamp (the importer's non-optional final step).
     stamp_template_identity(&db, "flextool", "40", false, "tester").unwrap();
@@ -574,7 +697,11 @@ fn stamp_template_identity_guards_and_restamps() {
     // allow_retarget's posture) — version and name alike.
     assert!(stamp_template_identity(&db, "flextool", "41", false, "tester").is_err());
     assert!(stamp_template_identity(&db, "ines", "40", false, "tester").is_err());
-    assert_eq!(meta("template_version").as_deref(), Some("40"), "refusal touched nothing");
+    assert_eq!(
+        meta("template_version").as_deref(),
+        Some("40"),
+        "refusal touched nothing"
+    );
 
     // Opt-in restamp works and closes any stale certification.
     stamp_template_identity(&db, "flextool", "41", true, "tester").unwrap();
@@ -597,19 +724,37 @@ fn stamp_then_apply_enters_the_chain() {
     )
     .unwrap();
     // Unstamped: plain reconcile to head, zero spans.
-    let out = apply(&db, &head, &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap();
+    let out = apply(
+        &db,
+        &head,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.plan.pending_migrations.is_empty());
 
     // Stamped mid-version: the chain walks.
     let dir2 = tempfile::tempdir().unwrap();
     let db2 = fresh_db(&dir2);
     stamp_template_identity(&db2, "t", "1", false, "tester").unwrap();
-    let out = apply(&db2, &head, &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap();
+    let out = apply(
+        &db2,
+        &head,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert_eq!(out.commits.len(), 3, "two span stamps + reconcile");
     assert_eq!(
-        qs(&db2, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db2,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("3")
     );
 }
@@ -629,9 +774,12 @@ fn array_batch(entity: &str, pairs: &[(i64, f64)]) -> RecordBatch {
         schema,
         vec![
             Arc::new(StringArray::from(vec![entity; pairs.len()])) as ArrayRef,
-            Arc::new(Int64Array::from(pairs.iter().map(|p| p.0).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(Float64Array::from(pairs.iter().map(|p| p.1).collect::<Vec<_>>()))
-                as ArrayRef,
+            Arc::new(Int64Array::from(
+                pairs.iter().map(|p| p.0).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Float64Array::from(
+                pairs.iter().map(|p| p.1).collect::<Vec<_>>(),
+            )) as ArrayRef,
         ],
     )
     .unwrap()
@@ -647,10 +795,12 @@ fn map_batch(entity: &str, pairs: &[(&str, f64)]) -> RecordBatch {
         schema,
         vec![
             Arc::new(StringArray::from(vec![entity; pairs.len()])) as ArrayRef,
-            Arc::new(StringArray::from(pairs.iter().map(|p| p.0).collect::<Vec<_>>()))
-                as ArrayRef,
-            Arc::new(Float64Array::from(pairs.iter().map(|p| p.1).collect::<Vec<_>>()))
-                as ArrayRef,
+            Arc::new(StringArray::from(
+                pairs.iter().map(|p| p.0).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Float64Array::from(
+                pairs.iter().map(|p| p.1).collect::<Vec<_>>(),
+            )) as ArrayRef,
         ],
     )
     .unwrap()
@@ -696,7 +846,10 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
         "solver_arguments",
         "base",
         map_batch("s1", &[("presolve", 1.0)]),
-        &[LabelDomain { position: 1, labels: vec!["presolve".into()] }],
+        &[LabelDomain {
+            position: 1,
+            labels: vec!["presolve".into()],
+        }],
         WriteOptions::default(),
         "tester",
         "",
@@ -733,7 +886,10 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
         "tester",
     )
     .unwrap();
-    assert_ne!(old_pd, new_pd, "row identity changes — the idiom's accepted cost");
+    assert_ne!(
+        old_pd, new_pd,
+        "row identity changes — the idiom's accepted cost"
+    );
     // (4) write the converted values.
     write_parameter(
         &db,
@@ -741,7 +897,10 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
         "solver_arguments",
         "base",
         map_batch("s1", &[("presolve", 1.0), ("threads", 4.0)]),
-        &[LabelDomain { position: 1, labels: vec!["presolve".into(), "threads".into()] }],
+        &[LabelDomain {
+            position: 1,
+            labels: vec!["presolve".into(), "threads".into()],
+        }],
         WriteOptions::default(),
         "tester",
         "",
@@ -751,7 +910,10 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
     // End state: one live definition, map-typed, with the converted values;
     // the old array rows are closed-out history, not current data.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_definition WHERE cur_name = 'solver_arguments'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name = 'solver_arguments'"
+        ),
         1
     );
     assert_eq!(
@@ -784,23 +946,40 @@ fn free_text_names_round_trip_through_verbs() {
     assert!(cls > 0);
     ensure_entity(&db, "5week-invest", Some("node with space"), &[], "tester").unwrap();
     let pd = ensure_parameter_definition(
-        &db, "5week-invest", "ramp__limit", &[], None, None, "tester",
+        &db,
+        "5week-invest",
+        "ramp__limit",
+        &[],
+        None,
+        None,
+        "tester",
     )
     .unwrap();
     assert!(pd > 0);
 
     // Read back verbatim: storage preserves case and the exact bytes.
     assert_eq!(
-        qs(&db, "SELECT name FROM entity_class WHERE cur_name = '5week-invest'").as_deref(),
+        qs(
+            &db,
+            "SELECT name FROM entity_class WHERE cur_name = '5week-invest'"
+        )
+        .as_deref(),
         Some("5week-invest")
     );
     assert_eq!(
-        qs(&db, "SELECT name FROM entity WHERE cur_name = 'node with space'").as_deref(),
+        qs(
+            &db,
+            "SELECT name FROM entity WHERE cur_name = 'node with space'"
+        )
+        .as_deref(),
         Some("node with space")
     );
     assert_eq!(
-        qs(&db, "SELECT name FROM parameter_definition WHERE cur_name = 'ramp__limit'")
-            .as_deref(),
+        qs(
+            &db,
+            "SELECT name FROM parameter_definition WHERE cur_name = 'ramp__limit'"
+        )
+        .as_deref(),
         Some("ramp__limit")
     );
 

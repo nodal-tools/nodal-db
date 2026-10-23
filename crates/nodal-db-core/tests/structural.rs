@@ -47,7 +47,10 @@ fn commits(db: &Path) -> i64 {
 }
 
 fn create_alt(name: &str) -> SC {
-    SC::CreateAlternative { name: name.into(), description: None }
+    SC::CreateAlternative {
+        name: name.into(),
+        description: None,
+    }
 }
 
 fn ranking(db: &Path, scenario: &str) -> Vec<String> {
@@ -96,9 +99,18 @@ fn create_rename_alternative() {
     );
     assert_eq!(r.structural[0].effect, SE::Renamed);
     assert_eq!(r.structural[0].object_id, id);
-    assert_eq!(q1(&db, "SELECT version FROM alternative WHERE cur_name = 'wet_year'"), 2);
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM alternative WHERE valid_to_commit IS NOT NULL"),
+        q1(
+            &db,
+            "SELECT version FROM alternative WHERE cur_name = 'wet_year'"
+        ),
+        2
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM alternative WHERE valid_to_commit IS NOT NULL"
+        ),
         1
     );
 
@@ -153,12 +165,33 @@ fn same_commit_create_then_rename_is_in_place() {
         ],
     );
     assert_eq!(r.structural[1].effect, SE::Renamed);
-    assert_eq!(q1(&db, "SELECT count(*) FROM alternative WHERE cur_name = 'bar'"), 1);
-    assert_eq!(q1(&db, "SELECT version FROM alternative WHERE cur_name = 'bar'"), 1);
-    assert_eq!(q1(&db, "SELECT count(*) FROM alternative WHERE cur_name = 'foo'"), 0);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM alternative WHERE cur_name = 'bar'"
+        ),
+        1
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT version FROM alternative WHERE cur_name = 'bar'"
+        ),
+        1
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM alternative WHERE cur_name = 'foo'"
+        ),
+        0
+    );
     // No closed alternative rows: the create was never visible.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM alternative WHERE valid_to_commit IS NOT NULL"),
+        q1(
+            &db,
+            "SELECT count(*) FROM alternative WHERE valid_to_commit IS NOT NULL"
+        ),
         0
     );
 }
@@ -167,7 +200,13 @@ fn same_commit_create_then_rename_is_in_place() {
 fn create_rename_scenario() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    let r = cs(&db, vec![SC::CreateScenario { name: "s".into(), description: None }]);
+    let r = cs(
+        &db,
+        vec![SC::CreateScenario {
+            name: "s".into(),
+            description: None,
+        }],
+    );
     assert_eq!(r.structural[0].effect, SE::Created);
     let r = cs(
         &db,
@@ -178,7 +217,10 @@ fn create_rename_scenario() {
         }],
     );
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(q1(&db, "SELECT version FROM scenario WHERE cur_name = 's2'"), 2);
+    assert_eq!(
+        q1(&db, "SELECT version FROM scenario WHERE cur_name = 's2'"),
+        2
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -217,11 +259,17 @@ fn a_min_minimal_diff() {
     assert_eq!(ranking(&db, "s"), vec!["a", "b", "c"]);
     // A and B untouched: nothing closed, all versions still 1.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM scenario_alternative WHERE valid_to_commit IS NOT NULL"),
+        q1(
+            &db,
+            "SELECT count(*) FROM scenario_alternative WHERE valid_to_commit IS NOT NULL"
+        ),
         0
     );
     assert_eq!(
-        q1(&db, "SELECT max(version) FROM scenario_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT max(version) FROM scenario_alternative WHERE valid_to_commit IS NULL"
+        ),
         1
     );
 
@@ -265,7 +313,15 @@ fn a_min_floor_insert_and_clear_and_noop() {
 fn a_min_over_non_contiguous_ranks() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    cs(&db, vec![create_alt("A"), create_alt("B"), create_alt("C"), create_alt("D")]);
+    cs(
+        &db,
+        vec![
+            create_alt("A"),
+            create_alt("B"),
+            create_alt("C"),
+            create_alt("D"),
+        ],
+    );
     cs(&db, vec![set_ranks("s", &["A", "B", "C"])]); // ranks 1,2,3
 
     // Object-delete the mid-stack alternative B: its ranking row closes, leaving
@@ -298,18 +354,28 @@ fn a_min_over_non_contiguous_ranks() {
 // ---------------------------------------------------------------------------
 
 fn class(name: &str) -> SC {
-    SC::CreateEntityClass { name: name.into(), dims: vec![] }
+    SC::CreateEntityClass {
+        name: name.into(),
+        dims: vec![],
+    }
 }
 
 fn entity(class: &str, name: &str) -> SC {
-    SC::CreateEntity { class: class.into(), name: Some(name.into()), elements: vec![] }
+    SC::CreateEntity {
+        class: class.into(),
+        name: Some(name.into()),
+        elements: vec![],
+    }
 }
 
 #[test]
 fn set_entity_activation_write_flip_close() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    cs(&db, vec![class("node"), entity("node", "n1"), create_alt("Base")]);
+    cs(
+        &db,
+        vec![class("node"), entity("node", "n1"), create_alt("Base")],
+    );
 
     let act = |active: Option<bool>| SC::SetEntityActivation {
         class: "node".into(),
@@ -320,20 +386,29 @@ fn set_entity_activation_write_flip_close() {
     let r = cs(&db, vec![act(Some(true))]);
     assert_eq!(r.structural[0].effect, SE::Updated);
     assert_eq!(
-        q1(&db, "SELECT active::INT FROM entity_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT active::INT FROM entity_alternative WHERE valid_to_commit IS NULL"
+        ),
         1
     );
     // Flip ⇒ close v1, insert v2.
     cs(&db, vec![act(Some(false))]);
     assert_eq!(
-        q1(&db, "SELECT version FROM entity_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT version FROM entity_alternative WHERE valid_to_commit IS NULL"
+        ),
         2
     );
     // None ⇒ close, no live row.
     let r = cs(&db, vec![act(None)]);
     assert_eq!(r.structural[0].effect, SE::Cleared);
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL"
+        ),
         0
     );
 }
@@ -342,7 +417,10 @@ fn set_entity_activation_write_flip_close() {
 fn same_commit_activation_create_then_close() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    cs(&db, vec![class("node"), entity("node", "n1"), create_alt("Base")]);
+    cs(
+        &db,
+        vec![class("node"), entity("node", "n1"), create_alt("Base")],
+    );
     let a = |active| SC::SetEntityActivation {
         class: "node".into(),
         entity: "n1".into(),
@@ -360,7 +438,10 @@ fn same_commit_activation_create_then_close() {
 fn same_commit_activation_inplace_flip() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    cs(&db, vec![class("node"), entity("node", "n1"), create_alt("Base")]);
+    cs(
+        &db,
+        vec![class("node"), entity("node", "n1"), create_alt("Base")],
+    );
     let a = |active| SC::SetEntityActivation {
         class: "node".into(),
         entity: "n1".into(),
@@ -384,8 +465,14 @@ fn same_commit_activation_inplace_flip() {
 fn same_commit_membership_create_then_close() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    cs(&db, vec![class("node"), entity("node", "g"), entity("node", "m")]);
-    let addr = |n: &str| EntityAddr { class: "node".into(), name: n.into() };
+    cs(
+        &db,
+        vec![class("node"), entity("node", "g"), entity("node", "m")],
+    );
+    let addr = |n: &str| EntityAddr {
+        class: "node".into(),
+        name: n.into(),
+    };
     let mem = |included| SC::SetMembership {
         group: addr("g"),
         member: addr("m"),
@@ -420,7 +507,10 @@ fn same_commit_create_entity_then_activate() {
     );
     assert_eq!(r.structural[3].effect, SE::Updated);
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_alternative WHERE valid_to_commit IS NULL"
+        ),
         1
     );
 }
@@ -429,8 +519,19 @@ fn same_commit_create_entity_then_activate() {
 fn set_membership_base_and_scoped() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    cs(&db, vec![class("node"), entity("node", "g"), entity("node", "m"), create_alt("Base")]);
-    let addr = |n: &str| EntityAddr { class: "node".into(), name: n.into() };
+    cs(
+        &db,
+        vec![
+            class("node"),
+            entity("node", "g"),
+            entity("node", "m"),
+            create_alt("Base"),
+        ],
+    );
+    let addr = |n: &str| EntityAddr {
+        class: "node".into(),
+        name: n.into(),
+    };
 
     // Base row: stored alternative_id NULL, NEVER 0 (critique M4).
     let r = cs(
@@ -450,7 +551,13 @@ fn set_membership_base_and_scoped() {
         ),
         1
     );
-    assert_eq!(q1(&db, "SELECT count(*) FROM membership WHERE alternative_id = 0"), 0);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM membership WHERE alternative_id = 0"
+        ),
+        0
+    );
 
     // Alternative-scoped override: stored alternative_id = Base id.
     cs(
@@ -518,9 +625,24 @@ fn create_class_parameter_entity() {
     assert_eq!(r.structural[0].effect, SE::Created);
     assert_eq!(r.structural[1].effect, SE::Created);
     assert_eq!(r.structural[2].effect, SE::Created);
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity_class WHERE cur_name = 'unit'"), 1);
-    assert_eq!(q1(&db, "SELECT count(*) FROM parameter_definition WHERE cur_name = 'cap'"), 1);
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity WHERE cur_name = 'u1'"), 1);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name = 'unit'"
+        ),
+        1
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name = 'cap'"
+        ),
+        1
+    );
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM entity WHERE cur_name = 'u1'"),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +676,10 @@ fn scenario_delete_cascade_preview_and_restrict() {
         o(),
     )
     .unwrap();
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Restricted { .. }));
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Restricted { .. }
+    ));
 
     // cascade:true ⇒ scenario + ranking closed.
     let r = delete_objects(
@@ -565,8 +690,14 @@ fn scenario_delete_cascade_preview_and_restrict() {
         o(),
     )
     .unwrap();
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }));
-    assert_eq!(q1(&db, "SELECT count(*) FROM scenario WHERE cur_name = 'sd'"), 0);
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM scenario WHERE cur_name = 'sd'"),
+        0
+    );
     assert_eq!(ranking(&db, "sd"), Vec::<String>::new());
 }
 
@@ -594,8 +725,16 @@ fn prepare_guards() {
     let err = commit_structural(
         &db,
         vec![
-            SC::RenameAlternative { current: "a".into(), new_name: "b".into(), description: None },
-            SC::RenameAlternative { current: "A".into(), new_name: "c".into(), description: None },
+            SC::RenameAlternative {
+                current: "a".into(),
+                new_name: "b".into(),
+                description: None,
+            },
+            SC::RenameAlternative {
+                current: "A".into(),
+                new_name: "c".into(),
+                description: None,
+            },
         ],
         "t",
         "m",
@@ -691,7 +830,10 @@ fn composed_editor_save_one_commit() {
         vec![seg],
         vec![
             create_alt("wet"),
-            SC::CreateScenario { name: "sc".into(), description: None },
+            SC::CreateScenario {
+                name: "sc".into(),
+                description: None,
+            },
             set_ranks("sc", &["wet"]),
         ],
         vec![],

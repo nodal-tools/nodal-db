@@ -150,12 +150,16 @@ pub fn set_scenario_alternatives(
              JOIN alternative a ON a.cur_id = sa.alternative_id \
              WHERE sa.cur_s = ? ORDER BY sa.cur_r",
         )?;
-        Ok(stmt.query_map(params![sid], |r| r.get(0))?.collect::<Result<_, _>>()?)
+        Ok(stmt
+            .query_map(params![sid], |r| r.get(0))?
+            .collect::<Result<_, _>>()?)
     }
 
     // Idempotency pre-check (read-only, no commit).
     let pre = with_read(db, |conn| {
-        let Some(sid) = lookup_scenario(conn, scenario)? else { return Ok(None) };
+        let Some(sid) = lookup_scenario(conn, scenario)? else {
+            return Ok(None);
+        };
         Ok(Some((sid, current_order_names(conn, sid)?)))
     })?;
     if let Some((sid, cur)) = pre {
@@ -206,13 +210,18 @@ pub fn set_entity_activation(
     // Idempotency pre-check (read-only, no commit) — resolves strictly, so a
     // missing referent errors here exactly as the applier would.
     let noop = with_read(db, |conn| {
-        let cid = lookup_entity_class(conn, class)?
-            .ok_or_else(|| DbError::Api(format!("set_entity_activation: class {class:?} not found")))?;
+        let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
+            DbError::Api(format!("set_entity_activation: class {class:?} not found"))
+        })?;
         let entity_id = lookup_entity(conn, cid, entity)?.ok_or_else(|| {
-            DbError::Api(format!("set_entity_activation: entity {class}:{entity} not found"))
+            DbError::Api(format!(
+                "set_entity_activation: entity {class}:{entity} not found"
+            ))
         })?;
         let alt_id = lookup_alternative(conn, alternative)?.ok_or_else(|| {
-            DbError::Api(format!("set_entity_activation: alternative {alternative:?} not found"))
+            DbError::Api(format!(
+                "set_entity_activation: alternative {alternative:?} not found"
+            ))
         })?;
         let current: Option<bool> = match conn.query_row(
             "SELECT active FROM entity_alternative WHERE cur_e = ? AND cur_a = ?",
@@ -258,7 +267,9 @@ pub fn set_class_active_by_default(
     require_name("class", class)?;
     let noop = with_read(db, |conn| {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
-            DbError::Api(format!("set_class_active_by_default: class {class:?} not found"))
+            DbError::Api(format!(
+                "set_class_active_by_default: class {class:?} not found"
+            ))
         })?;
         Ok(read_ec_row(conn, cid)?.active_by_default == active_by_default)
     })?;
@@ -268,7 +279,9 @@ pub fn set_class_active_by_default(
     let msg = format!("set_class_active_by_default {class} = {active_by_default}");
     with_write_txn_retrying(db, user, &msg, |conn, c| {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
-            DbError::Api(format!("set_class_active_by_default: class {class:?} not found"))
+            DbError::Api(format!(
+                "set_class_active_by_default: class {class:?} not found"
+            ))
         })?;
         let mut row = read_ec_row(conn, cid)?;
         if row.active_by_default == active_by_default {
@@ -402,7 +415,9 @@ pub fn ensure_parameter_definition(
     validate_type_decls("ensure_parameter_definition", class, name, types)?;
 
     if let Some(id) = with_read(db, |conn| {
-        let Some(cid) = lookup_entity_class(conn, class)? else { return Ok(None) };
+        let Some(cid) = lookup_entity_class(conn, class)? else {
+            return Ok(None);
+        };
         lookup_parameter(conn, cid, name)
     })? {
         return Ok(id); // exists: as-is, never re-declared (D-F4)
@@ -411,7 +426,8 @@ pub fn ensure_parameter_definition(
     let msg = format!("ensure_parameter_definition {class}.{name}");
     // The shared applier is the one definition+type-member create body.
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_parameter(conn, c, class, name, types, value_list, description).map(|(id, _)| id)
+        apply_create_parameter(conn, c, class, name, types, value_list, description)
+            .map(|(id, _)| id)
     })
 }
 
@@ -528,7 +544,10 @@ pub fn stamp_template_identity(
         let differs = match (db_name, db_version) {
             (None, None) => false, // fresh: nothing to overwrite
             (n, v) => {
-                n.as_deref().map(fold).map(|f| f != fold(name)).unwrap_or(false)
+                n.as_deref()
+                    .map(fold)
+                    .map(|f| f != fold(name))
+                    .unwrap_or(false)
                     || v.as_deref().map(|x| x != version).unwrap_or(false)
             }
         };

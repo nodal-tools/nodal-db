@@ -38,7 +38,12 @@ fn numbered_sql_files(dir: &Path) -> Vec<PathBuf> {
             p.extension().map(|x| x == "sql").unwrap_or(false)
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                    .map(|n| {
+                        n.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(false)
         })
         .collect();
@@ -146,10 +151,7 @@ fn spike_bundled_duckdb_matches_144_semantics() {
     let mut stmt = conn
         .prepare("SELECT values FROM value_array WHERE entity_id = 2")
         .unwrap();
-    let batches: Vec<_> = stmt
-        .query_arrow([])
-        .expect("query_arrow")
-        .collect();
+    let batches: Vec<_> = stmt.query_arrow([]).expect("query_arrow").collect();
     let batch = batches.first().expect("one record batch");
     let list = batch
         .column(0)

@@ -10,9 +10,7 @@ use nodal_db_core::template::ir::{
 const SAMPLE: &str = include_str!("fixtures/template_sample.yaml");
 
 fn minimal(extra: &str) -> String {
-    format!(
-        "template: {{name: t, version: \"1\"}}\nclasses:\n  - name: c\n{extra}"
-    )
+    format!("template: {{name: t, version: \"1\"}}\nclasses:\n  - name: c\n{extra}")
 }
 
 #[test]
@@ -75,15 +73,16 @@ fn unknown_fields_are_rejected_except_unit_registry_extras() {
     let chk = validate(&t).unwrap();
     assert_eq!(t.units[0].registry_extras.len(), 2);
     assert!(
-        chk.warnings.iter().any(|w| w.contains("registry fields") && w.contains("ucum")),
+        chk.warnings
+            .iter()
+            .any(|w| w.contains("registry fields") && w.contains("ucum")),
         "expected a dropped-registry-fields warning, got {:?}",
         chk.warnings
     );
     // …and the extras never reach the normalized model (hash-invisible).
-    let plain = parse_str(
-        "template: {name: t, version: \"1\"}\nunits: [{name: u}]\nclasses: [{name: c}]",
-    )
-    .unwrap();
+    let plain =
+        parse_str("template: {name: t, version: \"1\"}\nunits: [{name: u}]\nclasses: [{name: c}]")
+            .unwrap();
     assert_eq!(template_content_hash(&t), template_content_hash(&plain));
 }
 
@@ -99,7 +98,12 @@ fn json_parses_through_the_same_loader() {
     }"#;
     let t = parse_str(json).unwrap();
     assert_eq!(t.classes[1].dimensions[0], DimRef::Class("a".into()));
-    assert_eq!(t.classes[1].dimensions[1], DimRef::Set { class_set: "s".into() });
+    assert_eq!(
+        t.classes[1].dimensions[1],
+        DimRef::Set {
+            class_set: "s".into()
+        }
+    );
     validate(&t).unwrap();
 }
 
@@ -109,13 +113,24 @@ fn anchors_expand_and_never_affect_the_hash() {
     validate(&t).unwrap();
     // The anchored types block expanded into both parameters.
     let node = t.classes.iter().find(|c| c.name == "node").unwrap();
-    let r4 = t.classes.iter().find(|c| c.name == "reserve__upDown__unit__node").unwrap();
+    let r4 = t
+        .classes
+        .iter()
+        .find(|c| c.name == "reserve__upDown__unit__node")
+        .unwrap();
     let demand = &node.parameters[0];
-    let max_share = r4.parameters.iter().find(|p| p.name == "max_share").unwrap();
+    let max_share = r4
+        .parameters
+        .iter()
+        .find(|p| p.name == "max_share")
+        .unwrap();
     assert_eq!(demand.types, max_share.types);
     // Round-trip through the emitter (anchors gone) is hash-identical (§8.1.7).
     let emitted = ir::to_yaml(&t).unwrap();
-    assert!(!emitted.contains("&float_or_t"), "anchors must not survive re-emission");
+    assert!(
+        !emitted.contains("&float_or_t"),
+        "anchors must not survive re-emission"
+    );
     let back = parse_str(&emitted).unwrap();
     assert_eq!(template_content_hash(&t), template_content_hash(&back));
     assert_eq!(normalized_model(&t), normalized_model(&back));
@@ -167,17 +182,21 @@ migrations:
 ",
     )
     .unwrap();
-    let without =
-        parse_str("template: {name: t, version: \"2\"}\nclasses: [{name: c}]").unwrap();
+    let without = parse_str("template: {name: t, version: \"2\"}\nclasses: [{name: c}]").unwrap();
     validate(&with).unwrap();
-    assert_eq!(template_content_hash(&with), template_content_hash(&without));
+    assert_eq!(
+        template_content_hash(&with),
+        template_content_hash(&without)
+    );
 }
 
 // --- load-time validation errors (§2.2: caught before any write) ---
 
 fn expect_err(yaml: &str, needle: &str) {
     let t = parse_str(yaml).unwrap_or_else(|e| panic!("parse failed ({e}) for:\n{yaml}"));
-    let err = validate(&t).err().unwrap_or_else(|| panic!("expected error {needle:?}"));
+    let err = validate(&t)
+        .err()
+        .unwrap_or_else(|| panic!("expected error {needle:?}"));
     let msg = err.to_string();
     assert!(msg.contains(needle), "expected {needle:?} in:\n{msg}");
 }
@@ -519,7 +538,10 @@ classes:
     )
     .unwrap();
     assert_eq!(normalized_model(&explicit), normalized_model(&inferred));
-    assert_eq!(template_content_hash(&explicit), template_content_hash(&inferred));
+    assert_eq!(
+        template_content_hash(&explicit),
+        template_content_hash(&inferred)
+    );
 }
 
 #[test]
@@ -532,7 +554,10 @@ fn default_absent_vs_null_are_distinct_states() {
         "template: {name: t, version: \"1\"}\nclasses:\n  - name: c\n    parameters:\n      - {name: p, types: [{kind: float}]}\n",
     )
     .unwrap();
-    assert_eq!(absent.classes[0].parameters[0].default, DefaultSpec::Unspecified);
+    assert_eq!(
+        absent.classes[0].parameters[0].default,
+        DefaultSpec::Unspecified
+    );
 
     for null_spelling in ["default: null", "default: ~"] {
         let t = parse_str(&format!(
@@ -561,5 +586,8 @@ fn default_absent_vs_null_are_distinct_states() {
     )
     .unwrap();
     assert_eq!(normalized_model(&with_null), normalized_model(&absent));
-    assert_eq!(template_content_hash(&with_null), template_content_hash(&absent));
+    assert_eq!(
+        template_content_hash(&with_null),
+        template_content_hash(&absent)
+    );
 }

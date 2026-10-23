@@ -83,8 +83,8 @@ use duckdb::{params, Connection};
 use serde_json::{json, Map, Value};
 
 use crate::api::{
-    create_parameter_type, lookup_class_set, lookup_entity, lookup_entity_class,
-    lookup_parameter, lookup_unit, lookup_value_list, parse_index_kind,
+    create_parameter_type, lookup_class_set, lookup_entity, lookup_entity_class, lookup_parameter,
+    lookup_unit, lookup_value_list, parse_index_kind,
 };
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
@@ -97,8 +97,8 @@ use crate::object_delete::{
     resolve_element as resolve_element_in_dim,
 };
 use crate::types::{
-    fold, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind,
-    ObjectRef, ScalarValue, ValueKind, WriteReport,
+    fold, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind, ObjectRef,
+    ScalarValue, ValueKind, WriteReport,
 };
 
 use super::dbvocab::{read_metadata_key, read_vocab, DbParam, DbVocab};
@@ -199,15 +199,34 @@ pub struct PlannedDim {
 /// apply re-diffs inside its transaction and executes exactly these.
 #[derive(Clone, Debug)]
 pub enum Action {
-    CreateUnit { name: String, description: Option<String>, quantity_kind: Option<String> },
-    UpdateUnit { name: String, description: Option<String>, quantity_kind: Option<String> },
-    CreateValueList { name: String, description: Option<String>, members: Vec<PlannedListMember> },
-    UpdateValueList { name: String, description: Option<String> },
+    CreateUnit {
+        name: String,
+        description: Option<String>,
+        quantity_kind: Option<String>,
+    },
+    UpdateUnit {
+        name: String,
+        description: Option<String>,
+        quantity_kind: Option<String>,
+    },
+    CreateValueList {
+        name: String,
+        description: Option<String>,
+        members: Vec<PlannedListMember>,
+    },
+    UpdateValueList {
+        name: String,
+        description: Option<String>,
+    },
     /// Bring an existing list's members to the template's state: revisions
     /// (ordinal/description, two-phase close-then-reinsert so the
     /// `(list, ordinal)` unique index never sees a transient collision) and
     /// additions, in template order.
-    SyncListMembers { list: String, revise: Vec<MemberRevision>, add: Vec<PlannedListMember> },
+    SyncListMembers {
+        list: String,
+        revise: Vec<MemberRevision>,
+        add: Vec<PlannedListMember>,
+    },
     CreateClass {
         name: String,
         description: Option<String>,
@@ -224,10 +243,22 @@ pub enum Action {
     },
     /// Dimension rows of a NEW class, emitted after every `CreateClass` so
     /// forward references between new classes resolve (§2.2 by-name).
-    CreateClassDims { class: String, dims: Vec<PlannedDim> },
-    CreateClassSet { name: String, description: Option<String> },
-    UpdateClassSet { name: String, description: Option<String> },
-    AddClassSetMember { set: String, member: String },
+    CreateClassDims {
+        class: String,
+        dims: Vec<PlannedDim>,
+    },
+    CreateClassSet {
+        name: String,
+        description: Option<String>,
+    },
+    UpdateClassSet {
+        name: String,
+        description: Option<String>,
+    },
+    AddClassSetMember {
+        set: String,
+        member: String,
+    },
     CreateParameter {
         class: String,
         name: String,
@@ -247,14 +278,31 @@ pub enum Action {
         required: bool,
         display_order: Option<i64>,
     },
-    AddParameterType { class: String, parameter: String, member: TypeDecl },
+    AddParameterType {
+        class: String,
+        parameter: String,
+        member: TypeDecl,
+    },
     /// Close out a declared member the template no longer carries (§4.2:
     /// "narrowing is flagged when current data instantiates a removed
     /// member"). Apply skips-with-warning when any current value binds it —
     /// a skip withholds convergence (module docs).
-    NarrowParameterType { class: String, parameter: String, pt_id: i64, describe: String },
-    SetDefault { class: String, parameter: String, kind: String, value: ScalarValue },
-    ClearDefault { class: String, parameter: String },
+    NarrowParameterType {
+        class: String,
+        parameter: String,
+        pt_id: i64,
+        describe: String,
+    },
+    SetDefault {
+        class: String,
+        parameter: String,
+        kind: String,
+        value: ScalarValue,
+    },
+    ClearDefault {
+        class: String,
+        parameter: String,
+    },
     CreateSeedEntity {
         class: String,
         name: String,
@@ -273,12 +321,20 @@ pub enum Action {
     },
     /// Replace the template-owned keys of the Decision-7 `presentation`
     /// document (D8); `doc` is the full merged document to store.
-    SetPresentation { doc: String },
-    SetAuditRules { doc: Option<String> },
+    SetPresentation {
+        doc: String,
+    },
+    SetAuditRules {
+        doc: Option<String>,
+    },
     /// Stamp `template_name`/`template_version`; stamp `template_content_hash`
     /// ONLY when the apply converged (no skips), else close any stale hash
     /// (module docs, "Partial-apply honesty").
-    StampIdentity { name: String, version: String, content_hash: String },
+    StampIdentity {
+        name: String,
+        version: String,
+        content_hash: String,
+    },
 }
 
 fn scalar_display(v: &ScalarValue) -> String {
@@ -331,33 +387,74 @@ impl fmt::Display for Action {
             Action::AddClassSetMember { set, member } => {
                 write!(f, "add class_set member {set}: {member}")
             }
-            Action::CreateParameter { class, name, types, .. } => {
-                write!(f, "create parameter {class}.{name} ({} type member(s))", types.len())
+            Action::CreateParameter {
+                class, name, types, ..
+            } => {
+                write!(
+                    f,
+                    "create parameter {class}.{name} ({} type member(s))",
+                    types.len()
+                )
             }
             Action::UpdateParameter { class, name, .. } => {
                 write!(f, "update parameter {class}.{name}")
             }
-            Action::AddParameterType { class, parameter, member } => {
-                write!(f, "widen type set of {class}.{parameter}: + {}", member.describe())
+            Action::AddParameterType {
+                class,
+                parameter,
+                member,
+            } => {
+                write!(
+                    f,
+                    "widen type set of {class}.{parameter}: + {}",
+                    member.describe()
+                )
             }
-            Action::NarrowParameterType { class, parameter, describe, .. } => {
+            Action::NarrowParameterType {
+                class,
+                parameter,
+                describe,
+                ..
+            } => {
                 write!(f, "narrow type set of {class}.{parameter}: - {describe}")
             }
-            Action::SetDefault { class, parameter, kind, value } => {
-                write!(f, "set default of {class}.{parameter}: {kind} {}", scalar_display(value))
+            Action::SetDefault {
+                class,
+                parameter,
+                kind,
+                value,
+            } => {
+                write!(
+                    f,
+                    "set default of {class}.{parameter}: {kind} {}",
+                    scalar_display(value)
+                )
             }
             Action::ClearDefault { class, parameter } => {
                 write!(f, "clear default of {class}.{parameter}")
             }
-            Action::CreateSeedEntity { class, name, elements, .. } => {
+            Action::CreateSeedEntity {
+                class,
+                name,
+                elements,
+                ..
+            } => {
                 if elements.is_empty() {
                     write!(f, "seed entity {class}: {name}")
                 } else {
                     write!(f, "seed entity {class}: {name} = ({})", elements.join(", "))
                 }
             }
-            Action::CreateSeedMembership { group_class, group, member_class, member } => {
-                write!(f, "seed membership {group_class}:{group} <- {member_class}:{member}")
+            Action::CreateSeedMembership {
+                group_class,
+                group,
+                member_class,
+                member,
+            } => {
+                write!(
+                    f,
+                    "seed membership {group_class}:{group} <- {member_class}:{member}"
+                )
             }
             Action::SetPresentation { .. } => {
                 write!(f, "store parameter groups (presentation document, D8)")
@@ -366,7 +463,11 @@ impl fmt::Display for Action {
                 Some(_) => write!(f, "store audit_rules document (D4)"),
                 None => write!(f, "clear audit_rules document"),
             },
-            Action::StampIdentity { name, version, content_hash } => write!(
+            Action::StampIdentity {
+                name,
+                version,
+                content_hash,
+            } => write!(
                 f,
                 "stamp identity: template_name={name} template_version={version} \
                  template_content_hash={content_hash} (hash withheld if any skips)"
@@ -417,9 +518,11 @@ impl fmt::Display for ReconcilePlan {
             self.template_name, self.template_version, self.content_hash
         )?;
         match (&self.db_template_name, &self.db_template_version) {
-            (Some(n), Some(v)) => {
-                writeln!(f, "database: template {n} version {v} at commit {}", self.db_commit)?
-            }
+            (Some(n), Some(v)) => writeln!(
+                f,
+                "database: template {n} version {v} at commit {}",
+                self.db_commit
+            )?,
             (Some(n), None) => writeln!(
                 f,
                 "database: template {n} (no version stamped) at commit {}",
@@ -432,7 +535,10 @@ impl fmt::Display for ReconcilePlan {
             )?,
         }
         if self.no_op {
-            writeln!(f, "NO-OP: the database already carries this template version")?;
+            writeln!(
+                f,
+                "NO-OP: the database already carries this template version"
+            )?;
             return Ok(());
         }
         for span in &self.pending_migrations {
@@ -610,10 +716,7 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
 /// chain step running before this one may create, rename, or already close
 /// the target; the apply-time cascade is authoritative). `Ok(None)` for steps
 /// that destroy nothing.
-fn blast_radius_note(
-    conn: &Connection,
-    step: &MigrationStep,
-) -> Result<Option<String>, DbError> {
+fn blast_radius_note(conn: &Connection, step: &MigrationStep) -> Result<Option<String>, DbError> {
     let key = match step {
         MigrationStep::DropParameter { class, parameter } => ObjectDeleteKey {
             kind: ObjectKind::Parameter,
@@ -636,7 +739,9 @@ fn blast_radius_note(
             on_collision: OnCollision::DropSource,
             ..
         }
-        | MigrationStep::MergeParameter { class, from, to, .. } => {
+        | MigrationStep::MergeParameter {
+            class, from, to, ..
+        } => {
             let both_live = match lookup_entity_class(conn, class)? {
                 Some(cid) => {
                     lookup_parameter(conn, cid, to)?.is_some()
@@ -664,9 +769,7 @@ fn blast_radius_note(
         ));
     }
     let verb = match step {
-        MigrationStep::DropParameter { .. } | MigrationStep::DropClass { .. } => {
-            "would close"
-        }
+        MigrationStep::DropParameter { .. } | MigrationStep::DropClass { .. } => "would close",
         _ => "source close-out would cover",
     };
     Ok(Some(format!(
@@ -705,7 +808,10 @@ pub fn apply(
     // cannot be detected here — that window remains, as it does for every
     // cross-process write race (VMP Part 5 conflict semantics own it).
     let _in_flight = ApplyInFlight::enter(db)?;
-    let mut out = ApplyOutcome { converged: true, ..Default::default() };
+    let mut out = ApplyOutcome {
+        converged: true,
+        ..Default::default()
+    };
     out.warnings.extend(chk.warnings.iter().cloned());
 
     // --- Pre-flight: metadata keys only (cheap; review item 21). ---
@@ -980,7 +1086,10 @@ pub fn apply(
     }
 
     let msg = if message.is_empty() {
-        format!("template {} version {}: apply", t.template.name, t.template.version)
+        format!(
+            "template {} version {}: apply",
+            t.template.name, t.template.version
+        )
     } else {
         message.to_string()
     };
@@ -1062,7 +1171,9 @@ fn parse_substamp(v: Option<&str>) -> Option<(String, String, i64)> {
 /// `migrations:` block bridges any same-name version gap by plain reconcile —
 /// the §4.2 Layer-1 case, made explicit here.
 fn chain_guards(vocab: &DbVocab, t: &Template, opts: &ApplyOptions) -> Result<(), DbError> {
-    let Some(dbv) = &vocab.template_version else { return Ok(()) };
+    let Some(dbv) = &vocab.template_version else {
+        return Ok(());
+    };
     // Chains are same-name lineage only.
     match &vocab.template_name {
         Some(n) if fold(n) == fold(&t.template.name) => {}
@@ -1166,9 +1277,9 @@ fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
             if doomed.contains(key) {
                 continue;
             }
-            let hits = c.dims.iter().any(|d| {
-                matches!(d, super::dbvocab::DbDimRef::Class(n) if doomed.contains(&fold(n)))
-            });
+            let hits = c.dims.iter().any(
+                |d| matches!(d, super::dbvocab::DbDimRef::Class(n) if doomed.contains(&fold(n))),
+            );
             if hits {
                 doomed.insert(key.clone());
                 grew = true;
@@ -1183,9 +1294,9 @@ fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
         s.members.retain(|m| !doomed.contains(&fold(m)));
     }
     vocab.entities.retain(|(c, _), _| !doomed.contains(c));
-    vocab
-        .memberships
-        .retain(|m| !doomed.contains(&fold(&m.group_class)) && !doomed.contains(&fold(&m.member_class)));
+    vocab.memberships.retain(|m| {
+        !doomed.contains(&fold(&m.group_class)) && !doomed.contains(&fold(&m.member_class))
+    });
 }
 
 /// Apply one span's renames/moves/merges/drops to the in-memory snapshot so
@@ -1226,7 +1337,13 @@ fn simulate_span(
                     }
                 }
             }
-            MigrationStep::RenameParameter { class, from, to, on_collision, .. } => {
+            MigrationStep::RenameParameter {
+                class,
+                from,
+                to,
+                on_collision,
+                ..
+            } => {
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
                     if *on_collision == OnCollision::DropSource
                         && c.params.contains_key(&fold(to))
@@ -1241,7 +1358,9 @@ fn simulate_span(
                     }
                 }
             }
-            MigrationStep::MergeParameter { class, from, to, .. } => {
+            MigrationStep::MergeParameter {
+                class, from, to, ..
+            } => {
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
                     if c.params.contains_key(&fold(to)) {
                         c.params.remove(&fold(from)); // merge: source closes
@@ -1278,7 +1397,11 @@ fn simulate_span(
                     }
                 }
             }
-            MigrationStep::MoveParameter { name, from_class, to_class } => {
+            MigrationStep::MoveParameter {
+                name,
+                from_class,
+                to_class,
+            } => {
                 let taken = vocab
                     .classes
                     .get_mut(&fold(from_class))
@@ -1289,13 +1412,13 @@ fn simulate_span(
             }
             MigrationStep::MergeListMember { list, from, to, .. } => {
                 if let Some(l) = vocab.value_lists.get_mut(&fold(list)) {
-                    let has_to = l.members.iter().any(|mem| {
-                        matches!(&mem.value, ScalarValue::Str(s) if s == to)
-                    });
+                    let has_to = l
+                        .members
+                        .iter()
+                        .any(|mem| matches!(&mem.value, ScalarValue::Str(s) if s == to));
                     if has_to {
-                        l.members.retain(|mem| {
-                            !matches!(&mem.value, ScalarValue::Str(s) if s == from)
-                        });
+                        l.members
+                            .retain(|mem| !matches!(&mem.value, ScalarValue::Str(s) if s == from));
                     } else {
                         for mem in &mut l.members {
                             if matches!(&mem.value, ScalarValue::Str(s) if s == from) {
@@ -1316,10 +1439,10 @@ fn simulate_span(
                     .classes
                     .values()
                     .flat_map(|c| {
-                        c.params.values().filter_map(|p| {
-                            (p.value_list.as_deref().map(fold) == Some(fold(list)))
-                                .then(|| format!("{}.{}", c.name, p.name))
-                        })
+                        c.params
+                            .values()
+                            .filter(|&p| p.value_list.as_deref().map(fold) == Some(fold(list)))
+                            .map(|p| format!("{}.{}", c.name, p.name))
                     })
                     .collect();
                 if bound.is_empty() {
@@ -1336,9 +1459,8 @@ fn simulate_span(
             }
             MigrationStep::DropListMember { list, value } => {
                 if let Some(l) = vocab.value_lists.get_mut(&fold(list)) {
-                    l.members.retain(|mem| {
-                        !matches!(&mem.value, ScalarValue::Str(s) if s == value)
-                    });
+                    l.members
+                        .retain(|mem| !matches!(&mem.value, ScalarValue::Str(s) if s == value));
                 }
             }
             MigrationStep::Run(p) => warnings.push(format!(
@@ -1440,9 +1562,7 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
                             ordinal: desired_ordinal,
                         }),
                         Some(dbm) => {
-                            if dbm.ordinal != desired_ordinal
-                                || dbm.description != m.description
-                            {
+                            if dbm.ordinal != desired_ordinal || dbm.description != m.description {
                                 revise.push(MemberRevision {
                                     id: dbm.id,
                                     ordinal: desired_ordinal,
@@ -1670,27 +1790,27 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
         }
         // Can `el` serve as the element at dimension `dim` of `class`, given
         // what is available? Checked per the dimension's declared referent.
-        let element_ok = |dim: &ir::DimRef, el: &str, avail: &HashSet<(String, String)>| {
-            match dim {
-                ir::DimRef::Class(cls) => avail.contains(&(fold(cls), fold(el))),
-                ir::DimRef::Set { class_set } => chk
-                    .set_ix
-                    .get(&fold(class_set))
-                    .map(|&sx| {
-                        t.class_sets[sx]
-                            .members
-                            .iter()
-                            .any(|m| avail.contains(&(fold(m), fold(el))))
-                    })
-                    .unwrap_or(false),
-            }
+        let element_ok = |dim: &ir::DimRef, el: &str, avail: &HashSet<(String, String)>| match dim {
+            ir::DimRef::Class(cls) => avail.contains(&(fold(cls), fold(el))),
+            ir::DimRef::Set { class_set } => chk
+                .set_ix
+                .get(&fold(class_set))
+                .map(|&sx| {
+                    t.class_sets[sx]
+                        .members
+                        .iter()
+                        .any(|m| avail.contains(&(fold(m), fold(el))))
+                })
+                .unwrap_or(false),
         };
         while !pending.is_empty() {
             let ready: Vec<usize> = pending
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
-                    let Some(&ci) = chk.class_ix.get(&fold(&e.class)) else { return false };
+                    let Some(&ci) = chk.class_ix.get(&fold(&e.class)) else {
+                        return false;
+                    };
                     let dims = &t.classes[ci].dimensions;
                     e.elements
                         .as_deref()
@@ -1704,7 +1824,10 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
             if ready.is_empty() {
                 p.blocked.push(format!(
                     "seed entities form an element-reference cycle: {:?}",
-                    pending.iter().map(|e| e.effective_name()).collect::<Vec<_>>()
+                    pending
+                        .iter()
+                        .map(|e| e.effective_name())
+                        .collect::<Vec<_>>()
                 ));
                 break;
             }
@@ -1731,7 +1854,12 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
             .iter()
             .map(|m| {
                 (
-                    (fold(&m.group_class), fold(&m.group), fold(&m.member_class), fold(&m.member)),
+                    (
+                        fold(&m.group_class),
+                        fold(&m.group),
+                        fold(&m.member_class),
+                        fold(&m.member),
+                    ),
                     m.included,
                 )
             })
@@ -1961,7 +2089,12 @@ fn opt_name_eq(a: &Option<String>, b: &Option<String>) -> bool {
 fn planned_member(m: &ListMember, ordinal: i64) -> PlannedListMember {
     let kind = effective_member_kind(m).expect("validated");
     let value = m.value.resolve(&kind).expect("validated");
-    PlannedListMember { kind, value, description: m.description.clone(), ordinal }
+    PlannedListMember {
+        kind,
+        value,
+        description: m.description.clone(),
+        ordinal,
+    }
 }
 
 /// The template-owned subtree of the presentation document (D8).
@@ -1995,7 +2128,10 @@ fn desired_presentation(t: &Template) -> Value {
         }
     }
     if !membership.is_empty() {
-        sub.insert("parameter_group_membership".into(), Value::Object(membership));
+        sub.insert(
+            "parameter_group_membership".into(),
+            Value::Object(membership),
+        );
     }
     if sub.is_empty() {
         Value::Null
@@ -2049,7 +2185,9 @@ struct IdCache {
 
 fn require<T>(v: Option<T>, what: &str, name: &str) -> Result<T, DbError> {
     v.ok_or_else(|| {
-        DbError::Api(format!("{what} {name:?} not found (reconcile ordering bug?)"))
+        DbError::Api(format!(
+            "{what} {name:?} not found (reconcile ordering bug?)"
+        ))
     })
 }
 
@@ -2459,7 +2597,17 @@ fn insert_new_member(
            (parameter_value_list_id, ordinal, description, value_kind, \
             v_float, v_int, v_bool, v_str, valid_from_commit) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![list_id, m.ordinal, m.description, vc.kind, vc.f, vc.i, vc.b, vc.s, c],
+        params![
+            list_id,
+            m.ordinal,
+            m.description,
+            vc.kind,
+            vc.f,
+            vc.i,
+            vc.b,
+            vc.s,
+            c
+        ],
     )?;
     Ok(())
 }
@@ -2479,7 +2627,6 @@ fn rank0_member_id(conn: &Connection, pd_id: i64, kind: &str) -> Result<Option<i
         Err(e) => Err(e.into()),
     }
 }
-
 
 // --- the per-table CREATE sites, shared by the reconcile executor and the
 //     G8 verbs (`verbs.rs`) so "wraps the loader's create path" is literal:
@@ -2501,7 +2648,14 @@ pub(crate) fn insert_class_row(
            (name, description, active_by_default, required, display_order, \
             valid_from_commit) \
          VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-        params![name, description, active_by_default, required, display_order, c],
+        params![
+            name,
+            description,
+            active_by_default,
+            required,
+            display_order,
+            c
+        ],
         |r| r.get(0),
     )?)
 }
@@ -2545,7 +2699,16 @@ pub(crate) fn insert_definition_row(
            (entity_class_id, name, description, parameter_value_list_id, unit_id, \
             required, display_order, valid_from_commit) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-        params![class_id, name, description, list_id, unit_id, required, display_order, c],
+        params![
+            class_id,
+            name,
+            description,
+            list_id,
+            unit_id,
+            required,
+            display_order,
+            c
+        ],
         |r| r.get(0),
     )?)
 }
@@ -2586,14 +2749,13 @@ pub(crate) fn insert_entity_element_row(
     Ok(())
 }
 
-fn execute_action(
-    conn: &Connection,
-    c: i64,
-    a: &Action,
-    ctx: &mut ExecCtx,
-) -> Result<(), DbError> {
+fn execute_action(conn: &Connection, c: i64, a: &Action, ctx: &mut ExecCtx) -> Result<(), DbError> {
     match a {
-        Action::CreateUnit { name, description, quantity_kind } => {
+        Action::CreateUnit {
+            name,
+            description,
+            quantity_kind,
+        } => {
             conn.execute(
                 "INSERT INTO units_of_measure \
                    (name, description, quantity_kind_link, valid_from_commit) \
@@ -2601,7 +2763,11 @@ fn execute_action(
                 params![name, description, quantity_kind, c],
             )?;
         }
-        Action::UpdateUnit { name, description, quantity_kind } => {
+        Action::UpdateUnit {
+            name,
+            description,
+            quantity_kind,
+        } => {
             let id = ctx.ids.unit(conn, name)?;
             let (semantic_link, version): (Option<String>, i64) = conn.query_row(
                 "SELECT semantic_link, version FROM units_of_measure WHERE cur_id = ?",
@@ -2614,10 +2780,22 @@ fn execute_action(
                    (id, name, description, semantic_link, quantity_kind_link, \
                     valid_from_commit, version) \
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![id, name, description, semantic_link, quantity_kind, c, version + 1],
+                params![
+                    id,
+                    name,
+                    description,
+                    semantic_link,
+                    quantity_kind,
+                    c,
+                    version + 1
+                ],
             )?;
         }
-        Action::CreateValueList { name, description, members } => {
+        Action::CreateValueList {
+            name,
+            description,
+            members,
+        } => {
             let id: i64 = conn.query_row(
                 "INSERT INTO parameter_value_list (name, description, valid_from_commit) \
                  VALUES (?, ?, ?) RETURNING id",
@@ -2656,7 +2834,13 @@ fn execute_action(
                 insert_new_member(conn, c, lid, m)?;
             }
         }
-        Action::CreateClass { name, description, active_by_default, required, display_order } => {
+        Action::CreateClass {
+            name,
+            description,
+            active_by_default,
+            required,
+            display_order,
+        } => {
             let id = insert_class_row(
                 conn,
                 c,
@@ -2668,7 +2852,13 @@ fn execute_action(
             )?;
             ctx.ids.class.insert(fold(name), id);
         }
-        Action::UpdateClass { name, description, active_by_default, required, display_order } => {
+        Action::UpdateClass {
+            name,
+            description,
+            active_by_default,
+            required,
+            display_order,
+        } => {
             let id = ctx.ids.class(conn, name)?;
             let mut row = read_ec_row(conn, id)?;
             row.description = description.clone();
@@ -2781,11 +2971,20 @@ fn execute_action(
             row.display_order = *display_order;
             revise_pd_row(conn, c, &row)?;
         }
-        Action::AddParameterType { class, parameter, member } => {
+        Action::AddParameterType {
+            class,
+            parameter,
+            member,
+        } => {
             let pd_id = ctx.ids.param(conn, class, parameter)?;
             insert_type_member(conn, c, pd_id, member)?;
         }
-        Action::NarrowParameterType { class, parameter, pt_id, describe } => {
+        Action::NarrowParameterType {
+            class,
+            parameter,
+            pt_id,
+            describe,
+        } => {
             // §4.2: narrowing is flagged when current data instantiates the
             // removed member. Conservative: any current value bound to the
             // member — or any current value of the definition with a NULL
@@ -2843,7 +3042,12 @@ fn execute_action(
                 )?;
             }
         }
-        Action::SetDefault { class, parameter, kind, value } => {
+        Action::SetDefault {
+            class,
+            parameter,
+            kind,
+            value,
+        } => {
             let pd_id = ctx.ids.param(conn, class, parameter)?;
             let pt_id = rank0_member_id(conn, pd_id, kind)?;
             write_definition_default(conn, c, pd_id, value, pt_id)?;
@@ -2852,7 +3056,12 @@ fn execute_action(
             let pd_id = ctx.ids.param(conn, class, parameter)?;
             close_definition_default(conn, c, pd_id)?;
         }
-        Action::CreateSeedEntity { class, name, description, elements } => {
+        Action::CreateSeedEntity {
+            class,
+            name,
+            description,
+            elements,
+        } => {
             let cid = ctx.ids.class(conn, class)?;
             let eid = insert_entity_row(conn, c, cid, name, description.as_deref())?;
             for (i, el) in elements.iter().enumerate() {
@@ -2861,7 +3070,12 @@ fn execute_action(
                 insert_entity_element_row(conn, c, eid, pos, el_id)?;
             }
         }
-        Action::CreateSeedMembership { group_class, group, member_class, member } => {
+        Action::CreateSeedMembership {
+            group_class,
+            group,
+            member_class,
+            member,
+        } => {
             let gc = ctx.ids.class(conn, group_class)?;
             let mc = ctx.ids.class(conn, member_class)?;
             let gid = require(
@@ -2906,7 +3120,11 @@ fn execute_action(
             Some(d) => set_metadata(conn, c, "audit_rules", d)?,
             None => clear_metadata(conn, c, "audit_rules")?,
         },
-        Action::StampIdentity { name, version, content_hash } => {
+        Action::StampIdentity {
+            name,
+            version,
+            content_hash,
+        } => {
             set_metadata(conn, c, "template_name", name)?;
             set_metadata(conn, c, "template_version", version)?;
             if ctx.skipped.is_empty() {
@@ -2951,7 +3169,12 @@ fn resolve_seed_element(
 }
 
 /// Insert one declared type member through the api's one insert path.
-pub(crate) fn insert_type_member(conn: &Connection, c: i64, pd_id: i64, m: &TypeDecl) -> Result<(), DbError> {
+pub(crate) fn insert_type_member(
+    conn: &Connection,
+    c: i64,
+    pd_id: i64,
+    m: &TypeDecl,
+) -> Result<(), DbError> {
     let dims: Vec<(String, IndexKind)> = m
         .dims
         .as_deref()
@@ -2990,7 +3213,13 @@ pub(crate) fn set_metadata(
     let existing = conn.query_row(
         "SELECT id, value, version FROM metadata WHERE cur_name = lower(?)",
         params![key],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        },
     );
     match existing {
         Ok((_, v, _)) if v == value => Ok(()),
@@ -3051,10 +3280,18 @@ pub(crate) struct StepEffects {
 
 impl StepEffects {
     fn absorb(&mut self, other: StepEffects, span: &str) {
-        self.skips
-            .extend(other.skips.into_iter().map(|s| format!("migration {span}: {s}")));
-        self.notes
-            .extend(other.notes.into_iter().map(|s| format!("migration {span}: {s}")));
+        self.skips.extend(
+            other
+                .skips
+                .into_iter()
+                .map(|s| format!("migration {span}: {s}")),
+        );
+        self.notes.extend(
+            other
+                .notes
+                .into_iter()
+                .map(|s| format!("migration {span}: {s}")),
+        );
     }
 }
 
@@ -3138,7 +3375,10 @@ fn per_table_summary(per: &[crate::types::TableCount]) -> String {
     if per.is_empty() {
         "no dependent rows".into()
     } else {
-        per.iter().map(|t| format!("{} {}", t.table, t.rows)).collect::<Vec<_>>().join(", ")
+        per.iter()
+            .map(|t| format!("{} {}", t.table, t.rows))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -3160,6 +3400,7 @@ fn list_member_id(conn: &Connection, lid: i64, v: &str) -> Result<Option<i64>, D
 /// values (and defaults): scalar-only guard, the `unmapped_values` policy
 /// first (over the pre-rewrite state), then each old→new rewrite through the
 /// history protocol.
+#[allow(clippy::too_many_arguments)]
 fn apply_value_map(
     conn: &Connection,
     c: i64,
@@ -3185,7 +3426,10 @@ fn apply_value_map(
         UnmappedValues::Error => {
             let placeholders = vec!["?"; keys.len()].join(", ");
             let mut binds: Vec<duckdb::types::Value> = vec![pd_id.into()];
-            binds.extend(keys.iter().map(|k| duckdb::types::Value::Text((*k).to_string())));
+            binds.extend(
+                keys.iter()
+                    .map(|k| duckdb::types::Value::Text((*k).to_string())),
+            );
             let unmatched: i64 = conn.query_row(
                 &format!(
                     "SELECT count(*) FROM value_scalar \
@@ -3217,7 +3461,8 @@ fn apply_value_map(
         rewrite_definition_string_values(conn, c, pd_id, old, new)?;
     }
     if rewritten > 0 {
-        fx.notes.push(format!("{step}: translated {rewritten} stored value(s)"));
+        fx.notes
+            .push(format!("{step}: translated {rewritten} stored value(s)"));
     }
     Ok(())
 }
@@ -3355,7 +3600,11 @@ fn execute_step(
                 )?;
             }
         }
-        MigrationStep::RenameValueList { from, to, missing_source } => {
+        MigrationStep::RenameValueList {
+            from,
+            to,
+            missing_source,
+        } => {
             let src = lookup_value_list(conn, from)?;
             // Already-applied tolerance (finale plan F-C): source gone AND
             // target live is the applied state — partially-applied field DBs
@@ -3373,7 +3622,9 @@ fn execute_step(
                     ));
                     return Ok(());
                 }
-                return Err(DbError::Api(format!("rename_value_list: {from:?} not found")));
+                return Err(DbError::Api(format!(
+                    "rename_value_list: {from:?} not found"
+                )));
             };
             if fold(from) != fold(to) && lookup_value_list(conn, to)?.is_some() {
                 return Err(DbError::Api(format!(
@@ -3384,7 +3635,13 @@ fn execute_step(
             row.name = to.clone();
             revise_list_row(conn, c, &row)?;
         }
-        MigrationStep::RenameListMember { list, from, to, rewrite_values, missing_source } => {
+        MigrationStep::RenameListMember {
+            list,
+            from,
+            to,
+            rewrite_values,
+            missing_source,
+        } => {
             // Mid-chain tolerance (finale plan F-C): a per-version ladder's
             // member rename may name a list — or a member — that an earlier
             // RECONCILE-ONLY version introduced, which never materializes
@@ -3450,7 +3707,11 @@ fn execute_step(
                 }
             }
         }
-        MigrationStep::MoveParameter { name, from_class, to_class } => {
+        MigrationStep::MoveParameter {
+            name,
+            from_class,
+            to_class,
+        } => {
             let from_cid = hint_class_id(conn, "move_parameter", from_class)?;
             let to_cid = hint_class_id(conn, "move_parameter", to_class)?;
             let pd_id = lookup_parameter(conn, from_cid, name)?
@@ -3484,7 +3745,12 @@ fn execute_step(
             row.entity_class_id = to_cid;
             revise_pd_row(conn, c, &row)?;
         }
-        MigrationStep::MergeParameter { class, from, to, missing_source } => {
+        MigrationStep::MergeParameter {
+            class,
+            from,
+            to,
+            missing_source,
+        } => {
             let step_name = format!("merge_parameter {class}.{from} -> {to}");
             let cid = hint_class_id(conn, "merge_parameter", class)?;
             let src = lookup_parameter(conn, cid, from)?;
@@ -3652,7 +3918,12 @@ fn execute_step(
                 }
             }
         }
-        MigrationStep::MergeListMember { list, from, to, missing_source } => {
+        MigrationStep::MergeListMember {
+            list,
+            from,
+            to,
+            missing_source,
+        } => {
             let step_name = format!("merge_list_member {list}: {from:?} -> {to:?}");
             // Absent-list tolerance (the stamped-51-mid-v52 re-entry case:
             // the legacy list was already renamed away, so the member merge
@@ -3750,8 +4021,9 @@ fn execute_step(
                 )));
             }
             let members = close_value_list(conn, c, lid)?;
-            fx.notes
-                .push(format!("{step_name}: closed the list and {members} member row(s)"));
+            fx.notes.push(format!(
+                "{step_name}: closed the list and {members} member row(s)"
+            ));
         }
         MigrationStep::DropListMember { list, value } => {
             let step_name = format!("drop_list_member {list}: {value:?}");

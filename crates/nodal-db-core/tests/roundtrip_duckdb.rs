@@ -35,7 +35,12 @@ fn numbered_sql_files(dir: &Path) -> Vec<PathBuf> {
             p.extension().map(|x| x == "sql").unwrap_or(false)
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                    .map(|n| {
+                        n.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(false)
         })
         .collect();
@@ -54,12 +59,12 @@ fn apply_schema(conn: &Connection) {
 /// Read `(pos, epoch_us(ts))` for a datetime axis back through `axis_position`.
 fn read_datetime_coords(conn: &Connection, axis_id: i64) -> Vec<(i32, i64)> {
     let mut stmt = conn
-        .prepare(
-            "SELECT pos, epoch_us(ts) FROM axis_position WHERE axis_id = ? ORDER BY pos",
-        )
+        .prepare("SELECT pos, epoch_us(ts) FROM axis_position WHERE axis_id = ? ORDER BY pos")
         .unwrap();
     let rows = stmt
-        .query_map([axis_id], |r| Ok((r.get::<_, i32>(0)?, r.get::<_, i64>(1)?)))
+        .query_map([axis_id], |r| {
+            Ok((r.get::<_, i32>(0)?, r.get::<_, i64>(1)?))
+        })
         .unwrap();
     rows.map(|r| r.unwrap()).collect()
 }
@@ -67,12 +72,12 @@ fn read_datetime_coords(conn: &Connection, axis_id: i64) -> Vec<(i32, i64)> {
 /// Read `(pos, coord)` for a float axis back through `axis_position`.
 fn read_float_coords(conn: &Connection, axis_id: i64) -> Vec<(i32, f64)> {
     let mut stmt = conn
-        .prepare(
-            "SELECT pos, coord FROM axis_position WHERE axis_id = ? ORDER BY pos",
-        )
+        .prepare("SELECT pos, coord FROM axis_position WHERE axis_id = ? ORDER BY pos")
         .unwrap();
     let rows = stmt
-        .query_map([axis_id], |r| Ok((r.get::<_, i32>(0)?, r.get::<_, f64>(1)?)))
+        .query_map([axis_id], |r| {
+            Ok((r.get::<_, i32>(0)?, r.get::<_, f64>(1)?))
+        })
         .unwrap();
     rows.map(|r| r.unwrap()).collect()
 }
@@ -85,7 +90,10 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
     // ---- datetime, hourly micros-only step (vector 01 parameters) ----------
     // start 2020-01-01T00:00:00, step (0 months, 3_600_000_000 µs), length 24.
     let dt_hourly_start: i64 = 1_577_836_800_000_000;
-    let dt_hourly_step = Duration { months: 0, micros: 3_600_000_000 };
+    let dt_hourly_step = Duration {
+        months: 0,
+        micros: 3_600_000_000,
+    };
     let dt_hourly_len: i32 = 24;
     conn.execute(
         "INSERT INTO axis (id, kind, length, content_hash, p_start_ts, p_step_months, p_step_micros)
@@ -104,7 +112,10 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
     // subtle one: pos 0..3 must clamp to [Jan31, Feb28, Mar31, Apr30] via the
     // single-multiply `to_months` semantics (§7.1.2.1).
     let dt_clamp_start: i64 = 980_899_200_000_000;
-    let dt_clamp_step = Duration { months: 1, micros: 0 };
+    let dt_clamp_step = Duration {
+        months: 1,
+        micros: 0,
+    };
     let dt_clamp_len: i32 = 4;
     conn.execute(
         "INSERT INTO axis (id, kind, length, content_hash, p_start_ts, p_step_months, p_step_micros)
@@ -149,8 +160,8 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
     let got = read_datetime_coords(&conn, 101);
     assert_eq!(got.len(), dt_hourly_len as usize, "hourly row count");
     for (pos, ts) in got {
-        let want = datetime_coord(dt_hourly_start, &dt_hourly_step, pos as i64)
-            .expect("no overflow");
+        let want =
+            datetime_coord(dt_hourly_start, &dt_hourly_step, pos as i64).expect("no overflow");
         assert_eq!(
             ts, want,
             "hourly datetime pos {pos}: DuckDB {ts} != Rust {want} (µs)"
@@ -168,8 +179,7 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
         988_588_800_000_000,
     ];
     for (pos, ts) in got {
-        let want = datetime_coord(dt_clamp_start, &dt_clamp_step, pos as i64)
-            .expect("no overflow");
+        let want = datetime_coord(dt_clamp_start, &dt_clamp_step, pos as i64).expect("no overflow");
         assert_eq!(
             ts, want,
             "clamp datetime pos {pos}: DuckDB {ts} != Rust {want} (µs)"
@@ -213,7 +223,11 @@ fn parametric_axes_roundtrip_bit_exact_through_axis_position() {
             // The pinned divergence: DuckDB agrees with the two-rounding value
             // (0x40dda52635cbf3d8) and MUST differ from the fused result.
             let via_fma = fma_step.mul_add(pos as f64, fma_start);
-            assert_eq!(coord.to_bits(), 0x40dda52635cbf3d8_u64, "FMA-axis pos 5: DuckDB drifted from the spec-pinned non-FMA bits");
+            assert_eq!(
+                coord.to_bits(),
+                0x40dda52635cbf3d8_u64,
+                "FMA-axis pos 5: DuckDB drifted from the spec-pinned non-FMA bits"
+            );
             assert_ne!(
                 coord.to_bits(),
                 via_fma.to_bits(),

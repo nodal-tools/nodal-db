@@ -5,11 +5,11 @@
 //! the same content hash and an immediate no-op on re-apply.
 
 use nodal_db_core::schema_init::init_schema;
+use nodal_db_core::template::ir::normalized_model;
 use nodal_db_core::template::{
     apply, export, parse_str, template_content_hash, to_json, to_yaml, ApplyOptions,
     MigrationRegistry,
 };
-use nodal_db_core::template::ir::normalized_model;
 
 const SAMPLE: &str = include_str!("fixtures/template_sample.yaml");
 
@@ -24,7 +24,15 @@ fn load_export_reload_is_semantically_identical() {
     init_schema(&db1).unwrap();
 
     let source = parse_str(SAMPLE).unwrap();
-    apply(&db1, &source, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
+    apply(
+        &db1,
+        &source,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &opts(),
+    )
+    .unwrap();
 
     // Export re-derives the IR purely from the database. The only expected
     // warning is the ALWAYS-on seed-block honesty notice (review item 15).
@@ -45,7 +53,10 @@ fn load_export_reload_is_semantically_identical() {
         serde_json::to_string_pretty(&normalized_model(&source)).unwrap(),
         serde_json::to_string_pretty(&normalized_model(&exported)).unwrap(),
     );
-    assert_eq!(template_content_hash(&source), template_content_hash(&exported));
+    assert_eq!(
+        template_content_hash(&source),
+        template_content_hash(&exported)
+    );
 
     // The emitted YAML and JSON both re-parse to the same model (one loader,
     // both surfaces — D1).
@@ -60,9 +71,28 @@ fn load_export_reload_is_semantically_identical() {
     // re-applying the ORIGINAL source is a no-op there (full circle).
     let db2 = dir.path().join("b.duckdb");
     init_schema(&db2).unwrap();
-    apply(&db2, &from_yaml, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
-    let out = apply(&db2, &source, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
-    assert!(out.no_op, "source must no-op on a DB loaded from its own export");
+    apply(
+        &db2,
+        &from_yaml,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &opts(),
+    )
+    .unwrap();
+    let out = apply(
+        &db2,
+        &source,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &opts(),
+    )
+    .unwrap();
+    assert!(
+        out.no_op,
+        "source must no-op on a DB loaded from its own export"
+    );
 
     // And the two databases export identically.
     let (e1, _) = export(&db1).unwrap();

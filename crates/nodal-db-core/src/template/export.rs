@@ -56,15 +56,12 @@ pub fn export(db: &Path) -> Result<(Template, Vec<String>), DbError> {
 
 fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbError> {
     let name = v.template_name.clone().unwrap_or_else(|| {
-        warnings.push(
-            "database has no template_name stamped; exporting as \"unnamed\"".to_string(),
-        );
+        warnings
+            .push("database has no template_name stamped; exporting as \"unnamed\"".to_string());
         "unnamed".to_string()
     });
     let version = v.template_version.clone().unwrap_or_else(|| {
-        warnings.push(
-            "database has no template_version stamped; exporting as \"0\"".to_string(),
-        );
+        warnings.push("database has no template_version stamped; exporting as \"0\"".to_string());
         "0".to_string()
     });
 
@@ -203,8 +200,9 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
                     .get(&fold(list_name))
                     .map(|l| l.unrepresentable_members == 0)
                     .unwrap_or(false);
-                let exported_list =
-                    value_lists.iter().find(|l| fold(&l.name) == fold(list_name));
+                let exported_list = value_lists
+                    .iter()
+                    .find(|l| fold(&l.name) == fold(list_name));
                 if fully_represented && super::ir::types_elidable(ts, exported_list) {
                     types = None; // inference reproduces it (§3.5)
                 }
@@ -214,9 +212,10 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
             let default = match &p.default {
                 None => DefaultSpec::Unspecified,
                 Some(d) => match lit_of(&d.value) {
-                    Some((lit, _)) => {
-                        DefaultSpec::Value(DefaultValue { kind: d.value_kind.clone(), value: lit })
-                    }
+                    Some((lit, _)) => DefaultSpec::Value(DefaultValue {
+                        kind: d.value_kind.clone(),
+                        value: lit,
+                    }),
                     None => {
                         warnings.push(format!(
                             "parameter {}.{}: default kind {:?} has no v1 IR literal form — \
@@ -234,7 +233,9 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
                 value_list: p.value_list.clone(),
                 default,
                 unit: p.unit.clone(),
-                group: group_of.get(&fold(&format!("{}.{}", c.name, p.name))).cloned(),
+                group: group_of
+                    .get(&fold(&format!("{}.{}", c.name, p.name)))
+                    .cloned(),
                 required: p.required,
                 display_order: p.display_order,
             });
@@ -251,7 +252,9 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
                 .iter()
                 .map(|d| {
                     if d.is_set() {
-                        DimRef::Set { class_set: d.referent_name().to_string() }
+                        DimRef::Set {
+                            class_set: d.referent_name().to_string(),
+                        }
                     } else {
                         DimRef::Class(d.referent_name().to_string())
                     }
@@ -300,8 +303,14 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
         // template content.
         .filter(|m| m.included)
         .map(|m| SeedMembership {
-            group: EntityRef { class: m.group_class.clone(), entity: m.group.clone() },
-            member: EntityRef { class: m.member_class.clone(), entity: m.member.clone() },
+            group: EntityRef {
+                class: m.group_class.clone(),
+                entity: m.group.clone(),
+            },
+            member: EntityRef {
+                class: m.member_class.clone(),
+                entity: m.member.clone(),
+            },
         })
         .collect();
     memberships.sort_by_key(|m| {
@@ -325,7 +334,10 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
             entities.len(),
             memberships.len()
         ));
-        Some(Seed { entities, memberships })
+        Some(Seed {
+            entities,
+            memberships,
+        })
     };
 
     Ok(Template {

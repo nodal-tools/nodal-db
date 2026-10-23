@@ -24,7 +24,15 @@ fn fresh_loaded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
     let db = dir.path().join("t.duckdb");
     init_schema(&db).unwrap();
     let t = parse_str(SAMPLE).unwrap();
-    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     db
 }
 
@@ -96,7 +104,11 @@ migrations:
     // Post-migration names in the v4 vocabulary:
     {
         let unit = t.classes.iter_mut().find(|c| c.name == "unit").unwrap();
-        let eff = unit.parameters.iter_mut().find(|p| p.name == "efficiency").unwrap();
+        let eff = unit
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "efficiency")
+            .unwrap();
         eff.name = "eta".into();
         // …plus a brand-new parameter (the additive majority, 8.1.8a):
         let newp = parse_str(
@@ -111,14 +123,24 @@ classes:
         )
         .unwrap();
         unit.parameters.push(newp.classes[0].parameters[0].clone());
-        let cm = unit.parameters.iter_mut().find(|p| p.name == "conversion_method").unwrap();
-        cm.default = nodal_db_core::template::ir::DefaultSpec::Value(nodal_db_core::template::ir::DefaultValue {
-            kind: "string".into(),
-            value: nodal_db_core::template::ir::Lit::Str("const_eff".into()),
-        });
+        let cm = unit
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "conversion_method")
+            .unwrap();
+        cm.default = nodal_db_core::template::ir::DefaultSpec::Value(
+            nodal_db_core::template::ir::DefaultValue {
+                kind: "string".into(),
+                value: nodal_db_core::template::ir::Lit::Str("const_eff".into()),
+            },
+        );
     }
     {
-        let list = t.value_lists.iter_mut().find(|l| l.name == "method").unwrap();
+        let list = t
+            .value_lists
+            .iter_mut()
+            .find(|l| l.name == "method")
+            .unwrap();
         let m = list
             .members
             .iter_mut()
@@ -140,19 +162,29 @@ classes:
     // Widen node.demand with a period-indexed member (D2 widening).
     {
         let node = t.classes.iter_mut().find(|c| c.name == "node").unwrap();
-        let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
-        demand.types.as_mut().unwrap().push(nodal_db_core::template::ir::TypeDecl {
-            kind: "indexed".into(),
-            dims: Some(vec![nodal_db_core::template::ir::DimSpec {
-                name: "period".into(),
-                kind: "period".into(),
-            }]),
-        });
+        let demand = node
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "demand")
+            .unwrap();
+        demand
+            .types
+            .as_mut()
+            .unwrap()
+            .push(nodal_db_core::template::ir::TypeDecl {
+                kind: "indexed".into(),
+                dims: Some(vec![nodal_db_core::template::ir::DimSpec {
+                    name: "period".into(),
+                    kind: "period".into(),
+                }]),
+            });
         // Changed default (Layer 1 "changed defaults").
-        demand.default = nodal_db_core::template::ir::DefaultSpec::Value(nodal_db_core::template::ir::DefaultValue {
-            kind: "float".into(),
-            value: nodal_db_core::template::ir::Lit::Float(1.0),
-        });
+        demand.default = nodal_db_core::template::ir::DefaultSpec::Value(
+            nodal_db_core::template::ir::DefaultValue {
+                kind: "float".into(),
+                value: nodal_db_core::template::ir::Lit::Float(1.0),
+            },
+        );
     }
     // The audit rule keys must track the renames too.
     {
@@ -172,12 +204,30 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
     let db = fresh_loaded_db(&dir);
 
     // Stored data the rewrite must touch — and one value it must NOT.
-    write_parameter(&db, "unit", "conversion_method", "alt",
-        string_batch("u1", "constant_efficiency"), &[], WriteOptions::default(),
-        "tester", "").unwrap();
-    write_parameter(&db, "unit", "conversion_method", "alt",
-        string_batch("u2", "two_point_efficiency"), &[], WriteOptions::default(),
-        "tester", "").unwrap();
+    write_parameter(
+        &db,
+        "unit",
+        "conversion_method",
+        "alt",
+        string_batch("u1", "constant_efficiency"),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
+    write_parameter(
+        &db,
+        "unit",
+        "conversion_method",
+        "alt",
+        string_batch("u2", "two_point_efficiency"),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
 
     // The escape-hatch program observes execution order and writes through
     // the PUBLIC API (Layer 3's whole point): it writes unit.eta — the
@@ -191,9 +241,18 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
         registry.register("mark_step", move |db: &Path, user: &str| {
             order.lock().unwrap().push("mark_step");
             calls.fetch_add(1, Ordering::SeqCst);
-            write_parameter(db, "unit", "eta", "alt", scalar_batch("u1", 0.99), &[],
-                WriteOptions::default(), user, "escape hatch: set eta")
-                .map(|_| ())
+            write_parameter(
+                db,
+                "unit",
+                "eta",
+                "alt",
+                scalar_batch("u1", 0.99),
+                &[],
+                WriteOptions::default(),
+                user,
+                "escape hatch: set eta",
+            )
+            .map(|_| ())
         });
     }
 
@@ -205,115 +264,175 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
     assert!(!p.actions.is_empty());
     assert!(p.blocked.is_empty(), "unexpected blockers: {:?}", p.blocked);
     let rendered = format!("{p}");
-    assert!(rendered.contains("rename_parameter unit.efficiency -> eta"), "{rendered}");
+    assert!(
+        rendered.contains("rename_parameter unit.efficiency -> eta"),
+        "{rendered}"
+    );
     assert!(rendered.contains("run mark_step"), "{rendered}");
 
     let out = apply(&db, &t4, &registry, "tester", "", &ApplyOptions::default()).unwrap();
     assert!(!out.no_op);
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "escape hatch ran exactly once");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "escape hatch ran exactly once"
+    );
     assert_eq!(order.lock().unwrap().as_slice(), &["mark_step"]);
 
     // Hint results: the definition rename kept its id/history; the list
     // member renamed; the stored value + the default were rewritten; the
     // unrelated value untouched.
     assert_eq!(
-        qs(&db, "SELECT cur_name FROM parameter_definition WHERE cur_name = 'eta'").as_deref(),
+        qs(
+            &db,
+            "SELECT cur_name FROM parameter_definition WHERE cur_name = 'eta'"
+        )
+        .as_deref(),
         Some("eta")
     );
-    assert!(qs(&db, "SELECT cur_name FROM parameter_definition WHERE cur_name = 'efficiency'")
-        .is_none());
+    assert!(qs(
+        &db,
+        "SELECT cur_name FROM parameter_definition WHERE cur_name = 'efficiency'"
+    )
+    .is_none());
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM list_value lv \
+        q1(
+            &db,
+            "SELECT count(*) FROM list_value lv \
                  JOIN parameter_value_list l ON l.id = lv.parameter_value_list_id \
                  WHERE l.cur_name = 'method' AND lv.valid_to_commit IS NULL \
-                 AND lv.v_str = 'const_eff'"),
+                 AND lv.v_str = 'const_eff'"
+        ),
         1
     );
     // Ordinals track TEMPLATE order after the mid-list insertion (item 13):
     // const_eff=1, piecewise=2, two_point_efficiency=3.
-    for (val, ord) in [("const_eff", 1), ("piecewise", 2), ("two_point_efficiency", 3)] {
+    for (val, ord) in [
+        ("const_eff", 1),
+        ("piecewise", 2),
+        ("two_point_efficiency", 3),
+    ] {
         assert_eq!(
-            q1(&db, &format!(
-                "SELECT lv.ordinal FROM list_value lv \
+            q1(
+                &db,
+                &format!(
+                    "SELECT lv.ordinal FROM list_value lv \
                  JOIN parameter_value_list l ON l.id = lv.parameter_value_list_id \
                  WHERE l.cur_name = 'method' AND lv.valid_to_commit IS NULL \
                  AND lv.v_str = '{val}'"
-            )),
+                )
+            ),
             ord,
             "{val} ordinal"
         );
     }
     assert_eq!(
-        qs(&db, "SELECT v_str FROM value_scalar vs JOIN entity e ON e.id = vs.entity_id \
+        qs(
+            &db,
+            "SELECT v_str FROM value_scalar vs JOIN entity e ON e.id = vs.entity_id \
                  WHERE e.cur_name = 'u1' AND vs.valid_to_commit IS NULL \
-                 AND vs.value_kind = 'string' AND vs.v_str LIKE '%eff%'")
-            .as_deref(),
+                 AND vs.value_kind = 'string' AND vs.v_str LIKE '%eff%'"
+        )
+        .as_deref(),
         Some("const_eff"),
         "stored value rewritten"
     );
     assert_eq!(
-        qs(&db, "SELECT v_str FROM value_scalar vs JOIN entity e ON e.id = vs.entity_id \
+        qs(
+            &db,
+            "SELECT v_str FROM value_scalar vs JOIN entity e ON e.id = vs.entity_id \
                  WHERE e.cur_name = 'u2' AND vs.valid_to_commit IS NULL \
-                 AND vs.value_kind = 'string'")
-            .as_deref(),
+                 AND vs.value_kind = 'string'"
+        )
+        .as_deref(),
         Some("two_point_efficiency"),
         "unrelated value untouched"
     );
     // History kept the pre-rename value (close-out, not overwrite).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL \
-                 AND v_str = 'constant_efficiency'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL \
+                 AND v_str = 'constant_efficiency'"
+        ),
         1
     );
     // Default rewritten by the SAME hint (the defaults leg).
     assert_eq!(
-        qs(&db, "SELECT dv.v_str FROM definition_value_scalar dv \
+        qs(
+            &db,
+            "SELECT dv.v_str FROM definition_value_scalar dv \
                  JOIN parameter_definition pd ON pd.id = dv.parameter_definition_id \
-                 WHERE pd.cur_name = 'conversion_method' AND dv.valid_to_commit IS NULL")
-            .as_deref(),
+                 WHERE pd.cur_name = 'conversion_method' AND dv.valid_to_commit IS NULL"
+        )
+        .as_deref(),
         Some("const_eff")
     );
     // Escape-hatch write landed through the API.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM value_scalar vs \
+        q1(
+            &db,
+            "SELECT count(*) FROM value_scalar vs \
                  JOIN parameter_definition pd ON pd.id = vs.parameter_definition_id \
-                 WHERE pd.cur_name = 'eta' AND vs.valid_to_commit IS NULL"),
+                 WHERE pd.cur_name = 'eta' AND vs.valid_to_commit IS NULL"
+        ),
         1
     );
 
     // Layer-1 additions: new class, new parameter + default, widened set,
     // new list member, version restamped.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity_class WHERE cur_name = 'storage'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name = 'storage'"
+        ),
         1
     );
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_definition WHERE cur_name = 'startup_cost'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name = 'startup_cost'"
+        ),
         1
     );
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_type pt \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'demand'"),
-        3, "widened to three members"
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'demand'"
+        ),
+        3,
+        "widened to three members"
     );
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("4")
     );
     // Changed default: demand now 1.0 current, 0.0 in history.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM definition_value_scalar dv \
+        q1(
+            &db,
+            "SELECT count(*) FROM definition_value_scalar dv \
                  JOIN parameter_definition pd ON pd.id = dv.parameter_definition_id \
                  WHERE pd.cur_name = 'demand' AND dv.valid_to_commit IS NULL \
-                 AND dv.v_float = 1.0"),
+                 AND dv.v_float = 1.0"
+        ),
         1
     );
 
     // Re-applying v4 is now a no-op.
     let again = apply(&db, &t4, &registry, "tester", "", &ApplyOptions::default()).unwrap();
     assert!(again.no_op);
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "no-op must not re-run programs");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no-op must not re-run programs"
+    );
 }
 
 #[test]
@@ -322,7 +441,15 @@ fn unregistered_run_program_fails_before_any_step() {
     let db = fresh_loaded_db(&dir);
     let t4 = v4_template();
     let commits = q1(&db, "SELECT max(id) FROM commit");
-    let err = apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
+    let err = apply(
+        &db,
+        &t4,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("mark_step"), "{err}");
     assert!(err.to_string().contains("not registered"), "{err}");
     // Nothing of the span ran (the registry is checked before step 1).
@@ -336,8 +463,18 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
 
     // Write data at demand's datetime member so IT is in use; the float
     // member of max_share stays unused.
-    write_parameter(&db, "node", "demand", "alt", scalar_batch("n1", 2.0), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "alt",
+        scalar_batch("n1", 2.0),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
 
     let mut t = parse_str(SAMPLE).unwrap();
     t.template.version = "3n".into();
@@ -345,19 +482,46 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
         // Narrow demand to ONLY the datetime member (drops the float one —
         // but a float value binds it: kept, warned).
         let node = t.classes.iter_mut().find(|c| c.name == "node").unwrap();
-        let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
-        demand.types.as_mut().unwrap().retain(|m| m.kind == "indexed");
+        let demand = node
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "demand")
+            .unwrap();
+        demand
+            .types
+            .as_mut()
+            .unwrap()
+            .retain(|m| m.kind == "indexed");
         demand.default = nodal_db_core::template::ir::DefaultSpec::Unspecified; // no opinion (D12)
-        // Narrow max_share to only float (drops unused indexed member: closed).
-        let r4 = t.classes.iter_mut().find(|c| c.name == "reserve__upDown__unit__node").unwrap();
-        let ms = r4.parameters.iter_mut().find(|p| p.name == "max_share").unwrap();
+                                                                                // Narrow max_share to only float (drops unused indexed member: closed).
+        let r4 = t
+            .classes
+            .iter_mut()
+            .find(|c| c.name == "reserve__upDown__unit__node")
+            .unwrap();
+        let ms = r4
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "max_share")
+            .unwrap();
         ms.types.as_mut().unwrap().retain(|m| m.kind == "float");
     }
-    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    let out = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     // The kept member is a SKIP: the apply is PARTIAL, convergence withheld
     // (review item 14).
     assert!(
-        out.plan.skipped.iter().any(|s| s.contains("narrowing node.demand") && s.contains("kept")),
+        out.plan
+            .skipped
+            .iter()
+            .any(|s| s.contains("narrowing node.demand") && s.contains("kept")),
         "expected a kept-member skip, got {:?}",
         out.plan.skipped
     );
@@ -365,29 +529,51 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
     // template_content_hash is withheld (absent), so the no-op short-circuit
     // cannot certify this state: a re-apply REPLANS (not a no-op).
     assert!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'").is_none(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+        )
+        .is_none(),
         "content hash must be withheld on a partial apply"
     );
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("3n"),
         "name/version still stamp on a partial apply"
     );
-    let again = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    let again = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(!again.no_op, "partial state must keep replanning");
     assert!(!again.converged);
     // demand: float member survived (in use), datetime member still there.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_type pt \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'demand'"),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'demand'"
+        ),
         2
     );
     // max_share: narrowed to one member.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_type pt \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'max_share'"),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'max_share'"
+        ),
         1
     );
 }
@@ -399,19 +585,41 @@ fn dimension_change_is_blocked_reshape() {
     let mut t = parse_str(SAMPLE).unwrap();
     t.template.version = "3r".into();
     {
-        let c = t.classes.iter_mut().find(|c| c.name == "node__to_unit").unwrap();
+        let c = t
+            .classes
+            .iter_mut()
+            .find(|c| c.name == "node__to_unit")
+            .unwrap();
         c.dimensions.reverse(); // (node, unit) -> (unit, node)
-        // Its seed entity would now mismatch too; drop it to isolate the check.
-        t.seed.as_mut().unwrap().entities.retain(|e| e.class != "node__to_unit");
-        t.seed.as_mut().unwrap().entities.retain(|e| e.class != "unit_flow__unit_flow");
+                                // Its seed entity would now mismatch too; drop it to isolate the check.
+        t.seed
+            .as_mut()
+            .unwrap()
+            .entities
+            .retain(|e| e.class != "node__to_unit");
+        t.seed
+            .as_mut()
+            .unwrap()
+            .entities
+            .retain(|e| e.class != "unit_flow__unit_flow");
     }
     let p = plan(&db, &t).unwrap();
     assert!(
-        p.blocked.iter().any(|b| b.contains("node__to_unit") && b.contains("reshape")),
+        p.blocked
+            .iter()
+            .any(|b| b.contains("node__to_unit") && b.contains("reshape")),
         "expected a reshape blocker, got {:?}",
         p.blocked
     );
-    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
+    let err = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("reshape"), "{err}");
 }
 
@@ -457,7 +665,15 @@ classes:
 
     // But storage doesn't exist when the migration step runs (chain runs
     // BEFORE the diff creates classes) — so the step must fail cleanly…
-    let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
+    let err = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("storage"), "{err}");
 
     // …teaching the real ordering: additive prerequisites ship in an earlier
@@ -470,21 +686,50 @@ classes:
             .unwrap()
             .classes,
     );
-    apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t4,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
 
     let mut t5 = t.clone();
     t5.migrations[0].from = "4".into();
-    apply(&db, &t5, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t5,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_definition pd \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition pd \
                  JOIN entity_class c ON c.id = pd.cur_cls \
-                 WHERE pd.cur_name = 'efficiency' AND c.cur_name = 'storage'"),
+                 WHERE pd.cur_name = 'efficiency' AND c.cur_name = 'storage'"
+        ),
         1
     );
 
     // Guard: moving a definition WITH values errors, naming the reshape door.
-    write_parameter(&db, "storage", "efficiency", "alt", scalar_batch("s1", 0.8), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        &db,
+        "storage",
+        "efficiency",
+        "alt",
+        scalar_batch("s1", 0.8),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
     let mut t6 = t5.clone();
     t6.template.version = "6".into();
     t6.migrations = parse_str(
@@ -499,7 +744,15 @@ migrations:
     )
     .unwrap()
     .migrations;
-    let err = apply(&db, &t6, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap_err();
+    let err = apply(
+        &db,
+        &t6,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("current value row"), "{err}");
 }
 
@@ -507,7 +760,10 @@ migrations:
 fn rename_class_hint_preserves_identity_and_dimensions() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_loaded_db(&dir);
-    let old_id = q1(&db, "SELECT id FROM entity_class WHERE cur_name = 'reserve'");
+    let old_id = q1(
+        &db,
+        "SELECT id FROM entity_class WHERE cur_name = 'reserve'",
+    );
 
     let mut t = parse_str(SAMPLE).unwrap();
     t.template.version = "7".into();
@@ -555,32 +811,60 @@ migrations:
         }
     }
 
-    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    let out = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(!out.no_op);
     // Same id across the rename (from/to versioning, not delete+add) —
     // dimension rows referencing the class id stay valid untouched.
-    let new_id = q1(&db, "SELECT id FROM entity_class WHERE cur_name = 'reserve_product'");
+    let new_id = q1(
+        &db,
+        "SELECT id FROM entity_class WHERE cur_name = 'reserve_product'",
+    );
     assert_eq!(old_id, new_id);
     // The 4-D class's dimension row still points at the same class id.
     assert_eq!(
-        q1(&db, &format!(
-            "SELECT count(*) FROM entity_class_dimension \
+        q1(
+            &db,
+            &format!(
+                "SELECT count(*) FROM entity_class_dimension \
              WHERE valid_to_commit IS NULL AND dimension_class_id = {old_id}"
-        )),
+            )
+        ),
         1
     );
     // The list rename carried its members (same list id, members intact).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM list_value lv \
+        q1(
+            &db,
+            "SELECT count(*) FROM list_value lv \
                  JOIN parameter_value_list l ON l.id = lv.parameter_value_list_id \
-                 WHERE l.cur_name = 'yesno' AND lv.valid_to_commit IS NULL"),
+                 WHERE l.cur_name = 'yesno' AND lv.valid_to_commit IS NULL"
+        ),
         2
     );
     // Referential audits stay clean across both renames.
     assert_eq!(q1(&db, "SELECT count(*) FROM audit_dangling_ref"), 0);
-    assert_eq!(q1(&db, "SELECT count(*) FROM audit_value_list_membership"), 0);
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM audit_value_list_membership"),
+        0
+    );
     // And re-applying v7 is a no-op (idempotency after hints).
-    let again = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    let again = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(again.no_op);
 }
 
@@ -592,14 +876,20 @@ migrations:
 fn retarget_refuses_by_default_and_needs_the_explicit_opt_in() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_loaded_db(&dir);
-    let other = parse_str(
-        "template: {name: other, version: \"1\"}\nclasses: [{name: unrelated}]\n",
-    )
-    .unwrap();
+    let other =
+        parse_str("template: {name: other, version: \"1\"}\nclasses: [{name: unrelated}]\n")
+            .unwrap();
     // Default: typed refusal, before anything runs (no commit burned).
     let commits = q1(&db, "SELECT max(id) FROM commit");
-    let err = apply(&db, &other, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap_err();
+    let err = apply(
+        &db,
+        &other,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("retarget"), "{err}");
     assert_eq!(q1(&db, "SELECT max(id) FROM commit"), commits);
     // Plan surfaces the same refusal as a blocker (read-only).
@@ -610,11 +900,22 @@ fn retarget_refuses_by_default_and_needs_the_explicit_opt_in() {
         p.blocked
     );
     // The explicit opt-in applies and restamps, with a warning.
-    let opts = ApplyOptions { allow_retarget: true, ..Default::default() };
+    let opts = ApplyOptions {
+        allow_retarget: true,
+        ..Default::default()
+    };
     let out = apply(&db, &other, &MigrationRegistry::new(), "tester", "", &opts).unwrap();
-    assert!(out.warnings.iter().any(|w| w.contains("retargeting")), "{:?}", out.warnings);
+    assert!(
+        out.warnings.iter().any(|w| w.contains("retargeting")),
+        "{:?}",
+        out.warnings
+    );
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_name'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_name'"
+        )
+        .as_deref(),
         Some("other")
     );
 }
@@ -626,7 +927,15 @@ fn downgrade_and_unreachable_chains_refuse_loudly() {
     // Move the DB to version 4 first (additive bump, no migrations).
     let mut t4 = parse_str(SAMPLE).unwrap();
     t4.template.version = "4".into();
-    apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t4,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
 
     // Downgrade: a v3 template whose own chain knows 3 -> 4 sees the DB (at
     // 4) AHEAD of itself — refused by default.
@@ -640,8 +949,15 @@ migrations:
     )
     .unwrap()
     .migrations;
-    let err = apply(&db, &t3, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap_err();
+    let err = apply(
+        &db,
+        &t3,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("downgrade"), "{err}");
 
     // Unreachable: a v6 template whose chain only covers 5 -> 6 cannot walk
@@ -658,16 +974,35 @@ migrations:
     )
     .unwrap()
     .migrations;
-    let err = apply(&db, &t6, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap_err();
+    let err = apply(
+        &db,
+        &t6,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("no path"), "{err}");
 
     // The no-migrations-at-all case still bridges (the §4.2 L1 majority):
     let mut t5 = parse_str(SAMPLE).unwrap();
     t5.template.version = "5".into();
-    apply(&db, &t5, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
+    apply(
+        &db,
+        &t5,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("5")
     );
 }
@@ -684,17 +1019,23 @@ fn interrupted_chain_resumes_from_the_progress_substamp() {
     failing.register("mark_step", |_db: &Path, _u: &str| {
         Err(nodal_db_core::error::DbError::Api("simulated crash".into()))
     });
-    let err =
-        apply(&db, &t4, &failing, "tester", "", &ApplyOptions::default()).unwrap_err();
+    let err = apply(&db, &t4, &failing, "tester", "", &ApplyOptions::default()).unwrap_err();
     assert!(err.to_string().contains("simulated crash"), "{err}");
     // The chain is mid-span: version NOT bumped, substamp present.
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("3")
     );
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'")
-            .as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"
+        )
+        .as_deref(),
         Some("3->4:1"),
         "substamp records the last completed step"
     );
@@ -705,19 +1046,33 @@ fn interrupted_chain_resumes_from_the_progress_substamp() {
     let mut working = MigrationRegistry::new();
     working.register("mark_step", |_db: &Path, _u: &str| Ok(()));
     let out = apply(&db, &t4, &working, "tester", "", &ApplyOptions::default()).unwrap();
-    assert!(out.converged, "resumed apply must converge: {:?}", out.plan.skipped);
+    assert!(
+        out.converged,
+        "resumed apply must converge: {:?}",
+        out.plan.skipped
+    );
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("4")
     );
     assert!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'")
-            .is_none(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"
+        )
+        .is_none(),
         "span stamp clears the substamp"
     );
     // The rename happened exactly once (one closed + one current row).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_definition WHERE name = 'eta'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE name = 'eta'"
+        ),
         1
     );
 }
@@ -750,8 +1105,15 @@ fn excluded_membership_is_respected_and_withholds_convergence() {
     // resurrection, no unique-index collision), the apply is PARTIAL.
     let mut t = parse_str(SAMPLE).unwrap();
     t.template.version = "3x".into();
-    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap();
+    let out = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(
         out.plan.skipped.iter().any(|s| s.contains("EXCLUDED")),
         "expected the exclusion skip, got {:?}",
@@ -760,12 +1122,19 @@ fn excluded_membership_is_respected_and_withholds_convergence() {
     assert!(!out.converged);
     // The excluded row is untouched (still the one current base row, FALSE).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM membership WHERE valid_to_commit IS NULL \
-                 AND alternative_id IS NULL AND NOT included"),
+        q1(
+            &db,
+            "SELECT count(*) FROM membership WHERE valid_to_commit IS NULL \
+                 AND alternative_id IS NULL AND NOT included"
+        ),
         1
     );
     assert!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'").is_none(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+        )
+        .is_none(),
         "hash withheld while the exclusion diverges from the template"
     );
 }
@@ -779,16 +1148,32 @@ fn stale_plan_is_refused_via_expect_commit() {
 
     let p = plan(&db, &t).unwrap();
     // Something else commits in between (any write moves the cookie).
-    write_parameter(&db, "node", "demand", "alt", scalar_batch("n9", 1.0), &[],
-        WriteOptions::default(), "someone_else", "").unwrap();
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "alt",
+        scalar_batch("n9", 1.0),
+        &[],
+        WriteOptions::default(),
+        "someone_else",
+        "",
+    )
+    .unwrap();
 
-    let opts = ApplyOptions { expect_commit: Some(p.db_commit), ..Default::default() };
+    let opts = ApplyOptions {
+        expect_commit: Some(p.db_commit),
+        ..Default::default()
+    };
     let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts).unwrap_err();
     assert!(err.to_string().contains("stale plan"), "{err}");
 
     // Re-plan → apply with the fresh commit id succeeds.
     let p2 = plan(&db, &t).unwrap();
-    let opts2 = ApplyOptions { expect_commit: Some(p2.db_commit), ..Default::default() };
+    let opts2 = ApplyOptions {
+        expect_commit: Some(p2.db_commit),
+        ..Default::default()
+    };
     apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts2).unwrap();
 }
 
@@ -798,9 +1183,12 @@ fn d12_default_omission_keeps_and_explicit_null_clears() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_loaded_db(&dir);
     let has_default = |db: &Path| {
-        q1(db, "SELECT count(*) FROM definition_value_scalar dv \
+        q1(
+            db,
+            "SELECT count(*) FROM definition_value_scalar dv \
                 JOIN parameter_definition pd ON pd.id = dv.parameter_definition_id \
-                WHERE pd.cur_name = 'demand' AND dv.valid_to_commit IS NULL")
+                WHERE pd.cur_name = 'demand' AND dv.valid_to_commit IS NULL",
+        )
     };
     assert_eq!(has_default(&db), 1, "sample seeds demand's default");
 
@@ -810,16 +1198,34 @@ fn d12_default_omission_keeps_and_explicit_null_clears() {
     keep.template.version = "3k".into();
     {
         let node = keep.classes.iter_mut().find(|c| c.name == "node").unwrap();
-        let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
+        let demand = node
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "demand")
+            .unwrap();
         demand.default = DefaultSpec::Unspecified;
     }
-    let out = apply(&db, &keep, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap();
+    let out = apply(
+        &db,
+        &keep,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.converged);
     assert!(
-        !out.plan.actions.iter().any(|a| a.to_string().contains("default of node.demand")),
+        !out.plan
+            .actions
+            .iter()
+            .any(|a| a.to_string().contains("default of node.demand")),
         "omission must emit NO default action: {:?}",
-        out.plan.actions.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        out.plan
+            .actions
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
     );
     assert_eq!(has_default(&db), 1, "omission keeps the database's default");
 
@@ -829,21 +1235,45 @@ fn d12_default_omission_keeps_and_explicit_null_clears() {
     clear.template.version = "3c".into();
     {
         let node = clear.classes.iter_mut().find(|c| c.name == "node").unwrap();
-        let demand = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
+        let demand = node
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "demand")
+            .unwrap();
         demand.default = DefaultSpec::Clear;
     }
-    let out = apply(&db, &clear, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap();
+    let out = apply(
+        &db,
+        &clear,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.converged);
     assert!(
-        out.plan.actions.iter().any(|a| a.to_string().contains("clear default of node.demand")),
+        out.plan
+            .actions
+            .iter()
+            .any(|a| a.to_string().contains("clear default of node.demand")),
         "{:?}",
-        out.plan.actions.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        out.plan
+            .actions
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
     );
     assert_eq!(has_default(&db), 0, "explicit null clears");
-    let again =
-        apply(&db, &clear, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-            .unwrap();
+    let again = apply(
+        &db,
+        &clear,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(again.no_op, "clearing template re-applies as a no-op");
 
     // The parse-level spelling drives the same behavior end-to-end: the
@@ -853,8 +1283,16 @@ fn d12_default_omission_keeps_and_explicit_null_clears() {
         {
             let mut omitted = parse_str(SAMPLE).unwrap();
             omitted.template.version = "3c".into();
-            let node = omitted.classes.iter_mut().find(|c| c.name == "node").unwrap();
-            let d = node.parameters.iter_mut().find(|p| p.name == "demand").unwrap();
+            let node = omitted
+                .classes
+                .iter_mut()
+                .find(|c| c.name == "node")
+                .unwrap();
+            let d = node
+                .parameters
+                .iter_mut()
+                .find(|p| p.name == "demand")
+                .unwrap();
             d.default = DefaultSpec::Unspecified;
             nodal_db_core::template::template_content_hash(&omitted)
         },
@@ -890,23 +1328,40 @@ fn d12_explicit_null_respects_the_nonscalar_guard() {
     t.template.version = "3g".into();
     {
         let unit = t.classes.iter_mut().find(|c| c.name == "unit").unwrap();
-        let eff = unit.parameters.iter_mut().find(|p| p.name == "efficiency").unwrap();
+        let eff = unit
+            .parameters
+            .iter_mut()
+            .find(|p| p.name == "efficiency")
+            .unwrap();
         eff.default = DefaultSpec::Clear;
     }
-    let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap();
+    let out = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(
-        out.plan.skipped.iter().any(|s| s.contains("cannot clear a NON-SCALAR default")),
+        out.plan
+            .skipped
+            .iter()
+            .any(|s| s.contains("cannot clear a NON-SCALAR default")),
         "expected the item-6 guard skip, got {:?}",
         out.plan.skipped
     );
     assert!(!out.converged, "guarded clear withholds convergence");
     // The exotic default is untouched.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM definition_value_scalar dv \
+        q1(
+            &db,
+            "SELECT count(*) FROM definition_value_scalar dv \
                  JOIN parameter_definition pd ON pd.id = dv.parameter_definition_id \
                  WHERE pd.cur_name = 'efficiency' AND dv.valid_to_commit IS NULL \
-                 AND dv.value_kind = 'date_time'"),
+                 AND dv.value_kind = 'date_time'"
+        ),
         1
     );
 }
@@ -927,8 +1382,15 @@ fn nested_self_apply_is_refused() {
     registry.register("mark_step", move |db: &Path, user: &str| {
         // The program tries to re-apply its own in-flight template.
         let inner = v4_template();
-        let e = apply(db, &inner, &MigrationRegistry::new(), user, "", &ApplyOptions::default())
-            .unwrap_err();
+        let e = apply(
+            db,
+            &inner,
+            &MigrationRegistry::new(),
+            user,
+            "",
+            &ApplyOptions::default(),
+        )
+        .unwrap_err();
         Err(e)
     });
     let err = apply(&db, &t4, &registry, "tester", "", &ApplyOptions::default()).unwrap_err();

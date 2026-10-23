@@ -8,7 +8,7 @@
 //! - v52     — `rename_value_list` + `merge_list_member` glpsol→highs (G4)
 //! - v55     — `rename_list_member` with the D15 rewrite-by-default (G7)
 //! - v56     — `drop_parameter` with cascade counts + orphan
-//!             `drop_value_list` (D14/G1)
+//!   `drop_value_list` (D14/G1)
 //! - v62     — `rename_list_member` rewrite + `drop_parameter` batch
 //! - v65     — `rename_parameter` + `map_values` translation table (G6)
 //!
@@ -42,15 +42,34 @@ fn fresh_db_with(dir: &tempfile::TempDir, base_yaml: &str) -> PathBuf {
     let db = dir.path().join("t.duckdb");
     init_schema(&db).unwrap();
     let t = parse_str(base_yaml).unwrap();
-    let out =
-        apply(&db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap();
-    assert!(out.converged, "base template must converge: {:?}", out.plan.skipped);
+    let out = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        out.converged,
+        "base template must converge: {:?}",
+        out.plan.skipped
+    );
     db
 }
 
 fn apply_v2(db: &Path, yaml: &str) -> nodal_db_core::template::ApplyOutcome {
     let t = parse_str(yaml).unwrap();
-    apply(db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap()
+    apply(
+        db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap()
 }
 
 fn q1(db: &Path, sql: &str) -> i64 {
@@ -94,24 +113,47 @@ fn float_batch(entity: &str, v: f64) -> RecordBatch {
 }
 
 fn write_str(db: &Path, class: &str, param: &str, entity: &str, v: &str) {
-    write_parameter(db, class, param, "alt", string_batch(entity, v), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        db,
+        class,
+        param,
+        "alt",
+        string_batch(entity, v),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
 }
 
 fn write_f(db: &Path, class: &str, param: &str, entity: &str, v: f64) {
-    write_parameter(db, class, param, "alt", float_batch(entity, v), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        db,
+        class,
+        param,
+        "alt",
+        float_batch(entity, v),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
 }
 
 /// Current scalar value (string) for (class, param, entity), if any.
 fn cur_str(db: &Path, param: &str, entity: &str) -> Option<String> {
-    qs(db, &format!(
-        "SELECT v.v_str FROM value_scalar v \
+    qs(
+        db,
+        &format!(
+            "SELECT v.v_str FROM value_scalar v \
          JOIN parameter_definition pd ON pd.id = v.parameter_definition_id \
          JOIN entity e ON e.id = v.entity_id \
          WHERE v.valid_to_commit IS NULL AND pd.cur_name = '{param}' \
            AND e.cur_name = '{entity}'"
-    ))
+        ),
+    )
 }
 
 fn cur_float(db: &Path, param: &str, entity: &str) -> Option<f64> {
@@ -132,9 +174,10 @@ fn cur_float(db: &Path, param: &str, entity: &str) -> Option<f64> {
 
 /// Count of CURRENT rows in `table` matching a predicate.
 fn live(db: &Path, table: &str, pred: &str) -> i64 {
-    q1(db, &format!(
-        "SELECT count(*) FROM {table} WHERE valid_to_commit IS NULL AND {pred}"
-    ))
+    q1(
+        db,
+        &format!("SELECT count(*) FROM {table} WHERE valid_to_commit IS NULL AND {pred}"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -167,13 +210,28 @@ migrations:
     )
     .unwrap();
     let steps = &t.migrations[0].steps;
-    assert!(matches!(&steps[0],
-        MigrationStep::RenameParameter { on_collision: OnCollision::Error,
-            map_values: None, unmapped_values: UnmappedValues::Keep, .. }));
-    assert!(matches!(&steps[1],
-        MigrationStep::RenameParameter { on_collision: OnCollision::DropSource, .. }));
+    assert!(matches!(
+        &steps[0],
+        MigrationStep::RenameParameter {
+            on_collision: OnCollision::Error,
+            map_values: None,
+            unmapped_values: UnmappedValues::Keep,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &steps[1],
+        MigrationStep::RenameParameter {
+            on_collision: OnCollision::DropSource,
+            ..
+        }
+    ));
     match &steps[2] {
-        MigrationStep::RenameParameter { map_values: Some(m), unmapped_values, .. } => {
+        MigrationStep::RenameParameter {
+            map_values: Some(m),
+            unmapped_values,
+            ..
+        } => {
             // YAML 1.2: `yes` stays a string key.
             assert_eq!(m.get("yes").map(String::as_str), Some("manual"));
             assert_eq!(*unmapped_values, UnmappedValues::Drop);
@@ -181,10 +239,20 @@ migrations:
         other => panic!("expected map_values rename, got {other:?}"),
     }
     // D15: rewrite defaults ON; the explicit opt-out is honored.
-    assert!(matches!(&steps[3],
-        MigrationStep::RenameListMember { rewrite_values: true, .. }));
-    assert!(matches!(&steps[4],
-        MigrationStep::RenameListMember { rewrite_values: false, .. }));
+    assert!(matches!(
+        &steps[3],
+        MigrationStep::RenameListMember {
+            rewrite_values: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &steps[4],
+        MigrationStep::RenameListMember {
+            rewrite_values: false,
+            ..
+        }
+    ));
     assert!(matches!(&steps[5], MigrationStep::MergeParameter { .. }));
     assert!(matches!(&steps[6], MigrationStep::MergeListMember { .. }));
     assert!(matches!(&steps[7], MigrationStep::DropParameter { .. }));
@@ -197,7 +265,10 @@ migrations:
     )
     .unwrap_err()
     .to_string();
-    assert!(err.contains("ONE-key") && err.contains("drop_value_list"), "{err}");
+    assert!(
+        err.contains("ONE-key") && err.contains("drop_value_list"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -220,7 +291,10 @@ fn parse_rejects_duplicate_keys_in_new_steps() {
 
 fn expect_validate_err(yaml: &str, needle: &str) {
     let t = parse_str(yaml).unwrap_or_else(|e| panic!("parse failed ({e}) for:\n{yaml}"));
-    let msg = validate(&t).err().map(|e| e.to_string()).unwrap_or_default();
+    let msg = validate(&t)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
     assert!(msg.contains(needle), "expected {needle:?} in:\n{msg}");
 }
 
@@ -229,7 +303,9 @@ fn validation_checks_v2_step_shapes() {
     let head = "template: {name: t, version: \"2\"}\nclasses: [{name: c}]\nmigrations:\n  - from: \"1\"\n    to: \"2\"\n    steps:\n";
     // unmapped_values without a translation table.
     expect_validate_err(
-        &format!("{head}      - rename_parameter: {{class: c, from: a, to: b, unmapped_values: drop}}\n"),
+        &format!(
+            "{head}      - rename_parameter: {{class: c, from: a, to: b, unmapped_values: drop}}\n"
+        ),
         "unmapped_values requires a map_values table",
     );
     // Chained translations are ambiguous.
@@ -239,12 +315,16 @@ fn validation_checks_v2_step_shapes() {
     );
     // The identity entry gets its own explanation (review small item).
     expect_validate_err(
-        &format!("{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{x: x}}}}\n"),
+        &format!(
+            "{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{x: x}}}}\n"
+        ),
         "maps to itself",
     );
     // Empty map.
     expect_validate_err(
-        &format!("{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{}}}}\n"),
+        &format!(
+            "{head}      - rename_parameter: {{class: c, from: a, to: b, map_values: {{}}}}\n"
+        ),
         "map_values must be non-empty",
     );
     // Merge from == to.
@@ -286,9 +366,11 @@ migrations:
 "#,
     )
     .unwrap();
-    let without =
-        parse_str("template: {name: t, version: \"2\"}\nclasses: [{name: c}]").unwrap();
-    assert_eq!(template_content_hash(&with), template_content_hash(&without));
+    let without = parse_str("template: {name: t, version: \"2\"}\nclasses: [{name: c}]").unwrap();
+    assert_eq!(
+        template_content_hash(&with),
+        template_content_hash(&without)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -340,22 +422,41 @@ fn v28_collision_drops_stale_source_v66_renames_plain() {
     let p = plan(&db, &parse_str(V28_V2).unwrap()).unwrap();
     let rendered = format!("{p}");
     assert!(rendered.contains("drop stale source"), "{rendered}");
-    assert!(rendered.contains("would cover") || rendered.contains("row(s)"), "{rendered}");
+    assert!(
+        rendered.contains("would cover") || rendered.contains("row(s)"),
+        "{rendered}"
+    );
 
     let out = apply_v2(&db, V28_V2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
     // Stale source closed (versioned — history rows remain, nothing erased).
-    assert_eq!(live(&db, "parameter_definition", "name = 'interest_rate'"), 0);
-    assert!(q1(&db, "SELECT count(*) FROM parameter_definition WHERE name = 'interest_rate'") > 0,
-        "close-out, not erasure");
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'interest_rate'"),
+        0
+    );
+    assert!(
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE name = 'interest_rate'"
+        ) > 0,
+        "close-out, not erasure"
+    );
     // Its value closed with it; the survivor's value intact.
     assert_eq!(cur_float(&db, "interest_rate", "n1"), None);
     assert_eq!(cur_float(&db, "discount_rate", "n1"), Some(0.07));
     // v66 path: renamed with value carried (same definition id).
     assert_eq!(cur_float(&db, "energy_margin_multiplier", "n2"), Some(2.0));
-    assert_eq!(live(&db, "parameter_definition", "name = 'energy_margin'"), 0);
-    assert!(out.notes.iter().any(|n| n.contains("dropping stale source")
-            || n.contains("closed")), "notes: {:?}", out.notes);
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'energy_margin'"),
+        0
+    );
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.contains("dropping stale source") || n.contains("closed")),
+        "notes: {:?}",
+        out.notes
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -413,12 +514,18 @@ fn v41_merge_parameter_fills_empty_slots_and_closes_source() {
     assert_eq!(cur_float(&db, "storage_state_end", "n1"), Some(5.0));
     assert_eq!(cur_float(&db, "storage_state_end", "n2"), Some(2.0));
     // The typo definition and its values are closed (versioned).
-    assert_eq!(live(&db, "parameter_definition", "name = 'storate_state_end'"), 0);
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'storate_state_end'"),
+        0
+    );
     assert_eq!(cur_float(&db, "storate_state_end", "n1"), None);
     // Create-by-rename: value carried under the new name, same definition.
     assert_eq!(cur_float(&db, "new_name", "s1"), Some(9.0));
-    assert!(out.notes.iter().any(|n| n.contains("carried 1 value(s)")),
-        "notes: {:?}", out.notes);
+    assert!(
+        out.notes.iter().any(|n| n.contains("carried 1 value(s)")),
+        "notes: {:?}",
+        out.notes
+    );
 }
 
 // --- merge_parameter guards (2026-09-22 review, MEDIUM) ---
@@ -474,12 +581,26 @@ fn merge_parameter_refuses_cross_list_targets() {
     let db = fresh_db_with(&dir, MERGE_GUARD_BASE);
     write_str(&db, "node", "src_listed", "n1", "yes");
     let v2 = merge_guard_v2("merge_parameter: {class: node, from: src_listed, to: tgt_otherlist}");
-    let err = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap_err().to_string();
+    let err = apply(
+        &db,
+        &parse_str(&v2).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err()
+    .to_string();
     // The typed error names BOTH lists and points at run: as the escape.
-    assert!(err.contains("yes_no") && err.contains("on_off") && err.contains("run:"), "{err}");
-    assert_eq!(live(&db, "parameter_definition", "name = 'src_listed'"), 1,
-        "refusal must close nothing");
+    assert!(
+        err.contains("yes_no") && err.contains("on_off") && err.contains("run:"),
+        "{err}"
+    );
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'src_listed'"),
+        1,
+        "refusal must close nothing"
+    );
 }
 
 #[test]
@@ -488,8 +609,16 @@ fn merge_parameter_refuses_kind_without_target_member() {
     let db = fresh_db_with(&dir, MERGE_GUARD_BASE);
     write_str(&db, "node", "src_string", "n1", "hello");
     let v2 = merge_guard_v2("merge_parameter: {class: node, from: src_string, to: tgt_float}");
-    let err = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap_err().to_string();
+    let err = apply(
+        &db,
+        &parse_str(&v2).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err()
+    .to_string();
     // Hard error toward run: naming the uncovered kind — never the
     // NULL-binding fallback.
     assert!(err.contains("string") && err.contains("run:"), "{err}");
@@ -503,20 +632,32 @@ fn merge_parameter_same_list_carries_with_target_binding() {
     write_str(&db, "node", "src_listed", "n2", "no"); // fills the empty slot
     write_str(&db, "node", "tgt_samelist", "n1", "yes"); // occupied slot
     let v2 = merge_guard_v2("merge_parameter: {class: node, from: src_listed, to: tgt_samelist}");
-    let out = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap();
+    let out = apply(
+        &db,
+        &parse_str(&v2).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
     assert_eq!(cur_str(&db, "tgt_samelist", "n1").as_deref(), Some("yes"));
     assert_eq!(cur_str(&db, "tgt_samelist", "n2").as_deref(), Some("no"));
     // The carried row binds the TARGET's own rank-0 string member (D11) —
     // never NULL, never the source's member.
-    assert_eq!(q1(&db,
-        "SELECT count(*) FROM value_scalar v \
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM value_scalar v \
          JOIN parameter_type pt ON pt.id = v.parameter_type_id \
           AND pt.parameter_definition_id = v.parameter_definition_id \
           AND pt.value_kind = 'string' AND pt.rank = 0 \
          JOIN parameter_definition pd ON pd.id = v.parameter_definition_id \
-         WHERE v.valid_to_commit IS NULL AND pd.cur_name = 'tgt_samelist'"), 2);
+         WHERE v.valid_to_commit IS NULL AND pd.cur_name = 'tgt_samelist'"
+        ),
+        2
+    );
     assert_eq!(live(&db, "parameter_definition", "name = 'src_listed'"), 0);
 }
 
@@ -620,18 +761,32 @@ migrations:
 fn v55_v62_rewrite_by_default_and_drop_batch() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db_with(&dir, V55_BASE);
-    write_str(&db, "group", "constraint_method", "g1", "bind_within_timeset");
+    write_str(
+        &db,
+        "group",
+        "constraint_method",
+        "g1",
+        "bind_within_timeset",
+    );
     write_str(&db, "group", "constraint_method", "g2", "lagrangian");
     write_f(&db, "group", "lagrangian_gap", "g1", 0.01);
 
     let out = apply_v2(&db, V55_V2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
     // D15: values rewritten WITHOUT any rewrite_values in the YAML.
-    assert_eq!(cur_str(&db, "constraint_method", "g1").as_deref(),
-        Some("bind_within_timeblock"));
-    assert_eq!(cur_str(&db, "constraint_method", "g2").as_deref(), Some("benders"));
+    assert_eq!(
+        cur_str(&db, "constraint_method", "g1").as_deref(),
+        Some("bind_within_timeblock")
+    );
+    assert_eq!(
+        cur_str(&db, "constraint_method", "g2").as_deref(),
+        Some("benders")
+    );
     // v62 drop leg: definition + value closed.
-    assert_eq!(live(&db, "parameter_definition", "name = 'lagrangian_gap'"), 0);
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'lagrangian_gap'"),
+        0
+    );
     assert_eq!(cur_float(&db, "lagrangian_gap", "g1"), None);
 }
 
@@ -639,7 +794,13 @@ fn v55_v62_rewrite_by_default_and_drop_batch() {
 fn rename_list_member_opt_out_still_honored() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db_with(&dir, V55_BASE);
-    write_str(&db, "group", "constraint_method", "g1", "bind_within_timeset");
+    write_str(
+        &db,
+        "group",
+        "constraint_method",
+        "g1",
+        "bind_within_timeset",
+    );
     let v2 = r#"
 template: {name: v55, version: "2"}
 value_lists:
@@ -661,9 +822,14 @@ migrations:
     let out = apply_v2(&db, v2);
     assert!(out.converged);
     // The explicit opt-out strands the stored string — the author's call.
-    assert_eq!(cur_str(&db, "constraint_method", "g1").as_deref(),
-        Some("bind_within_timeset"));
-    assert_eq!(live(&db, "list_value", "v_str = 'bind_within_timeblock'"), 1);
+    assert_eq!(
+        cur_str(&db, "constraint_method", "g1").as_deref(),
+        Some("bind_within_timeset")
+    );
+    assert_eq!(
+        live(&db, "list_value", "v_str = 'bind_within_timeblock'"),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -711,23 +877,42 @@ fn v56_drop_parameter_cascades_then_orphan_list_drops() {
     // Plan: D14 blast radius — counts before apply, from the delete preview.
     let p = plan(&db, &parse_str(V56_V2).unwrap()).unwrap();
     let rendered = format!("{p}");
-    assert!(rendered.contains("drop_parameter solve.debug"), "{rendered}");
-    assert!(rendered.contains("value_scalar 2"), "expected blast counts:\n{rendered}");
+    assert!(
+        rendered.contains("drop_parameter solve.debug"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("value_scalar 2"),
+        "expected blast counts:\n{rendered}"
+    );
     assert!(p.blocked.is_empty(), "{:?}", p.blocked);
 
     let out = apply_v2(&db, V56_V2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
     // Cascade counts reported in the apply notes (D14 record).
-    assert!(out.notes.iter().any(|n| n.contains("drop_parameter solve.debug")
-            && n.contains("value_scalar 2")), "notes: {:?}", out.notes);
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.contains("drop_parameter solve.debug") && n.contains("value_scalar 2")),
+        "notes: {:?}",
+        out.notes
+    );
     // Definition + values closed; unrelated value untouched.
     assert_eq!(live(&db, "parameter_definition", "name = 'debug'"), 0);
     assert_eq!(cur_str(&db, "debug", "s1"), None);
     assert_eq!(cur_float(&db, "keeper", "s1"), Some(1.0));
     // The now-orphan list and its member rows closed — versioned, not erased.
-    assert_eq!(live(&db, "parameter_value_list", "name = 'debug_levels'"), 0);
+    assert_eq!(
+        live(&db, "parameter_value_list", "name = 'debug_levels'"),
+        0
+    );
     assert_eq!(live(&db, "list_value", "v_str IN ('off', 'verbose')"), 0);
-    assert!(q1(&db, "SELECT count(*) FROM list_value WHERE v_str = 'verbose'") > 0);
+    assert!(
+        q1(
+            &db,
+            "SELECT count(*) FROM list_value WHERE v_str = 'verbose'"
+        ) > 0
+    );
 }
 
 #[test]
@@ -752,12 +937,27 @@ migrations:
 "#;
     // The plan predicts the refusal (simulated over the prior steps)…
     let p = plan(&db, &parse_str(v2).unwrap()).unwrap();
-    assert!(p.blocked.iter().any(|b| b.contains("drop_value_list")), "{:?}", p.blocked);
+    assert!(
+        p.blocked.iter().any(|b| b.contains("drop_value_list")),
+        "{:?}",
+        p.blocked
+    );
     // …and apply refuses before any span commits.
-    let err = apply(&db, &parse_str(v2).unwrap(), &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap_err().to_string();
+    let err = apply(
+        &db,
+        &parse_str(v2).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("drop_value_list"), "{err}");
-    assert_eq!(live(&db, "parameter_value_list", "name = 'debug_levels'"), 1);
+    assert_eq!(
+        live(&db, "parameter_value_list", "name = 'debug_levels'"),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -811,20 +1011,36 @@ fn v65_translation_table_maps_yes_and_drops_the_rest() {
     let out = apply_v2(&db, V65_V2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
     // yes -> manual under the renamed definition; 'no' dropped to the default.
-    assert_eq!(cur_str(&db, "capacity_margin_method", "g1").as_deref(), Some("manual"));
+    assert_eq!(
+        cur_str(&db, "capacity_margin_method", "g1").as_deref(),
+        Some("manual")
+    );
     assert_eq!(cur_str(&db, "capacity_margin_method", "g2"), None);
-    assert_eq!(live(&db, "parameter_definition", "name = 'has_capacity_margin'"), 0);
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'has_capacity_margin'"),
+        0
+    );
     // The dropped value is a versioned close-out, not erasure.
     assert!(q1(&db, "SELECT count(*) FROM value_scalar WHERE v_str = 'no'") > 0);
     // Reconcile rebound the definition to the new list + set the default.
-    assert_eq!(qs(&db,
-        "SELECT l.name FROM parameter_definition pd \
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT l.name FROM parameter_definition pd \
          JOIN parameter_value_list l ON l.id = pd.parameter_value_list_id \
            AND l.valid_to_commit IS NULL \
-         WHERE pd.cur_name = 'capacity_margin_method'").as_deref(),
-        Some("capacity_margin_methods"));
-    assert!(out.notes.iter().any(|n| n.contains("translated 1 stored value(s)")),
-        "notes: {:?}", out.notes);
+         WHERE pd.cur_name = 'capacity_margin_method'"
+        )
+        .as_deref(),
+        Some("capacity_margin_methods")
+    );
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.contains("translated 1 stored value(s)")),
+        "notes: {:?}",
+        out.notes
+    );
 }
 
 #[test]
@@ -833,11 +1049,22 @@ fn v65_unmapped_error_policy_refuses() {
     let db = fresh_db_with(&dir, V65_BASE);
     write_str(&db, "group", "has_capacity_margin", "g2", "no");
     let v2 = V65_V2.replace("unmapped_values: drop", "unmapped_values: error");
-    let err = apply(&db, &parse_str(&v2).unwrap(), &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default()).unwrap_err().to_string();
+    let err = apply(
+        &db,
+        &parse_str(&v2).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("unmapped_values: error"), "{err}");
     // Nothing renamed — the step's commit rolled back.
-    assert_eq!(live(&db, "parameter_definition", "name = 'has_capacity_margin'"), 1);
+    assert_eq!(
+        live(&db, "parameter_definition", "name = 'has_capacity_margin'"),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -878,8 +1105,10 @@ fn drop_class_cascades_entities_parameters_values() {
 
     let p = plan(&db, &parse_str(DROP_CLASS_V2).unwrap()).unwrap();
     let rendered = format!("{p}");
-    assert!(rendered.contains("drop_class group") && rendered.contains("value_scalar 2"),
-        "expected class blast radius:\n{rendered}");
+    assert!(
+        rendered.contains("drop_class group") && rendered.contains("value_scalar 2"),
+        "expected class blast radius:\n{rendered}"
+    );
 
     let out = apply_v2(&db, DROP_CLASS_V2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
@@ -889,7 +1118,11 @@ fn drop_class_cascades_entities_parameters_values() {
     assert_eq!(cur_float(&db, "x", "g1"), None);
     // Versioned close-out, never physical erasure (D14 altitude constraint).
     assert!(q1(&db, "SELECT count(*) FROM entity WHERE name = 'g1'") > 0);
-    assert_eq!(live(&db, "entity", "name = 'n1'"), 1, "unrelated class untouched");
+    assert_eq!(
+        live(&db, "entity", "name = 'n1'"),
+        1,
+        "unrelated class untouched"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -940,31 +1173,80 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     // apply#1 — pauses at step 0.
     let out = apply_v2(&db, DLM_V2);
     assert!(!out.converged);
-    assert!(out.warnings.iter().any(|w| w.contains("PAUSED") && w.contains("RETRIES")),
-        "warnings: {:?}", out.warnings);
-    assert!(out.plan.skipped.iter().any(|s| s.contains("drop_list_member")
-            && s.contains("unblock")), "skips: {:?}", out.plan.skipped);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("PAUSED") && w.contains("RETRIES")),
+        "warnings: {:?}",
+        out.warnings
+    );
+    assert!(
+        out.plan
+            .skipped
+            .iter()
+            .any(|s| s.contains("drop_list_member") && s.contains("unblock")),
+        "skips: {:?}",
+        out.plan.skipped
+    );
     // Member kept, value untouched; the step AFTER the pause never ran.
     assert_eq!(live(&db, "list_value", "v_str = 'stranded'"), 1);
     assert_eq!(cur_str(&db, "method", "s1").as_deref(), Some("stranded"));
-    assert_eq!(live(&db, "list_value", "v_str = 'unused'"), 1,
-        "steps after the paused one must not execute");
+    assert_eq!(
+        live(&db, "list_value", "v_str = 'unused'"),
+        1,
+        "steps after the paused one must not execute"
+    );
     // Version did NOT advance; no substamp written; no certified hash.
-    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
-        .as_deref(), Some("1"));
-    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"),
-        None, "a skipped step must not substamp");
-    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"),
-        None, "no certification behind a paused chain");
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"
+        ),
+        None,
+        "a skipped step must not substamp"
+    );
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+        ),
+        None,
+        "no certification behind a paused chain"
+    );
 
     // apply#2, still blocked — retries, pauses again, still not certified.
     let out2 = apply_v2(&db, DLM_V2);
     assert!(!out2.converged);
-    assert!(out2.warnings.iter().any(|w| w.contains("PAUSED")), "{:?}", out2.warnings);
-    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
-        .as_deref(), Some("1"), "version stays until the blocker clears");
-    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"),
-        None, "apply#2 must NOT certify while the drop stays blocked");
+    assert!(
+        out2.warnings.iter().any(|w| w.contains("PAUSED")),
+        "{:?}",
+        out2.warnings
+    );
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
+        Some("1"),
+        "version stays until the blocker clears"
+    );
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+        ),
+        None,
+        "apply#2 must NOT certify while the drop stays blocked"
+    );
     assert_eq!(live(&db, "list_value", "v_str = 'stranded'"), 1);
 
     // Mop up the stranding value, then apply#3 — the RETRY completes the
@@ -984,11 +1266,23 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     .unwrap();
     let out3 = apply_v2(&db, DLM_V2);
     assert!(out3.converged, "skips: {:?}", out3.plan.skipped);
-    assert_eq!(live(&db, "list_value", "v_str IN ('stranded', 'unused')"), 0);
-    assert_eq!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
-        .as_deref(), Some("2"));
-    assert!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'")
-        .is_some());
+    assert_eq!(
+        live(&db, "list_value", "v_str IN ('stranded', 'unused')"),
+        0
+    );
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
+        Some("2")
+    );
+    assert!(qs(
+        &db,
+        "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+    )
+    .is_some());
 }
 
 #[test]
@@ -998,10 +1292,16 @@ fn drop_list_member_clean_case_closes_the_member() {
     // No values at all: both drops execute, apply converges, hash certifies.
     let out = apply_v2(&db, DLM_V2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
-    assert_eq!(live(&db, "list_value", "v_str IN ('stranded', 'unused')"), 0);
+    assert_eq!(
+        live(&db, "list_value", "v_str IN ('stranded', 'unused')"),
+        0
+    );
     assert_eq!(live(&db, "list_value", "v_str = 'keepme'"), 1);
-    assert!(qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'")
-        .is_some());
+    assert!(qs(
+        &db,
+        "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+    )
+    .is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,7 +1366,11 @@ migrations:
     let out = apply_v2(&db, v2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
     assert!(
-        out.notes.iter().filter(|n| n.contains("source absent")).count() >= 3,
+        out.notes
+            .iter()
+            .filter(|n| n.contains("source absent"))
+            .count()
+            >= 3,
         "each tolerated rename is NOTED, never silent: {:?}",
         out.notes
     );
@@ -1083,8 +1387,14 @@ migrations:
 "#,
     )
     .unwrap();
-    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default());
+    let err = apply(
+        &db,
+        &bad,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    );
     assert!(format!("{}", err.unwrap_err()).contains("no_such_class"));
 }
 
@@ -1149,8 +1459,14 @@ migrations:
 "#,
     )
     .unwrap();
-    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default());
+    let err = apply(
+        &db,
+        &bad,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    );
     assert!(format!("{}", err.unwrap_err()).contains("not found"));
 }
 
@@ -1184,9 +1500,15 @@ migrations:
 "#;
     let out = apply_v2(&db, v2);
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
-    assert_eq!(cur_str(&db, "method", "n1").as_deref(), Some("b"),
-        "stray value rewritten despite the absent member row");
-    assert!(out.notes.iter().any(|n| n.contains("ghost_list") && n.contains("list absent")));
+    assert_eq!(
+        cur_str(&db, "method", "n1").as_deref(),
+        Some("b"),
+        "stray value rewritten despite the absent member row"
+    );
+    assert!(out
+        .notes
+        .iter()
+        .any(|n| n.contains("ghost_list") && n.contains("list absent")));
     assert!(out.notes.iter().any(|n| n.contains("rewrote 1 stray")));
     // Source AND target both live stays the loud merge-shape error.
     let bad = parse_str(
@@ -1201,8 +1523,14 @@ migrations:
 "#,
     )
     .unwrap();
-    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default());
+    let err = apply(
+        &db,
+        &bad,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    );
     assert!(format!("{}", err.unwrap_err()).contains("already has a member"));
 }
 
@@ -1301,7 +1629,11 @@ migrations:
     );
     assert_eq!(live(&db, "parameter_value_list", "name = 'solvers'"), 1);
     assert_eq!(
-        qs(&db, "SELECT value FROM metadata WHERE cur_name = 'template_version'").as_deref(),
+        qs(
+            &db,
+            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+        )
+        .as_deref(),
         Some("52")
     );
     // merge_list_member with the LIST present but NEITHER member existing
@@ -1318,8 +1650,14 @@ migrations:
 "#,
     )
     .unwrap();
-    let err = apply(&db, &bad, &MigrationRegistry::new(), "tester", "",
-        &ApplyOptions::default());
+    let err = apply(
+        &db,
+        &bad,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    );
     assert!(format!("{}", err.unwrap_err()).contains("neither member"));
 }
 
@@ -1345,10 +1683,20 @@ migrations:
     .unwrap();
     use nodal_db_core::template::ir::MissingSource;
     let steps = &t.migrations[0].steps;
-    assert!(matches!(&steps[0],
-        MigrationStep::RenameParameter { missing_source: MissingSource::Tolerate, .. }));
-    assert!(matches!(&steps[1],
-        MigrationStep::RenameParameter { missing_source: MissingSource::Error, .. }));
+    assert!(matches!(
+        &steps[0],
+        MigrationStep::RenameParameter {
+            missing_source: MissingSource::Tolerate,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &steps[1],
+        MigrationStep::RenameParameter {
+            missing_source: MissingSource::Error,
+            ..
+        }
+    ));
 
     // Execute: the opted-out step refuses on the absent source the default
     // would tolerate.
@@ -1371,11 +1719,19 @@ migrations:
       - rename_parameter: {class: node, from: never_materialized, to: x,
                            missing_source: error}
 "#;
-    let err = apply(&db, &parse_str(strict).unwrap(), &MigrationRegistry::new(),
-        "tester", "", &ApplyOptions::default());
+    let err = apply(
+        &db,
+        &parse_str(strict).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    );
     let msg = format!("{}", err.unwrap_err());
-    assert!(msg.contains("missing_source: error") && msg.contains("never_materialized"),
-        "{msg}");
+    assert!(
+        msg.contains("missing_source: error") && msg.contains("never_materialized"),
+        "{msg}"
+    );
 
     // Same opt-out on the list-member step.
     let strict_member = r#"
@@ -1395,7 +1751,13 @@ migrations:
       - rename_list_member: {list: methods, from: ghost, to: b,
                              missing_source: error}
 "#;
-    let err = apply(&db, &parse_str(strict_member).unwrap(), &MigrationRegistry::new(),
-        "tester", "", &ApplyOptions::default());
+    let err = apply(
+        &db,
+        &parse_str(strict_member).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    );
     assert!(format!("{}", err.unwrap_err()).contains("missing_source: error"));
 }

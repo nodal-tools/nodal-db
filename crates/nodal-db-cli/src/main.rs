@@ -130,7 +130,13 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { db, alternative, template, user, schema_dir } => {
+        Command::Init {
+            db,
+            alternative,
+            template,
+            user,
+            schema_dir,
+        } => {
             // Refuse an existing database (CLI critique F6): the schema applies
             // file-by-file under autocommit, so re-applying onto existing state
             // fails partway and can leave a mixed state. Only an absent or
@@ -154,11 +160,11 @@ fn main() -> anyhow::Result<()> {
                     &nodal_db_core::schema_init::schema_dir(),
                     default_alt,
                 )?,
-                Some(Some(dir)) => {
-                    nodal_db_core::schema_init::init_schema_from_dir_with_default(
-                        &db, &dir, default_alt,
-                    )?
-                }
+                Some(Some(dir)) => nodal_db_core::schema_init::init_schema_from_dir_with_default(
+                    &db,
+                    &dir,
+                    default_alt,
+                )?,
             }
             println!("initialized {}", db.display());
             if let Some(file) = template {
@@ -185,7 +191,14 @@ fn main() -> anyhow::Result<()> {
             message,
             force_replace,
         }),
-        Command::EraseAlternative { db, name, preview, note, expect_present, user } => {
+        Command::EraseAlternative {
+            db,
+            name,
+            preview,
+            note,
+            expect_present,
+            user,
+        } => {
             use nodal_db_core::erasure;
             use nodal_db_core::types::{ObjectDeleteKey, ObjectKind, ObjectRef};
             let key = ObjectDeleteKey {
@@ -207,7 +220,11 @@ fn main() -> anyhow::Result<()> {
                     "would erase alternative '{}' (id {}, identity {}):",
                     p.alternative_name,
                     p.alternative_id,
-                    if p.still_current { "current — will be closed" } else { "already closed" }
+                    if p.still_current {
+                        "current — will be closed"
+                    } else {
+                        "already closed"
+                    }
                 );
                 for tc in &p.per_table {
                     println!("  {:<24} {:>10} rows", tc.table, tc.rows);
@@ -217,15 +234,25 @@ fn main() -> anyhow::Result<()> {
                     p.rows_total, p.bytes_estimate
                 );
                 for s in &p.referencing_scenarios {
-                    println!("  note: scenario '{}' (id {}) loses a rank row", s.name, s.id);
+                    println!(
+                        "  note: scenario '{}' (id {}) loses a rank row",
+                        s.name, s.id
+                    );
                 }
                 if !p.referencing_runs.is_empty() {
-                    println!("  note: erases the results of run(s) {:?}", p.referencing_runs);
+                    println!(
+                        "  note: erases the results of run(s) {:?}",
+                        p.referencing_runs
+                    );
                 }
                 // The same --expect-present check the erase enforces, reported
                 // read-only (core computes both from one helper).
                 for n in &expect_present {
-                    if !p.expect_present_problems.iter().any(|prob| prob.contains(&format!("'{n}'"))) {
+                    if !p
+                        .expect_present_problems
+                        .iter()
+                        .any(|prob| prob.contains(&format!("'{n}'")))
+                    {
                         println!("  expect-present '{n}': present — the erase would proceed");
                     }
                 }
@@ -250,8 +277,7 @@ fn main() -> anyhow::Result<()> {
                 use nodal_db_core::duckdb::{AccessMode, Config, Connection};
                 let config = Config::default().access_mode(AccessMode::ReadOnly)?;
                 let conn = Connection::open_with_flags(&db, config)?;
-                let runs: i64 =
-                    conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?;
+                let runs: i64 = conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?;
                 let _ = conn.close();
                 if runs == 0 {
                     eprintln!(
@@ -281,7 +307,11 @@ fn main() -> anyhow::Result<()> {
                 r.bytes_estimate,
                 r.marker_id,
                 r.commit_id,
-                if r.identity_closed { "; identity row closed" } else { "" }
+                if r.identity_closed {
+                    "; identity row closed"
+                } else {
+                    ""
+                }
             );
             for tc in &r.per_table {
                 println!("  {:<24} {:>10} rows", tc.table, tc.rows);

@@ -34,9 +34,7 @@ fn f1_guard_rejects_malformed_materialized_axis() {
     let bad = CanonicalAxis {
         length: 5,
         properties: AxisProperties::default(),
-        body: AxisBody::IntegerMaterialized {
-            coords: vec![1, 2],
-        },
+        body: AxisBody::IntegerMaterialized { coords: vec![1, 2] },
     };
     let err = with_write_txn(&path, "t", "f1", |conn, _c| {
         let mut cache = AxisCache::new();
@@ -44,7 +42,14 @@ fn f1_guard_rejects_malformed_materialized_axis() {
     })
     .expect_err("malformed axis must be rejected");
     assert!(
-        matches!(err, DbError::MalformedAxis { length: 5, children: 2, .. }),
+        matches!(
+            err,
+            DbError::MalformedAxis {
+                length: 5,
+                children: 2,
+                ..
+            }
+        ),
         "unexpected error: {err}"
     );
 
@@ -80,7 +85,15 @@ fn retrying_wrapper_happy_path_writes_value() {
     };
     let outcome = with_write_txn_retrying(&path, "t", "retry-happy", |conn, c| {
         let mut cache = AxisCache::new();
-        write_value(conn, c, key, &value, &mut cache, &WriteOptions::default(), None)
+        write_value(
+            conn,
+            c,
+            key,
+            &value,
+            &mut cache,
+            &WriteOptions::default(),
+            None,
+        )
     })
     .expect("retrying write succeeds");
     assert_eq!(outcome.tier, Some(Tier::Scalar));
@@ -158,11 +171,17 @@ fn batched_long_cells_bump_versions_independently() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(live, vec![(0, 3, 12.0), (1, 2, 21.0)], "per-cell version continuity");
+    assert_eq!(
+        live,
+        vec![(0, 3, 12.0), (1, 2, 21.0)],
+        "per-cell version continuity"
+    );
 
     // The append-only tiling audit must stay clean across the batched writes.
     let tiling: i64 = conn
-        .query_row("SELECT count(*) FROM audit_history_tiling", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM audit_history_tiling", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(tiling, 0, "audit_history_tiling must be empty");
 }

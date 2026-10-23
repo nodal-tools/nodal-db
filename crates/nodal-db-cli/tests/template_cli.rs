@@ -10,8 +10,7 @@ use std::process::Command;
 use nodal_db_core::template::ir::normalized_model;
 use nodal_db_core::template::{export, parse_file};
 
-const SAMPLE: &str =
-    include_str!("../../nodal-db-core/tests/fixtures/template_sample.yaml");
+const SAMPLE: &str = include_str!("../../nodal-db-core/tests/fixtures/template_sample.yaml");
 
 fn bin() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_nodal-db"));
@@ -49,13 +48,21 @@ fn template_verbs_end_to_end() {
 
     // plan against an up-to-date DB: no actions.
     let out = run_ok(
-        bin().args(["template", "plan"]).arg(&tpl).arg("--db").arg(&db1),
+        bin()
+            .args(["template", "plan"])
+            .arg(&tpl)
+            .arg("--db")
+            .arg(&db1),
     );
     assert!(out.contains("NO-OP"), "{out}");
 
     // apply is idempotent.
     let out = run_ok(
-        bin().args(["template", "apply"]).arg(&tpl).arg("--db").arg(&db1),
+        bin()
+            .args(["template", "apply"])
+            .arg(&tpl)
+            .arg("--db")
+            .arg(&db1),
     );
     assert!(out.contains("no-op"), "{out}");
 
@@ -72,7 +79,13 @@ fn template_verbs_end_to_end() {
 
     // …and the export loads into a second DB, semantically identical.
     let db2 = dir.path().join("b.duckdb");
-    run_ok(bin().args(["init"]).arg(&db2).arg("--template").arg(&exported));
+    run_ok(
+        bin()
+            .args(["init"])
+            .arg(&db2)
+            .arg("--template")
+            .arg(&exported),
+    );
     let (e1, _) = export(Path::new(&db1)).unwrap();
     let (e2, _) = export(Path::new(&db2)).unwrap();
     assert_eq!(normalized_model(&e1), normalized_model(&e2));
@@ -89,11 +102,19 @@ fn template_verbs_end_to_end() {
     )
     .unwrap();
     let err = run_err(
-        bin().args(["template", "load"]).arg(&other).arg("--db").arg(&db1),
+        bin()
+            .args(["template", "load"])
+            .arg(&other)
+            .arg("--db")
+            .arg(&db1),
     );
     assert!(err.contains("retarget"), "{err}");
     let err = run_err(
-        bin().args(["template", "apply"]).arg(&other).arg("--db").arg(&db1),
+        bin()
+            .args(["template", "apply"])
+            .arg(&other)
+            .arg("--db")
+            .arg(&db1),
     );
     assert!(err.contains("retarget"), "{err}");
 
@@ -116,5 +137,11 @@ fn template_verbs_end_to_end() {
     )
     .unwrap();
     let db3 = dir.path().join("c.duckdb");
-    run_ok(bin().args(["init"]).arg(&db3).arg("--template").arg(&json_tpl));
+    run_ok(
+        bin()
+            .args(["init"])
+            .arg(&db3)
+            .arg("--template")
+            .arg(&json_tpl),
+    );
 }

@@ -275,9 +275,7 @@ pub struct Class {
 #[serde(untagged)]
 pub enum DimRef {
     Class(String),
-    Set {
-        class_set: String,
-    },
+    Set { class_set: String },
 }
 
 impl DimRef {
@@ -363,8 +361,10 @@ impl TypeDecl {
         match self.dims.as_deref() {
             None | Some([]) => format!("{} rank 0", self.kind),
             Some(dims) => {
-                let d: Vec<String> =
-                    dims.iter().map(|d| format!("{}: {}", d.name, d.kind)).collect();
+                let d: Vec<String> = dims
+                    .iter()
+                    .map(|d| format!("{}: {}", d.name, d.kind))
+                    .collect();
                 format!("indexed rank {} ({})", dims.len(), d.join(", "))
             }
         }
@@ -777,7 +777,11 @@ pub enum MigrationStep {
 /// JSON-compatible by design, D1). Deserialization goes through [`UniqueMap`]
 /// first for the duplicate-key rejection and the one-key contract.
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "MigrationStep", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    remote = "MigrationStep",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 enum StepDef {
     RenameClass {
         from: String,
@@ -944,8 +948,7 @@ impl<'de> Deserialize<'de> for MigrationStep {
                 m.0.len()
             )));
         }
-        let obj: Map<String, Value> =
-            m.0.into_iter().map(|(k, StrictJson(v))| (k, v)).collect();
+        let obj: Map<String, Value> = m.0.into_iter().map(|(k, StrictJson(v))| (k, v)).collect();
         StepDef::deserialize(Value::Object(obj)).map_err(D::Error::custom)
     }
 }
@@ -1031,8 +1034,7 @@ impl MigrationStep {
 /// Parse a template from YAML 1.2 text. JSON is a YAML subset, so JSON input
 /// parses through the same call (D1: one loader, both surfaces).
 pub fn parse_str(text: &str) -> Result<Template, DbError> {
-    serde_norway::from_str(text)
-        .map_err(|e| DbError::Api(format!("template parse error: {e}")))
+    serde_norway::from_str(text).map_err(|e| DbError::Api(format!("template parse error: {e}")))
 }
 
 /// Parse a template file (YAML or JSON — one parser, D1).
@@ -1092,7 +1094,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
     }
     if let Some(role) = &t.template.role {
         if role != "input" && role != "results" {
-            errs.push(format!("template.role must be \"input\" or \"results\", got {role:?}"));
+            errs.push(format!(
+                "template.role must be \"input\" or \"results\", got {role:?}"
+            ));
         }
     }
 
@@ -1106,7 +1110,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             ));
         }
         if class_ix.insert(fold(&c.name), i).is_some() {
-            errs.push(format!("duplicate class name {:?} (case-insensitive)", c.name));
+            errs.push(format!(
+                "duplicate class name {:?} (case-insensitive)",
+                c.name
+            ));
         }
     }
     let mut set_ix: HashMap<String, usize> = HashMap::new();
@@ -1118,7 +1125,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             ));
         }
         if set_ix.insert(fold(&s.name), i).is_some() {
-            errs.push(format!("duplicate class_set name {:?} (case-insensitive)", s.name));
+            errs.push(format!(
+                "duplicate class_set name {:?} (case-insensitive)",
+                s.name
+            ));
         }
         if s.members.is_empty() {
             errs.push(format!("class_set {:?}: members must be non-empty", s.name));
@@ -1126,7 +1136,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
         let mut seen = HashSet::new();
         for m in &s.members {
             if !class_ix.contains_key(&fold(m)) {
-                errs.push(format!("class_set {:?}: member {m:?} is not a declared class", s.name));
+                errs.push(format!(
+                    "class_set {:?}: member {m:?} is not a declared class",
+                    s.name
+                ));
             }
             if !seen.insert(fold(m)) {
                 errs.push(format!("class_set {:?}: duplicate member {m:?}", s.name));
@@ -1147,7 +1160,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             errs.push("value_list with empty name".into());
         }
         if list_ix.insert(fold(&l.name), i).is_some() {
-            errs.push(format!("duplicate value_list name {:?} (case-insensitive)", l.name));
+            errs.push(format!(
+                "duplicate value_list name {:?} (case-insensitive)",
+                l.name
+            ));
         }
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for (mi, m) in l.members.iter().enumerate() {
@@ -1185,7 +1201,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             errs.push("unit with empty name".into());
         }
         if unit_ix.insert(fold(&u.name), i).is_some() {
-            errs.push(format!("duplicate unit name {:?} (case-insensitive)", u.name));
+            errs.push(format!(
+                "duplicate unit name {:?} (case-insensitive)",
+                u.name
+            ));
         }
         if !u.registry_extras.is_empty() {
             let keys: Vec<&str> = u.registry_extras.keys().map(|k| k.as_str()).collect();
@@ -1203,7 +1222,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             errs.push("parameter_group with empty name".into());
         }
         if !group_names.insert(fold(&g.name)) {
-            errs.push(format!("duplicate parameter_group name {:?} (case-insensitive)", g.name));
+            errs.push(format!(
+                "duplicate parameter_group name {:?} (case-insensitive)",
+                g.name
+            ));
         }
     }
 
@@ -1257,11 +1279,15 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                 ));
             }
             if !pnames.insert(fold(&p.name)) {
-                errs.push(format!("{loc}: duplicate parameter name (case-insensitive)"));
+                errs.push(format!(
+                    "{loc}: duplicate parameter name (case-insensitive)"
+                ));
             }
             if let Some(g) = &p.group {
                 if !group_names.contains(&fold(g)) {
-                    errs.push(format!("{loc}: group {g:?} is not a declared parameter_group"));
+                    errs.push(format!(
+                        "{loc}: group {g:?} is not a declared parameter_group"
+                    ));
                 }
             }
             if let Some(u) = &p.unit {
@@ -1339,7 +1365,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                     if let Some(l) = list {
                         // §3.5: infer the scalar kind from the list members.
                         match uniform_list_kind(l) {
-                            Ok(k) => eff.push(TypeDecl { kind: k, dims: None }),
+                            Ok(k) => eff.push(TypeDecl {
+                                kind: k,
+                                dims: None,
+                            }),
                             Err(e) => errs.push(format!("{loc}: {e}")),
                         }
                     }
@@ -1360,8 +1389,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                         .filter_map(|m| effective_member_kind(m).ok())
                         .collect();
                     for m in &eff {
-                        let rank0 =
-                            m.dims.as_deref().map(|d| d.is_empty()).unwrap_or(true);
+                        let rank0 = m.dims.as_deref().map(|d| d.is_empty()).unwrap_or(true);
                         if rank0 && !list_kinds.contains(&m.kind) {
                             errs.push(format!(
                                 "{loc}: declared rank-0 type kind {:?} has no member of \
@@ -1387,7 +1415,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                         errs.push(format!(
                             "{loc}: declared type members {} and {} are indistinguishable \
                              ({}) — exactly-one-member matching would be impossible (D2a)",
-                            a, b, eff[a].describe()
+                            a,
+                            b,
+                            eff[a].describe()
                         ));
                     }
                 }
@@ -1466,8 +1496,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                 None => errs.push(format!("{loc}: class {:?} is not declared", r.class)),
                 Some(&ci) => {
                     let c = &t.classes[ci];
-                    let sel =
-                        c.parameters.iter().position(|p| fold(&p.name) == fold(&r.selector));
+                    let sel = c
+                        .parameters
+                        .iter()
+                        .position(|p| fold(&p.name) == fold(&r.selector));
                     match sel {
                         None => errs.push(format!(
                             "{loc}: selector {:?} is not a parameter of class {:?}",
@@ -1484,9 +1516,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                                     if let Some(&li) = list_ix.get(&fold(ln)) {
                                         let l = &t.value_lists[li];
                                         for k in r.when.keys() {
-                                            let hit = l.members.iter().any(|m| {
-                                                matches!(&m.value, Lit::Str(s) if s == k)
-                                            });
+                                            let hit = l
+                                                .members
+                                                .iter()
+                                                .any(|m| matches!(&m.value, Lit::Str(s) if s == k));
                                             if !hit {
                                                 errs.push(format!(
                                                     "{loc}: when-branch {k:?} is not a member \
@@ -1537,12 +1570,12 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                 ));
             }
             if !seeded.insert((fold(&e.class), fold(&name))) {
-                errs.push(format!("{loc}: duplicate seed entity {name:?} (case-insensitive)"));
+                errs.push(format!(
+                    "{loc}: duplicate seed entity {name:?} (case-insensitive)"
+                ));
             }
             match (&e.elements, c.dimensions.is_empty()) {
-                (Some(_), true) => {
-                    errs.push(format!("{loc}: elements given but class is 0-D"))
-                }
+                (Some(_), true) => errs.push(format!("{loc}: elements given but class is 0-D")),
                 (None, false) => errs.push(format!(
                     "{loc}: class is {}-D; seed entity needs an elements tuple",
                     c.dimensions.len()
@@ -1568,7 +1601,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             };
             let c = &t.classes[ci];
             for (di, el) in els.iter().enumerate() {
-                let Some(dim) = c.dimensions.get(di) else { continue };
+                let Some(dim) = c.dimensions.get(di) else {
+                    continue;
+                };
                 let ok = match dim {
                     DimRef::Class(cls) => seeded.contains(&(fold(cls), fold(el))),
                     DimRef::Set { class_set } => set_ix
@@ -1645,7 +1680,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
             match s {
                 MigrationStep::Run(p) => {
                     if p.trim().is_empty() {
-                        errs.push(format!("migrations[{mi}]: run step with empty program name"));
+                        errs.push(format!(
+                            "migrations[{mi}]: run step with empty program name"
+                        ));
                     }
                 }
                 MigrationStep::RenameParameter {
@@ -1691,7 +1728,9 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                         }
                     }
                 }
-                MigrationStep::MergeParameter { class, from, to, .. } => {
+                MigrationStep::MergeParameter {
+                    class, from, to, ..
+                } => {
                     nonempty(&mut errs, "class", class);
                     nonempty(&mut errs, "from", from);
                     nonempty(&mut errs, "to", to);
@@ -1783,7 +1822,10 @@ fn uniform_list_kind(l: &ValueList) -> Result<String, String> {
         }
     }
     kind.ok_or_else(|| {
-        format!("cannot infer a kind from empty value_list {:?} (declare types:)", l.name)
+        format!(
+            "cannot infer a kind from empty value_list {:?} (declare types:)",
+            l.name
+        )
     })
 }
 
@@ -1827,8 +1869,14 @@ fn opt(map: &mut Map<String, Value>, key: &str, v: &Option<String>) {
 pub fn types_elidable(types: &[TypeDecl], list: Option<&ValueList>) -> bool {
     let Some(l) = list else { return false };
     types.len() == 1
-        && types[0].dims.as_deref().map(|d| d.is_empty()).unwrap_or(true)
-        && uniform_list_kind(l).map(|k| k == types[0].kind).unwrap_or(false)
+        && types[0]
+            .dims
+            .as_deref()
+            .map(|d| d.is_empty())
+            .unwrap_or(true)
+        && uniform_list_kind(l)
+            .map(|k| k == types[0].kind)
+            .unwrap_or(false)
 }
 
 fn type_member_json(ty: &TypeDecl) -> Value {
@@ -2054,8 +2102,12 @@ pub fn normalized_model(t: &Template) -> Value {
         if !seed.memberships.is_empty() {
             let mut ms: Vec<&SeedMembership> = seed.memberships.iter().collect();
             ms.sort_by_key(|m| {
-                (fold(&m.group.class), fold(&m.group.entity), fold(&m.member.class),
-                 fold(&m.member.entity))
+                (
+                    fold(&m.group.class),
+                    fold(&m.group.entity),
+                    fold(&m.member.class),
+                    fold(&m.member.entity),
+                )
             });
             let arr: Vec<Value> = ms
                 .iter()

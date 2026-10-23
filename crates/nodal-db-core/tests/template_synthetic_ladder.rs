@@ -120,23 +120,38 @@ fn fillers(n: usize, seed: usize) -> Vec<Param> {
                 4 => Kind::Typeless,
                 _ => Kind::Str("yes_no".into()),
             };
-            Param { name, kind, group: GROUPS[(i + seed) % GROUPS.len()] }
+            Param {
+                name,
+                kind,
+                group: GROUPS[(i + seed) % GROUPS.len()],
+            }
         })
         .collect()
 }
 
 fn p(name: &str, kind: Kind) -> Param {
-    Param { name: name.into(), kind, group: "core" }
+    Param {
+        name: name.into(),
+        kind,
+        group: "core",
+    }
 }
 
 fn class(name: &str, dims: &[&str], n_fill: usize, seed: usize, special: Vec<Param>) -> Class {
     let mut params = special;
     params.extend(fillers(n_fill, seed));
-    Class { name: name.into(), dims: dims.iter().map(|s| s.to_string()).collect(), params }
+    Class {
+        name: name.into(),
+        dims: dims.iter().map(|s| s.to_string()).collect(),
+        params,
+    }
 }
 
 fn list(name: &str, members: &[&str]) -> List {
-    List { name: name.into(), members: members.iter().map(|s| s.to_string()).collect() }
+    List {
+        name: name.into(),
+        members: members.iter().map(|s| s.to_string()).collect(),
+    }
 }
 
 /// The floor vocabulary (version 1).
@@ -146,38 +161,80 @@ fn base_vocab() -> Vocab {
         lists: vec![
             list("yes_no", &["yes", "no"]),
             list("levels", &["low", "mid", "high"]),
-            list("modes_old", &["on_off", "continuous_old", "continuous", "deprecated_x", "stepped"]),
+            list(
+                "modes_old",
+                &[
+                    "on_off",
+                    "continuous_old",
+                    "continuous",
+                    "deprecated_x",
+                    "stepped",
+                ],
+            ),
             list("flag_modes", &["f_a", "f_b"]),
             list("shapes", &["flat", "ramp", "peak"]),
         ],
         classes: vec![
             class("area", &[], 10, 0, vec![p("hub_count", Float(None))]),
-            class("hub", &[], 24, 1, vec![
-                p("demand_old", Float(None)),
-                p("demand", Float(None)),
-                p("flag_mode", Str("flag_modes".into())),
-            ]),
-            class("widget", &[], 28, 2, vec![
-                p("power_max", Float(None)),
-                p("legacy_scale", Float(None)),
-                p("scale_factor", Float(Some(1.0))),
-                p("mode", Str("modes_old".into())),
-                p("spare_coef", Float(None)),
-                p("enabled", Str("yes_no".into())),
-            ]),
-            class("gizmo", &[], 14, 3, vec![
-                p("eff_a", Float(None)),
-                p("efficiency", Float(Some(1.0))),
-            ]),
-            class("store", &[], 12, 4, vec![p("profile_shape", Str("shapes".into()))]),
+            class(
+                "hub",
+                &[],
+                24,
+                1,
+                vec![
+                    p("demand_old", Float(None)),
+                    p("demand", Float(None)),
+                    p("flag_mode", Str("flag_modes".into())),
+                ],
+            ),
+            class(
+                "widget",
+                &[],
+                28,
+                2,
+                vec![
+                    p("power_max", Float(None)),
+                    p("legacy_scale", Float(None)),
+                    p("scale_factor", Float(Some(1.0))),
+                    p("mode", Str("modes_old".into())),
+                    p("spare_coef", Float(None)),
+                    p("enabled", Str("yes_no".into())),
+                ],
+            ),
+            class(
+                "gizmo",
+                &[],
+                14,
+                3,
+                vec![p("eff_a", Float(None)), p("efficiency", Float(Some(1.0)))],
+            ),
+            class(
+                "store",
+                &[],
+                12,
+                4,
+                vec![p("profile_shape", Str("shapes".into()))],
+            ),
             class("route", &[], 10, 5, vec![p("len_km", Float(None))]),
             class("fleet", &[], 8, 0, vec![]),
             class("legacy_thing", &[], 4, 1, vec![]),
             class("hub__widget", &["hub", "widget"], 10, 2, vec![]),
             class("widget__hub", &["widget", "hub"], 10, 3, vec![]),
             class("area__hub", &["area", "hub"], 8, 4, vec![]),
-            class("area__route__fleet", &["area", "route", "fleet"], 6, 5, vec![]),
-            class("area__hub__widget__route", &["area", "hub", "widget", "route"], 4, 0, vec![]),
+            class(
+                "area__route__fleet",
+                &["area", "route", "fleet"],
+                6,
+                5,
+                vec![],
+            ),
+            class(
+                "area__hub__widget__route",
+                &["area", "hub", "widget", "route"],
+                4,
+                0,
+                vec![],
+            ),
             class("legacy_thing__hub", &["legacy_thing", "hub"], 4, 1, vec![]),
         ],
     }
@@ -185,10 +242,16 @@ fn base_vocab() -> Vocab {
 
 impl Vocab {
     fn class_mut(&mut self, name: &str) -> &mut Class {
-        self.classes.iter_mut().find(|c| c.name == name).unwrap_or_else(|| panic!("{name}"))
+        self.classes
+            .iter_mut()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
     }
     fn list_mut(&mut self, name: &str) -> &mut List {
-        self.lists.iter_mut().find(|l| l.name == name).unwrap_or_else(|| panic!("{name}"))
+        self.lists
+            .iter_mut()
+            .find(|l| l.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
     }
     fn param_mut(&mut self, class: &str, name: &str) -> &mut Param {
         self.class_mut(class)
@@ -421,13 +484,24 @@ fn template_text(version: i64) -> String {
     ));
     y.push_str("value_lists:\n");
     for l in &v.lists {
-        let members: Vec<String> =
-            l.members.iter().map(|m| format!("{{value: {}}}", q(m))).collect();
-        y.push_str(&format!("  - name: {}\n    members: [{}]\n", q(&l.name), members.join(", ")));
+        let members: Vec<String> = l
+            .members
+            .iter()
+            .map(|m| format!("{{value: {}}}", q(m)))
+            .collect();
+        y.push_str(&format!(
+            "  - name: {}\n    members: [{}]\n",
+            q(&l.name),
+            members.join(", ")
+        ));
     }
     y.push_str("parameter_groups:\n");
     for (i, g) in GROUPS.iter().enumerate() {
-        y.push_str(&format!("  - {{name: {}, order: {}}}\n", q(g), (i + 1) * 10));
+        y.push_str(&format!(
+            "  - {{name: {}, order: {}}}\n",
+            q(g),
+            (i + 1) * 10
+        ));
     }
     y.push_str("classes:\n");
     for c in &v.classes {
@@ -506,11 +580,17 @@ fn qs(db: &Path, sql: &str) -> Option<String> {
 }
 
 fn meta(db: &Path, key: &str) -> Option<String> {
-    qs(db, &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"))
+    qs(
+        db,
+        &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+    )
 }
 
 fn live(db: &Path, table: &str, pred: &str) -> i64 {
-    q1(db, &format!("SELECT count(*) FROM {table} WHERE valid_to_commit IS NULL AND {pred}"))
+    q1(
+        db,
+        &format!("SELECT count(*) FROM {table} WHERE valid_to_commit IS NULL AND {pred}"),
+    )
 }
 
 const MUST_BE_EMPTY: &[&str] = &[
@@ -537,7 +617,11 @@ const MUST_BE_EMPTY: &[&str] = &[
 
 fn assert_audits_empty(db: &Path, which: &str) {
     for view in MUST_BE_EMPTY {
-        assert_eq!(q1(db, &format!("SELECT count(*) FROM {view}")), 0, "{which}: {view}");
+        assert_eq!(
+            q1(db, &format!("SELECT count(*) FROM {view}")),
+            0,
+            "{which}: {view}"
+        );
     }
 }
 
@@ -559,7 +643,11 @@ fn vocab_model(t: &Template) -> Json {
 
 fn assert_db_vocab_is_head(db: &Path, head: &Template, which: &str) {
     let (exported, _warnings) = export(db).unwrap();
-    assert_eq!(vocab_model(head), vocab_model(&exported), "{which}: vocabulary != head");
+    assert_eq!(
+        vocab_model(head),
+        vocab_model(&exported),
+        "{which}: vocabulary != head"
+    );
 }
 
 fn float_batch(entity: &str, v: f64) -> RecordBatch {
@@ -593,24 +681,47 @@ fn string_batch(entity: &str, v: &str) -> RecordBatch {
 }
 
 fn write_f(db: &Path, class: &str, param: &str, entity: &str, v: f64) {
-    write_parameter(db, class, param, "alt", float_batch(entity, v), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        db,
+        class,
+        param,
+        "alt",
+        float_batch(entity, v),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
 }
 
 fn write_s(db: &Path, class: &str, param: &str, entity: &str, v: &str) {
-    write_parameter(db, class, param, "alt", string_batch(entity, v), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        db,
+        class,
+        param,
+        "alt",
+        string_batch(entity, v),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
 }
 
 fn cur_scalar(db: &Path, class: &str, param: &str, entity: &str, col: &str) -> Option<String> {
-    qs(db, &format!(
-        "SELECT CAST(v.{col} AS VARCHAR) FROM value_scalar v \
+    qs(
+        db,
+        &format!(
+            "SELECT CAST(v.{col} AS VARCHAR) FROM value_scalar v \
          JOIN parameter_definition pd ON pd.id = v.parameter_definition_id \
          JOIN entity_class c ON c.id = pd.cur_cls \
          JOIN entity e ON e.id = v.entity_id \
          WHERE v.valid_to_commit IS NULL AND c.cur_name = '{class}' \
            AND pd.cur_name = '{param}' AND e.cur_name = '{entity}'"
-    ))
+        ),
+    )
 }
 
 fn cur_f(db: &Path, class: &str, param: &str, entity: &str) -> Option<f64> {
@@ -644,8 +755,17 @@ fn registry(calls: &Arc<AtomicUsize>) -> MigrationRegistry {
             it.collect::<Result<_, _>>()?
         };
         for (ent, alt, v) in rows {
-            write_parameter(db, "widget", "scale_factor", &alt, float_batch(&ent, v * 100.0),
-                &[], WriteOptions::default(), user, "synth v8: scale backfill")?;
+            write_parameter(
+                db,
+                "widget",
+                "scale_factor",
+                &alt,
+                float_batch(&ent, v * 100.0),
+                &[],
+                WriteOptions::default(),
+                user,
+                "synth v8: scale backfill",
+            )?;
         }
         Ok(())
     });
@@ -668,8 +788,17 @@ fn registry(calls: &Arc<AtomicUsize>) -> MigrationRegistry {
             (areas, hubs)
         };
         for a in areas {
-            write_parameter(db, "area", "hub_count", "alt", float_batch(&a, hubs as f64), &[],
-                WriteOptions::default(), user, "synth v18: hub count")?;
+            write_parameter(
+                db,
+                "area",
+                "hub_count",
+                "alt",
+                float_batch(&a, hubs as f64),
+                &[],
+                WriteOptions::default(),
+                user,
+                "synth v18: hub count",
+            )?;
         }
         Ok(())
     });
@@ -698,7 +827,11 @@ fn signature(steps: &[MigrationStep]) -> String {
     for s in steps {
         *counts.entry(step_kind(s)).or_default() += 1;
     }
-    counts.iter().map(|(k, n)| format!("{k}:{n}")).collect::<Vec<_>>().join(",")
+    counts
+        .iter()
+        .map(|(k, n)| format!("{k}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // ---------------------------------------------------------------------------
@@ -716,7 +849,11 @@ fn every_version_template_parses_and_validates() {
     }
     // Medium-scale sanity: the head is a real-sized vocabulary.
     let head = vocab_at(HEAD);
-    assert!(head.n_defs() >= 150, "head carries {} definitions", head.n_defs());
+    assert!(
+        head.n_defs() >= 150,
+        "head carries {} definitions",
+        head.n_defs()
+    );
     assert!(head_text().lines().count() >= 200);
 }
 
@@ -724,12 +861,21 @@ fn every_version_template_parses_and_validates() {
 fn ladder_is_complete_linear_and_matches_the_independent_table() {
     let t = parse_str(&head_text()).unwrap();
     validate(&t).unwrap();
-    let spans: BTreeMap<i64, _> =
-        t.migrations.iter().map(|m| (m.from.parse::<i64>().unwrap(), m)).collect();
+    let spans: BTreeMap<i64, _> = t
+        .migrations
+        .iter()
+        .map(|m| (m.from.parse::<i64>().unwrap(), m))
+        .collect();
     assert_eq!(spans.len() as i64, HEAD - 1);
     for v in 1..HEAD {
-        let m = spans.get(&v).unwrap_or_else(|| panic!("missing span from {v}"));
-        assert_eq!(m.to.parse::<i64>().unwrap(), v + 1, "span {v} steps one version");
+        let m = spans
+            .get(&v)
+            .unwrap_or_else(|| panic!("missing span from {v}"));
+        assert_eq!(
+            m.to.parse::<i64>().unwrap(),
+            v + 1,
+            "span {v} steps one version"
+        );
     }
     // Every version is a legal starting point reaching the ceiling.
     for start in 1..=HEAD {
@@ -746,8 +892,11 @@ fn ladder_is_complete_linear_and_matches_the_independent_table() {
         assert_eq!(signature(&spans[&from].steps), sig, "span {from} signature");
     }
     // Every step kind of the vocabulary is exercised somewhere.
-    let mut kinds: Vec<&str> =
-        t.migrations.iter().flat_map(|m| m.steps.iter().map(step_kind)).collect();
+    let mut kinds: Vec<&str> = t
+        .migrations
+        .iter()
+        .flat_map(|m| m.steps.iter().map(step_kind))
+        .collect();
     kinds.sort();
     kinds.dedup();
     assert_eq!(kinds.len(), 12, "all twelve step kinds used: {kinds:?}");
@@ -767,22 +916,40 @@ fn ladder_is_complete_linear_and_matches_the_independent_table() {
 
     // Intra-span ordering discipline.
     for span in &t.migrations {
-        if let Some(run_at) = span.steps.iter().position(|s| matches!(s, MigrationStep::Run(_))) {
+        if let Some(run_at) = span
+            .steps
+            .iter()
+            .position(|s| matches!(s, MigrationStep::Run(_)))
+        {
             for (i, s) in span.steps.iter().enumerate() {
-                if matches!(s, MigrationStep::DropParameter { .. }
-                    | MigrationStep::DropClass { .. }
-                    | MigrationStep::DropValueList { .. })
-                {
-                    assert!(i > run_at, "span {}: drop must follow the program", span.from);
+                if matches!(
+                    s,
+                    MigrationStep::DropParameter { .. }
+                        | MigrationStep::DropClass { .. }
+                        | MigrationStep::DropValueList { .. }
+                ) {
+                    assert!(
+                        i > run_at,
+                        "span {}: drop must follow the program",
+                        span.from
+                    );
                 }
             }
         }
-        let last_dp =
-            span.steps.iter().rposition(|s| matches!(s, MigrationStep::DropParameter { .. }));
-        let first_dvl =
-            span.steps.iter().position(|s| matches!(s, MigrationStep::DropValueList { .. }));
+        let last_dp = span
+            .steps
+            .iter()
+            .rposition(|s| matches!(s, MigrationStep::DropParameter { .. }));
+        let first_dvl = span
+            .steps
+            .iter()
+            .position(|s| matches!(s, MigrationStep::DropValueList { .. }));
         if let (Some(dp), Some(dvl)) = (last_dp, first_dvl) {
-            assert!(dp < dvl, "span {}: drop_parameter before drop_value_list", span.from);
+            assert!(
+                dp < dvl,
+                "span {}: drop_parameter before drop_value_list",
+                span.from
+            );
         }
     }
 }
@@ -799,11 +966,18 @@ fn head_fresh_load_counts_audits_and_round_trip() {
     let t = parse_str(&text).unwrap();
     let out = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
     assert!(out.converged && !out.no_op);
-    assert_eq!(out.commits.len(), 1, "fresh load is ONE commit (no chain on an unstamped DB)");
+    assert_eq!(
+        out.commits.len(),
+        1,
+        "fresh load is ONE commit (no chain on an unstamped DB)"
+    );
     assert_audits_empty(&db, "head");
 
     assert_eq!(meta(&db, "template_name").as_deref(), Some("synth"));
-    assert_eq!(meta(&db, "template_version").as_deref(), Some(HEAD.to_string().as_str()));
+    assert_eq!(
+        meta(&db, "template_version").as_deref(),
+        Some(HEAD.to_string().as_str())
+    );
     assert_eq!(
         meta(&db, "template_content_hash").as_deref(),
         Some(template_content_hash(&t).as_str())
@@ -834,7 +1008,10 @@ fn head_fresh_load_counts_audits_and_round_trip() {
     assert_eq!(live(&db, "entity_class", "true"), v.classes.len() as i64);
     assert_eq!(live(&db, "entity_class_dimension", "true"), n_dims as i64);
     assert_eq!(live(&db, "parameter_definition", "true"), v.n_defs() as i64);
-    assert_eq!(live(&db, "parameter_value_list", "true"), v.lists.len() as i64);
+    assert_eq!(
+        live(&db, "parameter_value_list", "true"),
+        v.lists.len() as i64
+    );
     assert_eq!(live(&db, "list_value", "true"), n_members as i64);
     // One member per typed definition, two for float-or-series, none typeless.
     assert_eq!(
@@ -848,16 +1025,28 @@ fn head_fresh_load_counts_audits_and_round_trip() {
 
     // Groups: every definition grouped.
     let pres: Json = serde_json::from_str(&meta(&db, "presentation").unwrap()).unwrap();
-    assert_eq!(pres["parameter_groups"].as_array().unwrap().len(), GROUPS.len());
+    assert_eq!(
+        pres["parameter_groups"].as_array().unwrap().len(),
+        GROUPS.len()
+    );
 
     // Semantic round-trip + idempotency.
     let (exported, _w) = export(&db).unwrap();
     assert_eq!(normalized_model(&t), normalized_model(&exported));
     assert_eq!(template_content_hash(&t), template_content_hash(&exported));
-    let again =
-        apply(&db, &parse_str(&text).unwrap(), &MigrationRegistry::new(), "tester", "", &opts())
-            .unwrap();
-    assert!(again.no_op, "unchanged head re-apply is the hash short-circuit");
+    let again = apply(
+        &db,
+        &parse_str(&text).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &opts(),
+    )
+    .unwrap();
+    assert!(
+        again.no_op,
+        "unchanged head re-apply is the hash short-circuit"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -869,9 +1058,18 @@ fn floor_db_with_data_climbs_the_whole_ladder() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir, "floor.duckdb");
     let floor = parse_str(&template_text(1)).unwrap();
-    assert!(apply(&db, &floor, &MigrationRegistry::new(), "tester", "", &opts())
+    assert!(
+        apply(
+            &db,
+            &floor,
+            &MigrationRegistry::new(),
+            "tester",
+            "",
+            &opts()
+        )
         .unwrap()
-        .converged);
+        .converged
+    );
 
     // Data touched by the hints and programs.
     write_f(&db, "widget", "power_max", "w1", 10.0);
@@ -894,15 +1092,26 @@ fn floor_db_with_data_climbs_the_whole_ladder() {
 
     let head = parse_str(&head_text()).unwrap();
     let p = plan(&db, &head).unwrap();
-    assert_eq!(p.pending_migrations.len() as i64, HEAD - 1, "the whole ladder is pending");
+    assert_eq!(
+        p.pending_migrations.len() as i64,
+        HEAD - 1,
+        "the whole ladder is pending"
+    );
     assert!(p.blocked.is_empty(), "blockers: {:?}", p.blocked);
 
     let calls = Arc::new(AtomicUsize::new(0));
     let out = apply(&db, &head, &registry(&calls), "tester", "", &opts()).unwrap();
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "each program ran exactly once");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "each program ran exactly once"
+    );
     assert_eq!(out.run_programs.len(), 2);
-    assert_eq!(meta(&db, "template_version").as_deref(), Some(HEAD.to_string().as_str()));
+    assert_eq!(
+        meta(&db, "template_version").as_deref(),
+        Some(HEAD.to_string().as_str())
+    );
     assert_eq!(
         meta(&db, "template_content_hash").as_deref(),
         Some(template_content_hash(&head).as_str())
@@ -914,20 +1123,63 @@ fn floor_db_with_data_climbs_the_whole_ladder() {
     assert_eq!(cur_f(&db, "widget", "capacity", "w1"), Some(10.0));
     assert_eq!(cur_f(&db, "widget", "capacity", "w2"), Some(20.0));
     assert_eq!(cur_f(&db, "route", "length", "r1"), Some(42.0));
-    assert_eq!(cur_f(&db, "widget", "scale_factor", "w1"), Some(50.0), "program 1 backfill");
-    assert_eq!(live(&db, "parameter_definition", "cur_name = 'legacy_scale'"), 0);
-    assert_eq!(cur_s(&db, "widget", "mode", "w1").as_deref(), Some("binary"));
-    assert_eq!(cur_s(&db, "widget", "mode", "w2").as_deref(), Some("continuous"));
-    assert_eq!(cur_s(&db, "widget", "mode", "w3").as_deref(), Some("stepped"));
-    assert_eq!(cur_s(&db, "widget", "commit_mode", "w1").as_deref(), Some("forced"));
-    assert_eq!(cur_s(&db, "widget", "commit_mode", "w2"), None, "unmapped value dropped");
-    assert_eq!(cur_f(&db, "hub", "demand", "h1"), Some(5.0), "merge fills the absent");
-    assert_eq!(cur_f(&db, "hub", "demand", "h2"), Some(7.0), "merge keeps the present");
+    assert_eq!(
+        cur_f(&db, "widget", "scale_factor", "w1"),
+        Some(50.0),
+        "program 1 backfill"
+    );
+    assert_eq!(
+        live(&db, "parameter_definition", "cur_name = 'legacy_scale'"),
+        0
+    );
+    assert_eq!(
+        cur_s(&db, "widget", "mode", "w1").as_deref(),
+        Some("binary")
+    );
+    assert_eq!(
+        cur_s(&db, "widget", "mode", "w2").as_deref(),
+        Some("continuous")
+    );
+    assert_eq!(
+        cur_s(&db, "widget", "mode", "w3").as_deref(),
+        Some("stepped")
+    );
+    assert_eq!(
+        cur_s(&db, "widget", "commit_mode", "w1").as_deref(),
+        Some("forced")
+    );
+    assert_eq!(
+        cur_s(&db, "widget", "commit_mode", "w2"),
+        None,
+        "unmapped value dropped"
+    );
+    assert_eq!(
+        cur_f(&db, "hub", "demand", "h1"),
+        Some(5.0),
+        "merge fills the absent"
+    );
+    assert_eq!(
+        cur_f(&db, "hub", "demand", "h2"),
+        Some(7.0),
+        "merge keeps the present"
+    );
     assert_eq!(cur_s(&db, "hub", "flag_mode", "h1"), None);
     assert_eq!(cur_f(&db, "gadget", "efficiency", "g1"), Some(0.9));
-    assert_eq!(live(&db, "entity", "cur_name = 'g1'"), 1, "class rename keeps entities");
-    assert_eq!(cur_f(&db, "area", "hub_count", "a1"), Some(2.0), "program 2 ran on hubs");
-    assert_eq!(live(&db, "entity", "cur_name = 'lt1'"), 0, "drop_class cascade");
+    assert_eq!(
+        live(&db, "entity", "cur_name = 'g1'"),
+        1,
+        "class rename keeps entities"
+    );
+    assert_eq!(
+        cur_f(&db, "area", "hub_count", "a1"),
+        Some(2.0),
+        "program 2 ran on hubs"
+    );
+    assert_eq!(
+        live(&db, "entity", "cur_name = 'lt1'"),
+        0,
+        "drop_class cascade"
+    );
     // Versioned close-out, never erasure.
     assert!(q1(&db, "SELECT count(*) FROM entity WHERE name = 'lt1'") > 0);
 
@@ -956,7 +1208,11 @@ fn stamped_entrant_refuses_on_unregistered_program_before_any_step() {
         err.contains(PROG_BACKFILL) && err.contains("not registered"),
         "refusal names the first missing program: {err}"
     );
-    assert_eq!(q1(&db, "SELECT max(id) FROM commit"), before, "no step committed");
+    assert_eq!(
+        q1(&db, "SELECT max(id) FROM commit"),
+        before,
+        "no step committed"
+    );
     assert_eq!(meta(&db, "template_version").as_deref(), Some("5"));
 }
 
@@ -967,18 +1223,26 @@ fn stamped_entrant_past_the_last_program_walks_to_head_without_programs() {
     // A v18 DB (the load stamps its identity) holding data the remaining
     // hint span (19→20 rename with translation table) must carry.
     let t18 = parse_str(&template_text(18)).unwrap();
-    assert!(apply(&db, &t18, &MigrationRegistry::new(), "tester", "", &opts())
-        .unwrap()
-        .converged);
+    assert!(
+        apply(&db, &t18, &MigrationRegistry::new(), "tester", "", &opts())
+            .unwrap()
+            .converged
+    );
     assert_eq!(meta(&db, "template_version").as_deref(), Some("18"));
     write_s(&db, "widget", "enabled", "w1", "yes");
     let head = parse_str(&head_text()).unwrap();
     let out = apply(&db, &head, &MigrationRegistry::new(), "tester", "", &opts()).unwrap();
     assert!(out.converged, "skips: {:?}", out.plan.skipped);
-    assert_eq!(meta(&db, "template_version").as_deref(), Some(HEAD.to_string().as_str()));
+    assert_eq!(
+        meta(&db, "template_version").as_deref(),
+        Some(HEAD.to_string().as_str())
+    );
     assert!(meta(&db, "template_content_hash").is_some());
     assert!(out.run_programs.is_empty());
-    assert_eq!(cur_s(&db, "widget", "commit_mode", "w1").as_deref(), Some("forced"));
+    assert_eq!(
+        cur_s(&db, "widget", "commit_mode", "w1").as_deref(),
+        Some("forced")
+    );
     assert_db_vocab_is_head(&db, &head, "v18 walk");
 }
 
@@ -994,16 +1258,25 @@ fn every_version_chains_and_reconciles_to_the_head_vocabulary() {
     for k in 1..HEAD {
         let db = fresh_db(&dir, &format!("v{k}.duckdb"));
         let tk = parse_str(&template_text(k)).unwrap();
-        assert!(apply(&db, &tk, &MigrationRegistry::new(), "tester", "", &opts())
-            .unwrap()
-            .converged);
+        assert!(
+            apply(&db, &tk, &MigrationRegistry::new(), "tester", "", &opts())
+                .unwrap()
+                .converged
+        );
         let calls = Arc::new(AtomicUsize::new(0));
         let out = apply(&db, &head, &registry(&calls), "tester", "", &opts())
             .unwrap_or_else(|e| panic!("v{k} → head: {e}"));
         assert!(out.converged, "v{k}: skips {:?}", out.plan.skipped);
         let expected_runs = [8i64, 18].iter().filter(|&&r| k < r).count();
-        assert_eq!(calls.load(Ordering::SeqCst), expected_runs, "v{k} program runs");
-        assert_eq!(meta(&db, "template_version").as_deref(), Some(HEAD.to_string().as_str()));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            expected_runs,
+            "v{k} program runs"
+        );
+        assert_eq!(
+            meta(&db, "template_version").as_deref(),
+            Some(HEAD.to_string().as_str())
+        );
         assert_audits_empty(&db, &format!("v{k}"));
         assert_db_vocab_is_head(&db, &head, &format!("v{k}"));
     }

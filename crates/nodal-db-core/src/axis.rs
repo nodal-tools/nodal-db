@@ -221,9 +221,8 @@ fn reconstruct_axis(conn: &Connection, id: i64, kind: &str) -> Result<CanonicalA
             },
         },
         "label" => {
-            let mut stmt = conn.prepare(
-                "SELECT ordinal, label FROM axis_label WHERE axis_id = ? ORDER BY pos",
-            )?;
+            let mut stmt = conn
+                .prepare("SELECT ordinal, label FROM axis_label WHERE axis_id = ? ORDER BY pos")?;
             let positions = stmt
                 .query_map([id], |r| {
                     Ok(LabelPos {

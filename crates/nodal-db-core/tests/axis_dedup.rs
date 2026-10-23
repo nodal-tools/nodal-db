@@ -11,6 +11,7 @@
 //!     they are NOT byte-identical; uniqueness rests on parametric-first);
 //!   - two axes identical except calendar/timezone/crs → distinct rows;
 //!   - a canon-derived axis and a hand-built identical one dedup together.
+//!
 //! Kinds covered: datetime-parametric, integer-materialized, float-parametric,
 //! label (+ integer-parametric for the F6 pair).
 
@@ -25,9 +26,7 @@ use duckdb::Connection;
 use nodal_db_core::axis::{dedup_or_insert, AxisCache};
 use nodal_db_core::canon::canonicalize;
 use nodal_db_core::conn::with_write_txn;
-use nodal_db_core::encoding::{
-    AxisBody, AxisProperties, CanonicalAxis, Duration, LabelPos,
-};
+use nodal_db_core::encoding::{AxisBody, AxisProperties, CanonicalAxis, Duration, LabelPos};
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::{DeclaredType, IndexKind, ValueKind};
 
@@ -42,10 +41,9 @@ fn fresh_db() -> (tempfile::TempDir, PathBuf) {
 
 fn axis_count(path: &PathBuf) -> i64 {
     let conn = Connection::open(path).expect("open");
-    let n = conn
-        .query_row("SELECT count(*) FROM axis", [], |r| r.get::<_, i64>(0))
-        .expect("count");
-    n
+
+    conn.query_row("SELECT count(*) FROM axis", [], |r| r.get::<_, i64>(0))
+        .expect("count")
 }
 
 fn dt_parametric() -> CanonicalAxis {
@@ -275,13 +273,19 @@ fn canon_derived_axis_matches_hand_built() {
     // Regular [10,20,30] must have canonicalized to parametric (start 10, step 10).
     assert!(matches!(
         derived.body,
-        AxisBody::IntegerParametric { start: 10, step: 10 }
+        AxisBody::IntegerParametric {
+            start: 10,
+            step: 10
+        }
     ));
 
     let hand = CanonicalAxis {
         length: 3,
         properties: AxisProperties::default(),
-        body: AxisBody::IntegerParametric { start: 10, step: 10 },
+        body: AxisBody::IntegerParametric {
+            start: 10,
+            step: 10,
+        },
     };
 
     let (id_derived, id_hand) = with_write_txn(&path, "tester", "canon", |conn, _c| {
@@ -293,6 +297,9 @@ fn canon_derived_axis_matches_hand_built() {
         Ok((a, b))
     })
     .expect("write txn");
-    assert_eq!(id_derived, id_hand, "canon output and hand-built dedup together");
+    assert_eq!(
+        id_derived, id_hand,
+        "canon output and hand-built dedup together"
+    );
     assert_eq!(axis_count(&path), 1);
 }

@@ -29,7 +29,15 @@ fn fresh_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
 
 fn load_sample(db: &Path) -> nodal_db_core::template::ApplyOutcome {
     let t = parse_str(SAMPLE).unwrap();
-    apply(db, &t, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default()).unwrap()
+    apply(
+        db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap()
 }
 
 fn q1(db: &Path, sql: &str) -> i64 {
@@ -43,7 +51,10 @@ fn qs(db: &Path, sql: &str) -> Option<String> {
 }
 
 fn meta(db: &Path, key: &str) -> Option<String> {
-    qs(db, &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"))
+    qs(
+        db,
+        &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+    )
 }
 
 /// Every audit view that must be EMPTY after a clean load (§8.1.2 plus the
@@ -105,34 +116,64 @@ fn fresh_load_is_one_commit_audits_empty_and_stamped() {
     assert_ne!(meta(&db, "schema_version"), meta(&db, "template_version"));
 
     // Structure spot-checks against the store.
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL"), 9);
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL \
-                 AND NOT active_by_default"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL"
+        ),
+        9
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NULL \
+                 AND NOT active_by_default"
+        ),
         2, // node + unit (fidelity §8.1.3 shape)
     );
-    assert_eq!(q1(&db, "SELECT count(*) FROM class_set WHERE valid_to_commit IS NULL"), 1);
-    assert_eq!(q1(&db, "SELECT count(*) FROM class_set_member WHERE valid_to_commit IS NULL"), 2);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM class_set WHERE valid_to_commit IS NULL"
+        ),
+        1
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM class_set_member WHERE valid_to_commit IS NULL"
+        ),
+        2
+    );
     // 4-D class has 4 dimension rows.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity_class_dimension d \
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class_dimension d \
                  JOIN entity_class c ON c.id = d.entity_class_id \
-                 WHERE d.valid_to_commit IS NULL AND c.cur_name = 'reserve__updown__unit__node'"),
+                 WHERE d.valid_to_commit IS NULL AND c.cur_name = 'reserve__updown__unit__node'"
+        ),
         4
     );
     // Multi-member type set: node.demand declares float + datetime-indexed.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_type pt \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'demand'"),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'demand'"
+        ),
         2
     );
     // Value-list-inferred kind (§3.5): conversion_method got ONE string rank-0 row.
     assert_eq!(
-        qs(&db, "SELECT pt.value_kind FROM parameter_type pt \
+        qs(
+            &db,
+            "SELECT pt.value_kind FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'conversion_method'")
-            .as_deref(),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'conversion_method'"
+        )
+        .as_deref(),
         Some("string")
     );
     // Explicit types + value_list (review item 11 fixture): co2_cap keeps its
@@ -140,46 +181,70 @@ fn fresh_load_is_one_commit_audits_empty_and_stamped() {
     // the one string member; the float default 20 (int literal, kind float)
     // is in-list (audit_value_list_membership empty above).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_type pt \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'co2_cap'"),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'co2_cap'"
+        ),
         2
     );
     assert_eq!(
-        qs(&db, "SELECT pt.value_kind FROM parameter_type pt \
+        qs(
+            &db,
+            "SELECT pt.value_kind FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'co2_flag'")
-            .as_deref(),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'co2_flag'"
+        )
+        .as_deref(),
         Some("string")
     );
     // Typeless definition loaded with NO parameter_type row (§2.2).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM parameter_type pt \
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_type pt \
                  JOIN parameter_definition pd ON pd.id = pt.parameter_definition_id \
-                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'notes'"),
+                 WHERE pt.valid_to_commit IS NULL AND pd.cur_name = 'notes'"
+        ),
         0
     );
     // Defaults landed in the definition mirror with a D11 binding.
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM definition_value_scalar \
+        q1(
+            &db,
+            "SELECT count(*) FROM definition_value_scalar \
                  WHERE valid_to_commit IS NULL AND slot = 'default_value' \
-                 AND parameter_type_id IS NOT NULL"),
+                 AND parameter_type_id IS NOT NULL"
+        ),
         4 // demand 0.0, conversion_method, is_enabled "yes", co2_cap 20.0
     );
     // Seed: 9 entities incl. the N-D ones; elements; one base membership.
-    assert_eq!(q1(&db, "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL"), 9);
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM membership WHERE valid_to_commit IS NULL \
-                 AND alternative_id IS NULL"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL"
+        ),
+        9
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM membership WHERE valid_to_commit IS NULL \
+                 AND alternative_id IS NULL"
+        ),
         1
     );
     // The INES-shaped case (§8.2.2): flowpair's elements are entities of the
     // TRANSPOSED 2-D member classes, accepted through the class-set — and
     // audit_element_class_mismatch / audit_element_arity are empty (above).
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity_element ee \
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_element ee \
                  JOIN entity e ON e.id = ee.entity_id \
-                 WHERE ee.valid_to_commit IS NULL AND e.cur_name = 'flowpair'"),
+                 WHERE ee.valid_to_commit IS NULL AND e.cur_name = 'flowpair'"
+        ),
         2
     );
     // Audit-rules document persisted (D4) and single-current (reserved key).
@@ -202,9 +267,16 @@ fn reapplication_is_a_no_op() {
     load_sample(&db);
     let commits = q1(&db, "SELECT max(id) FROM commit");
     let out = load_sample(&db);
-    assert!(out.no_op, "re-applying an unchanged template must be a no-op");
+    assert!(
+        out.no_op,
+        "re-applying an unchanged template must be a no-op"
+    );
     assert!(out.commits.is_empty());
-    assert_eq!(q1(&db, "SELECT max(id) FROM commit"), commits, "no commit burned");
+    assert_eq!(
+        q1(&db, "SELECT max(id) FROM commit"),
+        commits,
+        "no commit burned"
+    );
 }
 
 // --- writes against the loaded declarations (D2a semantics, §8.1.4) ---
@@ -264,13 +336,32 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
     load_sample(&db);
 
     // Member 1: rank-0 float on the multi-member set.
-    write_parameter(&db, "node", "demand", "alt", scalar_batch("n1", 2.5), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "alt",
+        scalar_batch("n1", 2.5),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
     // Member 2: datetime-indexed on the SAME definition (multi-type
     // end-to-end, the D2 acceptance shape) for a different entity.
-    write_parameter(&db, "node", "demand", "alt",
-        datetime_batch("n2", "t", &[1_000_000, 2_000_000], &[1.0, 2.0]), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "alt",
+        datetime_batch("n2", "t", &[1_000_000, 2_000_000], &[1.0, 2.0]),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
     // Undeclared shape (label-indexed) rejects at entry, naming the set.
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity", DataType::Utf8, false),
@@ -286,24 +377,54 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
         ],
     )
     .unwrap();
-    let err = write_parameter(&db, "node", "demand", "alt", bad, &[],
-        WriteOptions::default(), "tester", "").unwrap_err();
+    let err = write_parameter(
+        &db,
+        "node",
+        "demand",
+        "alt",
+        bad,
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap_err();
     assert!(
-        err.to_string().contains("instantiates none of the 2 declared member"),
+        err.to_string()
+            .contains("instantiates none of the 2 declared member"),
         "unexpected: {err}"
     );
 
     // Typeless definition materializes on first write, loudly (§2.2).
-    let report = write_parameter(&db, "unit", "notes", "alt", string_batch("u1", "hello"),
-        &[], WriteOptions::default(), "tester", "").unwrap();
+    let report = write_parameter(
+        &db,
+        "unit",
+        "notes",
+        "alt",
+        string_batch("u1", "hello"),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
     assert!(report
         .warnings
         .iter()
         .any(|w| matches!(w.kind, WarningKind::AutoCreated) && w.object_type == "parameter_type"));
 
     // The audits stay clean with data in place (value-list membership etc.).
-    write_parameter(&db, "unit", "conversion_method", "alt",
-        string_batch("u1", "constant_efficiency"), &[],
-        WriteOptions::default(), "tester", "").unwrap();
+    write_parameter(
+        &db,
+        "unit",
+        "conversion_method",
+        "alt",
+        string_batch("u1", "constant_efficiency"),
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "",
+    )
+    .unwrap();
     assert_audits_empty(&db);
 }

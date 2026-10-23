@@ -17,11 +17,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use nodal_db_core::encoding::{
     content_hash, datetime_reproduces, encode_axis, float_regular_step, integer_regular_step,
     AxisBody, CanonicalAxis, Duration,
 };
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct Vector {

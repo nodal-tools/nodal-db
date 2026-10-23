@@ -180,7 +180,10 @@ const TABLE_ORDER: &[&str] = &[
 const GENERATED_COLUMNS: &[(&str, &[&str])] = &[
     ("metadata", &["cur_id", "cur_name", "cur_val"]),
     ("entity_metadata", &["cur_e", "cur_m"]),
-    ("parameter_value_metadata", &["cur_e", "cur_p", "cur_a", "cur_m"]),
+    (
+        "parameter_value_metadata",
+        &["cur_e", "cur_p", "cur_a", "cur_m"],
+    ),
     ("display_mode", &["cur_id", "cur_name"]),
     ("entity_class_display_mode", &["cur_dm", "cur_ec"]),
     ("alternative", &["cur_id", "cur_name"]),
@@ -191,7 +194,10 @@ const GENERATED_COLUMNS: &[(&str, &[&str])] = &[
     ("value_scalar", &["ce", "cp", "ca"]),
     ("value_long", &["ce", "cp", "ca", "c1", "c2", "c3", "c4"]),
     ("definition_value_scalar", &["cp", "cs"]),
-    ("definition_value_long", &["cp", "cs", "c1", "c2", "c3", "c4"]),
+    (
+        "definition_value_long",
+        &["cp", "cs", "c1", "c2", "c3", "c4"],
+    ),
     ("definition_value_array", &["cp", "cs"]),
     ("entity_class", &["cur_id", "cur_name"]),
     ("class_set", &["cur_id", "cur_name"]),
@@ -259,29 +265,76 @@ const CLUSTER_KEYS: &[(&str, &[&str])] = &[
     ("axis_float", &["axis_id", "pos"]),
     ("axis_time_pattern", &["axis_id", "pos", "term_no"]),
     // All-live array tier: key triple (locality only — no validity column).
-    ("value_array", &["entity_id", "parameter_definition_id", "alternative_id"]),
+    (
+        "value_array",
+        &["entity_id", "parameter_definition_id", "alternative_id"],
+    ),
     // History twin: key triple (+ valid_from via the uniform versioned rule).
-    ("value_array_hist", &["entity_id", "parameter_definition_id", "alternative_id"]),
+    (
+        "value_array_hist",
+        &["entity_id", "parameter_definition_id", "alternative_id"],
+    ),
     // From/to value tiers: key triple (long adds its position tuple).
-    ("value_scalar", &["entity_id", "parameter_definition_id", "alternative_id"]),
+    (
+        "value_scalar",
+        &["entity_id", "parameter_definition_id", "alternative_id"],
+    ),
     (
         "value_long",
-        &["entity_id", "parameter_definition_id", "alternative_id", "i1_pos", "i2_pos", "i3_pos", "i4_pos"],
+        &[
+            "entity_id",
+            "parameter_definition_id",
+            "alternative_id",
+            "i1_pos",
+            "i2_pos",
+            "i3_pos",
+            "i4_pos",
+        ],
     ),
-    ("definition_value_scalar", &["parameter_definition_id", "slot"]),
-    ("definition_value_long", &["parameter_definition_id", "slot", "i1_pos", "i2_pos", "i3_pos", "i4_pos"]),
-    ("definition_value_array", &["parameter_definition_id", "slot"]),
+    (
+        "definition_value_scalar",
+        &["parameter_definition_id", "slot"],
+    ),
+    (
+        "definition_value_long",
+        &[
+            "parameter_definition_id",
+            "slot",
+            "i1_pos",
+            "i2_pos",
+            "i3_pos",
+            "i4_pos",
+        ],
+    ),
+    (
+        "definition_value_array",
+        &["parameter_definition_id", "slot"],
+    ),
     // Narrow versioned tables: their identity/key columns.
     ("metadata", &["id"]),
     ("entity_metadata", &["entity_id", "metadata_id"]),
-    ("parameter_value_metadata", &["entity_id", "parameter_definition_id", "alternative_id", "metadata_id"]),
+    (
+        "parameter_value_metadata",
+        &[
+            "entity_id",
+            "parameter_definition_id",
+            "alternative_id",
+            "metadata_id",
+        ],
+    ),
     ("alternative", &["id"]),
     ("scenario", &["id"]),
     ("scenario_alternative", &["scenario_id", "alternative_id"]),
     ("entity_alternative", &["entity_id", "alternative_id"]),
-    ("membership", &["group_entity_id", "member_entity_id", "alternative_id"]),
+    (
+        "membership",
+        &["group_entity_id", "member_entity_id", "alternative_id"],
+    ),
     ("display_mode", &["id"]),
-    ("entity_class_display_mode", &["display_mode_id", "entity_class_id"]),
+    (
+        "entity_class_display_mode",
+        &["display_mode_id", "entity_class_id"],
+    ),
     ("entity_class", &["id"]),
     ("class_set", &["id"]),
     ("class_set_member", &["class_set_id", "member_class_id"]),
@@ -293,9 +346,15 @@ const CLUSTER_KEYS: &[(&str, &[&str])] = &[
     ("parameter_value_list", &["id"]),
     ("list_value", &["id"]),
     ("parameter_definition", &["id"]),
-    ("entity_parameter_unit", &["entity_id", "parameter_definition_id"]),
+    (
+        "entity_parameter_unit",
+        &["entity_id", "parameter_definition_id"],
+    ),
     ("parameter_type", &["id"]),
-    ("parameter_type_dimension", &["parameter_type_id", "position"]),
+    (
+        "parameter_type_dimension",
+        &["parameter_type_id", "position"],
+    ),
     ("semantic_annotation", &["id"]),
 ];
 
@@ -357,8 +416,8 @@ pub fn compact(db_path: &Path) -> Result<CompactionReport, DbError> {
 /// - baseline `b` present ⇒ compact iff `current_bytes >= growth_factor * b`,
 ///   else no-op with `swapped == false`.
 ///
-/// Only when it decides to compact does it open the source (schema_version gate
-/// + repack + atomic swap). So the common no-op commit is two `stat`s plus a
+/// Only when it decides to compact does it open the source (schema_version gate,
+/// repack, atomic swap). So the common no-op commit is two `stat`s plus a
 /// tiny file read. Pass [`DEFAULT_GROWTH_FACTOR`] for the documented default.
 /// The sidecar is advisory: a stale/missing/torn baseline costs at most one
 /// extra or skipped compaction and self-corrects on the next run.
@@ -366,8 +425,8 @@ pub fn compact_if_needed(db_path: &Path, growth_factor: f64) -> Result<Compactio
     // Cheap gate FIRST — no lock, no DB open.
     let current = fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     let should_compact = match read_baseline(db_path) {
-        None => true,          // establish a baseline on first run
-        Some(0) => true,       // degenerate/torn baseline ⇒ re-establish
+        None => true,    // establish a baseline on first run
+        Some(0) => true, // degenerate/torn baseline ⇒ re-establish
         Some(b) => current >= (b as f64 * growth_factor) as u64,
     };
     if !should_compact {
@@ -413,11 +472,10 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
             [],
             |r| r.get(0),
         )?;
-        let total: i64 = conn.query_row(
-            "SELECT total_blocks FROM pragma_database_size()",
-            [],
-            |r| r.get(0),
-        )?;
+        let total: i64 =
+            conn.query_row("SELECT total_blocks FROM pragma_database_size()", [], |r| {
+                r.get(0)
+            })?;
         conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
         (version, total as u64)
     };
@@ -488,7 +546,9 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
     })?;
     fsync_dir(dir);
 
-    let bytes_after = fs::metadata(db_path).map(|m| m.len()).unwrap_or(bytes_before);
+    let bytes_after = fs::metadata(db_path)
+        .map(|m| m.len())
+        .unwrap_or(bytes_before);
 
     // Refresh the byte-growth baseline (R1) to the just-compacted size — written
     // AFTER the DB rename so a crash in between leaves an under-estimate
@@ -576,7 +636,9 @@ fn repack_into(
     conn.execute_batch("CHECKPOINT")?;
     let _ = temp_path; // (temp file identity is the caller's concern)
     let blocks_after: i64 =
-        conn.query_row("SELECT total_blocks FROM pragma_database_size()", [], |r| r.get(0))?;
+        conn.query_row("SELECT total_blocks FROM pragma_database_size()", [], |r| {
+            r.get(0)
+        })?;
 
     Ok((rows_per_table, blocks_after as u64))
 }
@@ -613,7 +675,10 @@ fn discover_real_columns(conn: &Connection) -> Result<Vec<(String, Vec<String>)>
             .query_map([table], |r| r.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
         let gen = generated_for(table);
-        let real: Vec<String> = names.into_iter().filter(|c| !gen.contains(&c.as_str())).collect();
+        let real: Vec<String> = names
+            .into_iter()
+            .filter(|c| !gen.contains(&c.as_str()))
+            .collect();
         out.push((table.to_string(), real));
     }
     Ok(out)
@@ -644,9 +709,8 @@ fn check_catalog(conn: &Connection, real_cols: &[(String, Vec<String>)]) -> Resu
     // full column list per table (real + generated) from the catalog to check
     // presence.
     for (table, gens) in GENERATED_COLUMNS {
-        let mut cstmt = conn.prepare(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
-        )?;
+        let mut cstmt = conn
+            .prepare("SELECT column_name FROM information_schema.columns WHERE table_name = ?")?;
         let cols: Vec<String> = cstmt
             .query_map([table], |r| r.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
@@ -783,7 +847,9 @@ fn self_check(
                 args = hash_args,
                 rel = rel,
             );
-            Ok(conn.query_row(&sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?)
+            Ok(conn.query_row(&sql, [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?)
         };
         let (src_c, src_h) = probe(&format!("src.{}", q(table)))?;
         let (tmp_c, tmp_h) = probe(&q(table))?;
@@ -809,19 +875,13 @@ fn self_check(
 /// collide.
 fn temp_path_for(db_path: &Path) -> PathBuf {
     let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let name = db_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("db");
+    let name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
     dir.join(format!("{name}.compact.{}.tmp", std::process::id()))
 }
 
 /// The prefix a temp sibling of `db_path` starts with (for the orphan sweep).
 fn temp_prefix(db_path: &Path) -> String {
-    let name = db_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("db");
+    let name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
     format!("{name}.compact.")
 }
 
@@ -859,10 +919,7 @@ pub fn sweep_orphan_temps(db_path: &Path) {
 /// editor's staleness cookie relies on), and would itself grow the file.
 pub fn baseline_path(db_path: &Path) -> PathBuf {
     let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let name = db_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("db");
+    let name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
     dir.join(format!("{name}.compaction-baseline"))
 }
 
@@ -885,7 +942,8 @@ fn write_baseline(db_path: &Path, bytes: u64) {
         s.push(format!(".{}.tmp", std::process::id()));
         PathBuf::from(s)
     };
-    if fs::write(&tmp, bytes.to_string().as_bytes()).is_ok() && fs::rename(&tmp, &final_path).is_err()
+    if fs::write(&tmp, bytes.to_string().as_bytes()).is_ok()
+        && fs::rename(&tmp, &final_path).is_err()
     {
         let _ = fs::remove_file(&tmp);
     }

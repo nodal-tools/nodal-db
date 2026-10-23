@@ -297,7 +297,7 @@ pub fn canonicalize(
                     }
                 }
                 // Canonical order: ascending domain ordinal -> dense pos 0..k.
-                present.sort_by(|a, b| a.0.cmp(&b.0));
+                present.sort_by_key(|a| a.0);
                 let mut map = HashMap::with_capacity(present.len());
                 let mut positions = Vec::with_capacity(present.len());
                 for (pos, (ord, lab)) in present.iter().enumerate() {
@@ -337,7 +337,10 @@ pub fn canonicalize(
             };
             positions.push(p);
         }
-        rows.push(LongRow { positions, value: m });
+        rows.push(LongRow {
+            positions,
+            value: m,
+        });
     }
 
     // --- Step 3: sort row-major in declared-dimension order (lexicographic on
@@ -417,6 +420,7 @@ fn derive_datetime_axis(coords_sorted: &[i64]) -> AxisBody {
 ///   2. month-bearing `(m, r)` where `m` is the civil-month delta c[0]->c[1] and
 ///      `r = c[1] - reproduce(c[0], (m, 0))` is the sub-month residual (0 for a
 ///      clean monthly/yearly grid).
+///
 /// The first candidate that reproduces EVERY coordinate (via the shared clamp
 /// arithmetic) wins; if neither does, the axis materializes. A 2-point axis is
 /// always reproduced by candidate 1, so it canonicalizes to a micros step —

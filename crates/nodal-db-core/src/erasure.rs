@@ -200,9 +200,8 @@ pub fn preview_erase_alternative(
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut rstmt = conn.prepare(
-            "SELECT id FROM run WHERE result_alternative_id = ? ORDER BY id",
-        )?;
+        let mut rstmt =
+            conn.prepare("SELECT id FROM run WHERE result_alternative_id = ? ORDER BY id")?;
         let referencing_runs = rstmt
             .query_map(params![resolved.id], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -260,7 +259,9 @@ pub fn erase_alternative(
     }
     for n in opts.expect_present {
         if n.trim().is_empty() {
-            return Err(DbError::Api("expect_present names must be non-empty".into()));
+            return Err(DbError::Api(
+                "expect_present names must be non-empty".into(),
+            ));
         }
     }
     // Cheap schema-version pre-gate (advisory, before any write): erase's SQL
@@ -279,7 +280,9 @@ pub fn erase_alternative(
     let outcome = with_write_txn_retrying(db, user, &message, |conn, commit_id| {
         // Resolve fresh inside every (re)try — never reuse pre-conflict state.
         let resolved = resolve_alternative_any(conn, &name)?.ok_or_else(|| {
-            DbError::Api(format!("erase: alternative '{name}' not found (no identity row)"))
+            DbError::Api(format!(
+                "erase: alternative '{name}' not found (no identity row)"
+            ))
         })?;
 
         // The m7a ordering belt: every named replacement must have a CURRENT
@@ -496,9 +499,11 @@ fn validate_erase_key(alt: &ObjectDeleteKey) -> Result<&str, DbError> {
 /// The Alternative erase legs from the one registry. Non-empty by
 /// construction (the Alternative set is fully erase-flagged).
 fn alternative_erase_legs() -> Vec<EraseLeg> {
-    let legs = erase_scope_legs(ObjectKind::Alternative)
-        .expect("alternative leg set exists");
-    debug_assert!(!legs.is_empty(), "alternative erase scope must be non-empty");
+    let legs = erase_scope_legs(ObjectKind::Alternative).expect("alternative leg set exists");
+    debug_assert!(
+        !legs.is_empty(),
+        "alternative erase scope must be non-empty"
+    );
     legs
 }
 
@@ -525,10 +530,7 @@ struct ResolvedAlt {
 /// match BOTH a current identity and closed identities (delete-then-recreate
 /// reuse), or several closed identities. Either ambiguity is a loud refusal —
 /// an irreversible primitive never silently picks.
-fn resolve_alternative_any(
-    conn: &Connection,
-    name: &str,
-) -> Result<Option<ResolvedAlt>, DbError> {
+fn resolve_alternative_any(conn: &Connection, name: &str) -> Result<Option<ResolvedAlt>, DbError> {
     let current = crate::api::lookup_alternative(conn, name)?;
     // Closed identities only: name matched in ANY version, id has NO current
     // row (which also excludes the current id's own closed version rows —

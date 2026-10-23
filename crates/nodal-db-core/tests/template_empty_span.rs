@@ -54,7 +54,10 @@ fn empty_span_still_rejects_from_eq_to_and_duplicate_from() {
          migrations:\n - {from: '1', to: '2', steps: []}\n - {from: '1', to: '3', steps: []}\n",
     )
     .unwrap();
-    assert!(validate(&dup).is_err(), "duplicate from stays an error (linear chain)");
+    assert!(
+        validate(&dup).is_err(),
+        "duplicate from stays an error (linear chain)"
+    );
 }
 
 /// The runner walk: a DB stamped mid-chain walks consecutive EMPTY spans to
@@ -68,9 +71,15 @@ fn empty_span_chain_stamps_through_and_certifies() {
 
     let v1 = "template: {name: t, version: '1'}\nclasses: [{name: c}]\n";
     let t1 = parse_str(v1).unwrap();
-    let out =
-        apply(&db, &t1, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-            .unwrap();
+    let out = apply(
+        &db,
+        &t1,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.converged);
     assert_eq!(meta(&db, "template_version").as_deref(), Some("1"));
 
@@ -82,15 +91,29 @@ fn empty_span_chain_stamps_through_and_certifies() {
               - {from: '2', to: '3', steps: []}\n\
               - {from: '3', to: '4', steps: []}\n";
     let t4 = parse_str(v4).unwrap();
-    let out =
-        apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-            .unwrap();
-    assert!(out.converged, "empty chain converges: {:?}", out.plan.skipped);
+    let out = apply(
+        &db,
+        &t4,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        out.converged,
+        "empty chain converges: {:?}",
+        out.plan.skipped
+    );
     assert!(!out.no_op);
     // One version-stamp commit per span (empty spans burn no step commits)
     // plus the final reconcile commit (identity re-stamp: the walked-to
     // version's content hash must be re-certified for THIS template).
-    assert_eq!(out.commits.len(), 4, "three span stamps + the identity re-stamp");
+    assert_eq!(
+        out.commits.len(),
+        4,
+        "three span stamps + the identity re-stamp"
+    );
     assert_eq!(meta(&db, "template_version").as_deref(), Some("4"));
     assert!(
         meta(&db, "template_content_hash").is_some(),
@@ -100,22 +123,44 @@ fn empty_span_chain_stamps_through_and_certifies() {
     assert_eq!(meta(&db, "template_migration_step"), None);
 
     // Idempotency: the walked DB short-circuits.
-    let again =
-        apply(&db, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-            .unwrap();
-    assert!(again.no_op, "re-apply after the walk is the hash short-circuit");
+    let again = apply(
+        &db,
+        &t4,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        again.no_op,
+        "re-apply after the walk is the hash short-circuit"
+    );
 
     // A mid-chain entrant (stamped "3") is selected by pending_spans and
     // walks exactly the remaining span.
     let db2 = dir.path().join("t2.duckdb");
     init_schema(&db2).unwrap();
-    let out = apply(&db2, &t1, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-        .unwrap();
+    let out = apply(
+        &db2,
+        &t1,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.converged);
     stamp_template_identity(&db2, "t", "3", true, "tester").unwrap();
-    let out =
-        apply(&db2, &t4, &MigrationRegistry::new(), "tester", "", &ApplyOptions::default())
-            .unwrap();
+    let out = apply(
+        &db2,
+        &t4,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
     assert!(out.converged);
     assert_eq!(
         out.commits.len(),

@@ -9,8 +9,8 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, DictionaryArray, Float64Array, Int64Array, ListBuilder, Int64Builder,
-    Float64Builder, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    Array, ArrayRef, DictionaryArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
+    ListBuilder, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Int32Type, Schema, TimeUnit};
@@ -30,8 +30,16 @@ fn bin() -> &'static str {
 /// `nodal-db init` into a fresh dir (embedded schema — the deployment path).
 fn init_db(dir: &Path) -> PathBuf {
     let db = dir.join("model.sdb");
-    let out = Command::new(bin()).arg("init").arg(&db).output().expect("run init");
-    assert!(out.status.success(), "init failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(bin())
+        .arg("init")
+        .arg(&db)
+        .output()
+        .expect("run init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     db
 }
 
@@ -62,12 +70,19 @@ fn import_env(db: &Path, file: &Path, extra: &[&str], env: &[(&str, Option<&str>
 
 fn commits(db: &Path) -> i64 {
     let conn = Connection::open(db).unwrap();
-    let n: i64 = conn.query_row("SELECT count(*) FROM commit", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM commit", [], |r| r.get(0))
+        .unwrap();
     conn.close().unwrap();
     n
 }
 
-fn segment_metadata(class: &str, parameter: &str, form: &str, count: usize) -> HashMap<String, String> {
+fn segment_metadata(
+    class: &str,
+    parameter: &str,
+    form: &str,
+    count: usize,
+) -> HashMap<String, String> {
     HashMap::from([
         ("spinal:format".into(), "spinal-db-bulk".into()),
         ("spinal:format_version".into(), "1.0".into()),
@@ -109,9 +124,15 @@ fn long_batch(schema: &Arc<Schema>, rows: &[(&str, i64, f64)]) -> RecordBatch {
     RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(Int64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(Float64Array::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(StringArray::from(
+                rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Int64Array::from(
+                rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+            )) as ArrayRef,
         ],
     )
     .unwrap()
@@ -125,12 +146,7 @@ fn long_segment_md(md: HashMap<String, String>, rows: &[(&str, i64, f64)]) -> Ve
 }
 
 /// A rank-1 long segment: (entity Utf8, step Int64, value Float64).
-fn long_segment(
-    class: &str,
-    parameter: &str,
-    count: usize,
-    rows: &[(&str, i64, f64)],
-) -> Vec<u8> {
+fn long_segment(class: &str, parameter: &str, count: usize, rows: &[(&str, i64, f64)]) -> Vec<u8> {
     long_segment_md(segment_metadata(class, parameter, "long", count), rows)
 }
 
@@ -139,8 +155,10 @@ fn long_segment(
 fn label_segment(domain: Option<&str>, rows: &[(&str, &str, f64)]) -> Vec<u8> {
     let mut scenario = Field::new("scenario", DataType::Utf8, false);
     if let Some(d) = domain {
-        scenario = scenario
-            .with_metadata(HashMap::from([("spinal:label_domain".to_string(), d.to_string())]));
+        scenario = scenario.with_metadata(HashMap::from([(
+            "spinal:label_domain".to_string(),
+            d.to_string(),
+        )]));
     }
     let schema = Arc::new(Schema::new_with_metadata(
         vec![
@@ -153,9 +171,15 @@ fn label_segment(domain: Option<&str>, rows: &[(&str, &str, f64)]) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(Float64Array::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(StringArray::from(
+                rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+            )) as ArrayRef,
         ],
     )
     .unwrap();
@@ -170,8 +194,15 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 
 fn col_f64(batch: &RecordBatch, name: &str) -> Vec<f64> {
     let i = batch.schema().index_of(name).unwrap();
-    let a = batch.column(i).as_any().downcast_ref::<Float64Array>().unwrap();
-    (0..a.len()).filter(|&r| !arrow::array::Array::is_null(a, r)).map(|r| a.value(r)).collect()
+    let a = batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    (0..a.len())
+        .filter(|&r| !arrow::array::Array::is_null(a, r))
+        .map(|r| a.value(r))
+        .collect()
 }
 
 // --- success paths ---------------------------------------------------------
@@ -185,14 +216,29 @@ fn init_then_import_single_long_segment() {
     let file = write_file(
         dir.path(),
         "in.arrows",
-        &long_segment("node", "profile", 1, &[("n1", 0, 1.5), ("n1", 1, 2.5), ("n1", 2, 3.5)]),
+        &long_segment(
+            "node",
+            "profile",
+            1,
+            &[("n1", 0, 1.5), ("n1", 1, 2.5), ("n1", 2, 3.5)],
+        ),
     );
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("commit"), "summary must name the commit: {stdout}");
-    assert!(stdout.contains("warning: auto-created"), "auto-create warnings must print: {stdout}");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("commit"),
+        "summary must name the commit: {stdout}"
+    );
+    assert!(
+        stdout.contains("warning: auto-created"),
+        "auto-create warnings must print: {stdout}"
+    );
 
     let got = read_parameter(&db, "node", "profile", "Base").expect("read back");
     assert_eq!(got.num_rows(), 3);
@@ -212,13 +258,30 @@ fn multi_segment_two_parameters_one_commit() {
     let file = write_file(dir.path(), "two.arrows", &container);
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("2 segment(s)"), "unexpected summary: {stdout}");
+    assert!(
+        stdout.contains("2 segment(s)"),
+        "unexpected summary: {stdout}"
+    );
 
     assert_eq!(commits(&db), 2, "bootstrap + exactly ONE import commit");
-    assert_eq!(read_parameter(&db, "node", "demand", "Base").unwrap().num_rows(), 2);
-    assert_eq!(read_parameter(&db, "unit", "capacity", "Base").unwrap().num_rows(), 1);
+    assert_eq!(
+        read_parameter(&db, "node", "demand", "Base")
+            .unwrap()
+            .num_rows(),
+        2
+    );
+    assert_eq!(
+        read_parameter(&db, "unit", "capacity", "Base")
+            .unwrap()
+            .num_rows(),
+        1
+    );
 }
 
 /// Dense form: the importer expands (core row-major law), the CORE picks the
@@ -247,15 +310,26 @@ fn dense_form_expands_and_round_trips() {
     ));
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![Arc::new(StringArray::from(vec!["n1"])) as ArrayRef, steps, vals],
+        vec![
+            Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+            steps,
+            vals,
+        ],
     )
     .unwrap();
     let file = write_file(dir.path(), "dense.arrows", &stream(schema, &[batch]));
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("array"), "core must tier the full float grid as array: {stdout}");
+    assert!(
+        stdout.contains("array"),
+        "core must tier the full float grid as array: {stdout}"
+    );
 
     let got = read_parameter(&db, "node", "price", "Base").expect("read back");
     assert_eq!(got.num_rows(), 3);
@@ -283,7 +357,10 @@ fn ms_timestamp_dimension_is_upcast_and_accepted() {
         schema.clone(),
         vec![
             Arc::new(StringArray::from(vec!["n1", "n1"])) as ArrayRef,
-            Arc::new(TimestampMillisecondArray::from(vec![3_600_000i64, 7_200_000])) as ArrayRef,
+            Arc::new(TimestampMillisecondArray::from(vec![
+                3_600_000i64,
+                7_200_000,
+            ])) as ArrayRef,
             Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef,
         ],
     )
@@ -291,7 +368,11 @@ fn ms_timestamp_dimension_is_upcast_and_accepted() {
     let file = write_file(dir.path(), "ms.arrows", &stream(schema, &[batch]));
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The stored instants are the same instants in µs: verify via the axis
     // parametric start (µs precision), not just row count.
@@ -313,7 +394,10 @@ fn ms_timestamp_dimension_is_upcast_and_accepted() {
 fn assert_error_leaves_db_untouched(db: &Path, out: &Output, class: &str) {
     assert!(!out.status.success(), "import must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains(class), "expected {class} in stderr, got: {stderr}");
+    assert!(
+        stderr.contains(class),
+        "expected {class} in stderr, got: {stderr}"
+    );
     assert_eq!(commits(db), 1, "nothing imported (bootstrap commit only)");
 }
 
@@ -404,7 +488,9 @@ fn zero_row_segment_is_e6() {
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
     assert_error_leaves_db_untouched(&db, &out, "E6");
     let conn = Connection::open(&db).unwrap();
-    let classes: i64 = conn.query_row("SELECT count(*) FROM entity_class", [], |r| r.get(0)).unwrap();
+    let classes: i64 = conn
+        .query_row("SELECT count(*) FROM entity_class", [], |r| r.get(0))
+        .unwrap();
     conn.close().unwrap();
     assert_eq!(classes, 0, "no auto-create from a zero-row segment");
 }
@@ -424,13 +510,25 @@ fn nan_float_value_is_stored_on_array_tier() {
     );
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let conn = Connection::open(&db).unwrap();
     // A NaN cell is PRESENT, so the grid stays Cartesian → Array tier, NOT Long.
-    let arrays: i64 = conn.query_row("SELECT count(*) FROM value_array", [], |r| r.get(0)).unwrap();
-    let longs: i64 = conn.query_row("SELECT count(*) FROM value_long", [], |r| r.get(0)).unwrap();
-    assert_eq!((arrays, longs), (1, 0), "NaN-bearing dense grid stays on the array tier");
+    let arrays: i64 = conn
+        .query_row("SELECT count(*) FROM value_array", [], |r| r.get(0))
+        .unwrap();
+    let longs: i64 = conn
+        .query_row("SELECT count(*) FROM value_long", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        (arrays, longs),
+        (1, 0),
+        "NaN-bearing dense grid stays on the array tier"
+    );
     // Round-trip: payload is [1.0, NaN] in flat (position) order.
     let payload: Vec<f64> = conn
         .prepare("SELECT unnest(values) AS v FROM value_array")
@@ -442,7 +540,10 @@ fn nan_float_value_is_stored_on_array_tier() {
     conn.close().unwrap();
     assert_eq!(payload.len(), 2);
     assert_eq!(payload[0], 1.0, "position 0 preserved exactly");
-    assert!(payload[1].is_nan(), "the NaN survives the round-trip at position 1");
+    assert!(
+        payload[1].is_nan(),
+        "the NaN survives the round-trip at position 1"
+    );
 }
 
 /// Critique F1 regression: a batch body whose LAST 8 BYTES coincidentally
@@ -459,7 +560,17 @@ fn truncation_at_boundary_with_eos_lookalike_body_is_e10() {
     // 8 rows so the 64-byte Float64 value buffer ends flush at the aligned
     // body end; the last value's LE bytes are ff ff ff ff 00 00 00 00.
     let rows1: Vec<(&str, i64, f64)> = (0..8)
-        .map(|i| ("n1", i, if i == 7 { f64::from_bits(0x0000_0000_FFFF_FFFF) } else { i as f64 }))
+        .map(|i| {
+            (
+                "n1",
+                i,
+                if i == 7 {
+                    f64::from_bits(0x0000_0000_FFFF_FFFF)
+                } else {
+                    i as f64
+                },
+            )
+        })
         .collect();
     let b1 = long_batch(&schema, &rows1);
     let b2 = long_batch(&schema, &[("n2", 0, 9.0)]);
@@ -506,7 +617,11 @@ fn dense_row_with_empty_dim_list_is_e8_not_silent_drop() {
     ));
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![Arc::new(StringArray::from(vec!["n1", "ghost"])) as ArrayRef, steps, vals],
+        vec![
+            Arc::new(StringArray::from(vec!["n1", "ghost"])) as ArrayRef,
+            steps,
+            vals,
+        ],
     )
     .unwrap();
     let file = write_file(dir.path(), "ghost.arrows", &stream(schema, &[batch]));
@@ -559,12 +674,24 @@ fn blank_user_env_var_falls_through_the_chain() {
         &db,
         &file,
         &["--alternative", "Base"],
-        &[("USER", Some("  ")), ("USERNAME", None), ("LOGNAME", Some("envuser"))],
+        &[
+            ("USER", Some("  ")),
+            ("USERNAME", None),
+            ("LOGNAME", Some("envuser")),
+        ],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let conn = Connection::open(&db).unwrap();
     let user: String = conn
-        .query_row("SELECT \"user\" FROM commit ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT \"user\" FROM commit ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     conn.close().unwrap();
     assert_eq!(user, "envuser", "blank USER must fall through to LOGNAME");
@@ -590,8 +717,14 @@ fn missing_user_everywhere_is_a_usage_error_not_e6() {
     );
     assert!(!out.status.success(), "import must fail without any author");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--user"), "must point at the flag: {stderr}");
-    assert!(!stderr.contains("E6"), "not a payload-class error: {stderr}");
+    assert!(
+        stderr.contains("--user"),
+        "must point at the flag: {stderr}"
+    );
+    assert!(
+        !stderr.contains("E6"),
+        "not a payload-class error: {stderr}"
+    );
     assert_eq!(commits(&db), 1, "DB untouched");
 }
 
@@ -662,7 +795,11 @@ fn dense_timestamp_upcast_overflow_is_e6() {
     ));
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![Arc::new(StringArray::from(vec!["n1"])) as ArrayRef, ts, vals],
+        vec![
+            Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+            ts,
+            vals,
+        ],
     )
     .unwrap();
     let file = write_file(dir.path(), "overflow.arrows", &stream(schema, &[batch]));
@@ -671,7 +808,10 @@ fn dense_timestamp_upcast_overflow_is_e6() {
     assert_error_leaves_db_untouched(&db, &out, "E6");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("overflow"), "must say overflow: {stderr}");
-    assert!(stderr.contains(&i64::MAX.to_string()), "must name the value: {stderr}");
+    assert!(
+        stderr.contains(&i64::MAX.to_string()),
+        "must name the value: {stderr}"
+    );
 }
 
 // --- F9: the remaining E-table / normative-surface pins ---------------------
@@ -691,7 +831,11 @@ fn zero_byte_file_is_e1() {
 fn garbage_file_is_e1() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
-    let file = write_file(dir.path(), "garbage.arrows", b"definitely not an arrow stream");
+    let file = write_file(
+        dir.path(),
+        "garbage.arrows",
+        b"definitely not an arrow stream",
+    );
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
     assert_error_leaves_db_untouched(&db, &out, "E1");
 }
@@ -703,8 +847,11 @@ fn missing_format_key_is_e2() {
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
     md.remove("spinal:format");
-    let file =
-        write_file(dir.path(), "noformat.arrows", &long_segment_md(md, &[("n1", 0, 1.0)]));
+    let file = write_file(
+        dir.path(),
+        "noformat.arrows",
+        &long_segment_md(md, &[("n1", 0, 1.0)]),
+    );
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
     assert_error_leaves_db_untouched(&db, &out, "E2");
 }
@@ -717,7 +864,10 @@ fn unknown_form_value_is_e4() {
     let file = write_file(
         dir.path(),
         "wide.arrows",
-        &long_segment_md(segment_metadata("node", "profile", "wide", 1), &[("n1", 0, 1.0)]),
+        &long_segment_md(
+            segment_metadata("node", "profile", "wide", 1),
+            &[("n1", 0, 1.0)],
+        ),
     );
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
     assert_error_leaves_db_untouched(&db, &out, "E4");
@@ -731,16 +881,29 @@ fn unknown_spinal_key_is_e5_warning_not_error() {
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
     md.insert("spinal:future_hint".into(), "x".into());
-    let file = write_file(dir.path(), "e5.arrows", &long_segment_md(md, &[("n1", 0, 1.0)]));
+    let file = write_file(
+        dir.path(),
+        "e5.arrows",
+        &long_segment_md(md, &[("n1", 0, 1.0)]),
+    );
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("spinal:future_hint") && stdout.contains("E5"),
         "warning must name the key: {stdout}"
     );
-    assert_eq!(read_parameter(&db, "node", "profile", "Base").unwrap().num_rows(), 1);
+    assert_eq!(
+        read_parameter(&db, "node", "profile", "Base")
+            .unwrap()
+            .num_rows(),
+        1
+    );
 }
 
 /// Nanosecond timestamps are rejected with the producer-side fix named
@@ -787,7 +950,11 @@ fn tz_annotated_timestamp_imports_with_normalized_warning() {
     let schema = Arc::new(Schema::new_with_metadata(
         vec![
             Field::new("entity", DataType::Utf8, false),
-            Field::new("t", DataType::Timestamp(TimeUnit::Microsecond, Some(tz.clone())), false),
+            Field::new(
+                "t",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(tz.clone())),
+                false,
+            ),
             Field::new("value", DataType::Float64, true),
         ],
         segment_metadata("node", "flow", "long", 1),
@@ -806,7 +973,11 @@ fn tz_annotated_timestamp_imports_with_normalized_warning() {
     let file = write_file(dir.path(), "tz.arrows", &stream(schema, &[batch]));
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("timezone-normalized") && stdout.contains("Europe/Helsinki"),
@@ -840,12 +1011,23 @@ fn dictionary_encoded_entity_column_is_decoded() {
     let file = write_file(dir.path(), "dict.arrows", &stream(schema, &[batch]));
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let conn = Connection::open(&db).unwrap();
-    let n: i64 = conn.query_row("SELECT count(*) FROM entity", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM entity", [], |r| r.get(0))
+        .unwrap();
     conn.close().unwrap();
     assert_eq!(n, 2, "two distinct entities decoded from the dictionary");
-    assert_eq!(read_parameter(&db, "node", "profile", "Base").unwrap().num_rows(), 3);
+    assert_eq!(
+        read_parameter(&db, "node", "profile", "Base")
+            .unwrap()
+            .num_rows(),
+        3
+    );
 }
 
 /// A zstd-compressed stream imports end-to-end (spec §2.4, OPEN-Q3-9).
@@ -868,8 +1050,15 @@ fn zstd_compressed_stream_imports() {
     let file = write_file(dir.path(), "zstd.arrows", &buf);
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    let mut vals = col_f64(&read_parameter(&db, "node", "profile", "Base").unwrap(), "v_float");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut vals = col_f64(
+        &read_parameter(&db, "node", "profile", "Base").unwrap(),
+        "v_float",
+    );
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(vals, vec![1.5, 2.5]);
 }
@@ -924,15 +1113,33 @@ fn superset_domain_accepted_with_domain_ordinals() {
     );
 
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(read_parameter(&db, "node", "profile", "Base").unwrap().num_rows(), 2);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        read_parameter(&db, "node", "profile", "Base")
+            .unwrap()
+            .num_rows(),
+        2
+    );
     let conn = Connection::open(&db).unwrap();
-    let mut stmt = conn.prepare("SELECT label FROM axis_label ORDER BY ordinal").unwrap();
-    let labels: Vec<String> =
-        stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT label FROM axis_label ORDER BY ordinal")
+        .unwrap();
+    let labels: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     drop(stmt);
     conn.close().unwrap();
-    assert_eq!(labels, vec!["low", "high"], "ordinals from the domain, not wire order");
+    assert_eq!(
+        labels,
+        vec!["low", "high"],
+        "ordinals from the domain, not wire order"
+    );
 }
 
 /// OPEN-Q3-5: `spinal:alternative` metadata conflicting with `--alternative`
@@ -943,8 +1150,11 @@ fn alternative_flag_conflicting_with_metadata_is_e4() {
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
     md.insert("spinal:alternative".into(), "Base".into());
-    let file =
-        write_file(dir.path(), "conflict.arrows", &long_segment_md(md, &[("n1", 0, 1.0)]));
+    let file = write_file(
+        dir.path(),
+        "conflict.arrows",
+        &long_segment_md(md, &[("n1", 0, 1.0)]),
+    );
     let out = import(&db, &file, &["--alternative", "Other", "--user", "tester"]);
     assert_error_leaves_db_untouched(&db, &out, "E4");
 }
@@ -960,8 +1170,18 @@ fn class_assertion_mismatch_is_e4() {
         "assert.arrows",
         &long_segment("node", "profile", 1, &[("n1", 0, 1.0)]),
     );
-    let out =
-        import(&db, &file, &["--alternative", "Base", "--user", "tester", "--class", "unit"]);
+    let out = import(
+        &db,
+        &file,
+        &[
+            "--alternative",
+            "Base",
+            "--user",
+            "tester",
+            "--class",
+            "unit",
+        ],
+    );
     assert_error_leaves_db_untouched(&db, &out, "E4");
 }
 
@@ -978,9 +1198,22 @@ fn matching_class_and_parameter_assertions_pass() {
     let out = import(
         &db,
         &file,
-        &["--alternative", "Base", "--user", "tester", "--class", "node", "--parameter", "profile"],
+        &[
+            "--alternative",
+            "Base",
+            "--user",
+            "tester",
+            "--class",
+            "node",
+            "--parameter",
+            "profile",
+        ],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// §3.2: a same-major NEWER minor version is attempted, not rejected.
@@ -990,9 +1223,17 @@ fn newer_minor_version_is_attempted() {
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
     md.insert("spinal:format_version".into(), "1.7".into());
-    let file = write_file(dir.path(), "minor.arrows", &long_segment_md(md, &[("n1", 0, 1.0)]));
+    let file = write_file(
+        dir.path(),
+        "minor.arrows",
+        &long_segment_md(md, &[("n1", 0, 1.0)]),
+    );
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `--force-replace` reaches the core: the superseded pre-image is stubbed
@@ -1004,14 +1245,36 @@ fn force_replace_passes_through_to_core() {
     let file = write_file(
         dir.path(),
         "force.arrows",
-        &long_segment("node", "profile", 1, &[("n1", 0, 1.0), ("n1", 1, 2.0), ("n1", 2, 3.0)]),
+        &long_segment(
+            "node",
+            "profile",
+            1,
+            &[("n1", 0, 1.0), ("n1", 1, 2.0), ("n1", 2, 3.0)],
+        ),
     );
 
     let first = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
-    assert!(first.status.success(), "stderr: {}", String::from_utf8_lossy(&first.stderr));
-    let second =
-        import(&db, &file, &["--alternative", "Base", "--user", "tester", "--force-replace"]);
-    assert!(second.status.success(), "stderr: {}", String::from_utf8_lossy(&second.stderr));
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = import(
+        &db,
+        &file,
+        &[
+            "--alternative",
+            "Base",
+            "--user",
+            "tester",
+            "--force-replace",
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
 
     assert_eq!(commits(&db), 3, "bootstrap + two import commits");
     let conn = Connection::open(&db).unwrap();
@@ -1023,7 +1286,10 @@ fn force_replace_passes_through_to_core() {
         )
         .unwrap();
     conn.close().unwrap();
-    assert_eq!(stubs, 1, "force-replace must stub the pre-image, proving pass-through");
+    assert_eq!(
+        stubs, 1,
+        "force-replace must stub the pre-image, proving pass-through"
+    );
 }
 
 /// Critique F6: `init` onto an existing database refuses cleanly instead of
@@ -1032,7 +1298,11 @@ fn force_replace_passes_through_to_core() {
 fn init_onto_existing_db_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
-    let out = Command::new(bin()).arg("init").arg(&db).output().expect("run init");
+    let out = Command::new(bin())
+        .arg("init")
+        .arg(&db)
+        .output()
+        .expect("run init");
     assert!(!out.status.success(), "re-init must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

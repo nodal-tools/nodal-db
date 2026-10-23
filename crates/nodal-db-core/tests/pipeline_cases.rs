@@ -92,7 +92,11 @@ fn build_batch(case: &Case) -> RecordBatch {
         let name = format!("d{i}");
         match dim.kind {
             IndexKind::Datetime => {
-                let vals: Vec<i64> = case.rows.iter().map(|r| r.dims[i].as_i64().unwrap()).collect();
+                let vals: Vec<i64> = case
+                    .rows
+                    .iter()
+                    .map(|r| r.dims[i].as_i64().unwrap())
+                    .collect();
                 fields.push(Field::new(
                     name,
                     DataType::Timestamp(TimeUnit::Microsecond, None),
@@ -101,7 +105,11 @@ fn build_batch(case: &Case) -> RecordBatch {
                 columns.push(Arc::new(TimestampMicrosecondArray::from(vals)));
             }
             IndexKind::Integer => {
-                let vals: Vec<i64> = case.rows.iter().map(|r| r.dims[i].as_i64().unwrap()).collect();
+                let vals: Vec<i64> = case
+                    .rows
+                    .iter()
+                    .map(|r| r.dims[i].as_i64().unwrap())
+                    .collect();
                 fields.push(Field::new(name, DataType::Int64, false));
                 columns.push(Arc::new(Int64Array::from(vals)));
             }
@@ -153,7 +161,11 @@ fn build_batch(case: &Case) -> RecordBatch {
             )
         }
         ValueKind::DateTime => (
-            Field::new("value", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new(
+                "value",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
             Arc::new(TimestampMicrosecondArray::from(opt_i64(|j| j.as_i64()))),
         ),
         ValueKind::Duration => panic!("duration value column not supported in pipeline cases"),
@@ -161,14 +173,22 @@ fn build_batch(case: &Case) -> RecordBatch {
     fields.push(value_col.0);
     columns.push(value_col.1);
 
-    assert_eq!(columns.iter().map(|c| c.len()).max().unwrap_or(0), n, "row count");
+    assert_eq!(
+        columns.iter().map(|c| c.len()).max().unwrap_or(0),
+        n,
+        "row count"
+    );
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("build record batch")
 }
 
 #[test]
 fn pipeline_cases_match() {
     let files = case_files();
-    assert!(files.len() >= 7, "expected >=7 pipeline cases, got {}", files.len());
+    assert!(
+        files.len() >= 7,
+        "expected >=7 pipeline cases, got {}",
+        files.len()
+    );
 
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -191,9 +211,21 @@ fn pipeline_cases_match() {
         let cv = canonicalize(&batch, &declared, case.value_kind, &domains)
             .unwrap_or_else(|e| panic!("{name}: canonicalize failed: {e} ({})", case.description));
 
-        assert_eq!(cv.tier, case.expected.tier, "{name}: tier ({})", case.description);
-        assert_eq!(cv.axes, case.expected.axes, "{name}: axes ({})", case.description);
-        assert_eq!(cv.shape, case.expected.shape, "{name}: shape ({})", case.description);
+        assert_eq!(
+            cv.tier, case.expected.tier,
+            "{name}: tier ({})",
+            case.description
+        );
+        assert_eq!(
+            cv.axes, case.expected.axes,
+            "{name}: axes ({})",
+            case.description
+        );
+        assert_eq!(
+            cv.shape, case.expected.shape,
+            "{name}: shape ({})",
+            case.description
+        );
 
         // The value encoding (spec §9, OPEN-7) must produce bytes without error
         // for the derived value — a smoke check of the whole pipeline output.

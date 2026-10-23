@@ -550,6 +550,7 @@ const TIER_LONG: u8 = 0x02;
 ///        count then each canonical DOUBLE, row-major (§9.5);
 ///      - long:   a `u32` cell count, then per cell the positions (`i32` LE per
 ///        axis) + a component block of the cell measure.
+///
 /// Errors only on a NaN measure (§3.3.1).
 pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, EncodeError> {
     let mut out = Vec::new();
@@ -691,6 +692,9 @@ mod value_tests {
         };
         let a = encode_value(&k1, &ValueContent::Scalar(&m)).unwrap();
         let b = encode_value(&k2, &ValueContent::Scalar(&m)).unwrap();
-        assert_ne!(a, b, "value encoding MUST fold in the identity key (OPEN-7)");
+        assert_ne!(
+            a, b,
+            "value encoding MUST fold in the identity key (OPEN-7)"
+        );
     }
 }

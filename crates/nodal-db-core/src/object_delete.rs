@@ -189,8 +189,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     column: "alternative_id",
                     predicate: "alternative_id = ?",
                     array: false,
-                    sample_expr:
-                        "'entity=' || entity_id || ',pd=' || parameter_definition_id",
+                    sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                     erase: true,
                 },
             ],
@@ -382,7 +381,8 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     column: "group_entity_id",
                     predicate: "group_entity_id = ?",
                     array: false,
-                    sample_expr: "'member=' || member_entity_id || ',alt=' || coalesce(alternative_id, 0)",
+                    sample_expr:
+                        "'member=' || member_entity_id || ',alt=' || coalesce(alternative_id, 0)",
                     erase: false,
                 },
                 DepLeg {
@@ -390,7 +390,8 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     column: "member_entity_id",
                     predicate: "member_entity_id = ?",
                     array: false,
-                    sample_expr: "'group=' || group_entity_id || ',alt=' || coalesce(alternative_id, 0)",
+                    sample_expr:
+                        "'group=' || group_entity_id || ',alt=' || coalesce(alternative_id, 0)",
                     erase: false,
                 },
                 DepLeg {
@@ -887,34 +888,36 @@ fn resolve_target(
                     ))
                 }
             };
-            let class = key.class.as_deref().ok_or_else(|| {
-                DbError::Api("a parameter delete requires its class".into())
-            })?;
+            let class = key
+                .class
+                .as_deref()
+                .ok_or_else(|| DbError::Api("a parameter delete requires its class".into()))?;
             // Miss at EITHER step ⇒ None ⇒ NotFound (never auto-create).
             let class_id = match crate::api::lookup_entity_class(conn, class)? {
                 Some(id) => id,
                 None => return Ok(None),
             };
-            Ok(crate::api::lookup_parameter(conn, class_id, name)?
-                .map(|id| ResolvedTarget { id }))
+            Ok(crate::api::lookup_parameter(conn, class_id, name)?.map(|id| ResolvedTarget { id }))
         }
         ObjectKind::Entity => {
             // Entity is per-class; resolve the class first. Miss ⇒ None.
-            let class = key.class.as_deref().ok_or_else(|| {
-                DbError::Api("an entity delete requires its class".into())
-            })?;
+            let class = key
+                .class
+                .as_deref()
+                .ok_or_else(|| DbError::Api("an entity delete requires its class".into()))?;
             let class_id = match crate::api::lookup_entity_class(conn, class)? {
                 Some(id) => id,
                 None => return Ok(None),
             };
             match &key.target {
                 // 0-D or the (per-class-unique) N-D name.
-                ObjectRef::Name(n) => Ok(crate::api::lookup_entity(conn, class_id, n)?
-                    .map(|id| ResolvedTarget { id })),
-                // N-D element tuple (§4c, critique C6).
-                ObjectRef::Elements(es) => {
-                    resolve_entity_tuple(conn, class_id, class, es).map(|o| o.map(|id| ResolvedTarget { id }))
+                ObjectRef::Name(n) => {
+                    Ok(crate::api::lookup_entity(conn, class_id, n)?
+                        .map(|id| ResolvedTarget { id }))
                 }
+                // N-D element tuple (§4c, critique C6).
+                ObjectRef::Elements(es) => resolve_entity_tuple(conn, class_id, class, es)
+                    .map(|o| o.map(|id| ResolvedTarget { id })),
             }
         }
         ObjectKind::Class => {
@@ -1161,7 +1164,11 @@ fn preview_dependent_counts(
     }
     let mut out = Vec::new();
     for (table, array, preds) in groups {
-        let live = if array { "" } else { " AND valid_to_commit IS NULL" };
+        let live = if array {
+            ""
+        } else {
+            " AND valid_to_commit IS NULL"
+        };
         let clause = preds
             .iter()
             .map(|(p, _)| format!("({p})"))

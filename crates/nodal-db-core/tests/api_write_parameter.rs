@@ -102,15 +102,29 @@ fn label_batch(
 
 fn col_str(batch: &RecordBatch, name: &str) -> Vec<Option<String>> {
     let i = batch.schema().index_of(name).unwrap();
-    let a = batch.column(i).as_any().downcast_ref::<StringArray>().unwrap();
+    let a = batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
     (0..a.len())
-        .map(|r| if a.is_null(r) { None } else { Some(a.value(r).to_string()) })
+        .map(|r| {
+            if a.is_null(r) {
+                None
+            } else {
+                Some(a.value(r).to_string())
+            }
+        })
         .collect()
 }
 
 fn col_f64(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
     let i = batch.schema().index_of(name).unwrap();
-    let a = batch.column(i).as_any().downcast_ref::<Float64Array>().unwrap();
+    let a = batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
     (0..a.len())
         .map(|r| if a.is_null(r) { None } else { Some(a.value(r)) })
         .collect()
@@ -118,7 +132,11 @@ fn col_f64(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
 
 fn col_i64(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
     let i = batch.schema().index_of(name).unwrap();
-    let a = batch.column(i).as_any().downcast_ref::<Int64Array>().unwrap();
+    let a = batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     (0..a.len())
         .map(|r| if a.is_null(r) { None } else { Some(a.value(r)) })
         .collect()
@@ -205,7 +223,11 @@ fn dense_float_writes_array_tier_and_reads_back() {
         "array write",
     )
     .expect("write");
-    assert_eq!(report.tiers, vec![Tier::Array], "full Cartesian float ⇒ array tier");
+    assert_eq!(
+        report.tiers,
+        vec![Tier::Array],
+        "full Cartesian float ⇒ array tier"
+    );
     assert_eq!(report.values_written, 1);
 
     let got = read_parameter(&db, "node", "profile", "Base").expect("read");
@@ -268,7 +290,10 @@ fn dense_float_with_nan_stays_array_tier_and_round_trips() {
     assert_eq!(by_coord.len(), 6);
     assert_eq!(by_coord[&0], 10.0);
     assert_eq!(by_coord[&1], 20.0);
-    assert!(by_coord[&2].is_nan(), "the NaN survives the round-trip at coord 2");
+    assert!(
+        by_coord[&2].is_nan(),
+        "the NaN survives the round-trip at coord 2"
+    );
     assert_eq!(by_coord[&3], 40.0);
     assert_eq!(by_coord[&4], 50.0);
     assert_eq!(by_coord[&5], 60.0);
@@ -312,12 +337,32 @@ fn empty_user_is_rejected_and_empty_message_is_fine() {
     let (_dir, db) = fresh_db();
     let opts = WriteOptions::default();
 
-    let err = write_parameter(&db, "node", "demand", "Base", scalar_batch("n", 1.0), &[], opts, "  ", "m")
-        .expect_err("blank user must be rejected");
+    let err = write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("n", 1.0),
+        &[],
+        opts,
+        "  ",
+        "m",
+    )
+    .expect_err("blank user must be rejected");
     assert!(err.to_string().contains("user"), "unexpected error: {err}");
 
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("n", 1.0), &[], opts, "tool", "")
-        .expect("empty message is allowed");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("n", 1.0),
+        &[],
+        opts,
+        "tool",
+        "",
+    )
+    .expect("empty message is allowed");
 }
 
 #[test]
@@ -325,12 +370,36 @@ fn updating_a_scalar_bumps_the_version() {
     let (_dir, db) = fresh_db();
     let opts = WriteOptions::default();
 
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], opts, "t", "v1")
-        .expect("write v1");
-    let r2 = write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 2.0), &[], opts, "t", "v2")
-        .expect("write v2");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        opts,
+        "t",
+        "v1",
+    )
+    .expect("write v1");
+    let r2 = write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 2.0),
+        &[],
+        opts,
+        "t",
+        "v2",
+    )
+    .expect("write v2");
     // Second call finds every referent existing ⇒ no auto-create warnings.
-    assert!(r2.warnings.is_empty(), "no re-creation on the update: {:?}", r2.warnings);
+    assert!(
+        r2.warnings.is_empty(),
+        "no re-creation on the update: {:?}",
+        r2.warnings
+    );
 
     let conn = Connection::open(&db).unwrap();
     let rows: Vec<(i16, Option<i64>, f64)> = conn
@@ -339,7 +408,13 @@ fn updating_a_scalar_bumps_the_version() {
              WHERE v_float IS NOT NULL OR valid_to_commit IS NOT NULL ORDER BY version",
         )
         .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<f64>>(2)?.unwrap_or(f64::NAN))))
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, Option<f64>>(2)?.unwrap_or(f64::NAN),
+            ))
+        })
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -378,10 +453,30 @@ fn retain_content_false_stubs_the_superseded_row() {
     }
 
     let opts = WriteOptions::default();
-    write_parameter(&db, "unit", "result", "Base", scalar_batch("u1", 1.0), &[], opts, "t", "v1")
-        .expect("write v1");
-    write_parameter(&db, "unit", "result", "Base", scalar_batch("u1", 2.0), &[], opts, "t", "v2")
-        .expect("write v2");
+    write_parameter(
+        &db,
+        "unit",
+        "result",
+        "Base",
+        scalar_batch("u1", 1.0),
+        &[],
+        opts,
+        "t",
+        "v1",
+    )
+    .expect("write v1");
+    write_parameter(
+        &db,
+        "unit",
+        "result",
+        "Base",
+        scalar_batch("u1", 2.0),
+        &[],
+        opts,
+        "t",
+        "v2",
+    )
+    .expect("write v2");
 
     let conn = Connection::open(&db).unwrap();
     let rows: Vec<(i16, bool, Option<f64>, Option<i64>)> = conn
@@ -399,7 +494,10 @@ fn retain_content_false_stubs_the_superseded_row() {
     assert_eq!(rows.len(), 2);
     // Superseded row: stubbed — content_retained FALSE, payload nulled.
     assert_eq!(rows[0].0, 1);
-    assert!(!rows[0].1, "superseded row must NOT retain content (retain_content=FALSE wired through)");
+    assert!(
+        !rows[0].1,
+        "superseded row must NOT retain content (retain_content=FALSE wired through)"
+    );
     assert_eq!(rows[0].2, None, "stubbed payload is NULL");
     assert!(rows[0].3.is_some(), "superseded row is closed");
     // Current row keeps its content.
@@ -418,8 +516,15 @@ fn concurrent_writers_serialize_in_process() {
     let spawn = |db: std::path::PathBuf, ent: &'static str, v: f64, msg: &'static str| {
         std::thread::spawn(move || {
             write_parameter(
-                &db, "racecls", "p", "Base", scalar_batch(ent, v), &[],
-                WriteOptions::default(), "t", msg,
+                &db,
+                "racecls",
+                "p",
+                "Base",
+                scalar_batch(ent, v),
+                &[],
+                WriteOptions::default(),
+                "t",
+                msg,
             )
         })
     };
@@ -427,7 +532,10 @@ fn concurrent_writers_serialize_in_process() {
     let t2 = spawn(db.clone(), "e2", 2.0, "w2");
     let r1 = t1.join().unwrap().expect("writer 1");
     let r2 = t2.join().unwrap().expect("writer 2");
-    assert_ne!(r1.commit_id, r2.commit_id, "each writer gets its own commit");
+    assert_ne!(
+        r1.commit_id, r2.commit_id,
+        "each writer gets its own commit"
+    );
 
     let got = read_parameter(&db, "racecls", "p", "Base").expect("read");
     let mut pairs: Vec<(String, f64)> = col_str(&got, "entity")
@@ -436,7 +544,10 @@ fn concurrent_writers_serialize_in_process() {
         .map(|(e, v)| (e.unwrap(), v.unwrap()))
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(pairs, vec![("e1".to_string(), 1.0), ("e2".to_string(), 2.0)]);
+    assert_eq!(
+        pairs,
+        vec![("e1".to_string(), 1.0), ("e2".to_string(), 2.0)]
+    );
 }
 
 /// F2: a batch whose measure kind contradicts the stored declaration is loud.
@@ -444,16 +555,29 @@ fn concurrent_writers_serialize_in_process() {
 fn declared_value_kind_mismatch_is_rejected() {
     let (_dir, db) = fresh_db();
     let o = WriteOptions::default();
-    write_parameter(&db, "node", "p", "Base", scalar_batch("n1", 7.0), &[], o, "t", "float")
-        .expect("float declare");
+    write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch("n1", 7.0),
+        &[],
+        o,
+        "t",
+        "float",
+    )
+    .expect("float declare");
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity", DataType::Utf8, false),
         Field::new("value", DataType::Utf8, false),
     ]));
-    let strs = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from(vec!["n2"])) as ArrayRef,
-        Arc::new(StringArray::from(vec!["oops"])) as ArrayRef,
-    ])
+    let strs = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["n2"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["oops"])) as ArrayRef,
+        ],
+    )
     .unwrap();
     let err = write_parameter(&db, "node", "p", "Base", strs, &[], o, "t", "drift")
         .expect_err("kind drift must be loud");
@@ -470,13 +594,27 @@ fn declared_value_kind_mismatch_is_rejected() {
 fn case_aliased_entity_names_in_one_batch_are_rejected() {
     let (_dir, db) = fresh_db();
     let err = write_parameter(
-        &db, "node", "p", "Base", scalar_batch2(&["N1", "n1"], &[1.0, 2.0]), &[],
-        WriteOptions::default(), "t", "m",
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch2(&["N1", "n1"], &[1.0, 2.0]),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
     )
     .expect_err("case alias must be rejected");
     let msg = err.to_string();
-    assert!(msg.contains("N1") && msg.contains("n1"), "unexpected: {msg}");
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class"), 0, "no DB work happened");
+    assert!(
+        msg.contains("N1") && msg.contains("n1"),
+        "unexpected: {msg}"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM entity_class"),
+        0,
+        "no DB work happened"
+    );
 }
 
 /// F4: dim-column names must match the declared dimension names in declared
@@ -486,17 +624,34 @@ fn dimension_name_mismatch_is_rejected() {
     let (_dir, db) = fresh_db();
     let o = WriteOptions::default();
     write_parameter(
-        &db, "node", "flow", "Base",
-        indexed_float_batch("e1", "region", &[0, 1], &[1.0, 2.0]), &[], o, "t", "declare",
+        &db,
+        "node",
+        "flow",
+        "Base",
+        indexed_float_batch("e1", "region", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "declare",
     )
     .expect("declare with dim 'region'");
     let err = write_parameter(
-        &db, "node", "flow", "Base",
-        indexed_float_batch("e2", "season", &[0, 1], &[1.0, 2.0]), &[], o, "t", "rename",
+        &db,
+        "node",
+        "flow",
+        "Base",
+        indexed_float_batch("e2", "season", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "rename",
     )
     .expect_err("dim name mismatch must be loud");
     let msg = err.to_string();
-    assert!(msg.contains("region") && msg.contains("season"), "unexpected: {msg}");
+    assert!(
+        msg.contains("region") && msg.contains("season"),
+        "unexpected: {msg}"
+    );
 }
 
 /// F5: blank referent names (class/parameter/alternative/entity) fail as Api
@@ -514,11 +669,29 @@ fn blank_referent_names_are_rejected_before_db_work() {
             .expect_err("blank name must be rejected");
         assert!(err.to_string().contains(what), "missing {what:?} in: {err}");
     }
-    let err = write_parameter(&db, "node", "p", "Base", scalar_batch(" ", 1.0), &[], o, "t", "m")
-        .expect_err("blank entity name must be rejected");
+    let err = write_parameter(
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch(" ", 1.0),
+        &[],
+        o,
+        "t",
+        "m",
+    )
+    .expect_err("blank entity name must be rejected");
     assert!(err.to_string().contains("entity"), "unexpected: {err}");
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class"), 0, "no DB work happened");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM entity_class"),
+        0,
+        "no DB work happened"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        1,
+        "bootstrap commit only"
+    );
 }
 
 /// F6: a tz-bearing Timestamp column is accepted (it is a well-defined instant)
@@ -528,18 +701,33 @@ fn tz_bearing_timestamp_value_warns_timezone_normalized() {
     let (_dir, db) = fresh_db();
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity", DataType::Utf8, false),
-        Field::new("value", DataType::Timestamp(TimeUnit::Microsecond, Some("+05:00".into())), false),
+        Field::new(
+            "value",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+05:00".into())),
+            false,
+        ),
     ]));
-    let batch = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
-        Arc::new(
-            TimestampMicrosecondArray::from(vec![1_700_000_000_000_000i64])
-                .with_timezone("+05:00"),
-        ) as ArrayRef,
-    ])
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+            Arc::new(
+                TimestampMicrosecondArray::from(vec![1_700_000_000_000_000i64])
+                    .with_timezone("+05:00"),
+            ) as ArrayRef,
+        ],
+    )
     .unwrap();
     let report = write_parameter(
-        &db, "node", "ts", "Base", batch, &[], WriteOptions::default(), "t", "m",
+        &db,
+        "node",
+        "ts",
+        "Base",
+        batch,
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
     )
     .expect("tz-aware instants are accepted");
     assert_eq!(report.values_written, 1);
@@ -576,7 +764,15 @@ fn materializing_parameter_type_for_existing_definition_warns() {
         conn.close().unwrap();
     }
     let report = write_parameter(
-        &db, "unit", "p", "Base", scalar_batch("u1", 1.0), &[], WriteOptions::default(), "t", "m",
+        &db,
+        "unit",
+        "p",
+        "Base",
+        scalar_batch("u1", 1.0),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
     )
     .expect("write");
     let w = report
@@ -590,7 +786,10 @@ fn materializing_parameter_type_for_existing_definition_warns() {
     assert_eq!(count(&db, "SELECT count(*) FROM parameter_type"), 1);
     // D11: the auto-materialize path binds the freshly created member row.
     assert_eq!(
-        count(&db, "SELECT parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL"),
+        count(
+            &db,
+            "SELECT parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL"
+        ),
         w.id,
         "the written value binds the materialized parameter_type"
     );
@@ -602,13 +801,28 @@ fn materializing_parameter_type_for_existing_definition_warns() {
 fn empty_batch_is_rejected_without_side_effects() {
     let (_dir, db) = fresh_db();
     let err = write_parameter(
-        &db, "node", "p", "Base", scalar_batch2(&[], &[]), &[],
-        WriteOptions::default(), "t", "m",
+        &db,
+        "node",
+        "p",
+        "Base",
+        scalar_batch2(&[], &[]),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
     )
     .expect_err("empty batch must be rejected");
     assert!(err.to_string().contains("empty batch"), "unexpected: {err}");
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class"), 0, "no auto-creates");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM entity_class"),
+        0,
+        "no auto-creates"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        1,
+        "bootstrap commit only"
+    );
 }
 
 /// F9 (updated for D2(a) set semantics): schema-permitted declaration damage is
@@ -671,16 +885,33 @@ fn indistinguishable_or_noncontiguous_declarations_are_refused() {
         conn.close().unwrap();
     }
     let o = WriteOptions::default();
-    let err = write_parameter(&db, "node", "dup", "Base", scalar_batch("n", 1.0), &[], o, "t", "m")
-        .expect_err("indistinguishable declaration must be refused");
+    let err = write_parameter(
+        &db,
+        "node",
+        "dup",
+        "Base",
+        scalar_batch("n", 1.0),
+        &[],
+        o,
+        "t",
+        "m",
+    )
+    .expect_err("indistinguishable declaration must be refused");
     let msg = err.to_string();
     assert!(
         msg.contains("indistinguishable") && msg.contains("parameter_type rows"),
         "unexpected: {msg}"
     );
     let err = write_parameter(
-        &db, "node", "gap", "Base",
-        indexed_float_batch("n", "step", &[0, 1], &[1.0, 2.0]), &[], o, "t", "m",
+        &db,
+        "node",
+        "gap",
+        "Base",
+        indexed_float_batch("n", "step", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "m",
     )
     .expect_err("non-contiguous positions must be refused");
     assert!(err.to_string().contains("contiguous"), "unexpected: {err}");
@@ -717,11 +948,22 @@ fn auto_create_entity_in_nd_class_is_refused() {
         conn.close().unwrap();
     }
     let err = write_parameter(
-        &db, "flow", "p", "Base", scalar_batch("f1", 1.0), &[], WriteOptions::default(), "t", "m",
+        &db,
+        "flow",
+        "p",
+        "Base",
+        scalar_batch("f1", 1.0),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
     )
     .expect_err("N-D auto-create must be refused");
     let msg = err.to_string();
-    assert!(msg.contains("auto-create") && msg.contains("f1"), "unexpected: {msg}");
+    assert!(
+        msg.contains("auto-create") && msg.contains("f1"),
+        "unexpected: {msg}"
+    );
 }
 
 /// F11: a rank mismatch against the stored declaration names the parameter and
@@ -731,12 +973,29 @@ fn rank_mismatch_names_the_parameter_and_counts_ranks() {
     let (_dir, db) = fresh_db();
     let o = WriteOptions::default();
     write_parameter(
-        &db, "node", "profile", "Base",
-        indexed_float_batch("e", "step", &[0, 1], &[1.0, 2.0]), &[], o, "t", "declare",
+        &db,
+        "node",
+        "profile",
+        "Base",
+        indexed_float_batch("e", "step", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "declare",
     )
     .expect("rank-1 declare");
-    let err = write_parameter(&db, "node", "profile", "Base", scalar_batch("e", 1.0), &[], o, "t", "m")
-        .expect_err("rank mismatch must be loud");
+    let err = write_parameter(
+        &db,
+        "node",
+        "profile",
+        "Base",
+        scalar_batch("e", 1.0),
+        &[],
+        o,
+        "t",
+        "m",
+    )
+    .expect_err("rank mismatch must be loud");
     let msg = err.to_string();
     assert!(
         msg.contains("\"profile\"") && msg.contains("rank 0") && msg.contains("rank 1"),
@@ -819,20 +1078,32 @@ fn declare_definition(
 #[test]
 fn multi_type_set_accepts_each_declared_member() {
     let (_dir, db) = fresh_db();
-    let pts = declare_definition(&db, "unit", "availability", &[
-        ("float", &[]),
-        ("indexed", &[("step", "integer")]),
-    ]);
+    let pts = declare_definition(
+        &db,
+        "unit",
+        "availability",
+        &[("float", &[]), ("indexed", &[("step", "integer")])],
+    );
     let o = WriteOptions::default();
 
     // Member 1: scalar float.
     let r1 = write_parameter(
-        &db, "unit", "availability", "Base", scalar_batch("u1", 0.95), &[], o, "t", "scalar member",
+        &db,
+        "unit",
+        "availability",
+        "Base",
+        scalar_batch("u1", 0.95),
+        &[],
+        o,
+        "t",
+        "scalar member",
     )
     .expect("scalar member write");
     assert_eq!(r1.tiers, vec![Tier::Scalar]);
     assert!(
-        !r1.warnings.iter().any(|w| w.object_type == "parameter_type"),
+        !r1.warnings
+            .iter()
+            .any(|w| w.object_type == "parameter_type"),
         "no parameter_type materialization against a declared set: {:?}",
         r1.warnings
     );
@@ -840,8 +1111,14 @@ fn multi_type_set_accepts_each_declared_member() {
     // Member 2: 1-D integer-indexed map (another alternative — the union is
     // per value; a full grid of floats lands on the array tier as ever).
     let r2 = write_parameter(
-        &db, "unit", "availability", "hourly",
-        indexed_float_batch("u1", "step", &[0, 1, 2], &[0.9, 0.8, 0.7]), &[], o, "t",
+        &db,
+        "unit",
+        "availability",
+        "hourly",
+        indexed_float_batch("u1", "step", &[0, 1, 2], &[0.9, 0.8, 0.7]),
+        &[],
+        o,
+        "t",
         "indexed member",
     )
     .expect("indexed member write");
@@ -855,13 +1132,19 @@ fn multi_type_set_accepts_each_declared_member() {
 
     // The declared set is untouched: still exactly the two declared rows.
     assert_eq!(
-        count(&db, "SELECT count(*) FROM parameter_type WHERE valid_to_commit IS NULL"),
+        count(
+            &db,
+            "SELECT count(*) FROM parameter_type WHERE valid_to_commit IS NULL"
+        ),
         2
     );
 
     // D11: each value row persists the id of the member it instantiated.
     assert_eq!(
-        count(&db, "SELECT parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL"),
+        count(
+            &db,
+            "SELECT parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL"
+        ),
         pts[0],
         "the scalar value binds the scalar-float member"
     );
@@ -878,10 +1161,12 @@ fn multi_type_set_accepts_each_declared_member() {
 #[test]
 fn multi_type_set_rejects_nonmember_and_never_widens() {
     let (_dir, db) = fresh_db();
-    declare_definition(&db, "unit", "availability", &[
-        ("float", &[]),
-        ("indexed", &[("step", "integer")]),
-    ]);
+    declare_definition(
+        &db,
+        "unit",
+        "availability",
+        &[("float", &[]), ("indexed", &[("step", "integer")])],
+    );
     let o = WriteOptions::default();
 
     // Non-member measure kind (string scalar).
@@ -889,10 +1174,13 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
         Field::new("entity", DataType::Utf8, false),
         Field::new("value", DataType::Utf8, false),
     ]));
-    let strs = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from(vec!["u1"])) as ArrayRef,
-        Arc::new(StringArray::from(vec!["high"])) as ArrayRef,
-    ])
+    let strs = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["u1"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["high"])) as ArrayRef,
+        ],
+    )
     .unwrap();
     let err = write_parameter(&db, "unit", "availability", "Base", strs, &[], o, "t", "m")
         .expect_err("non-member kind must be rejected");
@@ -904,12 +1192,22 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
 
     // Non-member dimension name at a declared rank.
     let err = write_parameter(
-        &db, "unit", "availability", "Base",
-        indexed_float_batch("u1", "season", &[0, 1], &[1.0, 2.0]), &[], o, "t", "m",
+        &db,
+        "unit",
+        "availability",
+        "Base",
+        indexed_float_batch("u1", "season", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "m",
     )
     .expect_err("non-member dim name must be rejected");
     let msg = err.to_string();
-    assert!(msg.contains("season") && msg.contains("step"), "unexpected: {msg}");
+    assert!(
+        msg.contains("season") && msg.contains("step"),
+        "unexpected: {msg}"
+    );
 
     // Non-member rank (rank 2 vs declared {0, 1}).
     let schema = Arc::new(Schema::new(vec![
@@ -918,12 +1216,15 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
         Field::new("layer", DataType::Int64, false),
         Field::new("value", DataType::Float64, false),
     ]));
-    let rank2 = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from(vec!["u1"])) as ArrayRef,
-        Arc::new(Int64Array::from(vec![0])) as ArrayRef,
-        Arc::new(Int64Array::from(vec![0])) as ArrayRef,
-        Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
-    ])
+    let rank2 = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["u1"])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ],
+    )
     .unwrap();
     let err = write_parameter(&db, "unit", "availability", "Base", rank2, &[], o, "t", "m")
         .expect_err("non-member rank must be rejected");
@@ -943,23 +1244,42 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
 #[test]
 fn multi_type_same_rank_members_distinguished_by_index_kind() {
     let (_dir, db) = fresh_db();
-    let pts = declare_definition(&db, "node", "profile", &[
-        ("indexed", &[("t", "datetime")]),
-        ("indexed", &[("t", "integer")]),
-    ]);
+    let pts = declare_definition(
+        &db,
+        "node",
+        "profile",
+        &[
+            ("indexed", &[("t", "datetime")]),
+            ("indexed", &[("t", "integer")]),
+        ],
+    );
     let o = WriteOptions::default();
 
     let r1 = write_parameter(
-        &db, "node", "profile", "Base",
-        indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]), &[], o, "t", "integer member",
+        &db,
+        "node",
+        "profile",
+        "Base",
+        indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "integer member",
     )
     .expect("integer-indexed write");
     assert_eq!(r1.tiers, vec![Tier::Array]);
 
     let hour = 3_600_000_000i64;
     let r2 = write_parameter(
-        &db, "node", "profile", "ts",
-        datetime_indexed_batch("n1", "t", &[0, hour], &[3.0, 4.0]), &[], o, "t", "datetime member",
+        &db,
+        "node",
+        "profile",
+        "ts",
+        datetime_indexed_batch("n1", "t", &[0, hour], &[3.0, 4.0]),
+        &[],
+        o,
+        "t",
+        "datetime member",
     )
     .expect("datetime-indexed write");
     assert_eq!(r2.tiers, vec![Tier::Array]);
@@ -1004,24 +1324,47 @@ fn multi_type_same_rank_members_distinguished_by_index_kind() {
 #[test]
 fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
     let (_dir, db) = fresh_db();
-    let pts = declare_definition(&db, "node", "usage", &[
-        ("indexed", &[("t", "integer")]),
-        ("indexed", &[("step", "integer")]),
-    ]);
+    let pts = declare_definition(
+        &db,
+        "node",
+        "usage",
+        &[
+            ("indexed", &[("t", "integer")]),
+            ("indexed", &[("step", "integer")]),
+        ],
+    );
     let o = WriteOptions::default();
 
     // Both members writable, each bound by its dimension name at entry.
     write_parameter(
-        &db, "node", "usage", "Base",
-        indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]), &[], o, "t", "t member",
+        &db,
+        "node",
+        "usage",
+        "Base",
+        indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]),
+        &[],
+        o,
+        "t",
+        "t member",
     )
     .expect("t-member write");
     write_parameter(
-        &db, "node", "usage", "alt2",
-        indexed_float_batch("n1", "step", &[10, 20], &[3.0, 4.0]), &[], o, "t", "step member",
+        &db,
+        "node",
+        "usage",
+        "alt2",
+        indexed_float_batch("n1", "step", &[10, 20], &[3.0, 4.0]),
+        &[],
+        o,
+        "t",
+        "step member",
     )
     .expect("step-member write");
-    assert_eq!(count(&db, "SELECT count(*) FROM value_array"), 2, "both rows land");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_array"),
+        2,
+        "both rows land"
+    );
 
     // CAN distinguish: by alternative and axis content, on the positional
     // integer index column.
@@ -1036,8 +1379,14 @@ fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
 
     // The read macro exposes no dimension-named column and no binding column —
     // per-row member attribution goes through the persisted binding instead.
-    assert!(base.schema().index_of("t").is_err(), "index columns are positional, not named");
-    assert!(alt2.schema().index_of("step").is_err(), "index columns are positional, not named");
+    assert!(
+        base.schema().index_of("t").is_err(),
+        "index columns are positional, not named"
+    );
+    assert!(
+        alt2.schema().index_of("step").is_err(),
+        "index columns are positional, not named"
+    );
 
     // D11: the tables carry the exact member binding for each row.
     assert_eq!(
@@ -1068,10 +1417,24 @@ fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
 fn metadata_label_domain_sets_ordinals() {
     let (_dir, db) = fresh_db();
     let batch = label_batch(
-        "e1", "level", Some(r#"["low","mid","high"]"#), &["low", "high"], &[1.0, 2.0],
+        "e1",
+        "level",
+        Some(r#"["low","mid","high"]"#),
+        &["low", "high"],
+        &[1.0, 2.0],
     );
-    write_parameter(&db, "node", "lvl", "Base", batch, &[], WriteOptions::default(), "t", "m")
-        .expect("metadata-channel write");
+    write_parameter(
+        &db,
+        "node",
+        "lvl",
+        "Base",
+        batch,
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect("metadata-channel write");
     let conn = Connection::open(&db).unwrap();
     let rows: Vec<(i32, String, i32)> = conn
         .prepare("SELECT pos, label, ordinal FROM axis_label ORDER BY pos")
@@ -1093,11 +1456,32 @@ fn metadata_label_domain_sets_ordinals() {
 fn malformed_label_domain_metadata_fails_before_db_work() {
     let (_dir, db) = fresh_db();
     let batch = label_batch("e1", "level", Some(r#"["low", oops"#), &["low"], &[1.0]);
-    let err = write_parameter(&db, "node", "lvl", "Base", batch, &[], WriteOptions::default(), "t", "m")
-        .expect_err("malformed metadata must be loud");
-    assert!(err.to_string().contains("spinal:label_domain"), "unexpected: {err}");
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class"), 0, "DB untouched");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only");
+    let err = write_parameter(
+        &db,
+        "node",
+        "lvl",
+        "Base",
+        batch,
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect_err("malformed metadata must be loud");
+    assert!(
+        err.to_string().contains("spinal:label_domain"),
+        "unexpected: {err}"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM entity_class"),
+        0,
+        "DB untouched"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        1,
+        "bootstrap commit only"
+    );
 }
 
 /// Precedence: the in-process `domains` arg wins over conflicting metadata
@@ -1106,14 +1490,28 @@ fn malformed_label_domain_metadata_fails_before_db_work() {
 fn domains_arg_wins_over_conflicting_metadata() {
     let (_dir, db) = fresh_db();
     let batch = label_batch(
-        "e1", "level", Some(r#"["low","mid","high"]"#), &["low", "high"], &[1.0, 2.0],
+        "e1",
+        "level",
+        Some(r#"["low","mid","high"]"#),
+        &["low", "high"],
+        &[1.0, 2.0],
     );
     let arg = [LabelDomain {
         position: 1,
         labels: vec!["high".into(), "low".into()],
     }];
-    write_parameter(&db, "node", "lvl", "Base", batch, &arg, WriteOptions::default(), "t", "m")
-        .expect("arg-channel write");
+    write_parameter(
+        &db,
+        "node",
+        "lvl",
+        "Base",
+        batch,
+        &arg,
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect("arg-channel write");
     let conn = Connection::open(&db).unwrap();
     let rows: Vec<(i32, String, i32)> = conn
         .prepare("SELECT pos, label, ordinal FROM axis_label ORDER BY pos")

@@ -14,8 +14,10 @@ pub enum DbError {
     /// budget: another connection holds the file. CLAUDE.md invariant 1 — an
     /// idle RO handle starves every commit — makes this a first-class,
     /// user-visible state, never a stack trace (VMP Part 6).
-    #[error("database busy: could not acquire the lock after {attempts} attempts \
-             (another read-only or read-write connection holds the file)")]
+    #[error(
+        "database busy: could not acquire the lock after {attempts} attempts \
+             (another read-only or read-write connection holds the file)"
+    )]
     Busy { attempts: u32 },
 
     /// The bundled DuckDB is older than the line the schema semantics were

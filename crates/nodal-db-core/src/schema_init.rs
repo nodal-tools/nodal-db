@@ -26,21 +26,63 @@ use crate::error::DbError;
 /// below (a bare `include_str!` list cannot self-detect an omission).
 pub static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
     ("001_meta.sql", include_str!("../../../schema/001_meta.sql")),
-    ("010_entities.sql", include_str!("../../../schema/010_entities.sql")),
-    ("020_alternatives.sql", include_str!("../../../schema/020_alternatives.sql")),
-    ("030_parameters.sql", include_str!("../../../schema/030_parameters.sql")),
+    (
+        "010_entities.sql",
+        include_str!("../../../schema/010_entities.sql"),
+    ),
+    (
+        "020_alternatives.sql",
+        include_str!("../../../schema/020_alternatives.sql"),
+    ),
+    (
+        "030_parameters.sql",
+        include_str!("../../../schema/030_parameters.sql"),
+    ),
     ("040_axes.sql", include_str!("../../../schema/040_axes.sql")),
-    ("050_values.sql", include_str!("../../../schema/050_values.sql")),
-    ("055_provenance.sql", include_str!("../../../schema/055_provenance.sql")),
-    ("060_display.sql", include_str!("../../../schema/060_display.sql")),
-    ("065_semantic.sql", include_str!("../../../schema/065_semantic.sql")),
-    ("070_views_current.sql", include_str!("../../../schema/070_views_current.sql")),
-    ("080_views_read.sql", include_str!("../../../schema/080_views_read.sql")),
-    ("090_views_resolution.sql", include_str!("../../../schema/090_views_resolution.sql")),
-    ("100_views_completeness.sql", include_str!("../../../schema/100_views_completeness.sql")),
-    ("110_views_history.sql", include_str!("../../../schema/110_views_history.sql")),
-    ("120_views_audit.sql", include_str!("../../../schema/120_views_audit.sql")),
-    ("900_bootstrap.sql", include_str!("../../../schema/900_bootstrap.sql")),
+    (
+        "050_values.sql",
+        include_str!("../../../schema/050_values.sql"),
+    ),
+    (
+        "055_provenance.sql",
+        include_str!("../../../schema/055_provenance.sql"),
+    ),
+    (
+        "060_display.sql",
+        include_str!("../../../schema/060_display.sql"),
+    ),
+    (
+        "065_semantic.sql",
+        include_str!("../../../schema/065_semantic.sql"),
+    ),
+    (
+        "070_views_current.sql",
+        include_str!("../../../schema/070_views_current.sql"),
+    ),
+    (
+        "080_views_read.sql",
+        include_str!("../../../schema/080_views_read.sql"),
+    ),
+    (
+        "090_views_resolution.sql",
+        include_str!("../../../schema/090_views_resolution.sql"),
+    ),
+    (
+        "100_views_completeness.sql",
+        include_str!("../../../schema/100_views_completeness.sql"),
+    ),
+    (
+        "110_views_history.sql",
+        include_str!("../../../schema/110_views_history.sql"),
+    ),
+    (
+        "120_views_audit.sql",
+        include_str!("../../../schema/120_views_audit.sql"),
+    ),
+    (
+        "900_bootstrap.sql",
+        include_str!("../../../schema/900_bootstrap.sql"),
+    ),
 ];
 
 /// The repo's `schema/` directory, resolved relative to this crate:
@@ -68,7 +110,12 @@ fn numbered_sql_files(dir: &Path) -> Result<Vec<PathBuf>, DbError> {
             p.extension().map(|x| x == "sql").unwrap_or(false)
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                    .map(|n| {
+                        n.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(false)
         })
         .collect();
@@ -185,7 +232,9 @@ mod tests {
     fn alt_count(db: &Path) -> i64 {
         let conn = Connection::open(db).expect("open");
         let n = conn
-            .query_row("SELECT count(*) FROM alternative", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT count(*) FROM alternative", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .expect("count");
         conn.close().expect("close");
         n
@@ -225,11 +274,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let none_db = dir.path().join("none.duckdb");
         init_schema(&none_db).expect("init none");
-        assert_eq!(alt_count(&none_db), 0, "default init seeds zero alternatives");
+        assert_eq!(
+            alt_count(&none_db),
+            0,
+            "default init seeds zero alternatives"
+        );
 
         let base_db = dir.path().join("base.duckdb");
         init_schema_with_default(&base_db, Some("Base")).expect("init base");
-        assert_eq!(alt_count(&base_db), 1, "Some(name) seeds exactly one alternative");
+        assert_eq!(
+            alt_count(&base_db),
+            1,
+            "Some(name) seeds exactly one alternative"
+        );
     }
 
     /// RFC-4122 textual shape: 8-4-4-4-12 hex groups.
@@ -276,8 +333,10 @@ mod tests {
                 )
             })
             .collect();
-        let sources: Vec<(&str, &str)> =
-            named.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let sources: Vec<(&str, &str)> = named
+            .iter()
+            .map(|(n, s)| (n.as_str(), s.as_str()))
+            .collect();
         let c = dir.path().join("c.duckdb");
         init_schema_from_sources(&c, &sources).expect("init from sources");
         let id_c = crate::api::db_identity(&c).expect("identity c");

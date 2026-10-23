@@ -517,10 +517,8 @@ impl Database {
         user: String,
     ) -> PyResult<i64> {
         let path = self.path.clone();
-        py.detach(move || {
-            verbs::ensure_alternative(&path, &name, description.as_deref(), &user)
-        })
-        .map_err(db_err)
+        py.detach(move || verbs::ensure_alternative(&path, &name, description.as_deref(), &user))
+            .map_err(db_err)
     }
 
     /// Whole-list declarative replace of a scenario's alternative ranking:
@@ -537,10 +535,8 @@ impl Database {
         user: String,
     ) -> PyResult<i64> {
         let path = self.path.clone();
-        py.detach(move || {
-            verbs::set_scenario_alternatives(&path, &scenario, &alternatives, &user)
-        })
-        .map_err(db_err)
+        py.detach(move || verbs::set_scenario_alternatives(&path, &scenario, &alternatives, &user))
+            .map_err(db_err)
     }
 
     /// Write/update (`active` True/False) or close (`active=None`) one
@@ -685,10 +681,8 @@ impl Database {
         user: String,
     ) -> PyResult<()> {
         let path = self.path.clone();
-        py.detach(move || {
-            verbs::stamp_template_identity(&path, &name, &version, overwrite, &user)
-        })
-        .map_err(db_err)
+        py.detach(move || verbs::stamp_template_identity(&path, &name, &version, overwrite, &user))
+            .map_err(db_err)
     }
 
     // -- erasure -----------------------------------------------------------

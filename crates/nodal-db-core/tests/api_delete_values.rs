@@ -157,7 +157,9 @@ fn as_of_scalar(db: &std::path::Path, commit: i64) -> Vec<(bool, Option<f64>)> {
              ORDER BY version",
         )
         .unwrap()
-        .query_map(duckdb::params![commit, commit], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map(duckdb::params![commit, commit], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -185,13 +187,33 @@ fn o() -> WriteOptions {
 fn scalar_delete_removes_current_and_stays_as_of_queryable() {
     let (_dir, db) = fresh_db();
 
-    let w = write_parameter(&db, "node", "demand", "scen_a", scalar_batch("node_1", 42.5), &[], o(), "t", "v1")
-        .expect("write");
+    let w = write_parameter(
+        &db,
+        "node",
+        "demand",
+        "scen_a",
+        scalar_batch("node_1", 42.5),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("write");
     let c_write = w.commit_id;
 
-    let r = delete_values(&db, vec![dk("node", "demand", "scen_a", "node_1")], "t", "del", o())
-        .expect("delete");
-    assert!(r.warnings.is_empty(), "clean delete has no warnings: {:?}", r.warnings);
+    let r = delete_values(
+        &db,
+        vec![dk("node", "demand", "scen_a", "node_1")],
+        "t",
+        "del",
+        o(),
+    )
+    .expect("delete");
+    assert!(
+        r.warnings.is_empty(),
+        "clean delete has no warnings: {:?}",
+        r.warnings
+    );
     assert_eq!(r.rows_closed, 1, "one scalar row closed");
     assert_eq!(r.values_written, 1, "one value deleted");
     assert_eq!(r.rows_written, 0, "delete writes no new current row");
@@ -199,13 +221,25 @@ fn scalar_delete_removes_current_and_stays_as_of_queryable() {
     assert!(r.commit_id > c_write, "delete stamps a later commit");
 
     // Gone from the current read view.
-    assert_eq!(read_parameter(&db, "node", "demand", "scen_a").unwrap().num_rows(), 0);
+    assert_eq!(
+        read_parameter(&db, "node", "demand", "scen_a")
+            .unwrap()
+            .num_rows(),
+        0
+    );
 
     // The physical row is closed out, not removed: content retained + still
     // live (and correct) AS-OF the write commit.
-    assert_eq!(count(&db, "SELECT count(*) FROM value_scalar"), 1, "row retained, not deleted");
     assert_eq!(
-        count(&db, "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL"),
+        count(&db, "SELECT count(*) FROM value_scalar"),
+        1,
+        "row retained, not deleted"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL"
+        ),
         1,
         "the one row is closed out",
     );
@@ -242,11 +276,28 @@ fn retain_false_delete_stubs_and_is_not_recoverable_as_of() {
         conn.close().unwrap();
     }
 
-    let w = write_parameter(&db, "unit", "result", "Base", scalar_batch("u1", 7.0), &[], o(), "t", "v1")
-        .expect("write");
+    let w = write_parameter(
+        &db,
+        "unit",
+        "result",
+        "Base",
+        scalar_batch("u1", 7.0),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("write");
     let c_write = w.commit_id;
 
-    delete_values(&db, vec![dk("unit", "result", "Base", "u1")], "t", "del", o()).expect("delete");
+    delete_values(
+        &db,
+        vec![dk("unit", "result", "Base", "u1")],
+        "t",
+        "del",
+        o(),
+    )
+    .expect("delete");
 
     // As-of the write commit the row exists but is a stub: content NOT retained,
     // payload NULL — the value is unrecoverable, never round-trips.
@@ -264,10 +315,27 @@ fn retain_false_delete_stubs_and_is_not_recoverable_as_of() {
 fn delete_missing_value_warns_nothing_to_delete() {
     let (_dir, db) = fresh_db();
 
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "v1")
-        .expect("write");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("write");
     // First delete closes it out.
-    delete_values(&db, vec![dk("node", "demand", "Base", "node_1")], "t", "del1", o()).expect("del1");
+    delete_values(
+        &db,
+        vec![dk("node", "demand", "Base", "node_1")],
+        "t",
+        "del1",
+        o(),
+    )
+    .expect("del1");
 
     // Snapshot value state; the second delete must not touch it.
     let before: Vec<(i16, Option<i64>, Option<f64>)> = {
@@ -283,13 +351,22 @@ fn delete_missing_value_warns_nothing_to_delete() {
         v
     };
 
-    let r = delete_values(&db, vec![dk("node", "demand", "Base", "node_1")], "t", "del2", o())
-        .expect("del2");
+    let r = delete_values(
+        &db,
+        vec![dk("node", "demand", "Base", "node_1")],
+        "t",
+        "del2",
+        o(),
+    )
+    .expect("del2");
     assert_eq!(r.rows_closed, 0, "nothing was live to close");
     assert_eq!(r.values_written, 0, "no value counted for a no-op delete");
     assert_eq!(r.warnings.len(), 1, "exactly one warning");
     assert!(
-        matches!(r.warnings[0].kind, WarningKind::NothingToDelete { key_index: 0 }),
+        matches!(
+            r.warnings[0].kind,
+            WarningKind::NothingToDelete { key_index: 0 }
+        ),
         "unexpected: {:?}",
         r.warnings[0]
     );
@@ -316,8 +393,18 @@ fn delete_missing_value_warns_nothing_to_delete() {
 fn unknown_referent_warns_with_level_and_skips() {
     let (_dir, db) = fresh_db();
     // Establish node/demand/Base/node_1 as the resolvable baseline.
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "v1")
-        .expect("write");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("write");
 
     for (key, level) in [
         (dk("nope", "demand", "Base", "node_1"), "entity_class"),
@@ -329,7 +416,10 @@ fn unknown_referent_warns_with_level_and_skips() {
         assert_eq!(r.rows_closed, 0, "nothing deleted for {level}");
         assert_eq!(r.warnings.len(), 1, "one warning for {level}");
         match &r.warnings[0].kind {
-            WarningKind::UnknownReferent { key_index, level: got } => {
+            WarningKind::UnknownReferent {
+                key_index,
+                level: got,
+            } => {
                 assert_eq!(*key_index, 0);
                 assert_eq!(got, level, "level names the first missing referent");
             }
@@ -337,7 +427,12 @@ fn unknown_referent_warns_with_level_and_skips() {
         }
     }
     // The baseline value was never touched by the skipped deletes.
-    assert_eq!(read_parameter(&db, "node", "demand", "Base").unwrap().num_rows(), 1);
+    assert_eq!(
+        read_parameter(&db, "node", "demand", "Base")
+            .unwrap()
+            .num_rows(),
+        1
+    );
     audit_clean(&db);
 }
 
@@ -345,8 +440,18 @@ fn unknown_referent_warns_with_level_and_skips() {
 #[test]
 fn unknown_key_skipped_other_keys_applied() {
     let (_dir, db) = fresh_db();
-    write_parameter(&db, "node", "demand", "Base", scalar_batch2(&["a", "b"], &[1.0, 2.0]), &[], o(), "t", "w")
-        .expect("write");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch2(&["a", "b"], &[1.0, 2.0]),
+        &[],
+        o(),
+        "t",
+        "w",
+    )
+    .expect("write");
 
     let r = delete_values(
         &db,
@@ -366,7 +471,13 @@ fn unknown_key_skipped_other_keys_applied() {
         r.warnings[0].kind,
         WarningKind::UnknownReferent { key_index: 0, .. }
     ));
-    assert_eq!(read_parameter(&db, "node", "demand", "Base").unwrap().num_rows(), 0, "both gone");
+    assert_eq!(
+        read_parameter(&db, "node", "demand", "Base")
+            .unwrap()
+            .num_rows(),
+        0,
+        "both gone"
+    );
     audit_clean(&db);
 }
 
@@ -374,21 +485,43 @@ fn unknown_key_skipped_other_keys_applied() {
 #[test]
 fn multi_key_delete_is_one_commit() {
     let (_dir, db) = fresh_db();
-    write_parameter(&db, "node", "demand", "Base", scalar_batch2(&["a", "b"], &[1.0, 2.0]), &[], o(), "t", "w")
-        .expect("write");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch2(&["a", "b"], &[1.0, 2.0]),
+        &[],
+        o(),
+        "t",
+        "w",
+    )
+    .expect("write");
     let before = count(&db, "SELECT count(*) FROM commit");
 
     let r = delete_values(
         &db,
-        vec![dk("node", "demand", "Base", "a"), dk("node", "demand", "Base", "b")],
+        vec![
+            dk("node", "demand", "Base", "a"),
+            dk("node", "demand", "Base", "b"),
+        ],
         "t",
         "multi",
         o(),
     )
     .expect("delete");
     assert_eq!(r.rows_closed, 2);
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - before, 1, "one commit for the whole batch");
-    assert_eq!(read_parameter(&db, "node", "demand", "Base").unwrap().num_rows(), 0);
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit") - before,
+        1,
+        "one commit for the whole batch"
+    );
+    assert_eq!(
+        read_parameter(&db, "node", "demand", "Base")
+            .unwrap()
+            .num_rows(),
+        0
+    );
     audit_clean(&db);
 }
 
@@ -398,8 +531,18 @@ fn multi_key_delete_is_one_commit() {
 fn combined_write_and_delete_one_commit() {
     let (_dir, db) = fresh_db();
     // node_1 exists so the delete has something to close.
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "seed")
-        .expect("seed");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "seed",
+    )
+    .expect("seed");
     let before = count(&db, "SELECT count(*) FROM commit");
 
     let r = commit_changes(
@@ -414,7 +557,11 @@ fn combined_write_and_delete_one_commit() {
     )
     .expect("commit_changes");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - before, 1, "one commit for write+delete");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit") - before,
+        1,
+        "one commit for write+delete"
+    );
     assert_eq!(r.rows_written, 1, "the write added one current row");
     assert_eq!(r.rows_closed, 1, "the delete closed one row");
 
@@ -422,10 +569,18 @@ fn combined_write_and_delete_one_commit() {
     // Only node_2 remains current; node_1 was deleted in the same commit.
     let names: Vec<String> = {
         let i = got.schema().index_of("entity").unwrap();
-        let a = got.column(i).as_any().downcast_ref::<StringArray>().unwrap();
+        let a = got
+            .column(i)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         (0..a.len()).map(|r| a.value(r).to_string()).collect()
     };
-    assert_eq!(names, vec!["node_2".to_string()], "node_1 deleted, node_2 written, one commit");
+    assert_eq!(
+        names,
+        vec!["node_2".to_string()],
+        "node_1 deleted, node_2 written, one commit"
+    );
     audit_clean(&db);
 }
 
@@ -435,8 +590,18 @@ fn combined_write_and_delete_one_commit() {
 #[test]
 fn combined_error_rolls_back_whole_invocation() {
     let (_dir, db) = fresh_db();
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "seed")
-        .expect("seed");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "seed",
+    )
+    .expect("seed");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     let err = commit_changes(
@@ -445,7 +610,12 @@ fn combined_error_rolls_back_whole_invocation() {
             // seg 1 overwrites node_1/demand → CLOSES version 1, writes version 2.
             seg("node", "demand", "Base", scalar_batch("node_1", 2.0)),
             // seg 2 fails at canonicalization (MissingDomain) mid-transaction.
-            seg("node", "level_param", "Base", undomained_label_batch("node_1")),
+            seg(
+                "node",
+                "level_param",
+                "Base",
+                undomained_label_batch("node_1"),
+            ),
         ],
         vec![],                                       // no structural
         vec![dk("node", "demand", "Base", "node_1")], // queued delete, never reached
@@ -455,14 +625,28 @@ fn combined_error_rolls_back_whole_invocation() {
         o(),
     )
     .expect_err("undomained segment must fail the whole invocation");
-    assert!(err.to_string().contains("level_param"), "error names the failing segment: {err}");
+    assert!(
+        err.to_string().contains("level_param"),
+        "error names the failing segment: {err}"
+    );
 
     // Nothing persisted: no new commit; node_1/demand still its ORIGINAL value 1.0
     // (the mid-closure close-out of version 1 was rolled back); no version 2 row.
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "no commit row persisted");
-    assert_eq!(count(&db, "SELECT count(*) FROM value_scalar"), 1, "no version-2 row, close-out rolled back");
     assert_eq!(
-        count(&db, "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL"),
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "no commit row persisted"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_scalar"),
+        1,
+        "no version-2 row, close-out rolled back"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL"
+        ),
         0,
         "no row was closed",
     );
@@ -477,13 +661,40 @@ fn combined_error_rolls_back_whole_invocation() {
 fn write_delete_rewrite_monotonic_scalar() {
     let (_dir, db) = fresh_db();
 
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "v1")
-        .expect("v1");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("v1");
     audit_clean(&db);
-    delete_values(&db, vec![dk("node", "demand", "Base", "node_1")], "t", "del", o()).expect("del");
+    delete_values(
+        &db,
+        vec![dk("node", "demand", "Base", "node_1")],
+        "t",
+        "del",
+        o(),
+    )
+    .expect("del");
     audit_clean(&db);
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 2.0), &[], o(), "t", "v2")
-        .expect("v2");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 2.0),
+        &[],
+        o(),
+        "t",
+        "v2",
+    )
+    .expect("v2");
     audit_clean(&db);
 
     let conn = Connection::open(&db).unwrap();
@@ -496,7 +707,11 @@ fn write_delete_rewrite_monotonic_scalar() {
         .unwrap();
     conn.close().unwrap();
     // v1 written, v1 closed on delete, v2 on re-write: monotone 1 → 2, only v2 live.
-    assert_eq!(rows, vec![(1, false), (2, true)], "monotone versions; only v2 current");
+    assert_eq!(
+        rows,
+        vec![(1, false), (2, true)],
+        "monotone versions; only v2 current"
+    );
 }
 
 /// write→delete→re-write monotonic versions on the ARRAY tier.
@@ -504,21 +719,68 @@ fn write_delete_rewrite_monotonic_scalar() {
 fn write_delete_rewrite_monotonic_array() {
     let (_dir, db) = fresh_db();
 
-    let w = write_parameter(&db, "node", "profile", "Base", indexed_float_batch("node_1", "step", &[0, 1, 2], &[1.0, 2.0, 3.0]), &[], o(), "t", "v1")
-        .expect("v1");
-    assert_eq!(w.tiers, vec![nodal_db_core::types::Tier::Array], "array tier");
+    let w = write_parameter(
+        &db,
+        "node",
+        "profile",
+        "Base",
+        indexed_float_batch("node_1", "step", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("v1");
+    assert_eq!(
+        w.tiers,
+        vec![nodal_db_core::types::Tier::Array],
+        "array tier"
+    );
     audit_clean(&db);
-    delete_values(&db, vec![dk("node", "profile", "Base", "node_1")], "t", "del", o()).expect("del");
+    delete_values(
+        &db,
+        vec![dk("node", "profile", "Base", "node_1")],
+        "t",
+        "del",
+        o(),
+    )
+    .expect("del");
     audit_clean(&db);
-    write_parameter(&db, "node", "profile", "Base", indexed_float_batch("node_1", "step", &[0, 1, 2], &[4.0, 5.0, 6.0]), &[], o(), "t", "v2")
-        .expect("v2");
+    write_parameter(
+        &db,
+        "node",
+        "profile",
+        "Base",
+        indexed_float_batch("node_1", "step", &[0, 1, 2], &[4.0, 5.0, 6.0]),
+        &[],
+        o(),
+        "t",
+        "v2",
+    )
+    .expect("v2");
     audit_clean(&db);
 
     // v1 lived, was moved to the _hist twin on delete, v2 is the current row.
-    assert_eq!(count(&db, "SELECT count(*) FROM value_array"), 1, "one live array row");
-    assert_eq!(count(&db, "SELECT version FROM value_array"), 2, "current row is version 2");
-    assert_eq!(count(&db, "SELECT count(*) FROM value_array_hist"), 1, "the pre-image is retained");
-    assert_eq!(count(&db, "SELECT version FROM value_array_hist"), 1, "history holds version 1");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_array"),
+        1,
+        "one live array row"
+    );
+    assert_eq!(
+        count(&db, "SELECT version FROM value_array"),
+        2,
+        "current row is version 2"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_array_hist"),
+        1,
+        "the pre-image is retained"
+    );
+    assert_eq!(
+        count(&db, "SELECT version FROM value_array_hist"),
+        1,
+        "history holds version 1"
+    );
 }
 
 /// write→delete→re-write monotonic versions on the LONG tier.
@@ -526,14 +788,41 @@ fn write_delete_rewrite_monotonic_array() {
 fn write_delete_rewrite_monotonic_long() {
     let (_dir, db) = fresh_db();
 
-    let w = write_parameter(&db, "node", "counts", "Base", indexed_int_batch("node_1", "step", &[10, 20, 30], &[100, 200, 300]), &[], o(), "t", "v1")
-        .expect("v1");
+    let w = write_parameter(
+        &db,
+        "node",
+        "counts",
+        "Base",
+        indexed_int_batch("node_1", "step", &[10, 20, 30], &[100, 200, 300]),
+        &[],
+        o(),
+        "t",
+        "v1",
+    )
+    .expect("v1");
     assert_eq!(w.tiers, vec![nodal_db_core::types::Tier::Long], "long tier");
     audit_clean(&db);
-    delete_values(&db, vec![dk("node", "counts", "Base", "node_1")], "t", "del", o()).expect("del");
+    delete_values(
+        &db,
+        vec![dk("node", "counts", "Base", "node_1")],
+        "t",
+        "del",
+        o(),
+    )
+    .expect("del");
     audit_clean(&db);
-    write_parameter(&db, "node", "counts", "Base", indexed_int_batch("node_1", "step", &[10, 20, 30], &[111, 222, 333]), &[], o(), "t", "v2")
-        .expect("v2");
+    write_parameter(
+        &db,
+        "node",
+        "counts",
+        "Base",
+        indexed_int_batch("node_1", "step", &[10, 20, 30], &[111, 222, 333]),
+        &[],
+        o(),
+        "t",
+        "v2",
+    )
+    .expect("v2");
     audit_clean(&db);
 
     let conn = Connection::open(&db).unwrap();
@@ -565,7 +854,10 @@ fn caller_contract_errors_are_rejected() {
 
     // Empty segments AND empty deletes ⇒ Api error.
     let err = delete_values(&db, vec![], "t", "m", o()).expect_err("empty must be rejected");
-    assert!(err.to_string().contains("nothing to do"), "unexpected: {err}");
+    assert!(
+        err.to_string().contains("nothing to do"),
+        "unexpected: {err}"
+    );
 
     // Blank component ⇒ Api error.
     let err = delete_values(&db, vec![dk("node", " ", "Base", "e")], "t", "m", o())
@@ -575,7 +867,10 @@ fn caller_contract_errors_are_rejected() {
     // Fold-colliding distinct spellings (case-alias) ⇒ Api error.
     let err = delete_values(
         &db,
-        vec![dk("node", "demand", "Base", "N1"), dk("Node", "demand", "base", "n1")],
+        vec![
+            dk("node", "demand", "Base", "N1"),
+            dk("Node", "demand", "base", "n1"),
+        ],
         "t",
         "m",
         o(),
@@ -588,7 +883,11 @@ fn caller_contract_errors_are_rejected() {
         .expect_err("blank user must be rejected");
     assert!(err.to_string().contains("user"), "unexpected: {err}");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only — no DB work");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        1,
+        "bootstrap commit only — no DB work"
+    );
 }
 
 /// identical keys in one call are silently deduped (not an error, not a
@@ -596,18 +895,37 @@ fn caller_contract_errors_are_rejected() {
 #[test]
 fn identical_keys_are_deduped() {
     let (_dir, db) = fresh_db();
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "w")
-        .expect("write");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "w",
+    )
+    .expect("write");
 
     let r = delete_values(
         &db,
-        vec![dk("node", "demand", "Base", "node_1"), dk("node", "demand", "Base", "node_1")],
+        vec![
+            dk("node", "demand", "Base", "node_1"),
+            dk("node", "demand", "Base", "node_1"),
+        ],
         "t",
         "dupe",
         o(),
     )
     .expect("delete");
-    assert_eq!(r.rows_closed, 1, "the identical second key was deduped, not double-applied");
-    assert!(r.warnings.is_empty(), "no warning: the single delete succeeded");
+    assert_eq!(
+        r.rows_closed, 1,
+        "the identical second key was deduped, not double-applied"
+    );
+    assert!(
+        r.warnings.is_empty(),
+        "no warning: the single delete succeeded"
+    );
     audit_clean(&db);
 }

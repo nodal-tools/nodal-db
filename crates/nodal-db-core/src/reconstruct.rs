@@ -38,7 +38,10 @@ pub enum ReconstructError {
 ///
 /// A rank-0 (empty `axis_lengths`) payload of length 1 reconstructs to a single
 /// row with an empty position tuple; any other rank-0 length is a mismatch.
-pub fn reconstruct(axis_lengths: &[usize], values: &[f64]) -> Result<Vec<LongRow>, ReconstructError> {
+pub fn reconstruct(
+    axis_lengths: &[usize],
+    values: &[f64],
+) -> Result<Vec<LongRow>, ReconstructError> {
     let expected: usize = axis_lengths.iter().product();
     if values.len() != expected {
         return Err(ReconstructError::LengthMismatch {

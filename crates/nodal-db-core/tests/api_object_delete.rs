@@ -183,15 +183,55 @@ fn blocker<'a>(bs: &'a [Blocker], table: &str) -> Option<&'a Blocker> {
 fn seed_full_deps(db: &std::path::Path, alt: &str) {
     // Value tiers, through the one write pipeline (auto-creates `alt`, node
     // class, node_1, and the three parameter definitions).
-    write_parameter(db, "node", "demand", alt, scalar_batch("node_1", 1.0), &[], o(), "t", "s")
-        .expect("scalar");
-    write_parameter(db, "node", "profile", alt, array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]), &[], o(), "t", "a")
-        .expect("array");
-    write_parameter(db, "node", "counts", alt, long_batch("node_1", &[0, 1, 2], &[10, 20, 30]), &[], o(), "t", "l")
-        .expect("long");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        alt,
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("scalar");
+    write_parameter(
+        db,
+        "node",
+        "profile",
+        alt,
+        array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+        &[],
+        o(),
+        "t",
+        "a",
+    )
+    .expect("array");
+    write_parameter(
+        db,
+        "node",
+        "counts",
+        alt,
+        long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
+        &[],
+        o(),
+        "t",
+        "l",
+    )
+    .expect("long");
     // node_2 (a distinct entity, in Base) so membership has two members.
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_2", 5.0), &[], o(), "t", "n2")
-        .expect("node_2");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_2", 5.0),
+        &[],
+        o(),
+        "t",
+        "n2",
+    )
+    .expect("node_2");
 
     // Raw dependents (tables the value write path never touches). Each attaches
     // to the latest commit and resolves ids by name via subqueries.
@@ -261,12 +301,21 @@ fn restrict_blocks_and_reports() {
     let (_dir, db) = fresh_db();
     seed_full_deps(&db, "victim");
 
-    let alt_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('victim')");
+    let alt_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('victim')",
+    );
     let before_live = live_dep_rows(&db, alt_id);
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
-    let r = delete_objects(&db, vec![(oalt("victim"), cascade(false))], "t", "restrict", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oalt("victim"), cascade(false))],
+        "t",
+        "restrict",
+        o(),
+    )
+    .expect("commit");
     assert_eq!(r.object_deletes.len(), 1);
     let out = &r.object_deletes[0];
     assert_eq!(out.kind, ObjectKind::Alternative);
@@ -280,15 +329,28 @@ fn restrict_blocks_and_reports() {
         assert!(b.count >= 1, "{table} blocker count");
         assert!(!b.sample.is_empty(), "{table} sample present");
     }
-    assert_eq!(blocker(blockers, "value_long").unwrap().count, 3, "3 long cells");
+    assert_eq!(
+        blocker(blockers, "value_long").unwrap().count,
+        3,
+        "3 long cells"
+    );
 
     // RESTRICT closed NOTHING: object row still live, every dependent still live.
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM alternative WHERE id={alt_id} AND valid_to_commit IS NULL")),
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={alt_id} AND valid_to_commit IS NULL"
+            )
+        ),
         1,
         "object row still live"
     );
-    assert_eq!(live_dep_rows(&db, alt_id), before_live, "no dependent closed");
+    assert_eq!(
+        live_dep_rows(&db, alt_id),
+        before_live,
+        "no dependent closed"
+    );
     // A commit row IS created (the transaction ran), but no data changed. The
     // per-request contract is the report, not a refusal (D1).
     assert_eq!(
@@ -305,11 +367,20 @@ fn restrict_blocks_and_reports() {
 fn cascade_closes_and_reports() {
     let (_dir, db) = fresh_db();
     seed_full_deps(&db, "victim");
-    let alt_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('victim')");
+    let alt_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('victim')",
+    );
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
 
-    let r = delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "cascade", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oalt("victim"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
@@ -322,17 +393,29 @@ fn cascade_closes_and_reports() {
     assert_eq!(per_table(cc, "membership").unwrap().rows, 1);
     assert_eq!(per_table(cc, "scenario_alternative").unwrap().rows, 1);
     assert_eq!(per_table(cc, "parameter_value_metadata").unwrap().rows, 1);
-    assert_eq!(cc.total_rows, 1 + 1 + 1 + 3 + 1 + 1 + 1 + 1, "headline = object + all deps");
+    assert_eq!(
+        cc.total_rows,
+        1 + 1 + 1 + 3 + 1 + 1 + 1 + 1,
+        "headline = object + all deps"
+    );
 
     // Object row + all versioned dependents now closed; array moved to hist.
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM alternative WHERE id={alt_id} AND valid_to_commit IS NULL")),
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={alt_id} AND valid_to_commit IS NULL"
+            )
+        ),
         0,
         "object row closed"
     );
     assert_eq!(live_dep_rows(&db, alt_id), 0, "all dependents closed");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM value_array WHERE alternative_id={alt_id}")),
+        count(
+            &db,
+            &format!("SELECT count(*) FROM value_array WHERE alternative_id={alt_id}")
+        ),
         0,
         "array row deleted from current table"
     );
@@ -350,7 +433,10 @@ fn cascade_closes_and_reports() {
 fn bare_delete_no_dependents() {
     let (_dir, db) = fresh_db();
     // Base exists from the seed and has no dependents.
-    let base_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('base')");
+    let base_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('base')",
+    );
     let r = delete_objects(&db, vec![(oalt("Base"), cascade(false))], "t", "bare", o())
         .expect("commit");
     let cc = match &r.object_deletes[0].result {
@@ -361,7 +447,12 @@ fn bare_delete_no_dependents() {
     assert!(cc.per_table.is_empty(), "no dependent tables");
     assert_eq!(cc.total_rows, 1);
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM alternative WHERE id={base_id} AND valid_to_commit IS NULL")),
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={base_id} AND valid_to_commit IS NULL"
+            )
+        ),
         0,
         "bare object row closed"
     );
@@ -374,41 +465,59 @@ fn bare_delete_no_dependents() {
 fn as_of_queryable_after_delete() {
     let (_dir, db) = fresh_db();
     seed_full_deps(&db, "victim");
-    let alt_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('victim')");
+    let alt_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('victim')",
+    );
     let c_before = count(&db, "SELECT max(id) FROM commit");
 
-    let r = delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "cascade", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oalt("victim"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let c_del = r.commit_id;
 
     // The closed-out alternative row is still visible AS-OF the pre-delete
     // commit (valid_from <= c < valid_to), and gone as-of the delete commit.
     assert_eq!(
-        count(&db, &format!(
-            "SELECT count(*) FROM alternative WHERE id={alt_id} \
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={alt_id} \
              AND valid_from_commit <= {c_before} \
              AND (valid_to_commit IS NULL OR valid_to_commit > {c_before})"
-        )),
+            )
+        ),
         1,
         "alternative live as-of the pre-delete commit"
     );
     assert_eq!(
-        count(&db, &format!(
-            "SELECT count(*) FROM alternative WHERE id={alt_id} \
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={alt_id} \
              AND valid_from_commit <= {c_del} \
              AND (valid_to_commit IS NULL OR valid_to_commit > {c_del})"
-        )),
+            )
+        ),
         0,
         "alternative gone as-of the delete commit"
     );
     // A retained scalar value round-trips as-of the pre-delete commit.
     assert_eq!(
-        count(&db, &format!(
-            "SELECT count(*) FROM value_scalar WHERE alternative_id={alt_id} \
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM value_scalar WHERE alternative_id={alt_id} \
              AND content_retained AND v_float IS NOT NULL \
              AND valid_from_commit <= {c_before} \
              AND (valid_to_commit IS NULL OR valid_to_commit > {c_before})"
-        )),
+            )
+        ),
         1,
         "value content retained + queryable as-of"
     );
@@ -420,11 +529,21 @@ fn as_of_queryable_after_delete() {
 fn monotonic_versions_and_tiling_clean() {
     let (_dir, db) = fresh_db();
     seed_full_deps(&db, "victim");
-    delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "cascade", o()).expect("commit");
+    delete_objects(
+        &db,
+        vec![(oalt("victim"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     audit_tiling_clean(&db);
     // The alternative row kept its version (a close-out sets valid_to only).
     assert_eq!(
-        count(&db, "SELECT count(*) FROM alternative WHERE cur_name=lower('victim')"),
+        count(
+            &db,
+            "SELECT count(*) FROM alternative WHERE cur_name=lower('victim')"
+        ),
         0,
         "no current victim row after delete"
     );
@@ -442,10 +561,15 @@ fn monotonic_versions_and_tiling_clean() {
 fn idempotent_redelete_is_notfound() {
     let (_dir, db) = fresh_db();
     seed_full_deps(&db, "victim");
-    let r1 = delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "del1", o()).expect("del1");
-    assert!(matches!(r1.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }));
+    let r1 =
+        delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "del1", o()).expect("del1");
+    assert!(matches!(
+        r1.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
 
-    let r2 = delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "del2", o()).expect("del2");
+    let r2 =
+        delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "del2", o()).expect("del2");
     assert_eq!(
         r2.object_deletes[0].result,
         ObjectDeleteResult::NotFound,
@@ -459,7 +583,10 @@ fn idempotent_redelete_is_notfound() {
 fn atomic_rollback_on_mid_batch_error() {
     let (_dir, db) = fresh_db();
     seed_full_deps(&db, "victim");
-    let alt_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('victim')");
+    let alt_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('victim')",
+    );
     let before_live = live_dep_rows(&db, alt_id);
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
@@ -468,22 +595,41 @@ fn atomic_rollback_on_mid_batch_error() {
     // The whole txn must roll back.
     let err = delete_objects(
         &db,
-        vec![(oalt("victim"), cascade(true)), (forced_txn_error_key(), cascade(true))],
+        vec![
+            (oalt("victim"), cascade(true)),
+            (forced_txn_error_key(), cascade(true)),
+        ],
         "t",
         "must roll back",
         o(),
     )
     .expect_err("forced mid-batch error");
-    assert!(err.to_string().contains("0-D"), "error names the cause: {err}");
+    assert!(
+        err.to_string().contains("0-D"),
+        "error names the cause: {err}"
+    );
 
     // Nothing persisted: first delete rolled back, no commit row.
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "no commit persisted");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM alternative WHERE id={alt_id} AND valid_to_commit IS NULL")),
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "no commit persisted"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={alt_id} AND valid_to_commit IS NULL"
+            )
+        ),
         1,
         "victim still live (first delete rolled back)"
     );
-    assert_eq!(live_dep_rows(&db, alt_id), before_live, "dependents untouched");
+    assert_eq!(
+        live_dep_rows(&db, alt_id),
+        before_live,
+        "dependents untouched"
+    );
 }
 
 // --- test 8: combined atomicity (value write + value delete + object delete) -
@@ -492,10 +638,35 @@ fn atomic_rollback_on_mid_batch_error() {
 fn combined_atomicity_one_commit() {
     let (_dir, db) = fresh_db();
     // altA holds two scalar values; altB is a separate alternative with deps.
-    write_parameter(&db, "node", "demand", "altA", scalar_batch("node_1", 1.0), &[], o(), "t", "a1").expect("a1");
-    write_parameter(&db, "node", "demand", "altA", scalar_batch("node_2", 2.0), &[], o(), "t", "a2").expect("a2");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "altA",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "a1",
+    )
+    .expect("a1");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "altA",
+        scalar_batch("node_2", 2.0),
+        &[],
+        o(),
+        "t",
+        "a2",
+    )
+    .expect("a2");
     seed_full_deps(&db, "altB");
-    let altb_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('altb')");
+    let altb_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('altb')",
+    );
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write node_3 in altA, delete node_1 in altA, cascade-delete altB.
@@ -511,10 +682,20 @@ fn combined_atomicity_one_commit() {
     )
     .expect("commit");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - commits_before, 1, "exactly one commit");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit") - commits_before,
+        1,
+        "exactly one commit"
+    );
     assert_eq!(r.rows_written, 1, "node_3 written");
     assert_eq!(r.rows_closed, 1, "node_1 closed");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }), "altB cascaded");
+    assert!(
+        matches!(
+            r.object_deletes[0].result,
+            ObjectDeleteResult::Deleted { .. }
+        ),
+        "altB cascaded"
+    );
 
     // altA now has node_2 + node_3 current; node_1 gone.
     let got = read_parameter(&db, "node", "demand", "altA").expect("read");
@@ -523,7 +704,12 @@ fn combined_atomicity_one_commit() {
     assert!(!names.contains(&"node_1".to_string()), "node_1 deleted");
     // altB fully closed.
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM alternative WHERE id={altb_id} AND valid_to_commit IS NULL")),
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM alternative WHERE id={altb_id} AND valid_to_commit IS NULL"
+            )
+        ),
         0,
         "altB object row closed in the same commit"
     );
@@ -553,7 +739,11 @@ fn same_commit_write_then_cascade_guard() {
     )
     .expect("commit must not trip the span CHECK");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - commits_before, 1, "one commit");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit") - commits_before,
+        1,
+        "one commit"
+    );
     assert_eq!(
         r.object_deletes[0].result,
         ObjectDeleteResult::NotFound,
@@ -561,9 +751,16 @@ fn same_commit_write_then_cascade_guard() {
     );
     // The value (and its alternative) survived — the guard protected them.
     let got = read_parameter(&db, "node", "demand", "fresh").expect("read");
-    assert_eq!(entity_names(&got), vec!["node_1".to_string()], "value survives");
     assert_eq!(
-        count(&db, "SELECT count(*) FROM alternative WHERE cur_name=lower('fresh')"),
+        entity_names(&got),
+        vec!["node_1".to_string()],
+        "value survives"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM alternative WHERE cur_name=lower('fresh')"
+        ),
         1,
         "alternative still live"
     );
@@ -583,9 +780,20 @@ fn preview_matches_commit() {
     let p = &previews[0];
     assert!(p.found);
     // Preview mutates nothing.
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "preview is a pure read");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "preview is a pure read"
+    );
 
-    let r = delete_objects(&db, vec![(oalt("victim"), cascade(true))], "t", "cascade", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oalt("victim"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
@@ -601,7 +809,11 @@ fn preview_matches_commit() {
     }
     // And the blocker framing lists the same dependent tables.
     for tc in &cc.per_table {
-        assert!(blocker(&p.blockers, &tc.table).is_some(), "blocker for {}", tc.table);
+        assert!(
+            blocker(&p.blockers, &tc.table).is_some(),
+            "blocker for {}",
+            tc.table
+        );
     }
 }
 
@@ -611,8 +823,18 @@ fn preview_matches_commit() {
 fn run_referencing_deleted_alternative_not_flagged() {
     let (_dir, db) = fresh_db();
     // A tool entity + a result alternative, then a run pointing at the alt.
-    write_parameter(&db, "tool", "noop", "results", scalar_batch("solver_x", 1.0), &[], o(), "t", "seed")
-        .expect("seed");
+    write_parameter(
+        &db,
+        "tool",
+        "noop",
+        "results",
+        scalar_batch("solver_x", 1.0),
+        &[],
+        o(),
+        "t",
+        "seed",
+    )
+    .expect("seed");
     exec(
         &db,
         "INSERT INTO run (tool_entity_id, result_alternative_id, input_commit_id)
@@ -627,7 +849,10 @@ fn run_referencing_deleted_alternative_not_flagged() {
     // Ruling 2: a run leg to a CLOSED-OUT (not absent) alternative/entity is
     // coherent as-of and must NOT be reported dangling.
     assert_eq!(
-        count(&db, "SELECT count(*) FROM audit_dangling_ref WHERE src_table='run'"),
+        count(
+            &db,
+            "SELECT count(*) FROM audit_dangling_ref WHERE src_table='run'"
+        ),
         0,
         "run referencing a deleted (closed-out) alternative is not flagged dangling"
     );
@@ -664,10 +889,30 @@ fn opar(class: &str, name: &str) -> ObjectDeleteKey {
 /// dependents value_array=2, entity_parameter_unit=1, parameter_value_metadata=1,
 /// semantic_annotation=1 ⇒ total_rows = 10.
 fn seed_parameter_deps(db: &std::path::Path) -> i64 {
-    write_parameter(db, "node", "profile", "altA", array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]), &[], o(), "t", "pa")
-        .expect("profile altA");
-    write_parameter(db, "node", "profile", "altB", array_batch("node_1", &[0, 1, 2], &[4.0, 5.0, 6.0]), &[], o(), "t", "pb")
-        .expect("profile altB");
+    write_parameter(
+        db,
+        "node",
+        "profile",
+        "altA",
+        array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+        &[],
+        o(),
+        "t",
+        "pa",
+    )
+    .expect("profile altA");
+    write_parameter(
+        db,
+        "node",
+        "profile",
+        "altB",
+        array_batch("node_1", &[0, 1, 2], &[4.0, 5.0, 6.0]),
+        &[],
+        o(),
+        "t",
+        "pb",
+    )
+    .expect("profile altB");
 
     exec(
         db,
@@ -708,7 +953,10 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
                    'http://example/term', (SELECT max(id) FROM commit));",
     );
 
-    count(db, "SELECT id FROM parameter_definition WHERE cur_name=lower('profile')")
+    count(
+        db,
+        "SELECT id FROM parameter_definition WHERE cur_name=lower('profile')",
+    )
 }
 
 const PARAM_DEP_TABLES: &[&str] = &[
@@ -746,8 +994,14 @@ fn param_restrict_blocks_and_reports() {
     let before_deps = live_param_deps(&db, pd);
     let before_identity = live_param_identity(&db, pd);
 
-    let r = delete_objects(&db, vec![(opar("node", "profile"), cascade(false))], "t", "restrict", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(false))],
+        "t",
+        "restrict",
+        o(),
+    )
+    .expect("commit");
     let blockers = match &r.object_deletes[0].result {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
@@ -757,16 +1011,32 @@ fn param_restrict_blocks_and_reports() {
         assert!(b.count >= 1, "{table} blocker count");
         assert!(!b.sample.is_empty(), "{table} sample present");
     }
-    assert_eq!(blocker(blockers, "value_array").unwrap().count, 2, "2 array entity values");
+    assert_eq!(
+        blocker(blockers, "value_array").unwrap().count,
+        2,
+        "2 array entity values"
+    );
     // Identity legs are NOT blockers (§4d): a param blocked ONLY by its own type
     // + default would be un-deletable; assert none leak into the blocker list.
-    for id_table in ["parameter_type", "parameter_type_dimension", "definition_value_scalar", "definition_value_array"] {
-        assert!(blocker(blockers, id_table).is_none(), "{id_table} must not block");
+    for id_table in [
+        "parameter_type",
+        "parameter_type_dimension",
+        "definition_value_scalar",
+        "definition_value_array",
+    ] {
+        assert!(
+            blocker(blockers, id_table).is_none(),
+            "{id_table} must not block"
+        );
     }
 
     // RESTRICT closed NOTHING — dependents AND identity all still live.
     assert_eq!(live_param_deps(&db, pd), before_deps, "no dependent closed");
-    assert_eq!(live_param_identity(&db, pd), before_identity, "no identity row closed");
+    assert_eq!(
+        live_param_identity(&db, pd),
+        before_identity,
+        "no identity row closed"
+    );
     audit_tiling_clean(&db);
 }
 
@@ -778,28 +1048,54 @@ fn param_cascade_closes_and_reports() {
     let pd = seed_parameter_deps(&db);
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
 
-    let r = delete_objects(&db, vec![(opar("node", "profile"), cascade(true))], "t", "cascade", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
     };
     // Identity: pd + parameter_type + parameter_type_dimension + 2 definition mirrors.
-    assert_eq!(cc.object_rows, 5, "object row + type + dim + 2 definition-value mirrors");
+    assert_eq!(
+        cc.object_rows, 5,
+        "object row + type + dim + 2 definition-value mirrors"
+    );
     // Dependents.
     assert_eq!(per_table(cc, "value_array").unwrap().rows, 2);
     assert_eq!(per_table(cc, "entity_parameter_unit").unwrap().rows, 1);
     assert_eq!(per_table(cc, "parameter_value_metadata").unwrap().rows, 1);
     assert_eq!(per_table(cc, "semantic_annotation").unwrap().rows, 1);
-    assert!(per_table(cc, "value_scalar").is_none(), "no scalar values for this param");
-    assert!(per_table(cc, "value_long").is_none(), "no long values for this param");
-    assert_eq!(cc.total_rows, 5 + 2 + 1 + 1 + 1, "headline = identity + all deps");
+    assert!(
+        per_table(cc, "value_scalar").is_none(),
+        "no scalar values for this param"
+    );
+    assert!(
+        per_table(cc, "value_long").is_none(),
+        "no long values for this param"
+    );
+    assert_eq!(
+        cc.total_rows,
+        5 + 2 + 1 + 1 + 1,
+        "headline = identity + all deps"
+    );
 
     // Everything closed; value_array entity values moved to hist.
     assert_eq!(live_param_deps(&db, pd), 0, "all dependents closed");
-    assert_eq!(live_param_identity(&db, pd), 0, "object row + identity closed");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM value_array WHERE parameter_definition_id={pd}")),
+        live_param_identity(&db, pd),
+        0,
+        "object row + identity closed"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT count(*) FROM value_array WHERE parameter_definition_id={pd}")
+        ),
         0,
         "array entity values deleted from current table"
     );
@@ -827,7 +1123,18 @@ fn param_bare_delete_no_dependents() {
     let (_dir, db) = fresh_db();
     // Create the `node` class + node_1 via a throwaway write, then raw-insert a
     // dependent-free parameter carrying only identity (definition + type).
-    write_parameter(&db, "node", "seedp", "altA", scalar_batch("node_1", 1.0), &[], o(), "t", "s").expect("seed class");
+    write_parameter(
+        &db,
+        "node",
+        "seedp",
+        "altA",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("seed class");
     exec(
         &db,
         "INSERT INTO parameter_definition (entity_class_id, name, valid_from_commit)
@@ -837,10 +1144,19 @@ fn param_bare_delete_no_dependents() {
            VALUES ((SELECT id FROM parameter_definition WHERE cur_name=lower('lonely')), 'float', 0,
                    (SELECT max(id) FROM commit));",
     );
-    let pd = count(&db, "SELECT id FROM parameter_definition WHERE cur_name=lower('lonely')");
+    let pd = count(
+        &db,
+        "SELECT id FROM parameter_definition WHERE cur_name=lower('lonely')",
+    );
 
-    let r = delete_objects(&db, vec![(opar("node", "lonely"), cascade(false))], "t", "bare", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(opar("node", "lonely"), cascade(false))],
+        "t",
+        "bare",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted(identity only), got {other:?}"),
@@ -860,27 +1176,39 @@ fn param_as_of_queryable_after_delete() {
     let pd = seed_parameter_deps(&db);
     let c_before = count(&db, "SELECT max(id) FROM commit");
 
-    let r = delete_objects(&db, vec![(opar("node", "profile"), cascade(true))], "t", "cascade", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let c_del = r.commit_id;
 
     // The closed-out definition row is visible as-of the pre-delete commit, gone
     // as-of the delete commit.
     assert_eq!(
-        count(&db, &format!(
-            "SELECT count(*) FROM parameter_definition WHERE id={pd} \
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM parameter_definition WHERE id={pd} \
              AND valid_from_commit <= {c_before} \
              AND (valid_to_commit IS NULL OR valid_to_commit > {c_before})"
-        )),
+            )
+        ),
         1,
         "definition live as-of the pre-delete commit"
     );
     assert_eq!(
-        count(&db, &format!(
-            "SELECT count(*) FROM parameter_definition WHERE id={pd} \
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM parameter_definition WHERE id={pd} \
              AND valid_from_commit <= {c_del} \
              AND (valid_to_commit IS NULL OR valid_to_commit > {c_del})"
-        )),
+            )
+        ),
         0,
         "definition gone as-of the delete commit"
     );
@@ -900,10 +1228,20 @@ fn param_as_of_queryable_after_delete() {
 fn param_monotonic_versions_and_tiling_clean() {
     let (_dir, db) = fresh_db();
     seed_parameter_deps(&db);
-    delete_objects(&db, vec![(opar("node", "profile"), cascade(true))], "t", "cascade", o()).expect("commit");
+    delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     audit_tiling_clean(&db);
     assert_eq!(
-        count(&db, "SELECT count(*) FROM parameter_definition WHERE cur_name=lower('profile')"),
+        count(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name=lower('profile')"
+        ),
         0,
         "no current profile definition after delete"
     );
@@ -926,18 +1264,46 @@ fn param_monotonic_versions_and_tiling_clean() {
 fn param_idempotent_redelete_is_notfound() {
     let (_dir, db) = fresh_db();
     seed_parameter_deps(&db);
-    let r1 = delete_objects(&db, vec![(opar("node", "profile"), cascade(true))], "t", "del1", o()).expect("del1");
-    assert!(matches!(r1.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }));
+    let r1 = delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(true))],
+        "t",
+        "del1",
+        o(),
+    )
+    .expect("del1");
+    assert!(matches!(
+        r1.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
 
-    let r2 = delete_objects(&db, vec![(opar("node", "profile"), cascade(true))], "t", "del2", o()).expect("del2");
+    let r2 = delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(true))],
+        "t",
+        "del2",
+        o(),
+    )
+    .expect("del2");
     assert_eq!(
         r2.object_deletes[0].result,
         ObjectDeleteResult::NotFound,
         "second delete of an already-closed parameter is NotFound"
     );
     // A miss on the CLASS resolves to NotFound too (never auto-create, never error).
-    let r3 = delete_objects(&db, vec![(opar("no_such_class", "profile"), cascade(true))], "t", "del3", o()).expect("del3");
-    assert_eq!(r3.object_deletes[0].result, ObjectDeleteResult::NotFound, "unknown class ⇒ NotFound");
+    let r3 = delete_objects(
+        &db,
+        vec![(opar("no_such_class", "profile"), cascade(true))],
+        "t",
+        "del3",
+        o(),
+    )
+    .expect("del3");
+    assert_eq!(
+        r3.object_deletes[0].result,
+        ObjectDeleteResult::NotFound,
+        "unknown class ⇒ NotFound"
+    );
 }
 
 // --- param test 7: atomic rollback on forced mid-batch error ---------------
@@ -954,17 +1320,35 @@ fn param_atomic_rollback_on_mid_batch_error() {
     // mid-txn (0-D class addressed by tuple) ⇒ whole txn rolls back.
     let err = delete_objects(
         &db,
-        vec![(opar("node", "profile"), cascade(true)), (forced_txn_error_key(), cascade(true))],
+        vec![
+            (opar("node", "profile"), cascade(true)),
+            (forced_txn_error_key(), cascade(true)),
+        ],
         "t",
         "must roll back",
         o(),
     )
     .expect_err("forced mid-batch error");
-    assert!(err.to_string().contains("0-D"), "error names the cause: {err}");
+    assert!(
+        err.to_string().contains("0-D"),
+        "error names the cause: {err}"
+    );
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "no commit persisted");
-    assert_eq!(live_param_deps(&db, pd), before_deps, "dependents untouched");
-    assert_eq!(live_param_identity(&db, pd), before_identity, "identity untouched");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "no commit persisted"
+    );
+    assert_eq!(
+        live_param_deps(&db, pd),
+        before_deps,
+        "dependents untouched"
+    );
+    assert_eq!(
+        live_param_identity(&db, pd),
+        before_identity,
+        "identity untouched"
+    );
 }
 
 // --- param test 8: combined atomicity (value write + delete + param delete) -
@@ -974,7 +1358,18 @@ fn param_combined_atomicity_one_commit() {
     let (_dir, db) = fresh_db();
     // `profile` is the deletable param; `keep` is a scalar param we mutate.
     let pd = seed_parameter_deps(&db);
-    write_parameter(&db, "node", "keep", "altA", scalar_batch("node_1", 1.0), &[], o(), "t", "k1").expect("keep");
+    write_parameter(
+        &db,
+        "node",
+        "keep",
+        "altA",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "k1",
+    )
+    .expect("keep");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write keep/node_2, delete keep/node_1, cascade-delete profile.
@@ -990,16 +1385,30 @@ fn param_combined_atomicity_one_commit() {
     )
     .expect("commit");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - commits_before, 1, "exactly one commit");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit") - commits_before,
+        1,
+        "exactly one commit"
+    );
     assert_eq!(r.rows_written, 1, "keep/node_2 written");
     assert_eq!(r.rows_closed, 1, "keep/node_1 closed");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }), "profile cascaded");
+    assert!(
+        matches!(
+            r.object_deletes[0].result,
+            ObjectDeleteResult::Deleted { .. }
+        ),
+        "profile cascaded"
+    );
 
     let got = read_parameter(&db, "node", "keep", "altA").expect("read");
     let names = entity_names(&got);
     assert!(names.contains(&"node_2".to_string()), "node_2 present");
     assert!(!names.contains(&"node_1".to_string()), "node_1 deleted");
-    assert_eq!(live_param_identity(&db, pd), 0, "profile closed in the same commit");
+    assert_eq!(
+        live_param_identity(&db, pd),
+        0,
+        "profile closed in the same commit"
+    );
     audit_tiling_clean(&db);
 }
 
@@ -1015,15 +1424,29 @@ fn param_preview_matches_commit() {
     let p = &previews[0];
     assert!(p.found);
     assert_eq!(p.kind, ObjectKind::Parameter);
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "preview is a pure read");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "preview is a pure read"
+    );
 
-    let r = delete_objects(&db, vec![(opar("node", "profile"), cascade(true))], "t", "cascade", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(opar("node", "profile"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
     };
 
-    assert_eq!(p.cascade.object_rows, cc.object_rows, "identity object_rows match");
+    assert_eq!(
+        p.cascade.object_rows, cc.object_rows,
+        "identity object_rows match"
+    );
     assert_eq!(p.cascade.total_rows, cc.total_rows, "total_rows match");
     for tc in &cc.per_table {
         let pc = per_table(&p.cascade, &tc.table)
@@ -1031,7 +1454,11 @@ fn param_preview_matches_commit() {
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
     for tc in &cc.per_table {
-        assert!(blocker(&p.blockers, &tc.table).is_some(), "blocker for {}", tc.table);
+        assert!(
+            blocker(&p.blockers, &tc.table).is_some(),
+            "blocker for {}",
+            tc.table
+        );
     }
 }
 
@@ -1039,7 +1466,11 @@ fn param_preview_matches_commit() {
 
 fn entity_names(batch: &RecordBatch) -> Vec<String> {
     let i = batch.schema().index_of("entity").unwrap();
-    let a = batch.column(i).as_any().downcast_ref::<StringArray>().unwrap();
+    let a = batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
     (0..a.len()).map(|r| a.value(r).to_string()).collect()
 }
 
@@ -1094,14 +1525,54 @@ const ENT_DEP_TABLES: &[&str] = &[
 /// parameter_value_metadata=1, semantic_annotation=1 ⇒ dep total 13; object_rows
 /// = 1 (0-D has no identity tuple) ⇒ total_rows 14. Returns node_1's id.
 fn seed_entity_deps(db: &std::path::Path) -> i64 {
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "s")
-        .expect("scalar");
-    write_parameter(db, "node", "counts", "Base", long_batch("node_1", &[0, 1, 2], &[10, 20, 30]), &[], o(), "t", "l")
-        .expect("long");
-    write_parameter(db, "node", "profile", "Base", array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]), &[], o(), "t", "a")
-        .expect("array");
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_2", 5.0), &[], o(), "t", "n2")
-        .expect("node_2");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("scalar");
+    write_parameter(
+        db,
+        "node",
+        "counts",
+        "Base",
+        long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
+        &[],
+        o(),
+        "t",
+        "l",
+    )
+    .expect("long");
+    write_parameter(
+        db,
+        "node",
+        "profile",
+        "Base",
+        array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+        &[],
+        o(),
+        "t",
+        "a",
+    )
+    .expect("array");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_2", 5.0),
+        &[],
+        o(),
+        "t",
+        "n2",
+    )
+    .expect("node_2");
 
     exec(
         db,
@@ -1179,8 +1650,14 @@ fn entity_restrict_blocks_and_reports() {
     let e = seed_entity_deps(&db);
     let before = live_entity_deps(&db, e);
 
-    let r = delete_objects(&db, vec![(oent("node", "node_1"), cascade(false))], "t", "restrict", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_1"), cascade(false))],
+        "t",
+        "restrict",
+        o(),
+    )
+    .expect("commit");
     let blockers = match &r.object_deletes[0].result {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
@@ -1191,8 +1668,12 @@ fn entity_restrict_blocks_and_reports() {
     }
     // Nothing closed.
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")),
-        1, "entity row still live"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")
+        ),
+        1,
+        "entity row still live"
     );
     assert_eq!(live_entity_deps(&db, e), before, "no dependent closed");
     audit_tiling_clean(&db);
@@ -1206,8 +1687,14 @@ fn entity_cascade_closes_and_reports() {
     let e = seed_entity_deps(&db);
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
 
-    let r = delete_objects(&db, vec![(oent("node", "node_1"), cascade(true))], "t", "cascade", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_1"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
@@ -1218,7 +1705,11 @@ fn entity_cascade_closes_and_reports() {
     assert_eq!(per_table(cc, "value_array").unwrap().rows, 1);
     assert_eq!(per_table(cc, "entity_location").unwrap().rows, 1);
     assert_eq!(per_table(cc, "entity_alternative").unwrap().rows, 1);
-    assert_eq!(per_table(cc, "membership").unwrap().rows, 2, "group + member legs merged");
+    assert_eq!(
+        per_table(cc, "membership").unwrap().rows,
+        2,
+        "group + member legs merged"
+    );
     assert_eq!(per_table(cc, "entity_parameter_unit").unwrap().rows, 1);
     assert_eq!(per_table(cc, "entity_metadata").unwrap().rows, 1);
     assert_eq!(per_table(cc, "parameter_value_metadata").unwrap().rows, 1);
@@ -1226,11 +1717,19 @@ fn entity_cascade_closes_and_reports() {
     assert_eq!(cc.total_rows, 1 + 13, "object + all deps");
 
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")),
-        0, "entity row closed"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "entity row closed"
     );
     assert_eq!(live_entity_deps(&db, e), 0, "all dependents closed");
-    assert_eq!(count(&db, "SELECT count(*) FROM value_array_hist") - hist_before, 1, "array pre-image to hist");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_array_hist") - hist_before,
+        1,
+        "array pre-image to hist"
+    );
     audit_tiling_clean(&db);
 }
 
@@ -1243,15 +1742,41 @@ fn entity_bare_delete_no_dependents() {
     // create a standalone entity via a value then clear it). Simplest: seed a
     // fresh entity `solo` by a value write, then delete THAT value, leaving the
     // entity row dependent-free.
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("solo", 1.0), &[], o(), "t", "s").expect("solo");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("solo", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("solo");
     delete_objects(&db, vec![], "t", "noop", o()).ok();
     // Close the only value so `solo` has no dependents.
-    commit_changes(&db, vec![], vec![], vec![dk("node", "demand", "Base", "solo")], vec![], "t", "clear", o())
-        .expect("clear value");
+    commit_changes(
+        &db,
+        vec![],
+        vec![],
+        vec![dk("node", "demand", "Base", "solo")],
+        vec![],
+        "t",
+        "clear",
+        o(),
+    )
+    .expect("clear value");
     let e = count(&db, "SELECT id FROM entity WHERE cur_name=lower('solo')");
 
-    let r = delete_objects(&db, vec![(oent("node", "solo"), cascade(false))], "t", "bare", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "solo"), cascade(false))],
+        "t",
+        "bare",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted(empty), got {other:?}"),
@@ -1259,8 +1784,12 @@ fn entity_bare_delete_no_dependents() {
     assert_eq!(cc.object_rows, 1);
     assert!(cc.per_table.is_empty(), "no dependent tables");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")),
-        0, "bare entity row closed"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "bare entity row closed"
     );
     audit_tiling_clean(&db);
 }
@@ -1271,10 +1800,26 @@ fn entity_bare_delete_no_dependents() {
 fn entity_idempotent_redelete_is_notfound() {
     let (_dir, db) = fresh_db();
     seed_entity_deps(&db);
-    delete_objects(&db, vec![(oent("node", "node_1"), cascade(true))], "t", "first", o()).expect("first");
-    let r = delete_objects(&db, vec![(oent("node", "node_1"), cascade(true))], "t", "second", o())
-        .expect("second");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::NotFound), "second ⇒ NotFound");
+    delete_objects(
+        &db,
+        vec![(oent("node", "node_1"), cascade(true))],
+        "t",
+        "first",
+        o(),
+    )
+    .expect("first");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_1"), cascade(true))],
+        "t",
+        "second",
+        o(),
+    )
+    .expect("second");
+    assert!(
+        matches!(r.object_deletes[0].result, ObjectDeleteResult::NotFound),
+        "second ⇒ NotFound"
+    );
 }
 
 // --- entity test 5: monotonic versions + clean tiling ----------------------
@@ -1283,7 +1828,14 @@ fn entity_idempotent_redelete_is_notfound() {
 fn entity_monotonic_versions_and_tiling_clean() {
     let (_dir, db) = fresh_db();
     seed_entity_deps(&db);
-    delete_objects(&db, vec![(oent("node", "node_1"), cascade(true))], "t", "cascade", o()).expect("commit");
+    delete_objects(
+        &db,
+        vec![(oent("node", "node_1"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     audit_tiling_clean(&db);
 }
 
@@ -1296,13 +1848,30 @@ fn entity_atomic_rollback_on_mid_batch_error() {
     let before = live_entity_deps(&db, e);
     let commits_before = count(&db, "SELECT count(*) FROM commit");
     // Valid entity cascade FIRST, then a forced mid-txn error ⇒ rollback.
-    let err = delete_objects(&db, vec![(oent("node", "node_1"), cascade(true)), (forced_txn_error_key(), cascade(true))], "t", "roll", o())
-        .expect_err("forced mid-batch error");
+    let err = delete_objects(
+        &db,
+        vec![
+            (oent("node", "node_1"), cascade(true)),
+            (forced_txn_error_key(), cascade(true)),
+        ],
+        "t",
+        "roll",
+        o(),
+    )
+    .expect_err("forced mid-batch error");
     assert!(err.to_string().contains("0-D"), "names cause: {err}");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "no commit persisted");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")),
-        1, "entity still live"
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "no commit persisted"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={e} AND valid_to_commit IS NULL")
+        ),
+        1,
+        "entity still live"
     );
     assert_eq!(live_entity_deps(&db, e), before, "dependents untouched");
 }
@@ -1322,13 +1891,30 @@ fn entity_combined_atomicity_one_commit() {
         vec![],
         vec![dk("node", "demand", "Base", "node_2")],
         vec![(oent("node", "node_1"), cascade(true))],
-        "t", "one atomic save", o(),
-    ).expect("commit");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - commits_before, 1, "exactly one commit");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }), "node_1 cascaded");
+        "t",
+        "one atomic save",
+        o(),
+    )
+    .expect("commit");
     assert_eq!(
-        count(&db, "SELECT count(*) FROM entity WHERE cur_name=lower('node_1')"),
-        0, "node_1 closed"
+        count(&db, "SELECT count(*) FROM commit") - commits_before,
+        1,
+        "exactly one commit"
+    );
+    assert!(
+        matches!(
+            r.object_deletes[0].result,
+            ObjectDeleteResult::Deleted { .. }
+        ),
+        "node_1 cascaded"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity WHERE cur_name=lower('node_1')"
+        ),
+        0,
+        "node_1 closed"
     );
 }
 
@@ -1340,11 +1926,22 @@ fn entity_preview_matches_commit() {
     seed_entity_deps(&db);
     let commits_before = count(&db, "SELECT count(*) FROM commit");
     let previews = preview_object_deletes(&db, vec![oent("node", "node_1")]).expect("preview");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "preview mutates nothing");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "preview mutates nothing"
+    );
     let p = &previews[0];
     assert!(p.found);
 
-    let r = delete_objects(&db, vec![(oent("node", "node_1"), cascade(true))], "t", "cascade", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_1"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
@@ -1352,7 +1949,8 @@ fn entity_preview_matches_commit() {
     assert_eq!(p.cascade.object_rows, cc.object_rows, "object_rows match");
     assert_eq!(p.cascade.total_rows, cc.total_rows, "total_rows match");
     for tc in &cc.per_table {
-        let pc = per_table(&p.cascade, &tc.table).unwrap_or_else(|| panic!("preview missing {}", tc.table));
+        let pc = per_table(&p.cascade, &tc.table)
+            .unwrap_or_else(|| panic!("preview missing {}", tc.table));
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
 }
@@ -1365,8 +1963,30 @@ fn entity_preview_matches_commit() {
 /// `link` typed (node, node), and the N-D entity `link_ab` with tuple
 /// (node_a, node_b). Returns link_ab's id.
 fn seed_nd_link(db: &std::path::Path) -> i64 {
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_a", 1.0), &[], o(), "t", "a").expect("node_a");
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_b", 2.0), &[], o(), "t", "b").expect("node_b");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_a", 1.0),
+        &[],
+        o(),
+        "t",
+        "a",
+    )
+    .expect("node_a");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_b", 2.0),
+        &[],
+        o(),
+        "t",
+        "b",
+    )
+    .expect("node_b");
     exec(
         db,
         "INSERT INTO entity_class (name, valid_from_commit)
@@ -1394,7 +2014,14 @@ fn entity_nd_dual_channel_identical() {
     // By Name.
     let (_d1, db1) = fresh_db();
     seed_nd_link(&db1);
-    let r1 = delete_objects(&db1, vec![(oent("link", "link_ab"), cascade(true))], "t", "byname", o()).expect("c1");
+    let r1 = delete_objects(
+        &db1,
+        vec![(oent("link", "link_ab"), cascade(true))],
+        "t",
+        "byname",
+        o(),
+    )
+    .expect("c1");
     let cc1 = match &r1.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out.clone(),
         other => panic!("byname expected Deleted, got {other:?}"),
@@ -1405,13 +2032,22 @@ fn entity_nd_dual_channel_identical() {
     // By Elements (fresh DB).
     let (_d2, db2) = fresh_db();
     seed_nd_link(&db2);
-    let r2 = delete_objects(&db2, vec![(oent_elems("link", &["node_a", "node_b"]), cascade(true))], "t", "byelem", o())
-        .expect("c2");
+    let r2 = delete_objects(
+        &db2,
+        vec![(oent_elems("link", &["node_a", "node_b"]), cascade(true))],
+        "t",
+        "byelem",
+        o(),
+    )
+    .expect("c2");
     let cc2 = match &r2.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out.clone(),
         other => panic!("byelem expected Deleted, got {other:?}"),
     };
-    assert_eq!(cc1, cc2, "Name and Elements resolve the same row ⇒ identical counts");
+    assert_eq!(
+        cc1, cc2,
+        "Name and Elements resolve the same row ⇒ identical counts"
+    );
 }
 
 // --- N-D ambiguity is rejected --------------------------------------------
@@ -1432,9 +2068,18 @@ fn entity_nd_ambiguous_tuple_rejected() {
                   ((SELECT id FROM entity WHERE cur_name=lower('link_ab_dup')), 2,
                    (SELECT id FROM entity WHERE cur_name=lower('node_b')), (SELECT max(id) FROM commit));",
     );
-    let err = delete_objects(&db, vec![(oent_elems("link", &["node_a", "node_b"]), cascade(true))], "t", "amb", o())
-        .expect_err("ambiguous tuple");
-    assert!(err.to_string().contains("ambiguous"), "names ambiguity: {err}");
+    let err = delete_objects(
+        &db,
+        vec![(oent_elems("link", &["node_a", "node_b"]), cascade(true))],
+        "t",
+        "amb",
+        o(),
+    )
+    .expect_err("ambiguous tuple");
+    assert!(
+        err.to_string().contains("ambiguous"),
+        "names ambiguity: {err}"
+    );
 }
 
 // --- Stage 3: B1 recursion — deleting an element cascades into its container -
@@ -1446,21 +2091,39 @@ fn entity_cascade_recurses_into_container() {
     let a_id = count(&db, "SELECT id FROM entity WHERE cur_name=lower('node_a')");
 
     // Delete node_a cascade:true ⇒ recurses into link_ab (which lists node_a).
-    let r = delete_objects(&db, vec![(oent("node", "node_a"), cascade(true))], "t", "recurse", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_a"), cascade(true))],
+        "t",
+        "recurse",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
     };
     // object_rows: node_a (1) + link_ab entity (1) + link_ab's 2 identity element
     // rows (its whole tuple closes with it) = 4.
-    assert_eq!(cc.object_rows, 4, "node_a + container entity + container tuple");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={a_id} AND valid_to_commit IS NULL")),
-        0, "node_a closed"
+        cc.object_rows, 4,
+        "node_a + container entity + container tuple"
     );
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={link_id} AND valid_to_commit IS NULL")),
-        0, "container link_ab recursively closed"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={a_id} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "node_a closed"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={link_id} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "container link_ab recursively closed"
     );
     assert_eq!(
         count(&db, &format!("SELECT count(*) FROM entity_element WHERE entity_id={link_id} AND valid_to_commit IS NULL")),
@@ -1492,15 +2155,33 @@ fn entity_cascade_recurses_two_levels() {
     let chain_id = count(&db, "SELECT id FROM entity WHERE cur_name=lower('chain_x')");
 
     // Deleting node_a recurses node_a → link_ab → chain_x.
-    let r = delete_objects(&db, vec![(oent("node", "node_a"), cascade(true))], "t", "recurse2", o()).expect("commit");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }));
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_a"), cascade(true))],
+        "t",
+        "recurse2",
+        o(),
+    )
+    .expect("commit");
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={link_id} AND valid_to_commit IS NULL")),
-        0, "level-1 container closed"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={link_id} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "level-1 container closed"
     );
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={chain_id} AND valid_to_commit IS NULL")),
-        0, "level-2 container closed"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={chain_id} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "level-2 container closed"
     );
     audit_tiling_clean(&db);
 }
@@ -1513,7 +2194,14 @@ fn entity_restrict_reports_container_blocker() {
     let link_id = seed_nd_link(&db);
     let a_id = count(&db, "SELECT id FROM entity WHERE cur_name=lower('node_a')");
 
-    let r = delete_objects(&db, vec![(oent("node", "node_a"), cascade(false))], "t", "restrict", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_a"), cascade(false))],
+        "t",
+        "restrict",
+        o(),
+    )
+    .expect("commit");
     let blockers = match &r.object_deletes[0].result {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
@@ -1521,15 +2209,27 @@ fn entity_restrict_reports_container_blocker() {
     let cb = blocker(blockers, "entity").expect("container blocker on `entity`");
     assert_eq!(cb.column, "element_entity_id");
     assert!(cb.count >= 1, "at least one container");
-    assert!(cb.sample.iter().any(|s| s == "link_ab"), "container name sampled: {:?}", cb.sample);
+    assert!(
+        cb.sample.iter().any(|s| s == "link_ab"),
+        "container name sampled: {:?}",
+        cb.sample
+    );
     // Closed NOTHING.
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={a_id} AND valid_to_commit IS NULL")),
-        1, "node_a still live"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={a_id} AND valid_to_commit IS NULL")
+        ),
+        1,
+        "node_a still live"
     );
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id={link_id} AND valid_to_commit IS NULL")),
-        1, "container still live"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity WHERE id={link_id} AND valid_to_commit IS NULL")
+        ),
+        1,
+        "container still live"
     );
     audit_tiling_clean(&db);
 }
@@ -1539,7 +2239,18 @@ fn entity_restrict_reports_container_blocker() {
 #[test]
 fn entity_cascade_cycle_is_safe() {
     let (_dir, db) = fresh_db();
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("seed", 1.0), &[], o(), "t", "s").expect("seed");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("seed", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("seed");
     // Two 1-D `pair` entities that contain EACH OTHER (p1 ∈ p2, p2 ∈ p1).
     exec(
         &db,
@@ -1561,11 +2272,27 @@ fn entity_cascade_cycle_is_safe() {
     let p2 = count(&db, "SELECT id FROM entity WHERE cur_name=lower('p2')");
 
     // Must terminate (visited-set) and close BOTH.
-    let r = delete_objects(&db, vec![(oent("pair", "p1"), cascade(true))], "t", "cycle", o()).expect("commit");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }));
+    let r = delete_objects(
+        &db,
+        vec![(oent("pair", "p1"), cascade(true))],
+        "t",
+        "cycle",
+        o(),
+    )
+    .expect("commit");
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity WHERE id IN ({p1},{p2}) AND valid_to_commit IS NULL")),
-        0, "both cycle members closed"
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM entity WHERE id IN ({p1},{p2}) AND valid_to_commit IS NULL"
+            )
+        ),
+        0,
+        "both cycle members closed"
     );
     audit_tiling_clean(&db);
 }
@@ -1580,15 +2307,31 @@ fn entity_preview_matches_recursive_commit() {
     let pv = &p[0];
     // Preview must include the container link_ab (blast radius) AND report it as
     // a blocker.
-    assert!(blocker(&pv.blockers, "entity").is_some(), "container in blockers");
+    assert!(
+        blocker(&pv.blockers, "entity").is_some(),
+        "container in blockers"
+    );
 
-    let r = delete_objects(&db, vec![(oent("node", "node_a"), cascade(true))], "t", "cascade", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oent("node", "node_a"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
     };
-    assert_eq!(pv.cascade.object_rows, cc.object_rows, "recursive object_rows match");
-    assert_eq!(pv.cascade.total_rows, cc.total_rows, "recursive total_rows match");
+    assert_eq!(
+        pv.cascade.object_rows, cc.object_rows,
+        "recursive object_rows match"
+    );
+    assert_eq!(
+        pv.cascade.total_rows, cc.total_rows,
+        "recursive total_rows match"
+    );
 }
 
 // ===========================================================================
@@ -1606,7 +2349,11 @@ fn entity_preview_matches_recursive_commit() {
 
 /// A class object-delete key (globally name-addressed; `class` is None).
 fn oclass(name: &str) -> ObjectDeleteKey {
-    ObjectDeleteKey { kind: ObjectKind::Class, class: None, target: ObjectRef::Name(name.into()) }
+    ObjectDeleteKey {
+        kind: ObjectKind::Class,
+        class: None,
+        target: ObjectRef::Name(name.into()),
+    }
 }
 
 /// Seed class `node` with a full cross-kind dependent set:
@@ -1620,16 +2367,57 @@ fn oclass(name: &str) -> ObjectDeleteKey {
 ///     (object_type 'entity_class' AND 'class_dimension') ⇒ semantic_annotation=2;
 ///   - a SECOND class `link` typed (node, node) — the B2 edge — with the N-D
 ///     entity link_ab = (node_1, node_2).
+///
 /// Returns class node's id.
 fn seed_class_deps(db: &std::path::Path) -> i64 {
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_1", 1.0), &[], o(), "t", "s")
-        .expect("scalar node_1");
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_2", 2.0), &[], o(), "t", "s2")
-        .expect("scalar node_2");
-    write_parameter(db, "node", "counts", "Base", long_batch("node_1", &[0, 1, 2], &[10, 20, 30]), &[], o(), "t", "l")
-        .expect("long node_1");
-    write_parameter(db, "node", "profile", "Base", array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]), &[], o(), "t", "a")
-        .expect("array node_1");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("scalar node_1");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_2", 2.0),
+        &[],
+        o(),
+        "t",
+        "s2",
+    )
+    .expect("scalar node_2");
+    write_parameter(
+        db,
+        "node",
+        "counts",
+        "Base",
+        long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
+        &[],
+        o(),
+        "t",
+        "l",
+    )
+    .expect("long node_1");
+    write_parameter(
+        db,
+        "node",
+        "profile",
+        "Base",
+        array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+        &[],
+        o(),
+        "t",
+        "a",
+    )
+    .expect("array node_1");
 
     exec(
         db,
@@ -1671,7 +2459,10 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
                    (SELECT id FROM entity WHERE cur_name=lower('node_2')), (SELECT max(id) FROM commit));",
     );
 
-    count(db, "SELECT id FROM entity_class WHERE cur_name=lower('node')")
+    count(
+        db,
+        "SELECT id FROM entity_class WHERE cur_name=lower('node')",
+    )
 }
 
 /// Live class-scoped value rows across the whole class (both child entities).
@@ -1692,8 +2483,14 @@ fn class_restrict_blocks_and_reports() {
     seed_class_deps(&db);
     let values_before = live_class_values(&db);
 
-    let r = delete_objects(&db, vec![(oclass("node"), cascade(false))], "t", "restrict", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(false))],
+        "t",
+        "restrict",
+        o(),
+    )
+    .expect("commit");
     let blockers = match &r.object_deletes[0].result {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
@@ -1706,15 +2503,33 @@ fn class_restrict_blocks_and_reports() {
     assert!(pd.count >= 3, "demand + counts + profile");
     let dep_cls = blocker(blockers, "entity_class").expect("B2 dependent-class blocker");
     assert_eq!(dep_cls.column, "dimension_class_id");
-    assert!(dep_cls.sample.iter().any(|s| s == "link"), "B2 class sampled: {:?}", dep_cls.sample);
+    assert!(
+        dep_cls.sample.iter().any(|s| s == "link"),
+        "B2 class sampled: {:?}",
+        dep_cls.sample
+    );
     // Flat class legs also block.
     assert!(blocker(blockers, "class_set_member").is_some());
     assert!(blocker(blockers, "entity_class_display_mode").is_some());
     assert!(blocker(blockers, "semantic_annotation").is_some());
 
     // Closed NOTHING.
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class WHERE cur_name=lower('node')"), 1, "node still live");
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class WHERE cur_name=lower('link')"), 1, "link still live");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name=lower('node')"
+        ),
+        1,
+        "node still live"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name=lower('link')"
+        ),
+        1,
+        "link still live"
+    );
     assert_eq!(live_class_values(&db), values_before, "no value closed");
     audit_tiling_clean(&db);
 }
@@ -1727,37 +2542,72 @@ fn class_cascade_closes_and_reports() {
     let node_id = seed_class_deps(&db);
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
 
-    let r = delete_objects(&db, vec![(oclass("node"), cascade(true))], "t", "cascade", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
     };
     // Value counts AGGREGATE across both child entities (node_1 + node_2 scalars).
-    assert_eq!(per_table(cc, "value_scalar").unwrap().rows, 2, "node_1 + node_2 scalars");
+    assert_eq!(
+        per_table(cc, "value_scalar").unwrap().rows,
+        2,
+        "node_1 + node_2 scalars"
+    );
     assert_eq!(per_table(cc, "value_long").unwrap().rows, 3);
     assert_eq!(per_table(cc, "value_array").unwrap().rows, 1);
     // Flat class legs.
     assert_eq!(per_table(cc, "class_set_member").unwrap().rows, 1);
     assert_eq!(per_table(cc, "entity_class_display_mode").unwrap().rows, 1);
-    assert_eq!(per_table(cc, "semantic_annotation").unwrap().rows, 2, "entity_class + class_dimension");
+    assert_eq!(
+        per_table(cc, "semantic_annotation").unwrap().rows,
+        2,
+        "entity_class + class_dimension"
+    );
 
     // The class row, the B2 dependent class, every child entity + parameter are
     // all closed.
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity_class WHERE id={node_id} AND valid_to_commit IS NULL")),
-        0, "class node closed"
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM entity_class WHERE id={node_id} AND valid_to_commit IS NULL"
+            )
+        ),
+        0,
+        "class node closed"
     );
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class WHERE cur_name=lower('link')"), 0, "B2 class link closed");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name=lower('link')"
+        ),
+        0,
+        "B2 class link closed"
+    );
     assert_eq!(count(&db, "SELECT count(*) FROM entity WHERE cur_name IN (lower('node_1'),lower('node_2'),lower('link_ab'))"), 0, "child + container entities closed");
     assert_eq!(
         count(&db, &format!("SELECT count(*) FROM parameter_definition WHERE entity_class_id={node_id} AND valid_to_commit IS NULL")),
         0, "all child parameter definitions closed"
     );
     assert_eq!(live_class_values(&db), 0, "all class values closed");
-    assert_eq!(count(&db, "SELECT count(*) FROM value_array_hist") - hist_before, 1, "array pre-image to hist");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_array_hist") - hist_before,
+        1,
+        "array pre-image to hist"
+    );
     // object_rows covers class + link + 3 entities + 3 params + their identity.
-    assert!(cc.object_rows >= 1 + 1 + 3 + 3, "object rows span all cascaded objects: {}", cc.object_rows);
+    assert!(
+        cc.object_rows >= 1 + 1 + 3 + 3,
+        "object rows span all cascaded objects: {}",
+        cc.object_rows
+    );
     audit_tiling_clean(&db);
 }
 
@@ -1767,19 +2617,35 @@ fn class_cascade_closes_and_reports() {
 fn class_bare_delete_empty() {
     let (_dir, db) = fresh_db();
     exec(&db, "INSERT INTO entity_class (name, valid_from_commit) VALUES ('empty', (SELECT max(id) FROM commit));");
-    let e = count(&db, "SELECT id FROM entity_class WHERE cur_name=lower('empty')");
+    let e = count(
+        &db,
+        "SELECT id FROM entity_class WHERE cur_name=lower('empty')",
+    );
 
-    let r = delete_objects(&db, vec![(oclass("empty"), cascade(false))], "t", "bare", o())
-        .expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oclass("empty"), cascade(false))],
+        "t",
+        "bare",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted(empty), got {other:?}"),
     };
-    assert_eq!(cc.object_rows, 1, "just the class row (0-D class has no identity dims)");
+    assert_eq!(
+        cc.object_rows, 1,
+        "just the class row (0-D class has no identity dims)"
+    );
     assert!(cc.per_table.is_empty(), "no dependent tables");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity_class WHERE id={e} AND valid_to_commit IS NULL")),
-        0, "empty class row closed"
+        count(
+            &db,
+            &format!("SELECT count(*) FROM entity_class WHERE id={e} AND valid_to_commit IS NULL")
+        ),
+        0,
+        "empty class row closed"
     );
     audit_tiling_clean(&db);
 }
@@ -1792,7 +2658,14 @@ fn class_as_of_queryable_after_delete() {
     let node_id = seed_class_deps(&db);
     let c_before = count(&db, "SELECT max(id) FROM commit");
 
-    let r = delete_objects(&db, vec![(oclass("node"), cascade(true))], "t", "cascade", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let c_del = r.commit_id;
 
     assert_eq!(
@@ -1822,9 +2695,23 @@ fn class_as_of_queryable_after_delete() {
 fn class_monotonic_and_tiling_clean() {
     let (_dir, db) = fresh_db();
     seed_class_deps(&db);
-    delete_objects(&db, vec![(oclass("node"), cascade(true))], "t", "cascade", o()).expect("commit");
+    delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     audit_tiling_clean(&db);
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class WHERE cur_name=lower('node')"), 0, "no current node row");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name=lower('node')"
+        ),
+        0,
+        "no current node row"
+    );
     assert_eq!(
         count(&db, "SELECT count(*) FROM entity_class WHERE valid_to_commit IS NOT NULL AND valid_to_commit <= valid_from_commit"),
         0, "closed class spans are coherent"
@@ -1837,9 +2724,26 @@ fn class_monotonic_and_tiling_clean() {
 fn class_idempotent_redelete_notfound() {
     let (_dir, db) = fresh_db();
     seed_class_deps(&db);
-    delete_objects(&db, vec![(oclass("node"), cascade(true))], "t", "first", o()).expect("first");
-    let r = delete_objects(&db, vec![(oclass("node"), cascade(true))], "t", "second", o()).expect("second");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::NotFound), "second ⇒ NotFound");
+    delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(true))],
+        "t",
+        "first",
+        o(),
+    )
+    .expect("first");
+    let r = delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(true))],
+        "t",
+        "second",
+        o(),
+    )
+    .expect("second");
+    assert!(
+        matches!(r.object_deletes[0].result, ObjectDeleteResult::NotFound),
+        "second ⇒ NotFound"
+    );
 }
 
 // --- class test 7: atomic rollback on forced mid-batch error ---------------
@@ -1856,17 +2760,40 @@ fn class_atomic_rollback_on_mid_batch_error() {
     // Valid class cascade FIRST, then a forced mid-txn error ⇒ whole txn rolls back.
     let err = delete_objects(
         &db,
-        vec![(oclass("node"), cascade(true)), (forced_txn_error_key_for("keeper"), cascade(true))],
-        "t", "roll", o(),
-    ).expect_err("forced mid-batch error");
+        vec![
+            (oclass("node"), cascade(true)),
+            (forced_txn_error_key_for("keeper"), cascade(true)),
+        ],
+        "t",
+        "roll",
+        o(),
+    )
+    .expect_err("forced mid-batch error");
     assert!(err.to_string().contains("0-D"), "names cause: {err}");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "no commit persisted");
     assert_eq!(
-        count(&db, &format!("SELECT count(*) FROM entity_class WHERE id={node_id} AND valid_to_commit IS NULL")),
-        1, "node still live (first delete rolled back)"
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "no commit persisted"
     );
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class WHERE cur_name=lower('link')"), 1, "B2 class untouched");
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) FROM entity_class WHERE id={node_id} AND valid_to_commit IS NULL"
+            )
+        ),
+        1,
+        "node still live (first delete rolled back)"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name=lower('link')"
+        ),
+        1,
+        "B2 class untouched"
+    );
 }
 
 // --- class test 8: combined atomicity (value write + delete + class delete) -
@@ -1876,7 +2803,18 @@ fn class_combined_atomicity_one_commit() {
     let (_dir, db) = fresh_db();
     seed_class_deps(&db);
     // A SEPARATE class `gen` we mutate in the same commit (independent of node).
-    write_parameter(&db, "gen", "cap", "Base", scalar_batch("g1", 1.0), &[], o(), "t", "g1").expect("g1");
+    write_parameter(
+        &db,
+        "gen",
+        "cap",
+        "Base",
+        scalar_batch("g1", 1.0),
+        &[],
+        o(),
+        "t",
+        "g1",
+    )
+    .expect("g1");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write gen/g2, delete gen/g1, cascade-delete class node.
@@ -1886,14 +2824,34 @@ fn class_combined_atomicity_one_commit() {
         vec![],
         vec![dk("gen", "cap", "Base", "g1")],
         vec![(oclass("node"), cascade(true))],
-        "t", "one atomic save", o(),
-    ).expect("commit");
+        "t",
+        "one atomic save",
+        o(),
+    )
+    .expect("commit");
 
-    assert_eq!(count(&db, "SELECT count(*) FROM commit") - commits_before, 1, "exactly one commit");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit") - commits_before,
+        1,
+        "exactly one commit"
+    );
     assert_eq!(r.rows_written, 1, "gen/g2 written");
     assert_eq!(r.rows_closed, 1, "gen/g1 closed");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }), "node cascaded");
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class WHERE cur_name=lower('node')"), 0, "node closed in same commit");
+    assert!(
+        matches!(
+            r.object_deletes[0].result,
+            ObjectDeleteResult::Deleted { .. }
+        ),
+        "node cascaded"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name=lower('node')"
+        ),
+        0,
+        "node closed in same commit"
+    );
     // gen survived with g2 current, g1 gone.
     let got = read_parameter(&db, "gen", "cap", "Base").expect("read");
     let names = entity_names(&got);
@@ -1913,13 +2871,33 @@ fn class_preview_matches_commit() {
     let p = &previews[0];
     assert!(p.found);
     assert_eq!(p.kind, ObjectKind::Class);
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), commits_before, "preview mutates nothing");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "preview mutates nothing"
+    );
     // Immediate cross-kind dependents surface as blockers.
-    assert!(blocker(&p.blockers, "entity").is_some(), "child entities in blockers");
-    assert!(blocker(&p.blockers, "parameter_definition").is_some(), "child params in blockers");
-    assert!(blocker(&p.blockers, "entity_class").is_some(), "B2 class in blockers");
+    assert!(
+        blocker(&p.blockers, "entity").is_some(),
+        "child entities in blockers"
+    );
+    assert!(
+        blocker(&p.blockers, "parameter_definition").is_some(),
+        "child params in blockers"
+    );
+    assert!(
+        blocker(&p.blockers, "entity_class").is_some(),
+        "B2 class in blockers"
+    );
 
-    let r = delete_objects(&db, vec![(oclass("node"), cascade(true))], "t", "cascade", o()).expect("commit");
+    let r = delete_objects(
+        &db,
+        vec![(oclass("node"), cascade(true))],
+        "t",
+        "cascade",
+        o(),
+    )
+    .expect("commit");
     let cc = match &r.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out,
         other => panic!("expected Deleted, got {other:?}"),
@@ -1930,10 +2908,15 @@ fn class_preview_matches_commit() {
     assert_eq!(p.cascade.object_rows, cc.object_rows, "object_rows match");
     assert_eq!(p.cascade.total_rows, cc.total_rows, "total_rows match");
     for tc in &cc.per_table {
-        let pc = per_table(&p.cascade, &tc.table).unwrap_or_else(|| panic!("preview missing {}", tc.table));
+        let pc = per_table(&p.cascade, &tc.table)
+            .unwrap_or_else(|| panic!("preview missing {}", tc.table));
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
-    assert_eq!(p.cascade.per_table.len(), cc.per_table.len(), "no extra preview tables");
+    assert_eq!(
+        p.cascade.per_table.len(),
+        cc.per_table.len(),
+        "no extra preview tables"
+    );
 }
 
 // --- class test: B2 mutual-reference cycle terminates + closes both --------
@@ -1941,7 +2924,18 @@ fn class_preview_matches_commit() {
 #[test]
 fn class_b2_cycle_is_safe() {
     let (_dir, db) = fresh_db();
-    write_parameter(&db, "node", "demand", "Base", scalar_batch("seed", 1.0), &[], o(), "t", "s").expect("seed");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("seed", 1.0),
+        &[],
+        o(),
+        "t",
+        "s",
+    )
+    .expect("seed");
     // Classes `ca` and `cb` type a dimension on EACH OTHER (mutual B2).
     exec(
         &db,
@@ -1954,11 +2948,19 @@ fn class_b2_cycle_is_safe() {
                    (SELECT id FROM entity_class WHERE cur_name=lower('ca')), (SELECT max(id) FROM commit));",
     );
     // Must terminate (visited-set on (kind,id)) and close BOTH classes.
-    let r = delete_objects(&db, vec![(oclass("ca"), cascade(true))], "t", "cycle", o()).expect("commit");
-    assert!(matches!(r.object_deletes[0].result, ObjectDeleteResult::Deleted { .. }));
+    let r = delete_objects(&db, vec![(oclass("ca"), cascade(true))], "t", "cycle", o())
+        .expect("commit");
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
     assert_eq!(
-        count(&db, "SELECT count(*) FROM entity_class WHERE cur_name IN (lower('ca'),lower('cb'))"),
-        0, "both mutually-referencing classes closed"
+        count(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name IN (lower('ca'),lower('cb'))"
+        ),
+        0,
+        "both mutually-referencing classes closed"
     );
     audit_tiling_clean(&db);
 }
@@ -1972,8 +2974,30 @@ fn class_b2_cycle_is_safe() {
 /// per-class uniqueness, NOT contiguity), plus its N-D entity `gap_ab` whose
 /// tuple lives at those same positions (node_a@1, node_b@3).
 fn seed_gap_class(db: &std::path::Path) {
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_a", 1.0), &[], o(), "t", "a").expect("node_a");
-    write_parameter(db, "node", "demand", "Base", scalar_batch("node_b", 2.0), &[], o(), "t", "b").expect("node_b");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_a", 1.0),
+        &[],
+        o(),
+        "t",
+        "a",
+    )
+    .expect("node_a");
+    write_parameter(
+        db,
+        "node",
+        "demand",
+        "Base",
+        scalar_batch("node_b", 2.0),
+        &[],
+        o(),
+        "t",
+        "b",
+    )
+    .expect("node_b");
     exec(
         db,
         "INSERT INTO entity_class (name, valid_from_commit)
@@ -2000,25 +3024,44 @@ fn entity_nd_noncontiguous_positions_resolve() {
     // By Name — the baseline.
     let (_d1, db1) = fresh_db();
     seed_gap_class(&db1);
-    let r1 = delete_objects(&db1, vec![(oent("gap", "gap_ab"), cascade(true))], "t", "byname", o()).expect("c1");
+    let r1 = delete_objects(
+        &db1,
+        vec![(oent("gap", "gap_ab"), cascade(true))],
+        "t",
+        "byname",
+        o(),
+    )
+    .expect("c1");
     let cc1 = match &r1.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out.clone(),
         other => panic!("byname expected Deleted, got {other:?}"),
     };
-    assert_eq!(cc1.object_rows, 3, "N-D object_rows = entity + 2 tuple rows");
+    assert_eq!(
+        cc1.object_rows, 3,
+        "N-D object_rows = entity + 2 tuple rows"
+    );
 
     // By Elements at NON-contiguous positions (node_a@1, node_b@3). Under the old
     // `i+1` HAVING this spuriously resolved to NotFound (it looked at positions
     // 1,2 instead of 1,3); with the real position it must resolve identically.
     let (_d2, db2) = fresh_db();
     seed_gap_class(&db2);
-    let r2 = delete_objects(&db2, vec![(oent_elems("gap", &["node_a", "node_b"]), cascade(true))], "t", "byelem", o())
-        .expect("c2");
+    let r2 = delete_objects(
+        &db2,
+        vec![(oent_elems("gap", &["node_a", "node_b"]), cascade(true))],
+        "t",
+        "byelem",
+        o(),
+    )
+    .expect("c2");
     let cc2 = match &r2.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => closed_out.clone(),
         other => panic!("byelem expected Deleted (NotFound under the i+1 bug), got {other:?}"),
     };
-    assert_eq!(cc1, cc2, "Name and Elements resolve the same entity ⇒ identical CascadeCounts");
+    assert_eq!(
+        cc1, cc2,
+        "Name and Elements resolve the same entity ⇒ identical CascadeCounts"
+    );
 }
 
 // --- Fix 2: preview validates keys exactly like commit ---------------------
@@ -2034,8 +3077,12 @@ fn preview_rejects_malformed_alternative_key() {
         class: Some("node".into()),
         target: ObjectRef::Name("Base".into()),
     };
-    let err = preview_object_deletes(&db, vec![bad]).expect_err("preview must reject the malformed key");
-    assert!(err.to_string().contains("class must be None"), "same error as commit: {err}");
+    let err =
+        preview_object_deletes(&db, vec![bad]).expect_err("preview must reject the malformed key");
+    assert!(
+        err.to_string().contains("class must be None"),
+        "same error as commit: {err}"
+    );
 }
 
 // --- Fix 3a: overlapping value-delete + object-cascade counts once (D5) -----
@@ -2044,9 +3091,34 @@ fn preview_rejects_malformed_alternative_key() {
 fn overlapping_value_delete_and_object_cascade_counts_once() {
     let (_dir, db) = fresh_db();
     // Two scalar coords in alternative `victim`: node_1 and node_2.
-    write_parameter(&db, "node", "demand", "victim", scalar_batch("node_1", 1.0), &[], o(), "t", "s1").expect("s1");
-    write_parameter(&db, "node", "demand", "victim", scalar_batch("node_2", 2.0), &[], o(), "t", "s2").expect("s2");
-    let alt_id = count(&db, "SELECT id FROM alternative WHERE cur_name=lower('victim')");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "victim",
+        scalar_batch("node_1", 1.0),
+        &[],
+        o(),
+        "t",
+        "s1",
+    )
+    .expect("s1");
+    write_parameter(
+        &db,
+        "node",
+        "demand",
+        "victim",
+        scalar_batch("node_2", 2.0),
+        &[],
+        o(),
+        "t",
+        "s2",
+    )
+    .expect("s2");
+    let alt_id = count(
+        &db,
+        "SELECT id FROM alternative WHERE cur_name=lower('victim')",
+    );
 
     // ONE commit: value-delete node_1's coord AND cascade-delete the whole victim
     // alternative — which ALSO covers node_1's coord. The value delete closes it
@@ -2058,8 +3130,11 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
         vec![],
         vec![dk("node", "demand", "victim", "node_1")],
         vec![(oalt("victim"), cascade(true))],
-        "t", "overlap", o(),
-    ).expect("commit");
+        "t",
+        "overlap",
+        o(),
+    )
+    .expect("commit");
 
     assert_eq!(r.rows_closed, 1, "value delete closed node_1's coord once");
     let cc = match &r.object_deletes[0].result {
@@ -2069,7 +3144,8 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
     // The cascade counts ONLY the still-live coord (node_2), not the already-closed
     // node_1 — no double-count.
     assert_eq!(
-        per_table(cc, "value_scalar").unwrap().rows, 1,
+        per_table(cc, "value_scalar").unwrap().rows,
+        1,
         "cascade counts the still-live coord only, not the already-closed one"
     );
 
@@ -2101,12 +3177,20 @@ fn same_commit_array_write_then_cascade_guard() {
     // branch) ⇒ no trip, result NotFound, and the array value survives.
     let r = commit_changes(
         &db,
-        vec![seg("node", "profile", "afresh", array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]))],
+        vec![seg(
+            "node",
+            "profile",
+            "afresh",
+            array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+        )],
         vec![],
         vec![],
         vec![(oalt("afresh"), cascade(true))],
-        "t", "array hazard", o(),
-    ).expect("commit must not trip the value_array_hist span CHECK");
+        "t",
+        "array hazard",
+        o(),
+    )
+    .expect("commit must not trip the value_array_hist span CHECK");
 
     assert_eq!(
         r.object_deletes[0].result,
@@ -2115,14 +3199,23 @@ fn same_commit_array_write_then_cascade_guard() {
     );
     assert_eq!(
         count(&db, "SELECT count(*) FROM value_array_hist") - hist_before,
-        0, "no same-commit array row moved to hist"
+        0,
+        "no same-commit array row moved to hist"
     );
     // The array value (and its alternative) survived — the guard protected them.
     let got = read_parameter(&db, "node", "profile", "afresh").expect("read");
-    assert_eq!(entity_names(&got), vec!["node_1".to_string(); 3], "array value survives");
     assert_eq!(
-        count(&db, "SELECT count(*) FROM alternative WHERE cur_name=lower('afresh')"),
-        1, "alternative still live"
+        entity_names(&got),
+        vec!["node_1".to_string(); 3],
+        "array value survives"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM alternative WHERE cur_name=lower('afresh')"
+        ),
+        1,
+        "alternative still live"
     );
     audit_tiling_clean(&db);
 }

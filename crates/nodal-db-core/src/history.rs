@@ -97,9 +97,15 @@ pub fn write_value(
 
     // --- 4. Write into the target tier. ---
     let (version, rows_written, closed_same) = match (&value.shape, target) {
-        (ShapedData::Scalar(m), Tier::Scalar) => {
-            write_scalar(conn, &key, commit_id, m, same_tier_live, retained, parameter_type_id)?
-        }
+        (ShapedData::Scalar(m), Tier::Scalar) => write_scalar(
+            conn,
+            &key,
+            commit_id,
+            m,
+            same_tier_live,
+            retained,
+            parameter_type_id,
+        )?,
         (ShapedData::Array(vals), Tier::Array) => write_array(
             conn,
             &key,
@@ -303,9 +309,11 @@ pub(crate) fn drop_scalar_values_not_matching(
     // non-empty at load).
     let placeholders = vec!["?"; keys.len()].join(", ");
     let match_pred = format!("(value_kind = 'string' AND v_str IN ({placeholders}))");
-    let mut binds: Vec<duckdb::types::Value> =
-        vec![commit_id.into(), pd_id.into()];
-    binds.extend(keys.iter().map(|k| duckdb::types::Value::Text((*k).to_string())));
+    let mut binds: Vec<duckdb::types::Value> = vec![commit_id.into(), pd_id.into()];
+    binds.extend(
+        keys.iter()
+            .map(|k| duckdb::types::Value::Text((*k).to_string())),
+    );
     let closed = conn.execute(
         &format!(
             "UPDATE value_scalar SET valid_to_commit = ? \
@@ -452,7 +460,12 @@ fn write_scalar(
     Ok((version, 1, closed))
 }
 
-fn close_out_scalar(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -> Result<usize, DbError> {
+fn close_out_scalar(
+    conn: &Connection,
+    key: &ValueKey,
+    c: i64,
+    retained: bool,
+) -> Result<usize, DbError> {
     let sql = if retained {
         "UPDATE value_scalar SET valid_to_commit=? \
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
@@ -466,7 +479,12 @@ fn close_out_scalar(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -
     };
     Ok(conn.execute(
         sql,
-        params![c, key.entity_id, key.parameter_definition_id, key.alternative_id],
+        params![
+            c,
+            key.entity_id,
+            key.parameter_definition_id,
+            key.alternative_id
+        ],
     )?)
 }
 
@@ -474,7 +492,11 @@ fn next_version_scalar(conn: &Connection, key: &ValueKey) -> Result<u16, DbError
     let v: i32 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM value_scalar \
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-        params![key.entity_id, key.parameter_definition_id, key.alternative_id],
+        params![
+            key.entity_id,
+            key.parameter_definition_id,
+            key.alternative_id
+        ],
         |r| r.get(0),
     )?;
     Ok(v as u16)
@@ -554,7 +576,12 @@ fn write_array(
 /// SQL-side pre-image copy of the live array row(s) into `value_array_hist`
 /// (VMP Part 5). Retained → `SELECT *, c, TRUE`; stub → payload columns nulled
 /// with `content_retained = FALSE`. The pre-image never leaves SQL.
-fn copy_array_preimage(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -> Result<usize, DbError> {
+fn copy_array_preimage(
+    conn: &Connection,
+    key: &ValueKey,
+    c: i64,
+    retained: bool,
+) -> Result<usize, DbError> {
     let sql = if retained {
         "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array \
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?"
@@ -572,7 +599,12 @@ fn copy_array_preimage(conn: &Connection, key: &ValueKey, c: i64, retained: bool
     };
     Ok(conn.execute(
         sql,
-        params![c, key.entity_id, key.parameter_definition_id, key.alternative_id],
+        params![
+            c,
+            key.entity_id,
+            key.parameter_definition_id,
+            key.alternative_id
+        ],
     )?)
 }
 
@@ -638,7 +670,9 @@ fn write_long(
         let pos = pad4_pos(&row.positions);
         let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
         max_version = max_version.max(version);
-        rows_params.push(long_row_params(key, pt_id, c, version, axis_ids, axes, &pos, &row.value));
+        rows_params.push(long_row_params(
+            key, pt_id, c, version, axis_ids, axes, &pos, &row.value,
+        ));
     }
 
     // Batched multi-row INSERT (replaces the per-cell prepare/execute). Issued on
@@ -655,7 +689,10 @@ fn write_long(
 /// already holds (live OR superseded — versioning spans both, as the former
 /// per-cell probe did: no `valid_to_commit` filter). One scan per key replaces
 /// one probe per cell (RESULTS.md alarm #1).
-fn current_long_versions(conn: &Connection, key: &ValueKey) -> Result<HashMap<[i32; 4], u16>, DbError> {
+fn current_long_versions(
+    conn: &Connection,
+    key: &ValueKey,
+) -> Result<HashMap<[i32; 4], u16>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT i1_pos, i2_pos, i3_pos, i4_pos, MAX(version)::INTEGER \
          FROM value_long \
@@ -664,7 +701,11 @@ fn current_long_versions(conn: &Connection, key: &ValueKey) -> Result<HashMap<[i
     )?;
     let mut map = HashMap::new();
     let iter = stmt.query_map(
-        params![key.entity_id, key.parameter_definition_id, key.alternative_id],
+        params![
+            key.entity_id,
+            key.parameter_definition_id,
+            key.alternative_id
+        ],
         |r| {
             let pos = [
                 r.get::<_, i32>(0)?,
@@ -700,7 +741,7 @@ fn insert_long_rows(conn: &Connection, rows_params: &[Vec<Value>]) -> Result<(),
     if full > 0 {
         let sql = long_insert_sql(LONG_INSERT_CHUNK);
         let mut stmt = conn.prepare(&sql)?;
-        for chunk in rows_params.chunks_exact(LONG_INSERT_CHUNK) {
+        for chunk in rows_params.as_chunks::<LONG_INSERT_CHUNK>().0 {
             stmt.execute(duckdb::params_from_iter(chunk.iter().flatten()))?;
         }
     }
@@ -806,7 +847,12 @@ fn opt_text(v: Option<String>) -> Value {
     v.map(Value::Text).unwrap_or(Value::Null)
 }
 
-fn close_out_long(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -> Result<usize, DbError> {
+fn close_out_long(
+    conn: &Connection,
+    key: &ValueKey,
+    c: i64,
+    retained: bool,
+) -> Result<usize, DbError> {
     let sql = if retained {
         "UPDATE value_long SET valid_to_commit=? \
          WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
@@ -820,7 +866,12 @@ fn close_out_long(conn: &Connection, key: &ValueKey, c: i64, retained: bool) -> 
     };
     Ok(conn.execute(
         sql,
-        params![c, key.entity_id, key.parameter_definition_id, key.alternative_id],
+        params![
+            c,
+            key.entity_id,
+            key.parameter_definition_id,
+            key.alternative_id
+        ],
     )?)
 }
 
@@ -843,7 +894,11 @@ fn close_out_tier(
             conn.execute(
                 "DELETE FROM value_array \
                  WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-                params![key.entity_id, key.parameter_definition_id, key.alternative_id],
+                params![
+                    key.entity_id,
+                    key.parameter_definition_id,
+                    key.alternative_id
+                ],
             )?;
             Ok(moved)
         }
@@ -878,7 +933,9 @@ pub(crate) struct VCols {
 /// did not see.
 pub(crate) fn literal_cols(v: &ScalarValue) -> Result<VCols, DbError> {
     match v {
-        ScalarValue::Float(_) | ScalarValue::Int(_) | ScalarValue::Bool(_)
+        ScalarValue::Float(_)
+        | ScalarValue::Int(_)
+        | ScalarValue::Bool(_)
         | ScalarValue::Str(_) => Ok(VCols::of(v)),
         other => Err(DbError::Api(format!(
             "scalar kind {other:?} has no v1 template literal form"
@@ -940,7 +997,12 @@ fn pad4_pos(positions: &[i32]) -> [i32; 4] {
 /// Push four axis-id params (`Value::Null` beyond the declared rank).
 fn push_axis4(p: &mut Vec<Value>, axis_ids: &[i64]) {
     for d in 0..4 {
-        p.push(axis_ids.get(d).map(|&id| Value::BigInt(id)).unwrap_or(Value::Null));
+        p.push(
+            axis_ids
+                .get(d)
+                .map(|&id| Value::BigInt(id))
+                .unwrap_or(Value::Null),
+        );
     }
 }
 

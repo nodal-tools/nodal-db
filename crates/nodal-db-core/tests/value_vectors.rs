@@ -9,9 +9,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use nodal_db_core::encoding::{content_hash, encode_value, ValueContent};
 use nodal_db_core::types::{ScalarValue, ValueKey, ValueKind};
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct VVector {
@@ -72,7 +72,11 @@ fn value_vectors_match() {
         .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
         .collect();
     files.sort();
-    assert!(files.len() >= 4, "expected >=4 value vectors, got {}", files.len());
+    assert!(
+        files.len() >= 4,
+        "expected >=4 value vectors, got {}",
+        files.len()
+    );
 
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -131,10 +135,9 @@ fn value_vectors_match() {
         };
 
         let bytes = encode_value(&v.key, &content).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        let want_hex = v
-            .expected_canonical_hex
-            .as_deref()
-            .unwrap_or_else(|| panic!("{name}: committed vector is missing expected_canonical_hex"));
+        let want_hex = v.expected_canonical_hex.as_deref().unwrap_or_else(|| {
+            panic!("{name}: committed vector is missing expected_canonical_hex")
+        });
         assert_eq!(
             to_hex(&bytes),
             want_hex,

@@ -41,8 +41,7 @@ impl DbTypeMember {
         if self.dims.is_empty() {
             format!("{} rank 0", self.value_kind)
         } else {
-            let d: Vec<String> =
-                self.dims.iter().map(|(n, k)| format!("{n}: {k}")).collect();
+            let d: Vec<String> = self.dims.iter().map(|(n, k)| format!("{n}: {k}")).collect();
             format!("indexed rank {} ({})", self.dims.len(), d.join(", "))
         }
     }
@@ -269,8 +268,11 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
             let s = s?;
             v.class_sets.insert(fold(&s.name), s);
         }
-        let set_by_id: BTreeMap<i64, String> =
-            v.class_sets.values().map(|s| (s.id, fold(&s.name))).collect();
+        let set_by_id: BTreeMap<i64, String> = v
+            .class_sets
+            .values()
+            .map(|s| (s.id, fold(&s.name)))
+            .collect();
         let mut mstmt = conn.prepare(
             "SELECT class_set_id, member_class_id FROM class_set_member \
              WHERE valid_to_commit IS NULL ORDER BY class_set_id, member_class_id",
@@ -310,7 +312,9 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
         })?;
         for row in rows {
             let (cid, _pos, dc, ds) = row?;
-            let Some(cf) = class_by_id.get(&cid) else { continue };
+            let Some(cf) = class_by_id.get(&cid) else {
+                continue;
+            };
             let referent = match (dc, ds) {
                 (Some(id), None) => cname_by_id.get(&id).cloned().map(DbDimRef::Class),
                 (None, Some(id)) => set_by_id.get(&id).cloned().map(DbDimRef::Set),
@@ -365,8 +369,11 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
             let l = l?;
             v.value_lists.insert(fold(&l.name), l);
         }
-        let list_by_id: BTreeMap<i64, String> =
-            v.value_lists.values().map(|l| (l.id, fold(&l.name))).collect();
+        let list_by_id: BTreeMap<i64, String> = v
+            .value_lists
+            .values()
+            .map(|l| (l.id, fold(&l.name)))
+            .collect();
         let mut mstmt = conn.prepare(
             "SELECT parameter_value_list_id, id, ordinal, description, value_kind, \
                     v_float, v_int, v_bool, v_str \
@@ -388,7 +395,9 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
         })?;
         for row in mrows {
             let (lid, id, ordinal, description, kind, f, i, b, s) = row?;
-            let Some(lf) = list_by_id.get(&lid) else { continue };
+            let Some(lf) = list_by_id.get(&lid) else {
+                continue;
+            };
             let list = v.value_lists.get_mut(lf).unwrap();
             match scalar_from_row(&kind, f, i, b, s) {
                 Some(value) => list.members.push(DbListMember {
@@ -412,8 +421,11 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
 
     // --- parameter definitions + types + defaults ---
     {
-        let list_name_by_id: BTreeMap<i64, String> =
-            v.value_lists.values().map(|l| (l.id, l.name.clone())).collect();
+        let list_name_by_id: BTreeMap<i64, String> = v
+            .value_lists
+            .values()
+            .map(|l| (l.id, l.name.clone()))
+            .collect();
         let unit_name_by_id: BTreeMap<i64, String> =
             v.units.values().map(|u| (u.id, u.name.clone())).collect();
         let mut stmt = conn.prepare(
@@ -467,7 +479,9 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
         // are the same code the entry check runs, so the snapshot cannot
         // interpret a stored declaration differently than a write would.
         for (pd_id, declared) in read_all_declared_types(conn)? {
-            let Some(cf) = pd_class.get(&pd_id) else { continue };
+            let Some(cf) = pd_class.get(&pd_id) else {
+                continue;
+            };
             let class = v.classes.get_mut(cf).unwrap();
             if let Some(p) = class.params.values_mut().find(|p| p.id == pd_id) {
                 for d in declared {
@@ -503,11 +517,18 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
         })?;
         for row in dvrows {
             let (pd_id, kind, f, i, b, s) = row?;
-            let Some(cf) = pd_class.get(&pd_id) else { continue };
+            let Some(cf) = pd_class.get(&pd_id) else {
+                continue;
+            };
             let class = v.classes.get_mut(cf).unwrap();
             if let Some(p) = class.params.values_mut().find(|p| p.id == pd_id) {
                 match scalar_from_row(&kind, f, i, b, s) {
-                    Some(value) => p.default = Some(DbDefault { value_kind: kind, value }),
+                    Some(value) => {
+                        p.default = Some(DbDefault {
+                            value_kind: kind,
+                            value,
+                        })
+                    }
                     None => {
                         p.has_nonscalar_default = true;
                         warnings.push(format!(
@@ -528,7 +549,9 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
             let nrows = nstmt.query_map([], |r| r.get::<_, i64>(0))?;
             for row in nrows {
                 let pd_id = row?;
-                let Some(cf) = pd_class.get(&pd_id) else { continue };
+                let Some(cf) = pd_class.get(&pd_id) else {
+                    continue;
+                };
                 let class = v.classes.get_mut(cf).unwrap();
                 if let Some(p) = class.params.values_mut().find(|p| p.id == pd_id) {
                     p.has_nonscalar_default = true;
@@ -564,7 +587,9 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
         let mut ent_by_id: BTreeMap<i64, (String, String)> = BTreeMap::new();
         for row in rows {
             let (id, cid, name, description) = row?;
-            let Some((cf, cname)) = cname_by_id.get(&cid) else { continue };
+            let Some((cf, cname)) = cname_by_id.get(&cid) else {
+                continue;
+            };
             ent_by_id.insert(id, (cf.clone(), fold(&name)));
             v.entities.insert(
                 (cf.clone(), fold(&name)),
@@ -581,9 +606,7 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
             "SELECT entity_id, position, element_entity_id FROM entity_element \
              WHERE valid_to_commit IS NULL ORDER BY entity_id, position",
         )?;
-        let erows = estmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(2)?))
-        })?;
+        let erows = estmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(2)?)))?;
         for row in erows {
             let (eid, el_id) = row?;
             let (Some(ek), Some(elk)) = (ent_by_id.get(&eid), ent_by_id.get(&el_id)) else {
@@ -598,7 +621,11 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
              ORDER BY group_entity_id, member_entity_id",
         )?;
         let mrows = mstmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
         })?;
         for row in mrows {
             let (gid, mid, included) = row?;

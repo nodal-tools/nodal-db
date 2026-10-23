@@ -20,7 +20,9 @@ use nodal_db_core::conn::with_write_txn;
 use nodal_db_core::encoding::{AxisBody, AxisProperties, CanonicalAxis};
 use nodal_db_core::history::{delete_value, write_value};
 use nodal_db_core::schema_init::init_schema;
-use nodal_db_core::types::{LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions};
+use nodal_db_core::types::{
+    LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions,
+};
 
 // --- JSON case model -------------------------------------------------------
 
@@ -44,7 +46,9 @@ struct Step {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Op {
-    ScalarFloat { v: f64 },
+    ScalarFloat {
+        v: f64,
+    },
     ArrayFloat {
         start: i64,
         step: i64,
@@ -209,6 +213,7 @@ fn resolve(step: Option<usize>, commit_ids: &[i64]) -> Option<i64> {
     step.map(|s| commit_ids[s - 1])
 }
 
+#[allow(clippy::type_complexity)]
 fn assert_step(
     db: &PathBuf,
     key: &ValueKey,
@@ -232,16 +237,18 @@ fn assert_step(
              WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? ORDER BY version",
         )
         .unwrap()
-        .query_map(triple, |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
+        .query_map(triple, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(got.len(), e.scalar.len(), "{ctx}: value_scalar row count");
     for (row, exp) in got.iter().zip(&e.scalar) {
         assert_eq!(row.0, exp.version, "{ctx}: scalar version");
-        assert_eq!(row.1, resolve(exp.valid_to_step, commit_ids), "{ctx}: scalar valid_to");
+        assert_eq!(
+            row.1,
+            resolve(exp.valid_to_step, commit_ids),
+            "{ctx}: scalar valid_to"
+        );
         assert_eq!(row.2, exp.retained, "{ctx}: scalar content_retained");
         assert_eq!(row.3, exp.v_float, "{ctx}: scalar v_float");
     }
@@ -279,10 +286,18 @@ fn assert_step(
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(got_h.len(), e.array_hist.len(), "{ctx}: value_array_hist row count");
+    assert_eq!(
+        got_h.len(),
+        e.array_hist.len(),
+        "{ctx}: value_array_hist row count"
+    );
     for (row, exp) in got_h.iter().zip(&e.array_hist) {
         assert_eq!(row.0, exp.version, "{ctx}: hist version");
-        assert_eq!(row.1, resolve(exp.valid_to_step, commit_ids), "{ctx}: hist valid_to");
+        assert_eq!(
+            row.1,
+            resolve(exp.valid_to_step, commit_ids),
+            "{ctx}: hist valid_to"
+        );
         assert_eq!(row.2, exp.retained, "{ctx}: hist content_retained");
         assert_eq!(row.3, exp.values_present, "{ctx}: hist values present");
         assert_eq!(row.4, exp.first, "{ctx}: hist values[1]");
@@ -306,22 +321,27 @@ fn assert_step(
     for (row, exp) in got_l.iter().zip(&e.long) {
         assert_eq!(row.0, exp.i1_pos, "{ctx}: long i1_pos");
         assert_eq!(row.1, exp.version, "{ctx}: long version");
-        assert_eq!(row.2, resolve(exp.valid_to_step, commit_ids), "{ctx}: long valid_to");
+        assert_eq!(
+            row.2,
+            resolve(exp.valid_to_step, commit_ids),
+            "{ctx}: long valid_to"
+        );
         assert_eq!(row.3, exp.retained, "{ctx}: long content_retained");
         assert_eq!(row.4, exp.v_float, "{ctx}: long v_float");
     }
 
     // Every step must leave the history-tiling audit clean (VMP Part 5).
     let tiling: i64 = conn
-        .query_row("SELECT count(*) FROM audit_history_tiling", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM audit_history_tiling", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(tiling, 0, "{ctx}: audit_history_tiling must be empty");
 }
 
 #[test]
 fn all_protocol_cases() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/protocol_cases");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/protocol_cases");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("read protocol_cases dir")
         .filter_map(|e| e.ok().map(|e| e.path()))

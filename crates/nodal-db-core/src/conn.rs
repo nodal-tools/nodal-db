@@ -55,7 +55,10 @@ static PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock:
 /// one canonicalization, so the two registries cannot disagree on identity.
 pub(crate) fn canonical_path_key(db_path: &Path) -> PathBuf {
     db_path.canonicalize().unwrap_or_else(|_| {
-        match (db_path.parent().and_then(|d| d.canonicalize().ok()), db_path.file_name()) {
+        match (
+            db_path.parent().and_then(|d| d.canonicalize().ok()),
+            db_path.file_name(),
+        ) {
             (Some(dir), Some(name)) => dir.join(name),
             _ => db_path.to_path_buf(),
         }
@@ -131,12 +134,7 @@ fn assert_min_version(conn: &Connection) -> Result<(), DbError> {
 /// lock is never leaked. `commit_id` is the validity edge Phase 3's history
 /// writes stamp onto rows (VMP Part 5); axis writes ignore it (axes are
 /// immutable and carry no validity span).
-pub fn with_write_txn<T, F>(
-    db_path: &Path,
-    user: &str,
-    message: &str,
-    f: F,
-) -> Result<T, DbError>
+pub fn with_write_txn<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> Result<T, DbError>
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {

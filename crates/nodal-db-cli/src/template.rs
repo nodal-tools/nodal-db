@@ -78,18 +78,25 @@ pub enum TemplateCommand {
 
 pub fn run(cmd: TemplateCommand) -> Result<()> {
     match cmd {
-        TemplateCommand::Load { file, db, user, message } => {
-            apply_file(&file, &db, user.as_deref(), &message, None)
-        }
+        TemplateCommand::Load {
+            file,
+            db,
+            user,
+            message,
+        } => apply_file(&file, &db, user.as_deref(), &message, None),
         TemplateCommand::Plan { file, db } => {
             let t = parse(&file)?;
             let p = tpl::plan(&db, &t).map_err(anyhow::Error::from)?;
             print!("{p}");
             Ok(())
         }
-        TemplateCommand::Apply { file, db, user, message, expect_commit } => {
-            apply_file(&file, &db, user.as_deref(), &message, expect_commit)
-        }
+        TemplateCommand::Apply {
+            file,
+            db,
+            user,
+            message,
+            expect_commit,
+        } => apply_file(&file, &db, user.as_deref(), &message, expect_commit),
         TemplateCommand::Export { db, out, json } => {
             let (t, warnings) = tpl::export(&db).map_err(anyhow::Error::from)?;
             for w in &warnings {
@@ -139,7 +146,10 @@ fn apply_file(
     let t = parse(file)?;
     let user = resolve_user_from(user)?;
     let registry = tpl::MigrationRegistry::new();
-    let opts = tpl::ApplyOptions { expect_commit, ..Default::default() };
+    let opts = tpl::ApplyOptions {
+        expect_commit,
+        ..Default::default()
+    };
     let outcome =
         tpl::apply(db, &t, &registry, &user, message, &opts).map_err(anyhow::Error::from)?;
     if outcome.no_op {
@@ -158,7 +168,11 @@ fn apply_file(
         t.template.version,
         outcome.commits.len(),
         outcome.plan.actions.len(),
-        if outcome.converged { "" } else { " [PARTIAL — content hash withheld]" }
+        if outcome.converged {
+            ""
+        } else {
+            " [PARTIAL — content hash withheld]"
+        }
     );
     for a in &outcome.plan.actions {
         println!("  + {a}");

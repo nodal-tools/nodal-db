@@ -30,7 +30,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use duckdb::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray};
+use duckdb::arrow::array::{
+    ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+};
 use duckdb::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{params, AccessMode, Config, Connection};
@@ -123,14 +125,20 @@ fn scalar_batch(names: &[String], vals: &[f64]) -> RecordBatch {
         Field::new("entity", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
     ]));
-    let ent = Arc::new(StringArray::from_iter_values(names.iter().map(String::as_str))) as ArrayRef;
+    let ent = Arc::new(StringArray::from_iter_values(
+        names.iter().map(String::as_str),
+    )) as ArrayRef;
     let val = Arc::new(Float64Array::from(vals.to_vec())) as ArrayRef;
     RecordBatch::try_new(schema, vec![ent, val]).unwrap()
 }
 
 /// Logical-long rank-1 hourly batch: every entity carries the full 8760-hour
 /// grid. Float measure → Tier A (full Cartesian grid); int measure → Tier L.
-fn series_batch(names: &[String], float_vals: Option<&[f64]>, int_vals: Option<&[i64]>) -> RecordBatch {
+fn series_batch(
+    names: &[String],
+    float_vals: Option<&[f64]>,
+    int_vals: Option<&[i64]>,
+) -> RecordBatch {
     let n = names.len() * CELLS;
     let mut ent = Vec::with_capacity(n);
     let mut ts = Vec::with_capacity(n);
@@ -153,7 +161,11 @@ fn series_batch(names: &[String], float_vals: Option<&[f64]>, int_vals: Option<&
     };
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity", DataType::Utf8, false),
-        Field::new("time", DataType::Timestamp(TimeUnit::Microsecond, None), false),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
         vfield,
     ]));
     let ent = Arc::new(StringArray::from_iter_values(ent)) as ArrayRef;
@@ -162,33 +174,67 @@ fn series_batch(names: &[String], float_vals: Option<&[f64]>, int_vals: Option<&
 }
 
 pub fn float_series(seed: usize) -> Vec<f64> {
-    (0..CELLS).map(|h| ((seed * 8760 + h) % 977) as f64 * 1.7 - 800.0).collect()
+    (0..CELLS)
+        .map(|h| ((seed * 8760 + h) % 977) as f64 * 1.7 - 800.0)
+        .collect()
 }
 
 pub fn int_series(seed: usize) -> Vec<i64> {
-    (0..CELLS).map(|h| ((seed as i64) * 100_000 + h as i64) % 65_536).collect()
+    (0..CELLS)
+        .map(|h| ((seed as i64) * 100_000 + h as i64) % 65_536)
+        .collect()
 }
 
 /// One-entity float-array write (Tier A replace path in the write benches).
 pub fn write_array_entity(db: &Path, name: &str, seed: usize) {
     let batch = series_batch(&[name.to_string()], Some(&float_series(seed)), None);
-    write_parameter(db, "bench_array", "p_series", ALT, batch, &[], WriteOptions::default(), USER, "bench array write")
-        .expect("array write");
+    write_parameter(
+        db,
+        "bench_array",
+        "p_series",
+        ALT,
+        batch,
+        &[],
+        WriteOptions::default(),
+        USER,
+        "bench array write",
+    )
+    .expect("array write");
 }
 
 /// One-entity int-series write (Tier L create/replace path; a replace closes
 /// out all 8760 live cells and re-inserts them — the churn primitive).
 pub fn write_long_entity(db: &Path, name: &str, seed: usize) {
     let batch = series_batch(&[name.to_string()], None, Some(&int_series(seed)));
-    write_parameter(db, "bench_long", "p_long", ALT, batch, &[], WriteOptions::default(), USER, "bench long write")
-        .expect("long write");
+    write_parameter(
+        db,
+        "bench_long",
+        "p_long",
+        ALT,
+        batch,
+        &[],
+        WriteOptions::default(),
+        USER,
+        "bench long write",
+    )
+    .expect("long write");
 }
 
 /// N-entity scalar write in one call (the per-entity-cost bench primitive).
 pub fn write_scalars(db: &Path, names: &[String], vals: &[f64], message: &str) {
     let batch = scalar_batch(names, vals);
-    write_parameter(db, "bench_scalar", "p_scalar", ALT, batch, &[], WriteOptions::default(), USER, message)
-        .expect("scalar write");
+    write_parameter(
+        db,
+        "bench_scalar",
+        "p_scalar",
+        ALT,
+        batch,
+        &[],
+        WriteOptions::default(),
+        USER,
+        message,
+    )
+    .expect("scalar write");
 }
 
 // --- connections / measurement helpers --------------------------------------
@@ -311,25 +357,49 @@ fn build() -> Synthetic {
     // 100 k scalars, 10 chunks of 10 k entities per commit.
     let t = Instant::now();
     for chunk in 0..10 {
-        let names: Vec<String> = (0..10_000).map(|i| format!("s{:06}", chunk * 10_000 + i)).collect();
-        let vals: Vec<f64> = (0..10_000).map(|i| (chunk * 10_000 + i) as f64 * 0.5).collect();
+        let names: Vec<String> = (0..10_000)
+            .map(|i| format!("s{:06}", chunk * 10_000 + i))
+            .collect();
+        let vals: Vec<f64> = (0..10_000)
+            .map(|i| (chunk * 10_000 + i) as f64 * 0.5)
+            .collect();
         write_scalars(&db, &names, &vals, "synthetic scalars");
-        eprintln!("[synthetic] scalars chunk {}/10 done ({:.1}s)", chunk + 1, t.elapsed().as_secs_f64());
+        eprintln!(
+            "[synthetic] scalars chunk {}/10 done ({:.1}s)",
+            chunk + 1,
+            t.elapsed().as_secs_f64()
+        );
     }
     let scalars = t.elapsed();
 
     // 1 000 × 8 760-cell float arrays (~70 MB), 10 chunks of 100 entities.
     let t = Instant::now();
     for chunk in 0..10 {
-        let names: Vec<String> = (0..100).map(|i| format!("a{:04}", chunk * 100 + i)).collect();
+        let names: Vec<String> = (0..100)
+            .map(|i| format!("a{:04}", chunk * 100 + i))
+            .collect();
         let mut vals: Vec<f64> = Vec::with_capacity(100 * CELLS);
         for i in 0..100 {
             vals.extend(float_series(chunk * 100 + i));
         }
         let batch = series_batch(&names, Some(&vals), None);
-        write_parameter(&db, "bench_array", "p_series", ALT, batch, &[], WriteOptions::default(), USER, "synthetic arrays")
-            .expect("array chunk");
-        eprintln!("[synthetic] arrays chunk {}/10 done ({:.1}s)", chunk + 1, t.elapsed().as_secs_f64());
+        write_parameter(
+            &db,
+            "bench_array",
+            "p_series",
+            ALT,
+            batch,
+            &[],
+            WriteOptions::default(),
+            USER,
+            "synthetic arrays",
+        )
+        .expect("array chunk");
+        eprintln!(
+            "[synthetic] arrays chunk {}/10 done ({:.1}s)",
+            chunk + 1,
+            t.elapsed().as_secs_f64()
+        );
     }
     let arrays = t.elapsed();
 
@@ -338,7 +408,12 @@ fn build() -> Synthetic {
     for e in 0..LONG_ENTITIES {
         write_long_entity(&db, &format!("l{e:04}"), e);
         if (e + 1) % 20 == 0 {
-            eprintln!("[synthetic] long entities {}/{} ({:.1}s)", e + 1, LONG_ENTITIES, t.elapsed().as_secs_f64());
+            eprintln!(
+                "[synthetic] long entities {}/{} ({:.1}s)",
+                e + 1,
+                LONG_ENTITIES,
+                t.elapsed().as_secs_f64()
+            );
         }
     }
     let long_live = t.elapsed();
@@ -359,7 +434,12 @@ fn build() -> Synthetic {
     for e in 0..CHURN_REWRITES {
         write_long_entity(&db, &format!("l{e:04}"), 10_000 + e);
         if (e + 1) % 10 == 0 {
-            eprintln!("[synthetic] churn {}/{} ({:.1}s)", e + 1, CHURN_REWRITES, t.elapsed().as_secs_f64());
+            eprintln!(
+                "[synthetic] churn {}/{} ({:.1}s)",
+                e + 1,
+                CHURN_REWRITES,
+                t.elapsed().as_secs_f64()
+            );
         }
     }
     let churn = t.elapsed();
@@ -373,7 +453,9 @@ fn build() -> Synthetic {
         assert_eq!(one, 1);
     });
     let conn = open_ro(&db);
-    let duckdb_version: String = conn.query_row("SELECT version()", [], |r| r.get(0)).unwrap();
+    let duckdb_version: String = conn
+        .query_row("SELECT version()", [], |r| r.get(0))
+        .unwrap();
     let (live_long, dead_long) = long_counts(&conn, keys.long_pd);
     conn.close().map_err(|(_, e)| e).expect("close");
     let db_bytes = fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
@@ -412,7 +494,8 @@ fn build() -> Synthetic {
 }
 
 fn id(conn: &Connection, sql: &str, name: &str) -> i64 {
-    conn.query_row(sql, params![name], |r| r.get(0)).expect("id lookup")
+    conn.query_row(sql, params![name], |r| r.get(0))
+        .expect("id lookup")
 }
 
 fn resolve_keys(conn: &Connection) -> PointKeys {
@@ -429,11 +512,28 @@ fn resolve_keys(conn: &Connection) -> PointKeys {
     };
     let ent = "SELECT id FROM entity WHERE lower(name)=lower(?) AND valid_to_commit IS NULL";
     let alt_id: i64 = conn
-        .query_row("SELECT id FROM alternative WHERE lower(name)=lower(?)", params![ALT], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM alternative WHERE lower(name)=lower(?)",
+            params![ALT],
+            |r| r.get(0),
+        )
         .expect("alt lookup");
-    let scalar = (id(conn, ent, "s050000"), pd("bench_scalar", "p_scalar"), alt_id);
+    let scalar = (
+        id(conn, ent, "s050000"),
+        pd("bench_scalar", "p_scalar"),
+        alt_id,
+    );
     let long_pd = pd("bench_long", "p_long");
     let long = (id(conn, ent, "l0070"), long_pd, alt_id, (CELLS / 2) as i32);
-    let array = (id(conn, ent, "a0500"), pd("bench_array", "p_series"), alt_id);
-    PointKeys { scalar, long, array, long_pd }
+    let array = (
+        id(conn, ent, "a0500"),
+        pd("bench_array", "p_series"),
+        alt_id,
+    );
+    PointKeys {
+        scalar,
+        long,
+        array,
+        long_pd,
+    }
 }

@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use duckdb::{params, Connection};
 
 use crate::api::{
-    insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class, lookup_parameter,
-    lookup_scenario, lookup_value_list,
+    insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class,
+    lookup_parameter, lookup_scenario, lookup_value_list,
 };
 use crate::error::DbError;
 use crate::object_delete::resolve_element as resolve_element_in_dim;
@@ -62,32 +62,60 @@ pub(crate) fn apply_structural(
             let (id, e) = apply_create_alternative(conn, c, name, description.as_deref())?;
             (StructuralKind::Alternative, id, e)
         }
-        StructuralChange::RenameAlternative { current, new_name, description } => {
-            let (id, e) = apply_rename_alternative(conn, c, current, new_name, description.as_deref())?;
+        StructuralChange::RenameAlternative {
+            current,
+            new_name,
+            description,
+        } => {
+            let (id, e) =
+                apply_rename_alternative(conn, c, current, new_name, description.as_deref())?;
             (StructuralKind::Alternative, id, e)
         }
         StructuralChange::CreateScenario { name, description } => {
             let (id, e) = apply_create_scenario(conn, c, name, description.as_deref())?;
             (StructuralKind::Scenario, id, e)
         }
-        StructuralChange::RenameScenario { current, new_name, description } => {
-            let (id, e) = apply_rename_scenario(conn, c, current, new_name, description.as_deref())?;
+        StructuralChange::RenameScenario {
+            current,
+            new_name,
+            description,
+        } => {
+            let (id, e) =
+                apply_rename_scenario(conn, c, current, new_name, description.as_deref())?;
             (StructuralKind::Scenario, id, e)
         }
-        StructuralChange::SetScenarioAlternatives { scenario, alternatives } => {
+        StructuralChange::SetScenarioAlternatives {
+            scenario,
+            alternatives,
+        } => {
             let (id, e) = apply_set_scenario_alternatives(conn, c, scenario, alternatives)?;
             (StructuralKind::ScenarioRanking, id, e)
         }
-        StructuralChange::SetEntityActivation { class, entity, alternative, active } => {
-            let (id, e) = apply_set_entity_activation(conn, c, class, entity, alternative, *active)?;
+        StructuralChange::SetEntityActivation {
+            class,
+            entity,
+            alternative,
+            active,
+        } => {
+            let (id, e) =
+                apply_set_entity_activation(conn, c, class, entity, alternative, *active)?;
             (StructuralKind::Activation, id, e)
         }
-        StructuralChange::SetMembership { group, member, alternative, included } => {
+        StructuralChange::SetMembership {
+            group,
+            member,
+            alternative,
+            included,
+        } => {
             let (id, e) =
                 apply_set_membership(conn, c, group, member, alternative.as_deref(), *included)?;
             (StructuralKind::Membership, id, e)
         }
-        StructuralChange::CreateEntity { class, name, elements } => {
+        StructuralChange::CreateEntity {
+            class,
+            name,
+            elements,
+        } => {
             let (id, e) = apply_create_entity(conn, c, class, name.as_deref(), elements)?;
             (StructuralKind::Entity, id, e)
         }
@@ -95,14 +123,31 @@ pub(crate) fn apply_structural(
             let (id, e) = apply_create_entity_class(conn, c, name, dims)?;
             (StructuralKind::EntityClass, id, e)
         }
-        StructuralChange::CreateParameter { class, name, types, value_list, description } => {
+        StructuralChange::CreateParameter {
+            class,
+            name,
+            types,
+            value_list,
+            description,
+        } => {
             let (id, e) = apply_create_parameter(
-                conn, c, class, name, types, value_list.as_deref(), description.as_deref(),
+                conn,
+                c,
+                class,
+                name,
+                types,
+                value_list.as_deref(),
+                description.as_deref(),
             )?;
             (StructuralKind::Parameter, id, e)
         }
     };
-    report.structural.push(StructuralOutcome { change_index, kind, object_id, effect });
+    report.structural.push(StructuralOutcome {
+        change_index,
+        kind,
+        object_id,
+        effect,
+    });
     Ok(())
 }
 
@@ -165,6 +210,7 @@ fn read_identity(conn: &Connection, table: &str, id: i64) -> Result<IdentityRow,
 type Revise = fn(&Connection, i64, i64, &str, Option<&str>, i64) -> Result<(), DbError>;
 type Lookup = fn(&Connection, &str) -> Result<Option<i64>, DbError>;
 
+#[allow(clippy::too_many_arguments)]
 fn rename_identity(
     conn: &Connection,
     c: i64,
@@ -215,10 +261,19 @@ pub(crate) fn apply_rename_alternative(
     description: Option<&str>,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let id = lookup_alternative(conn, current)?.ok_or_else(|| {
-        DbError::Api(format!("rename_alternative: alternative {current:?} does not exist"))
+        DbError::Api(format!(
+            "rename_alternative: alternative {current:?} does not exist"
+        ))
     })?;
     let e = rename_identity(
-        conn, c, "alternative", id, new_name, description, lookup_alternative, revise_alternative_row,
+        conn,
+        c,
+        "alternative",
+        id,
+        new_name,
+        description,
+        lookup_alternative,
+        revise_alternative_row,
     )?;
     Ok((id, e))
 }
@@ -231,10 +286,19 @@ pub(crate) fn apply_rename_scenario(
     description: Option<&str>,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let id = lookup_scenario(conn, current)?.ok_or_else(|| {
-        DbError::Api(format!("rename_scenario: scenario {current:?} does not exist"))
+        DbError::Api(format!(
+            "rename_scenario: scenario {current:?} does not exist"
+        ))
     })?;
     let e = rename_identity(
-        conn, c, "scenario", id, new_name, description, lookup_scenario, revise_scenario_row,
+        conn,
+        c,
+        "scenario",
+        id,
+        new_name,
+        description,
+        lookup_scenario,
+        revise_scenario_row,
     )?;
     Ok((id, e))
 }
@@ -275,8 +339,11 @@ pub(crate) fn apply_set_scenario_alternatives(
         .collect::<Result<_, _>>()?;
     drop(stmt);
     let cur_map: HashMap<i64, (i64, i64)> = cur.iter().map(|(a, r, v)| (*a, (*r, *v))).collect();
-    let desired: HashMap<i64, i64> =
-        alt_ids.iter().enumerate().map(|(i, a)| (*a, (i + 1) as i64)).collect();
+    let desired: HashMap<i64, i64> = alt_ids
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (*a, (i + 1) as i64))
+        .collect();
 
     // Classify: changed ∪ removed (close), changed ∪ added (insert).
     let mut to_close: Vec<i64> = Vec::new();
@@ -359,10 +426,14 @@ pub(crate) fn apply_set_entity_activation(
     let cid = lookup_entity_class(conn, class)?
         .ok_or_else(|| DbError::Api(format!("set_entity_activation: class {class:?} not found")))?;
     let entity_id = lookup_entity(conn, cid, entity)?.ok_or_else(|| {
-        DbError::Api(format!("set_entity_activation: entity {class}:{entity} not found"))
+        DbError::Api(format!(
+            "set_entity_activation: entity {class}:{entity} not found"
+        ))
     })?;
     let alt_id = lookup_alternative(conn, alternative)?.ok_or_else(|| {
-        DbError::Api(format!("set_entity_activation: alternative {alternative:?} not found"))
+        DbError::Api(format!(
+            "set_entity_activation: alternative {alternative:?} not found"
+        ))
     })?;
     // (active, version, valid_from) of the current row, if any.
     let current = opt_row3(
@@ -449,12 +520,13 @@ pub(crate) fn apply_set_membership(
 ) -> Result<(i64, StructuralEffect), DbError> {
     let gid = resolve_entity_addr(conn, group, "group")?;
     let mid = resolve_entity_addr(conn, member, "member")?;
-    let alt_id: Option<i64> = match alternative {
-        Some(a) => Some(lookup_alternative(conn, a)?.ok_or_else(|| {
-            DbError::Api(format!("set_membership: alternative {a:?} not found"))
-        })?),
-        None => None,
-    };
+    let alt_id: Option<i64> =
+        match alternative {
+            Some(a) => Some(lookup_alternative(conn, a)?.ok_or_else(|| {
+                DbError::Api(format!("set_membership: alternative {a:?} not found"))
+            })?),
+            None => None,
+        };
     // Base rows join `one_current_membership` on cur_a = coalesce(alt, 0), so a
     // base lookup/close keys on cur_a = 0 (NEVER `alternative_id = ?` bound to
     // NULL, which matches nothing); an insert stores NULL, never 0 (M4).
@@ -502,7 +574,11 @@ pub(crate) fn apply_set_membership(
             StructuralEffect::Updated
         }
     };
-    let object_id = if matches!(effect, StructuralEffect::Cleared) { 0 } else { gid };
+    let object_id = if matches!(effect, StructuralEffect::Cleared) {
+        0
+    } else {
+        gid
+    };
     Ok((object_id, effect))
 }
 
@@ -516,7 +592,13 @@ fn membership_current(
         "SELECT included, version, valid_from_commit FROM membership \
          WHERE cur_g = ? AND cur_m = ? AND cur_a = ?",
         params![gid, mid, cur_a],
-        |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, bool>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        },
     ) {
         Ok(v) => Ok(Some(v)),
         Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
@@ -526,7 +608,10 @@ fn membership_current(
 
 fn resolve_entity_addr(conn: &Connection, addr: &EntityAddr, role: &str) -> Result<i64, DbError> {
     let cid = lookup_entity_class(conn, &addr.class)?.ok_or_else(|| {
-        DbError::Api(format!("set_membership: {role} class {:?} not found", addr.class))
+        DbError::Api(format!(
+            "set_membership: {role} class {:?} not found",
+            addr.class
+        ))
     })?;
     lookup_entity(conn, cid, &addr.name)?.ok_or_else(|| {
         DbError::Api(format!(
@@ -545,7 +630,11 @@ fn opt_row3(
     b: i64,
 ) -> Result<Option<(bool, i64, i64)>, DbError> {
     match conn.query_row(sql, params![a, b], |r| {
-        Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, bool>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     }) {
         Ok(v) => Ok(Some(v)),
         Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
@@ -566,7 +655,9 @@ pub(crate) fn class_dims_of(conn: &Connection, cid: i64) -> Result<Vec<String>, 
                           WHERE ec.cur_id = d.dimension_class_id), '<class_set>') \
          FROM entity_class_dimension d WHERE d.cur_c = ? ORDER BY d.cur_p",
     )?;
-    let rows = stmt.query_map(params![cid], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    let rows = stmt
+        .query_map(params![cid], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
     Ok(rows)
 }
 
@@ -600,7 +691,10 @@ pub(crate) fn apply_create_entity_class(
     dims: &[String],
 ) -> Result<(i64, StructuralEffect), DbError> {
     if let Some(cid) = lookup_entity_class(conn, name)? {
-        return Ok((check_class_dims(conn, name, cid, dims)?, StructuralEffect::NoOp));
+        return Ok((
+            check_class_dims(conn, name, cid, dims)?,
+            StructuralEffect::NoOp,
+        ));
     }
     // Resolve every dimension class BEFORE inserting anything.
     let mut dim_ids: Vec<i64> = Vec::with_capacity(dims.len());
@@ -657,8 +751,9 @@ pub(crate) fn verify_entity_elements(
          JOIN entity e ON e.cur_id = el.element_entity_id \
          WHERE el.cur_e = ? ORDER BY el.cur_p",
     )?;
-    let have: Vec<String> =
-        stmt.query_map(params![eid], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    let have: Vec<String> = stmt
+        .query_map(params![eid], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
     let want: Vec<String> = elements.iter().map(|e| fold(e)).collect();
     if have == want {
         Ok(())
@@ -818,7 +913,9 @@ pub(crate) fn apply_create_parameter(
     let lid = match value_list {
         None => None,
         Some(l) => Some(lookup_value_list(conn, l)?.ok_or_else(|| {
-            DbError::Api(format!("ensure_parameter_definition: value_list {l:?} not found"))
+            DbError::Api(format!(
+                "ensure_parameter_definition: value_list {l:?} not found"
+            ))
         })?),
     };
     // §3.5 inference: no explicit types + a bound list ⇒ the single rank-0 member
@@ -830,10 +927,14 @@ pub(crate) fn apply_create_parameter(
                 "SELECT DISTINCT value_kind FROM list_value \
                  WHERE cur_l = ? AND valid_to_commit IS NULL ORDER BY value_kind",
             )?;
-            let kinds: Vec<String> =
-                stmt.query_map(params![lid], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let kinds: Vec<String> = stmt
+                .query_map(params![lid], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
             match kinds.as_slice() {
-                [k] => effective.push(TypeDecl { kind: k.clone(), dims: None }),
+                [k] => effective.push(TypeDecl {
+                    kind: k.clone(),
+                    dims: None,
+                }),
                 [] => {
                     return Err(DbError::Api(format!(
                         "ensure_parameter_definition: cannot infer a kind from empty value_list \
@@ -887,11 +988,15 @@ pub(crate) fn prepare_structural(
 
     // Contradictory renames: two different new_names for one object (§4.5).
     check_rename_coherence(changes, |ch| match ch {
-        StructuralChange::RenameAlternative { current, new_name, .. } => Some((current, new_name)),
+        StructuralChange::RenameAlternative {
+            current, new_name, ..
+        } => Some((current, new_name)),
         _ => None,
     })?;
     check_rename_coherence(changes, |ch| match ch {
-        StructuralChange::RenameScenario { current, new_name, .. } => Some((current, new_name)),
+        StructuralChange::RenameScenario {
+            current, new_name, ..
+        } => Some((current, new_name)),
         _ => None,
     })?;
 
@@ -934,7 +1039,10 @@ pub(crate) fn prepare_structural(
     };
     for ch in changes {
         match ch {
-            StructuralChange::SetScenarioAlternatives { scenario, alternatives } => {
+            StructuralChange::SetScenarioAlternatives {
+                scenario,
+                alternatives,
+            } => {
                 for a in alternatives {
                     if clash_alt(a) {
                         return Err(orphan("alternative", a));
@@ -944,7 +1052,12 @@ pub(crate) fn prepare_structural(
                     return Err(orphan("scenario", scenario));
                 }
             }
-            StructuralChange::SetEntityActivation { class, entity, alternative, .. } => {
+            StructuralChange::SetEntityActivation {
+                class,
+                entity,
+                alternative,
+                ..
+            } => {
                 if clash_entity(class, entity) {
                     return Err(orphan("entity", entity));
                 }
@@ -952,7 +1065,12 @@ pub(crate) fn prepare_structural(
                     return Err(orphan("alternative", alternative));
                 }
             }
-            StructuralChange::SetMembership { group, member, alternative, .. } => {
+            StructuralChange::SetMembership {
+                group,
+                member,
+                alternative,
+                ..
+            } => {
                 if clash_entity(&group.class, &group.name) {
                     return Err(orphan("entity", &group.name));
                 }
@@ -965,15 +1083,17 @@ pub(crate) fn prepare_structural(
                     }
                 }
             }
-            StructuralChange::RenameAlternative { current, new_name, .. } => {
+            StructuralChange::RenameAlternative {
+                current, new_name, ..
+            } => {
                 if clash_alt(current) || clash_alt(new_name) {
                     return Err(orphan("alternative", current));
                 }
             }
-            StructuralChange::RenameScenario { current, new_name, .. } => {
-                if clash_scen(current) || clash_scen(new_name) {
-                    return Err(orphan("scenario", current));
-                }
+            StructuralChange::RenameScenario {
+                current, new_name, ..
+            } if (clash_scen(current) || clash_scen(new_name)) => {
+                return Err(orphan("scenario", current));
             }
             _ => {}
         }
@@ -983,7 +1103,9 @@ pub(crate) fn prepare_structural(
 
 fn require_nonempty(what: &str, name: &str) -> Result<(), DbError> {
     if name.trim().is_empty() {
-        return Err(DbError::Api(format!("structural: {what} name must be non-empty")));
+        return Err(DbError::Api(format!(
+            "structural: {what} name must be non-empty"
+        )));
     }
     Ok(())
 }
@@ -1000,16 +1122,23 @@ fn require_charset(what: &str, name: &str) -> Result<(), DbError> {
 fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
     match ch {
         StructuralChange::CreateAlternative { name, .. } => require_nonempty("alternative", name),
-        StructuralChange::RenameAlternative { current, new_name, .. } => {
+        StructuralChange::RenameAlternative {
+            current, new_name, ..
+        } => {
             require_nonempty("alternative", current)?;
             require_nonempty("alternative", new_name)
         }
         StructuralChange::CreateScenario { name, .. } => require_nonempty("scenario", name),
-        StructuralChange::RenameScenario { current, new_name, .. } => {
+        StructuralChange::RenameScenario {
+            current, new_name, ..
+        } => {
             require_nonempty("scenario", current)?;
             require_nonempty("scenario", new_name)
         }
-        StructuralChange::SetScenarioAlternatives { scenario, alternatives } => {
+        StructuralChange::SetScenarioAlternatives {
+            scenario,
+            alternatives,
+        } => {
             require_nonempty("scenario", scenario)?;
             let mut seen: HashSet<String> = HashSet::new();
             for a in alternatives {
@@ -1023,12 +1152,22 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             }
             Ok(())
         }
-        StructuralChange::SetEntityActivation { class, entity, alternative, .. } => {
+        StructuralChange::SetEntityActivation {
+            class,
+            entity,
+            alternative,
+            ..
+        } => {
             require_nonempty("class", class)?;
             require_nonempty("entity", entity)?;
             require_nonempty("alternative", alternative)
         }
-        StructuralChange::SetMembership { group, member, alternative, .. } => {
+        StructuralChange::SetMembership {
+            group,
+            member,
+            alternative,
+            ..
+        } => {
             require_nonempty("group class", &group.class)?;
             require_nonempty("group", &group.name)?;
             require_nonempty("member class", &member.class)?;
@@ -1038,7 +1177,11 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             }
             Ok(())
         }
-        StructuralChange::CreateEntity { class, name, elements } => {
+        StructuralChange::CreateEntity {
+            class,
+            name,
+            elements,
+        } => {
             require_nonempty("class", class)?;
             let effective = effective_entity_name(name.as_deref(), elements)?;
             require_charset("entity", &effective)?;
@@ -1060,7 +1203,9 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             }
             Ok(())
         }
-        StructuralChange::CreateParameter { class, name, types, .. } => {
+        StructuralChange::CreateParameter {
+            class, name, types, ..
+        } => {
             require_nonempty("class", class)?;
             require_charset("parameter", name)?;
             validate_type_decls("create_parameter", class, name, types)

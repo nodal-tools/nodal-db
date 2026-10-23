@@ -65,13 +65,18 @@ fn fixture_files() -> Vec<PathBuf> {
 #[test]
 fn reconstruction_fixtures_match() {
     let files = fixture_files();
-    assert!(files.len() >= 4, "expected >=4 fixtures, got {}", files.len());
+    assert!(
+        files.len() >= 4,
+        "expected >=4 fixtures, got {}",
+        files.len()
+    );
     let mut crosschecked = 0;
 
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let raw = fs::read_to_string(path).expect("read fixture");
-        let fx: Fixture = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+        let fx: Fixture =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
 
         let lengths: Vec<usize> = fx.axes.iter().map(|a| a.length).collect();
         let rows = reconstruct(&lengths, &fx.values)
@@ -84,7 +89,11 @@ fn reconstruction_fixtures_match() {
             fx.description
         );
         for (i, (got, want)) in rows.iter().zip(fx.expected.iter()).enumerate() {
-            assert_eq!(got.positions, want.index, "{name}: row {i} index ({})", fx.description);
+            assert_eq!(
+                got.positions, want.index,
+                "{name}: row {i} index ({})",
+                fx.description
+            );
             match got.value {
                 ScalarValue::Float(x) => assert_eq!(
                     x.to_bits(),
@@ -102,7 +111,10 @@ fn reconstruction_fixtures_match() {
         }
     }
 
-    assert!(crosschecked >= 1, "at least one sql_crosscheck fixture expected");
+    assert!(
+        crosschecked >= 1,
+        "at least one sql_crosscheck fixture expected"
+    );
     println!(
         "reconstruction fixtures: {} checked ({} with SQL cross-check)",
         files.len(),
@@ -121,7 +133,8 @@ fn reconstruction_fixtures_expand_inverse_direction() {
     for path in fixture_files() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let raw = fs::read_to_string(&path).expect("read fixture");
-        let fx: Fixture = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+        let fx: Fixture =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"));
 
         // Coordinate lists: the fixture's explicit axis positions (fall back to
         // 0..length for any fixture that omits them).
@@ -132,7 +145,11 @@ fn reconstruction_fixtures_expand_inverse_direction() {
                 if a.positions.is_empty() {
                     (0..a.length as i64).collect()
                 } else {
-                    assert_eq!(a.positions.len(), a.length, "{name}: axis positions vs length");
+                    assert_eq!(
+                        a.positions.len(),
+                        a.length,
+                        "{name}: axis positions vs length"
+                    );
                     a.positions.clone()
                 }
             })
@@ -154,7 +171,11 @@ fn reconstruction_fixtures_expand_inverse_direction() {
                 .enumerate()
                 .map(|(i, &p)| dim_lists[i][p as usize])
                 .collect();
-            assert_eq!(coords, &want_coords, "{name}: cell {k} coords ({})", fx.description);
+            assert_eq!(
+                coords, &want_coords,
+                "{name}: cell {k} coords ({})",
+                fx.description
+            );
             assert_eq!(
                 v.to_bits(),
                 want.value.to_bits(),
@@ -167,7 +188,10 @@ fn reconstruction_fixtures_expand_inverse_direction() {
                 .enumerate()
                 .map(|(i, &p)| dim_lists[i][p as usize])
                 .collect();
-            assert_eq!(coords, &rt, "{name}: cell {k} expand/reconstruct round-trip");
+            assert_eq!(
+                coords, &rt,
+                "{name}: cell {k} expand/reconstruct round-trip"
+            );
         }
     }
 }
@@ -194,7 +218,12 @@ fn apply_schema(conn: &Connection) {
             p.extension().map(|x| x == "sql").unwrap_or(false)
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                    .map(|n| {
+                        n.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(false)
         })
         .collect();
@@ -207,7 +236,11 @@ fn apply_schema(conn: &Connection) {
 }
 
 fn sql_crosscheck(name: &str, fx: &Fixture) {
-    assert_eq!(fx.axes.len(), 2, "{name}: SQL cross-check fixture must be rank 2");
+    assert_eq!(
+        fx.axes.len(),
+        2,
+        "{name}: SQL cross-check fixture must be rank 2"
+    );
     let conn = Connection::open_in_memory().expect("in-memory duckdb");
     apply_schema(&conn);
 
@@ -251,7 +284,11 @@ fn sql_crosscheck(name: &str, fx: &Fixture) {
         .unwrap();
     let sql_rows: Vec<(i32, i32, f64)> = stmt
         .query_map([], |r| {
-            Ok((r.get::<_, i32>(0)?, r.get::<_, i32>(1)?, r.get::<_, f64>(2)?))
+            Ok((
+                r.get::<_, i32>(0)?,
+                r.get::<_, i32>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
         })
         .unwrap()
         .map(|r| r.unwrap())

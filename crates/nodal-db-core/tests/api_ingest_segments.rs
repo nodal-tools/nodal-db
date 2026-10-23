@@ -90,17 +90,34 @@ fn two_segments_commit_under_one_commit_row() {
 
     assert_eq!(report.values_written, 2);
     // Exactly one non-bootstrap commit; both writes stamped with it.
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 2, "bootstrap + ONE ingest commit");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        2,
+        "bootstrap + ONE ingest commit"
+    );
     assert_eq!(
         count(
             &db,
-            &format!("SELECT count(DISTINCT valid_from_commit) FROM value_scalar \
-                      WHERE valid_from_commit = {}", report.commit_id)
+            &format!(
+                "SELECT count(DISTINCT valid_from_commit) FROM value_scalar \
+                      WHERE valid_from_commit = {}",
+                report.commit_id
+            )
         ),
         1
     );
-    assert_eq!(read_parameter(&db, "node", "demand", "Base").unwrap().num_rows(), 1);
-    assert_eq!(read_parameter(&db, "unit", "capacity", "Base").unwrap().num_rows(), 1);
+    assert_eq!(
+        read_parameter(&db, "node", "demand", "Base")
+            .unwrap()
+            .num_rows(),
+        1
+    );
+    assert_eq!(
+        read_parameter(&db, "unit", "capacity", "Base")
+            .unwrap()
+            .num_rows(),
+        1
+    );
 }
 
 #[test]
@@ -121,12 +138,27 @@ fn failing_late_segment_rolls_back_the_whole_ingest() {
     .expect_err("undomained label segment must fail the ingest");
     // The error names the failing segment (spec §9.1).
     let msg = err.to_string();
-    assert!(msg.contains("segment 2") && msg.contains("level_param"), "unexpected: {msg}");
+    assert!(
+        msg.contains("segment 2") && msg.contains("level_param"),
+        "unexpected: {msg}"
+    );
 
     // Nothing persisted — not even segment 1's writes or auto-creates.
-    assert_eq!(count(&db, "SELECT count(*) FROM entity_class"), 0, "rolled back");
-    assert_eq!(count(&db, "SELECT count(*) FROM value_scalar"), 0, "rolled back");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "bootstrap commit only");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM entity_class"),
+        0,
+        "rolled back"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM value_scalar"),
+        0,
+        "rolled back"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        1,
+        "bootstrap commit only"
+    );
 }
 
 /// Scale pin (critique F4): one segment holding 1000 entities × 50 rows each
@@ -184,12 +216,21 @@ fn thousand_entity_segment_ingests_correctly() {
 
     // Spot-check two entities' cells by (idx1_num → v_float).
     let sch = got.schema();
-    let ent = got.column(sch.index_of("entity").unwrap())
-        .as_any().downcast_ref::<StringArray>().unwrap();
-    let coord = got.column(sch.index_of("idx1_num").unwrap())
-        .as_any().downcast_ref::<Int64Array>().unwrap();
-    let val = got.column(sch.index_of("v_float").unwrap())
-        .as_any().downcast_ref::<Float64Array>().unwrap();
+    let ent = got
+        .column(sch.index_of("entity").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let coord = got
+        .column(sch.index_of("idx1_num").unwrap())
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let val = got
+        .column(sch.index_of("v_float").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
     for e in [0usize, ENTITIES - 1] {
         let target = format!("unit_{e:04}");
         let mut cells: Vec<(i64, f64)> = (0..got.num_rows())
@@ -197,8 +238,9 @@ fn thousand_entity_segment_ingests_correctly() {
             .map(|r| (coord.value(r), val.value(r)))
             .collect();
         cells.sort_by_key(|c| c.0);
-        let want: Vec<(i64, f64)> =
-            (0..STEPS).map(|s| (s as i64, (e * STEPS + s) as f64)).collect();
+        let want: Vec<(i64, f64)> = (0..STEPS)
+            .map(|s| (s as i64, (e * STEPS + s) as f64))
+            .collect();
         assert_eq!(cells, want, "entity {target}");
     }
 }
@@ -217,6 +259,13 @@ fn duplicate_case_aliased_target_is_rejected_before_db_work() {
         WriteOptions::default(),
     )
     .expect_err("case-aliased duplicate target must be rejected");
-    assert!(err.to_string().contains("duplicate target"), "unexpected: {err}");
-    assert_eq!(count(&db, "SELECT count(*) FROM commit"), 1, "no DB work happened");
+    assert!(
+        err.to_string().contains("duplicate target"),
+        "unexpected: {err}"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        1,
+        "no DB work happened"
+    );
 }

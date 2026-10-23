@@ -65,7 +65,9 @@ fn fingerprint(db: &Path, query: &str) -> (i64, String) {
     let sql =
         format!("SELECT count(*), CAST(COALESCE(bit_xor(hash(t)), 0) AS VARCHAR) FROM ({query}) t");
     let out = conn
-        .query_row(&sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .query_row(&sql, [], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
         .unwrap();
     conn.close().unwrap();
     out
@@ -81,14 +83,47 @@ fn scalar(db: &Path, sql: &str) -> i64 {
 /// Every base table (same set as `compaction::TABLE_ORDER`) — used to assert
 /// per-table row counts are preserved.
 const ALL_TABLES: &[&str] = &[
-    "commit", "axis", "erasure_marker", "metadata", "entity_metadata", "parameter_value_metadata", "run",
-    "alternative", "scenario", "scenario_alternative", "entity_alternative", "membership",
-    "axis_datetime", "axis_period", "axis_label", "axis_integer", "axis_float", "axis_time_pattern",
-    "display_mode", "entity_class_display_mode", "entity_class", "class_set", "class_set_member",
-    "entity_class_dimension", "entity", "entity_element", "entity_location", "units_of_measure",
-    "parameter_value_list", "list_value", "parameter_definition", "entity_parameter_unit",
-    "parameter_type", "parameter_type_dimension", "value_scalar", "value_long", "value_array",
-    "value_array_hist", "definition_value_scalar", "definition_value_long", "definition_value_array",
+    "commit",
+    "axis",
+    "erasure_marker",
+    "metadata",
+    "entity_metadata",
+    "parameter_value_metadata",
+    "run",
+    "alternative",
+    "scenario",
+    "scenario_alternative",
+    "entity_alternative",
+    "membership",
+    "axis_datetime",
+    "axis_period",
+    "axis_label",
+    "axis_integer",
+    "axis_float",
+    "axis_time_pattern",
+    "display_mode",
+    "entity_class_display_mode",
+    "entity_class",
+    "class_set",
+    "class_set_member",
+    "entity_class_dimension",
+    "entity",
+    "entity_element",
+    "entity_location",
+    "units_of_measure",
+    "parameter_value_list",
+    "list_value",
+    "parameter_definition",
+    "entity_parameter_unit",
+    "parameter_type",
+    "parameter_type_dimension",
+    "value_scalar",
+    "value_long",
+    "value_array",
+    "value_array_hist",
+    "definition_value_scalar",
+    "definition_value_long",
+    "definition_value_array",
     "semantic_annotation",
 ];
 
@@ -186,7 +221,10 @@ fn compact_preserves_sequence_state_for_next_write() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_bloated(dir.path(), 20);
 
-    let entities_before = scalar(&db, "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL");
+    let entities_before = scalar(
+        &db,
+        "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL",
+    );
     let max_entity_before = scalar(&db, "SELECT COALESCE(max(id),0) FROM entity");
 
     compact(&db).expect("compact");
@@ -196,9 +234,16 @@ fn compact_preserves_sequence_state_for_next_write() {
     // `one_current_entity` / reuse a live id.
     write_scalar(&db, "Widget", "size", "Base", "w_new", 42.0);
 
-    let entities_after = scalar(&db, "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL");
+    let entities_after = scalar(
+        &db,
+        "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL",
+    );
     let max_entity_after = scalar(&db, "SELECT COALESCE(max(id),0) FROM entity");
-    assert_eq!(entities_after, entities_before + 1, "new entity not created");
+    assert_eq!(
+        entities_after,
+        entities_before + 1,
+        "new entity not created"
+    );
     assert!(
         max_entity_after > max_entity_before,
         "new entity id {max_entity_after} did not advance past {max_entity_before}"
@@ -281,10 +326,12 @@ fn compact_rejects_schema_version_mismatch() {
         "db no longer readable"
     );
     // No orphan temp left behind.
-    let leftover = std::fs::read_dir(dir.path())
-        .unwrap()
-        .flatten()
-        .any(|e| e.file_name().to_str().map(|n| n.contains(".compact.")).unwrap_or(false));
+    let leftover = std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .map(|n| n.contains(".compact."))
+            .unwrap_or(false)
+    });
     assert!(!leftover, "a temp file was left behind after abort");
 }
 
@@ -314,7 +361,10 @@ fn compact_sweeps_orphan_temps_and_keeps_original() {
     std::fs::write(&orphan, b"garbage again").unwrap();
     let report = compact(&db).expect("compact");
     assert!(report.swapped);
-    assert!(!orphan.exists(), "compact() did not sweep the orphan on entry");
+    assert!(
+        !orphan.exists(),
+        "compact() did not sweep the orphan on entry"
+    );
     let after_fp = fingerprint(&db, "SELECT * FROM read_parameter('Widget','size')");
     assert_eq!(after_fp, before_fp, "content changed across compact");
 }
@@ -375,16 +425,26 @@ fn compact_clusters_from_to_tiers_current_first() {
     // be accidentally clustered, or the post-assert is vacuous).
     let pre = liveness_sequence(&db);
     assert_eq!(pre.len(), 10_000);
-    assert!(!pre[..2].iter().all(|&l| l), "fixture must start interleaved");
+    assert!(
+        !pre[..2].iter().all(|&l| l),
+        "fixture must start interleaved"
+    );
 
     let report = compact(&db).expect("compact");
     assert!(report.swapped);
 
     let post = liveness_sequence(&db);
     assert_eq!(post.len(), 10_000, "row count must survive");
-    assert_eq!(post.iter().filter(|&&l| l).count(), 5_000, "live count must survive");
+    assert_eq!(
+        post.iter().filter(|&&l| l).count(),
+        5_000,
+        "live count must survive"
+    );
     let first_dead = post.iter().position(|&l| !l).expect("dead rows exist");
-    assert_eq!(first_dead, 5_000, "live rows must form one contiguous prefix");
+    assert_eq!(
+        first_dead, 5_000,
+        "live rows must form one contiguous prefix"
+    );
     assert!(
         post[first_dead..].iter().all(|&l| !l),
         "no live row may follow the first dead row (current-first clustering)"
@@ -558,11 +618,17 @@ fn compact_unlinks_stale_wal_sidecar_after_swap() {
 
     let report = compact(&db).expect("compact with stale wal present");
     assert!(report.swapped);
-    assert!(!wal.exists(), "stale <db>.wal must be unlinked after the swap");
+    assert!(
+        !wal.exists(),
+        "stale <db>.wal must be unlinked after the swap"
+    );
 
     // Next RW open + write works on the swapped file.
     write_scalar(&db, "Widget", "size", "Base", "w_after_wal", 7.0);
-    let n = scalar(&db, "SELECT count(*) FROM entity WHERE cur_name = 'w_after_wal'");
+    let n = scalar(
+        &db,
+        "SELECT count(*) FROM entity WHERE cur_name = 'w_after_wal'",
+    );
     assert_eq!(n, 1);
 }
 
@@ -573,18 +639,37 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_bloated(dir.path(), 12);
     let sidecar = baseline_path(&db);
-    assert!(!sidecar.exists(), "no baseline sidecar before the first run");
+    assert!(
+        !sidecar.exists(),
+        "no baseline sidecar before the first run"
+    );
 
     // (1) No baseline ⇒ establish it: compact once and shrink the file. The
     // sidecar then equals the post-compaction byte size.
     let before = std::fs::metadata(&db).unwrap().len();
     let r1 = compact_if_needed(&db, 3.0).expect("establish-baseline run");
-    assert!(r1.swapped, "first run (no baseline) must compact to establish it");
-    assert!(r1.bytes_after < before, "establish run should shrink the file");
+    assert!(
+        r1.swapped,
+        "first run (no baseline) must compact to establish it"
+    );
+    assert!(
+        r1.bytes_after < before,
+        "establish run should shrink the file"
+    );
     let compacted = std::fs::metadata(&db).unwrap().len();
-    assert!(sidecar.exists(), "baseline sidecar must be written after compaction");
-    let baseline: u64 = std::fs::read_to_string(&sidecar).unwrap().trim().parse().unwrap();
-    assert_eq!(baseline, compacted, "sidecar must equal the post-compaction size");
+    assert!(
+        sidecar.exists(),
+        "baseline sidecar must be written after compaction"
+    );
+    let baseline: u64 = std::fs::read_to_string(&sidecar)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        baseline, compacted,
+        "sidecar must equal the post-compaction size"
+    );
 
     // (2) Immediately again ⇒ NO-OP: the file has not tripled since the
     // baseline, and the cheap gate must not touch it.
@@ -600,15 +685,28 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
     // the file having grown past 3x its last-compacted size). It must fire.
     std::fs::write(&sidecar, b"1").unwrap();
     let r3 = compact_if_needed(&db, 3.0).expect("watermark-tripped run");
-    assert!(r3.swapped, "must fire once current bytes exceed 3x the baseline");
+    assert!(
+        r3.swapped,
+        "must fire once current bytes exceed 3x the baseline"
+    );
     // Firing refreshes the baseline to the fresh size (no longer the tiny "1").
-    let refreshed: u64 = std::fs::read_to_string(&sidecar).unwrap().trim().parse().unwrap();
+    let refreshed: u64 = std::fs::read_to_string(&sidecar)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     assert_eq!(refreshed, std::fs::metadata(&db).unwrap().len());
 
     // (4) The sidecar is NOT an orphan temp: neither an unconditional compact()
     // nor the orphan sweep may remove it.
     compact(&db).expect("unconditional compact leaves the sidecar");
-    assert!(baseline_path(&db).exists(), "compact() must not sweep the baseline sidecar");
+    assert!(
+        baseline_path(&db).exists(),
+        "compact() must not sweep the baseline sidecar"
+    );
     sweep_orphan_temps(&db);
-    assert!(baseline_path(&db).exists(), "orphan sweep must not delete the baseline sidecar");
+    assert!(
+        baseline_path(&db).exists(),
+        "orphan sweep must not delete the baseline sidecar"
+    );
 }

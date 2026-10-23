@@ -20,7 +20,11 @@ use crate::types::{LongRow, ScalarValue, ShapedData, Tier, ValueKind};
 /// is the scalar. For the array tier the sorted rows ARE the row-major
 /// flattening — every cell of the full Cartesian grid is present exactly once,
 /// in row-major order — so their values in order are the dense array.
-pub fn decide(axis_lengths: &[usize], value_kind: ValueKind, rows: &[LongRow]) -> (Tier, ShapedData) {
+pub fn decide(
+    axis_lengths: &[usize],
+    value_kind: ValueKind,
+    rows: &[LongRow],
+) -> (Tier, ShapedData) {
     if axis_lengths.is_empty() {
         return (Tier::Scalar, ShapedData::Scalar(rows[0].value.clone()));
     }

@@ -128,7 +128,16 @@ pub fn ingest_segments(
     // A pure-write ingest is a `commit_changes` with no deletes (delete design
     // MAJOR-2): the write path and the retried-commit shape are shared, so
     // writes-only and writes+deletes cannot drift.
-    commit_changes(db, segments, Vec::new(), Vec::new(), Vec::new(), user, message, opts)
+    commit_changes(
+        db,
+        segments,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        user,
+        message,
+        opts,
+    )
 }
 
 /// A typed delete target: one `(class, parameter, alternative, entity)` value,
@@ -192,10 +201,14 @@ pub fn commit_changes(
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
-    if segments.is_empty() && structural.is_empty() && deletes.is_empty() && object_deletes.is_empty()
+    if segments.is_empty()
+        && structural.is_empty()
+        && deletes.is_empty()
+        && object_deletes.is_empty()
     {
         return Err(DbError::Api(
-            "nothing to do: no segments, no structural changes, no deletes, no object deletes".into(),
+            "nothing to do: no segments, no structural changes, no deletes, no object deletes"
+                .into(),
         ));
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
@@ -231,7 +244,12 @@ pub fn commit_changes(
                 if multi {
                     // Name the failing segment (spec §9.1: errors name the
                     // segment by ordinal and class:parameter).
-                    DbError::Api(format!("segment {} ({}:{}): {e}", i + 1, s.class, s.parameter))
+                    DbError::Api(format!(
+                        "segment {} ({}:{}): {e}",
+                        i + 1,
+                        s.class,
+                        s.parameter
+                    ))
                 } else {
                     e
                 }
@@ -275,7 +293,12 @@ pub fn commit_changes(
                 // DuckDB error: the conflict-retry loop keys on its variant
                 // (`conn::is_conflict`), and an Api wrapper would break retry.
                 if multi && !matches!(e, DbError::Duckdb(_)) {
-                    DbError::Api(format!("segment {} ({}:{}): {e}", i + 1, p.class, p.parameter))
+                    DbError::Api(format!(
+                        "segment {} ({}:{}): {e}",
+                        i + 1,
+                        p.class,
+                        p.parameter
+                    ))
                 } else {
                     e
                 }
@@ -307,7 +330,16 @@ pub fn delete_values(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(db, Vec::new(), Vec::new(), keys, Vec::new(), user, message, opts)
+    commit_changes(
+        db,
+        Vec::new(),
+        Vec::new(),
+        keys,
+        Vec::new(),
+        user,
+        message,
+        opts,
+    )
 }
 
 /// Apply one or more structural (create/rename/set-ranks/activation/membership)
@@ -321,7 +353,16 @@ pub fn commit_structural(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(db, Vec::new(), changes, Vec::new(), Vec::new(), user, message, opts)
+    commit_changes(
+        db,
+        Vec::new(),
+        changes,
+        Vec::new(),
+        Vec::new(),
+        user,
+        message,
+        opts,
+    )
 }
 
 /// Delete (append-only close-out) one or more OBJECTS in ONE atomic, conflict-
@@ -337,7 +378,16 @@ pub fn delete_objects(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(db, Vec::new(), Vec::new(), Vec::new(), object_deletes, user, message, opts)
+    commit_changes(
+        db,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        object_deletes,
+        user,
+        message,
+        opts,
+    )
 }
 
 /// Read-only preview of each object delete (object_delete plan §3, decision D6):
@@ -431,25 +481,47 @@ fn apply_delete(
 ) -> Result<(), DbError> {
     let class_id = match lookup_entity_class(conn, &dk.class)? {
         Some(id) => id,
-        None => return Ok(unknown(report, key_index, "entity_class", &dk.class)),
+        None => {
+            return {
+                unknown(report, key_index, "entity_class", &dk.class);
+                Ok(())
+            }
+        }
     };
     let pd_id = match lookup_parameter(conn, class_id, &dk.parameter)? {
         Some(id) => id,
-        None => return Ok(unknown(report, key_index, "parameter_definition", &dk.parameter)),
+        None => {
+            return {
+                unknown(report, key_index, "parameter_definition", &dk.parameter);
+                Ok(())
+            }
+        }
     };
     let alt_id = match lookup_alternative(conn, &dk.alternative)? {
         Some(id) => id,
-        None => return Ok(unknown(report, key_index, "alternative", &dk.alternative)),
+        None => {
+            return {
+                unknown(report, key_index, "alternative", &dk.alternative);
+                Ok(())
+            }
+        }
     };
     let entity_id = match lookup_entity(conn, class_id, &dk.entity)? {
         Some(id) => id,
-        None => return Ok(unknown(report, key_index, "entity", &dk.entity)),
+        None => {
+            return {
+                unknown(report, key_index, "entity", &dk.entity);
+                Ok(())
+            }
+        }
     };
 
     // Fold the definition's retain_content into retain_override unless the
     // caller already overrode it — else a delete on a retain_content=FALSE
     // definition would silently keep the closed-out payload (VMP Part 5).
-    let effective_retain = opts.retain_override.unwrap_or(read_retain_content(conn, pd_id)?);
+    let effective_retain = opts
+        .retain_override
+        .unwrap_or(read_retain_content(conn, pd_id)?);
     let resolved_opts = WriteOptions {
         force_replace: opts.force_replace,
         retain_override: Some(effective_retain),
@@ -465,7 +537,10 @@ fn apply_delete(
         report.warnings.push(Warning {
             kind: WarningKind::NothingToDelete { key_index },
             object_type: "value".into(),
-            name: format!("{}:{}/{}/{}", dk.class, dk.parameter, dk.alternative, dk.entity),
+            name: format!(
+                "{}:{}/{}/{}",
+                dk.class, dk.parameter, dk.alternative, dk.entity
+            ),
             id: 0,
         });
     }
@@ -489,15 +564,30 @@ fn unknown(report: &mut WriteReport, key_index: usize, level: &str, name: &str) 
 // `opt_id` — the case-insensitive current-row lookup, minus the auto-create tail.
 
 pub(crate) fn lookup_entity_class(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(conn, "SELECT id FROM entity_class WHERE cur_name = lower(?)", -1, name)
+    opt_id(
+        conn,
+        "SELECT id FROM entity_class WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )
 }
 
 pub(crate) fn lookup_alternative(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(conn, "SELECT id FROM alternative WHERE cur_name = lower(?)", -1, name)
+    opt_id(
+        conn,
+        "SELECT id FROM alternative WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )
 }
 
 pub(crate) fn lookup_scenario(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(conn, "SELECT id FROM scenario WHERE cur_name = lower(?)", -1, name)
+    opt_id(
+        conn,
+        "SELECT id FROM scenario WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )
 }
 
 pub(crate) fn lookup_parameter(
@@ -513,7 +603,11 @@ pub(crate) fn lookup_parameter(
     )
 }
 
-pub(crate) fn lookup_entity(conn: &Connection, class_id: i64, name: &str) -> Result<Option<i64>, DbError> {
+pub(crate) fn lookup_entity(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+) -> Result<Option<i64>, DbError> {
     opt_id(
         conn,
         "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)",
@@ -523,15 +617,30 @@ pub(crate) fn lookup_entity(conn: &Connection, class_id: i64, name: &str) -> Res
 }
 
 pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(conn, "SELECT id FROM class_set WHERE cur_name = lower(?)", -1, name)
+    opt_id(
+        conn,
+        "SELECT id FROM class_set WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )
 }
 
 pub(crate) fn lookup_value_list(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(conn, "SELECT id FROM parameter_value_list WHERE cur_name = lower(?)", -1, name)
+    opt_id(
+        conn,
+        "SELECT id FROM parameter_value_list WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )
 }
 
 pub(crate) fn lookup_unit(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(conn, "SELECT id FROM units_of_measure WHERE cur_name = lower(?)", -1, name)
+    opt_id(
+        conn,
+        "SELECT id FROM units_of_measure WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )
 }
 
 /// The pure, DB-independent part of one segment's write: batch-contract
@@ -587,7 +696,9 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     }
     let rank = ncols - 2;
     if rank > 4 {
-        return Err(DbError::Api(format!("declared rank {rank} exceeds the cap of 4")));
+        return Err(DbError::Api(format!(
+            "declared rank {rank} exceeds the cap of 4"
+        )));
     }
     if batch.num_rows() == 0 {
         return Err(DbError::Api("empty batch: no rows to write".into()));
@@ -717,8 +828,14 @@ fn write_prepared(
     };
 
     for (name, idx) in p.names.iter().zip(p.rows.iter()) {
-        let entity_id =
-            resolve_entity(conn, commit_id, class_id, &p.class, name, &mut report.warnings)?;
+        let entity_id = resolve_entity(
+            conn,
+            commit_id,
+            class_id,
+            &p.class,
+            name,
+            &mut report.warnings,
+        )?;
         let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
         let value = canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
         let key = ValueKey {
@@ -726,7 +843,15 @@ fn write_prepared(
             parameter_definition_id: pd_id,
             alternative_id: alt_id,
         };
-        let outcome = write_value(conn, commit_id, key, &value, cache, &resolved_opts, Some(pt_id))?;
+        let outcome = write_value(
+            conn,
+            commit_id,
+            key,
+            &value,
+            cache,
+            &resolved_opts,
+            Some(pt_id),
+        )?;
         report.absorb(&outcome);
     }
     Ok(())
@@ -745,9 +870,8 @@ pub fn read_parameter(
     alternative: &str,
 ) -> Result<RecordBatch, DbError> {
     with_read(db, |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT * FROM read_parameter(?, ?) WHERE lower(alternative) = lower(?)",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM read_parameter(?, ?) WHERE lower(alternative) = lower(?)")?;
         let arrow = stmt.query_arrow(params![class, parameter, alternative])?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
@@ -851,7 +975,10 @@ fn effective_domains(
         let field = batch.schema().field(i + 1).clone();
         if let Some(js) = field.metadata().get("spinal:label_domain") {
             let labels: Vec<String> = serde_json::from_str(js).map_err(|e| {
-                DbError::Api(format!("bad spinal:label_domain metadata on {:?}: {e}", field.name()))
+                DbError::Api(format!(
+                    "bad spinal:label_domain metadata on {:?}: {e}",
+                    field.name()
+                ))
             })?;
             out.push(LabelDomain { position, labels });
         }
@@ -888,7 +1015,12 @@ fn resolve_entity_class(
     name: &str,
     warnings: &mut Vec<Warning>,
 ) -> Result<i64, DbError> {
-    if let Some(id) = opt_id(conn, "SELECT id FROM entity_class WHERE cur_name = lower(?)", -1, name)? {
+    if let Some(id) = opt_id(
+        conn,
+        "SELECT id FROM entity_class WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )? {
         return Ok(id);
     }
     let id: i64 = conn.query_row(
@@ -928,7 +1060,12 @@ fn resolve_alternative(
     name: &str,
     warnings: &mut Vec<Warning>,
 ) -> Result<i64, DbError> {
-    if let Some(id) = opt_id(conn, "SELECT id FROM alternative WHERE cur_name = lower(?)", -1, name)? {
+    if let Some(id) = opt_id(
+        conn,
+        "SELECT id FROM alternative WHERE cur_name = lower(?)",
+        -1,
+        name,
+    )? {
         return Ok(id);
     }
     let id = insert_alternative_row(conn, commit_id, name, None)?;
@@ -1097,7 +1234,12 @@ fn batch_desc(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> String
             .iter()
             .map(|(n, k)| format!("{n}: {}", index_kind_tag(*k)))
             .collect();
-        format!("rank {}, indexed ({}), measure {}", inferred.len(), dims.join(", "), value_kind.tag())
+        format!(
+            "rank {}, indexed ({}), measure {}",
+            inferred.len(),
+            dims.join(", "),
+            value_kind.tag()
+        )
     }
 }
 
@@ -1127,7 +1269,11 @@ fn member_key(m: &DbDeclared) -> MatchKey {
 }
 
 fn batch_key(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> MatchKey {
-    let tag = if inferred.is_empty() { value_kind.tag() } else { "indexed" };
+    let tag = if inferred.is_empty() {
+        value_kind.tag()
+    } else {
+        "indexed"
+    };
     (
         tag.to_string(),
         inferred
@@ -1176,8 +1322,15 @@ fn validate_declared(
     // Probable-damage hint: a stored tag that differs from the batch's only by
     // case, or sits outside the known tag vocabulary, points at import/hand
     // edits rather than a caller mistake. Matching itself stays case-sensitive.
-    const KNOWN_TAGS: [&str; 7] =
-        ["float", "int", "bool", "string", "date_time", "duration", "indexed"];
+    const KNOWN_TAGS: [&str; 7] = [
+        "float",
+        "int",
+        "bool",
+        "string",
+        "date_time",
+        "duration",
+        "indexed",
+    ];
     let damaged = set.iter().any(|m| {
         (m.value_kind != bkey.0 && m.value_kind.eq_ignore_ascii_case(&bkey.0))
             || !KNOWN_TAGS.contains(&m.value_kind.as_str())
@@ -1229,7 +1382,11 @@ fn read_declared_types(conn: &Connection, pd_id: i64) -> Result<Vec<DbDeclared>,
     for (pt_id, value_kind) in pts {
         let mut raw_dims: Vec<(i8, String, String)> = Vec::new();
         let rows = dim_stmt.query_map(params![pt_id], |r| {
-            Ok((r.get::<_, i8>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, i8>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?;
         for row in rows {
             raw_dims.push(row?);
@@ -1264,7 +1421,12 @@ fn assemble_declared(
             )));
         }
     }
-    Ok(DbDeclared { pt_id, value_kind, dim_names, shape: DeclaredType { positions } })
+    Ok(DbDeclared {
+        pt_id,
+        value_kind,
+        dim_names,
+        shape: DeclaredType { positions },
+    })
 }
 
 /// Batch form of [`read_declared_types`]: every definition's current declared
@@ -1289,7 +1451,12 @@ pub(crate) fn read_all_declared_types(
          ORDER BY parameter_type_id, position",
     )?;
     let drows = dstmt.query_map([], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i8>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i8>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
     })?;
     for row in drows {
         let (pt_id, pos, name, kind) = row?;
@@ -1298,7 +1465,9 @@ pub(crate) fn read_all_declared_types(
     let mut out: HashMap<i64, Vec<DbDeclared>> = HashMap::new();
     for (pt_id, pd_id, value_kind) in pts {
         let raw = dims_by_pt.remove(&pt_id).unwrap_or_default();
-        out.entry(pd_id).or_default().push(assemble_declared(pt_id, value_kind, raw)?);
+        out.entry(pd_id)
+            .or_default()
+            .push(assemble_declared(pt_id, value_kind, raw)?);
     }
     Ok(out)
 }
@@ -1336,7 +1505,13 @@ pub(crate) fn create_parameter_type(
             "INSERT INTO parameter_type_dimension \
                (parameter_type_id, position, dimension_name, kind, valid_from_commit) \
              VALUES (?, ?, ?, ?, ?)",
-            params![pt_id, (i + 1) as i8, dname, index_kind_tag(*kind), commit_id],
+            params![
+                pt_id,
+                (i + 1) as i8,
+                dname,
+                index_kind_tag(*kind),
+                commit_id
+            ],
         )?;
     }
     Ok(pt_id)

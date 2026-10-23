@@ -257,9 +257,17 @@ impl WriteReport {
         self.axes_created += o.axes_created;
         self.axes_reused += o.axes_reused;
         if let Some(t) = o.tier {
-            if !self.tiers.contains(&t) {
-                self.tiers.push(t);
-            }
+            self.note_tier(t);
+        }
+    }
+
+    /// Record `t` in `tiers` if not yet seen. The write path calls this when
+    /// a scalar is canonicalized, before its deferred set-based write is
+    /// absorbed, so `tiers` keeps the order in which values were met, not
+    /// the order in which they were written.
+    pub(crate) fn note_tier(&mut self, t: Tier) {
+        if !self.tiers.contains(&t) {
+            self.tiers.push(t);
         }
     }
 

@@ -551,3 +551,277 @@ fn materialized_axes_across_a_chunk_round_trip() {
     assert_eq!(terms, 6);
     conn.close().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Set-based scalar write (set_based_scalar_write_PLAN §5.2, §5.3)
+// ---------------------------------------------------------------------------
+
+fn scalar_names_batch(names: &[String], vals: &[f64]) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(names.to_vec())) as ArrayRef,
+            Arc::new(Float64Array::from(vals.to_vec())) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+fn q_i64(db: &Path, sql: &str) -> i64 {
+    let conn = Connection::open(db).unwrap();
+    let n: i64 = conn.query_row(sql, [], |r| r.get(0)).unwrap();
+    conn.close().unwrap();
+    n
+}
+
+/// One commit of 16 385 new scalar entities crosses the 16 384-key round
+/// (and the entity insert chunk) by one: ids are contiguous in batch order,
+/// every value is version 1, and a replace of all of them closes 16 385
+/// rows at version 2.
+#[test]
+fn scalar_batch_one_key_past_the_round_writes_and_replaces() {
+    const N: usize = 16_385;
+    let (_d, db) = fresh_db();
+    let names: Vec<String> = (0..N).map(|i| format!("e{i:05}")).collect();
+    let vals: Vec<f64> = (0..N).map(|i| i as f64 * 0.5).collect();
+    let r = commit_changes(
+        &db,
+        vec![seg("p", "Base", scalar_names_batch(&names, &vals))],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "fresh",
+        WriteOptions::default(),
+    )
+    .expect("fresh");
+    assert_eq!((r.values_written, r.rows_written, r.rows_closed), (N, N, 0));
+    let ids: Vec<i64> = r
+        .warnings
+        .iter()
+        .filter(|w| w.object_type == "entity")
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(ids.len(), N);
+    assert!(ids.windows(2).all(|w| w[1] == w[0] + 1), "contiguous ids");
+    // The id order is the batch order, and each value sits on its entity.
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM entity e JOIN value_scalar v ON v.entity_id = e.id \
+             WHERE v.version = 1 AND v.v_float = (e.id - (SELECT min(id) FROM entity)) * 0.5 \
+               AND e.name = printf('e%05d', e.id - (SELECT min(id) FROM entity))"
+        ),
+        N as i64
+    );
+
+    let vals2: Vec<f64> = (0..N).map(|i| i as f64 + 0.25).collect();
+    let r = commit_changes(
+        &db,
+        vec![seg("p", "Base", scalar_names_batch(&names, &vals2))],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "replace",
+        WriteOptions::default(),
+    )
+    .expect("replace");
+    assert_eq!((r.values_written, r.rows_written, r.rows_closed), (N, N, N));
+    assert!(r.warnings.is_empty());
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NULL AND version = 2"
+        ),
+        N as i64
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL \
+               AND version = 1 AND content_retained"
+        ),
+        N as i64
+    );
+    assert_audits_clean(&db);
+}
+
+/// 30 segments × 1 entity in one commit: one set-based scalar write across
+/// segments; the report counts every value once and the audits stay empty.
+#[test]
+fn scalar_batch_across_thirty_segments() {
+    let (_d, db) = fresh_db();
+    let segs = |v: f64| -> Vec<Segment> {
+        (0..30)
+            .map(|i| {
+                seg(
+                    &format!("p{i:02}"),
+                    "Base",
+                    scalar_batch("n1", v + i as f64),
+                )
+            })
+            .collect()
+    };
+    let r = commit_changes(
+        &db,
+        segs(0.0),
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "a",
+        WriteOptions::default(),
+    )
+    .expect("first");
+    assert_eq!(
+        (r.values_written, r.rows_written, r.rows_closed),
+        (30, 30, 0)
+    );
+    assert_eq!(r.tiers, vec![Tier::Scalar]);
+    let r = commit_changes(
+        &db,
+        segs(100.0),
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "b",
+        WriteOptions::default(),
+    )
+    .expect("second");
+    assert_eq!(
+        (r.values_written, r.rows_written, r.rows_closed),
+        (30, 30, 30)
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NULL \
+               AND version = 2 AND v_float >= 100"
+        ),
+        30
+    );
+    assert_audits_clean(&db);
+}
+
+/// A damaged key live in BOTH scalar and long (planted by direct SQL): a
+/// scalar write follows the per-key precedence (scalar first), so it closes
+/// the scalar row and leaves the long row alone, as `live_tier` did.
+#[test]
+fn scalar_write_on_a_doubly_live_key_closes_the_scalar_row() {
+    let (_d, db) = fresh_db();
+    let k = key(1);
+    write(&db, k, &long_value(3, 1));
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO value_scalar (entity_id, parameter_definition_id, alternative_id, \
+               valid_from_commit, version, value_kind, v_float) \
+             VALUES (1, 1, 1, (SELECT max(id) FROM \"commit\"), 1, 'float', 7.0)",
+            [],
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+    let s = CanonicalValue {
+        tier: Tier::Scalar,
+        value_kind: ValueKind::Float,
+        axes: vec![],
+        shape: ShapedData::Scalar(ScalarValue::Float(8.0)),
+    };
+    let o = with_write_txn(&db, "t", "w", |conn, c| {
+        write_value(
+            conn,
+            c,
+            k,
+            &s,
+            &mut AxisCache::new(),
+            &WriteOptions::default(),
+            None,
+        )
+    })
+    .expect("write");
+    assert_eq!((o.version, o.rows_closed), (2, 1));
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_long WHERE valid_to_commit IS NULL"
+        ),
+        3,
+        "the long row stays live"
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NULL AND v_float = 8.0"
+        ),
+        1
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL AND v_float = 7.0"
+        ),
+        1
+    );
+}
+
+/// Erasure removes rows with no close-out edge; a rewrite of the erased
+/// alternative's scalars starts from what remains (nothing): version 1,
+/// audits empty.
+#[test]
+fn scalars_rewritten_after_erasure_restart_at_version_one() {
+    use nodal_db_core::erasure::{erase_alternative, EraseOpts};
+    let (_d, db) = fresh_db();
+    let names: Vec<String> = (0..5).map(|i| format!("r{i}")).collect();
+    for (msg, v) in [("v1", 1.0), ("v2", 2.0)] {
+        commit_changes(
+            &db,
+            vec![seg("p", "run1", scalar_names_batch(&names, &[v; 5]))],
+            vec![],
+            vec![],
+            vec![],
+            "t",
+            msg,
+            WriteOptions::default(),
+        )
+        .expect("write");
+    }
+    let rep = erase_alternative(
+        &db,
+        &ObjectDeleteKey {
+            kind: ObjectKind::Alternative,
+            class: None,
+            target: ObjectRef::Name("run1".into()),
+        },
+        &EraseOpts::default(),
+        "t",
+    )
+    .expect("erase");
+    assert!(rep.erased);
+    assert_eq!(q_i64(&db, "SELECT count(*) FROM value_scalar"), 0);
+    commit_changes(
+        &db,
+        vec![seg("p", "run1", scalar_names_batch(&names, &[3.0; 5]))],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "rewrite",
+        WriteOptions::default(),
+    )
+    .expect("rewrite");
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE version = 1 AND valid_to_commit IS NULL"
+        ),
+        5
+    );
+    assert_audits_clean(&db);
+}

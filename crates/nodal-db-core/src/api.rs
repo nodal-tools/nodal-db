@@ -43,12 +43,14 @@ use crate::axis::AxisCache;
 use crate::canon::{canonicalize, LabelDomain};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
-use crate::history::{delete_value, write_value};
+use crate::history::{
+    delete_value, keeps_content, write_scalars, write_value, ScalarWrite, LONG_INSERT_CHUNK,
+};
 use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
 use crate::structural::{apply_structural, prepare_structural};
 use crate::types::{
-    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview,
-    StructuralChange, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
+    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview, ShapedData,
+    StructuralChange, Tier, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -280,6 +282,11 @@ pub fn commit_changes(
             commit_id,
             ..Default::default()
         };
+        // The commit's scalar writes, deferred to one set-based write
+        // (set_based_scalar_write_PLAN D1): flushed whenever it reaches one
+        // round (16 384 keys, D6) and after the last segment. A closure local,
+        // so a conflict retry rebuilds it from scratch.
+        let mut scalars: Vec<ScalarWrite> = Vec::new();
         // Structural changes run FIRST (§4.1): a value write / rank / activation
         // later in this same commit may target a referent an earlier structural
         // item just created, and items apply sequentially against the one open
@@ -288,11 +295,22 @@ pub fn commit_changes(
             apply_structural(conn, commit_id, i, ch, &mut report)?;
         }
         for (i, p) in prepared.iter().enumerate() {
-            write_prepared(conn, commit_id, p, opts, &mut cache, &mut report).map_err(|e| {
+            write_prepared(
+                conn,
+                commit_id,
+                p,
+                opts,
+                &mut cache,
+                &mut report,
+                &mut scalars,
+            )
+            .map_err(|e| {
                 // Name the failing segment (spec §9.1) — but never rewrap a raw
                 // DuckDB error: the conflict-retry loop keys on its variant
                 // (`conn::is_conflict`), and an Api wrapper would break retry.
-                if multi && !matches!(e, DbError::Duckdb(_)) {
+                // An Internal error (a core invariant, e.g. from a scalar flush
+                // that ran mid-segment) keeps its variant too.
+                if multi && !matches!(e, DbError::Duckdb(_) | DbError::Internal(_)) {
                     DbError::Api(format!(
                         "segment {} ({}:{}): {e}",
                         i + 1,
@@ -304,6 +322,9 @@ pub fn commit_changes(
                 }
             })?;
         }
+        // The remaining deferred scalar writes, before any delete reads value
+        // rows (deletes and object deletes run after every write, as before).
+        flush_scalars(conn, commit_id, &mut scalars, &mut report)?;
         // Deletes resolve + close out AFTER the writes, under the same commit —
         // one atomic invocation (delete design MAJOR-2).
         for (key_index, dk) in &prepared_deletes {
@@ -805,6 +826,7 @@ fn write_prepared(
     opts: WriteOptions,
     cache: &mut AxisCache,
     report: &mut WriteReport,
+    scalars: &mut Vec<ScalarWrite>,
 ) -> Result<(), DbError> {
     report.warnings.extend(p.tz_warnings.iter().cloned());
 
@@ -844,8 +866,8 @@ fn write_prepared(
         &p.names,
         &mut report.warnings,
     )?;
-    let entity_ids = match resolved {
-        Resolved::Ids(ids) => ids,
+    let (entity_ids, entity_minted) = match resolved {
+        Resolved::Ids { ids, minted } => (ids, minted),
         Resolved::NdRefused { first_missing, err } => {
             for idx in &p.rows[..first_missing] {
                 let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
@@ -855,7 +877,8 @@ fn write_prepared(
         }
     };
 
-    for (&entity_id, idx) in entity_ids.iter().zip(p.rows.iter()) {
+    let retained = keeps_content(&resolved_opts);
+    for ((&entity_id, &minted), idx) in entity_ids.iter().zip(&entity_minted).zip(p.rows.iter()) {
         let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
         let value = canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
         let key = ValueKey {
@@ -863,6 +886,22 @@ fn write_prepared(
             parameter_definition_id: pd_id,
             alternative_id: alt_id,
         };
+        if let ShapedData::Scalar(m) = value.shape {
+            // Deferred to the commit's set-based scalar write (plan D1). The
+            // tier is recorded now, in the order values are met (critique C5).
+            report.note_tier(Tier::Scalar);
+            scalars.push(ScalarWrite {
+                key,
+                value: m,
+                parameter_type_id: Some(pt_id),
+                retained,
+                entity_minted: minted,
+            });
+            if scalars.len() >= LONG_INSERT_CHUNK {
+                flush_scalars(conn, commit_id, scalars, report)?;
+            }
+            continue;
+        }
         let outcome = write_value(
             conn,
             commit_id,
@@ -874,6 +913,25 @@ fn write_prepared(
         )?;
         report.absorb(&outcome);
     }
+    Ok(())
+}
+
+/// Write the buffered scalars in one set-based call and fold their outcomes
+/// into `report` in buffer order (the tiers were already noted when each
+/// value was canonicalized). Empties the buffer.
+fn flush_scalars(
+    conn: &Connection,
+    commit_id: i64,
+    scalars: &mut Vec<ScalarWrite>,
+    report: &mut WriteReport,
+) -> Result<(), DbError> {
+    if scalars.is_empty() {
+        return Ok(());
+    }
+    for o in write_scalars(conn, commit_id, scalars)? {
+        report.absorb(&o);
+    }
+    scalars.clear();
     Ok(())
 }
 
@@ -1100,8 +1158,9 @@ fn resolve_alternative(
 
 /// The outcome of [`resolve_entities`].
 enum Resolved {
-    /// One entity id per input name, in input order.
-    Ids(Vec<i64>),
+    /// One entity id per input name, in input order, and whether this call
+    /// minted it (auto-created in this commit).
+    Ids { ids: Vec<i64>, minted: Vec<bool> },
     /// The class is N-D and `first_missing` is the first name (in input
     /// order) without a current entity: auto-creating it is refused with
     /// `err`. Nothing was inserted. The caller canonicalizes the entities
@@ -1144,7 +1203,6 @@ fn resolve_entities(
     names: &[String],
     warnings: &mut Vec<Warning>,
 ) -> Result<Resolved, DbError> {
-    use crate::history::LONG_INSERT_CHUNK;
     use duckdb::types::Value;
 
     let n = names.len();
@@ -1194,6 +1252,7 @@ fn resolve_entities(
     }
 
     let missing: Vec<usize> = (0..n).filter(|&i| ids[i].is_none()).collect();
+    let mut minted = vec![false; n];
     if let Some(&m) = missing.first() {
         let ndims: i64 = conn
             .prepare_cached("SELECT count(*) FROM entity_class_dimension WHERE cur_c = ?")?
@@ -1240,6 +1299,7 @@ fn resolve_entities(
                 }
                 last_id = id;
                 ids[i] = Some(id);
+                minted[i] = true;
                 warnings.push(Warning {
                     kind: WarningKind::AutoCreated,
                     object_type: "entity".into(),
@@ -1249,7 +1309,10 @@ fn resolve_entities(
             }
         }
     }
-    Ok(Resolved::Ids(ids.into_iter().flatten().collect()))
+    Ok(Resolved::Ids {
+        ids: ids.into_iter().flatten().collect(),
+        minted,
+    })
 }
 
 /// Resolve the parameter definition within `class_id`, auto-creating it (and its

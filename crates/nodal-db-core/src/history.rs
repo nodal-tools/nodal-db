@@ -53,6 +53,17 @@
 //! columnar insert zips its `unnest`s by position and NULL-pads a short list
 //! silently, so a hard length check (all builds) guards every execution.
 //!
+//! **Set-based scalar write (set_based_scalar_write_PLAN)**: the scalar tier
+//! has one writer, [`write_scalars`], which handles a batch of distinct keys
+//! in rounds of ≤ `LONG_INSERT_CHUNK`: one grouped live + version probe, a
+//! long/array live probe only for the keys not live in scalar, the per-key
+//! `close_out_tier` for a tier transition, one close-out UPDATE per retention
+//! mode, and one columnar INSERT. The API defers a commit's scalars into one
+//! such call; [`write_value`] delegates a scalar to it with N = 1. Per-key
+//! point probes cost a statement floor each, and DuckDB serves them with a
+//! sequential scan rather than the compound indexes, so a set-based round is
+//! what makes a scalar batch cost O(keys + table) per commit.
+//!
 //! **Retention**: the superseded row (scalar/long close-out, array `_hist` copy)
 //! keeps its content by default (`content_retained = TRUE`). `force_replace`
 //! (or an explicit `retain_override = Some(false)`) writes a stub instead —
@@ -72,7 +83,7 @@ use crate::types::{ScalarValue, ShapedData, Tier, ValueKey, WriteOptions, WriteO
 
 /// Should the superseded / pre-image row keep its content? `force_replace`
 /// forces a stub; an explicit `retain_override` otherwise decides; default true.
-fn keeps_content(opts: &WriteOptions) -> bool {
+pub(crate) fn keeps_content(opts: &WriteOptions) -> bool {
     !opts.force_replace && opts.retain_override.unwrap_or(true)
 }
 
@@ -95,10 +106,24 @@ pub fn write_value(
     debug_assert_value_floats_canonical(value);
     let retained = keeps_content(opts);
 
+    // --- 0. A scalar goes through the one set-based scalar writer with
+    // N = 1 (set_based_scalar_write_PLAN D2): it does its own live-tier
+    // probe, transition and close-out, so no second scalar writer exists. ---
+    if let ShapedData::Scalar(m) = &value.shape {
+        let w = ScalarWrite {
+            key,
+            value: m.clone(),
+            parameter_type_id,
+            retained,
+            entity_minted: false,
+        };
+        return Ok(write_scalars(conn, commit_id, std::slice::from_ref(&w))?[0]);
+    }
+
     // --- 1. Resolve the value's axes (array/long tiers) via content-verified
     // dedup, threading the caller's cache. Count created vs reused by the axis
-    // population delta (dedup itself returns only the id). A scalar has no
-    // axes: both counts are skipped (two statements per scalar value). ---
+    // population delta (dedup itself returns only the id). A value without
+    // axes skips both counts. ---
     let mut axis_ids: Vec<i64> = Vec::with_capacity(value.axes.len());
     let axes_created = if value.axes.is_empty() {
         0
@@ -126,15 +151,6 @@ pub fn write_value(
 
     // --- 4. Write into the target tier. ---
     let (version, rows_written, closed_same) = match (&value.shape, target) {
-        (ShapedData::Scalar(m), Tier::Scalar) => write_scalar(
-            conn,
-            &key,
-            commit_id,
-            m,
-            same_tier_live,
-            retained,
-            parameter_type_id,
-        )?,
         (ShapedData::Array(vals), Tier::Array) => write_array(
             conn,
             &key,
@@ -474,50 +490,347 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError>
 // Scalar tier
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn write_scalar(
-    conn: &Connection,
-    key: &ValueKey,
-    c: i64,
-    m: &ScalarValue,
-    same_tier_live: bool,
-    retained: bool,
-    pt_id: Option<i64>,
-) -> Result<(u16, usize, usize), DbError> {
-    let closed = if same_tier_live {
-        close_out_scalar(conn, key, c, retained)?
-    } else {
-        0
-    };
-    let version = next_version_scalar(conn, key)?;
-    let vc = VCols::of(m);
-    conn.prepare_cached(
-        "INSERT INTO value_scalar \
-           (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-            valid_from_commit, version, \
-            content_retained, value_kind, v_float, v_int, v_bool, v_str, v_datetime, \
-            v_dur_months, v_dur_micros) \
-         VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, make_timestamp(?), ?, ?)",
-    )?
-    .execute(params![
-        key.entity_id,
-        key.parameter_definition_id,
-        key.alternative_id,
-        pt_id,
-        c,
-        version as i16,
-        vc.kind,
-        vc.f,
-        vc.i,
-        vc.b,
-        vc.s,
-        vc.dt,
-        vc.dm,
-        vc.du,
-    ])?;
-    Ok((version, 1, closed))
+/// One key of a set-based scalar write: the canonical scalar (owned, so a
+/// buffer of these outlives the per-entity `canonicalize` result), the D11
+/// member binding, and whether the superseded row keeps its content
+/// (`keeps_content`, resolved per segment by the caller).
+#[derive(Clone, Debug)]
+pub(crate) struct ScalarWrite {
+    pub(crate) key: ValueKey,
+    pub(crate) value: ScalarValue,
+    pub(crate) parameter_type_id: Option<i64>,
+    pub(crate) retained: bool,
+    /// The key's entity was minted by THIS commit, so no value row of any
+    /// tier can exist for the key: the live-tier and version probes are
+    /// skipped (version 1). Pass `false` when unsure; it only costs a probe.
+    pub(crate) entity_minted: bool,
 }
 
+/// The zipped key lists every set-based scalar statement binds first
+/// (`WITH k AS (SELECT unnest(e), unnest(p), unnest(a))`).
+const SCALAR_KEYS_CTE: &str = "WITH k AS (SELECT unnest(?::BIGINT[]) AS e, \
+     unnest(?::BIGINT[]) AS p, unnest(?::BIGINT[]) AS a) ";
+
+/// Per key: the max version over all `value_scalar` rows of the triple
+/// (current and closed: the `audit_history_tiling` partition) and the count
+/// of current rows.
+const SCALAR_PROBE_SQL: &str = "SELECT s.entity_id, s.parameter_definition_id, s.alternative_id, \
+            max(s.version)::INTEGER, count(*) FILTER (WHERE s.valid_to_commit IS NULL) \
+     FROM value_scalar s JOIN k ON s.entity_id = k.e \
+          AND s.parameter_definition_id = k.p AND s.alternative_id = k.a \
+     GROUP BY ALL";
+
+/// The keys with a current `value_long` row.
+const LONG_LIVE_SQL: &str = "SELECT DISTINCT l.entity_id, l.parameter_definition_id, \
+            l.alternative_id, 0::BIGINT \
+     FROM value_long l JOIN k ON l.entity_id = k.e \
+          AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
+     WHERE l.valid_to_commit IS NULL";
+
+/// The keys with a `value_array` row (the live table holds only current
+/// rows) and its `array_id`; never the payload.
+const ARRAY_LIVE_SQL: &str = "SELECT v.entity_id, v.parameter_definition_id, v.alternative_id, \
+            v.array_id \
+     FROM value_array v JOIN k ON v.entity_id = k.e \
+          AND v.parameter_definition_id = k.p AND v.alternative_id = k.a";
+
+/// Same-tier close-out of the current rows of the bound keys, content
+/// retained.
+const SCALAR_CLOSE_SQL: &str = "UPDATE value_scalar SET valid_to_commit = ? \
+     FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
+                  unnest(?::BIGINT[]) AS a) k \
+     WHERE value_scalar.entity_id = k.e AND value_scalar.parameter_definition_id = k.p \
+       AND value_scalar.alternative_id = k.a AND value_scalar.valid_to_commit IS NULL";
+
+/// The stub form of [`SCALAR_CLOSE_SQL`]: the same SET list as the per-key
+/// stub close-out (`content_retained = FALSE`, the 7 payload columns NULL).
+const SCALAR_CLOSE_STUB_SQL: &str = "UPDATE value_scalar SET valid_to_commit = ?, \
+       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
+       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+     FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
+                  unnest(?::BIGINT[]) AS a) k \
+     WHERE value_scalar.entity_id = k.e AND value_scalar.parameter_definition_id = k.p \
+       AND value_scalar.alternative_id = k.a AND value_scalar.valid_to_commit IS NULL";
+
+/// The columnar `value_scalar` INSERT: the commit is a scalar bind, every
+/// other column a zipped list; `content_retained` is the literal TRUE and
+/// `v_datetime` crosses as µs through `make_timestamp`, as every timestamp
+/// write does.
+const SCALAR_INSERT_SQL: &str = "INSERT INTO value_scalar \
+       (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+        valid_from_commit, version, content_retained, value_kind, \
+        v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
+     SELECT unnest(?::BIGINT[]), unnest(?::BIGINT[]), unnest(?::BIGINT[]), unnest(?::BIGINT[]), \
+       ?, unnest(?::SMALLINT[]), TRUE, unnest(?::VARCHAR[]), \
+       unnest(?::DOUBLE[]), unnest(?::BIGINT[]), unnest(?::BOOLEAN[]), unnest(?::VARCHAR[]), \
+       make_timestamp(unnest(?::BIGINT[])), unnest(?::INTEGER[]), unnest(?::BIGINT[])";
+
+type Triple = (i64, i64, i64);
+
+fn triple(k: &ValueKey) -> Triple {
+    (k.entity_id, k.parameter_definition_id, k.alternative_id)
+}
+
+/// The three key lists `(entity, parameter_definition, alternative)`.
+fn key_lists<'a>(keys: impl Iterator<Item = &'a ValueKey> + Clone) -> [Value; 3] {
+    [
+        Value::List(keys.clone().map(|k| Value::BigInt(k.entity_id)).collect()),
+        Value::List(
+            keys.clone()
+                .map(|k| Value::BigInt(k.parameter_definition_id))
+                .collect(),
+        ),
+        Value::List(keys.map(|k| Value::BigInt(k.alternative_id)).collect()),
+    ]
+}
+
+/// Run one keyed probe (`SCALAR_KEYS_CTE` + `sql`) whose rows are
+/// `(triple, i64, i64)`; a probe without a second payload column returns 0.
+fn probe_keys<'a>(
+    conn: &Connection,
+    sql: &str,
+    keys: impl Iterator<Item = &'a ValueKey> + Clone,
+    two: bool,
+) -> Result<Vec<(Triple, i64, i64)>, DbError> {
+    let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{sql}"))?;
+    let rows = stmt.query_map(duckdb::params_from_iter(key_lists(keys)), |r| {
+        Ok((
+            (r.get(0)?, r.get(1)?, r.get(2)?),
+            r.get::<_, i64>(3)?,
+            if two { r.get::<_, i64>(4)? } else { 0 },
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Write every scalar of `w` at `commit_id` in set-based rounds of
+/// ≤ [`LONG_INSERT_CHUNK`] keys (set_based_scalar_write_PLAN §3.2): the one
+/// scalar history implementation (`write_value` delegates here with N = 1).
+/// Per round: a grouped live + version probe of `value_scalar`, a live probe
+/// of `value_long` and `value_array` for the keys the first probe found not
+/// live, the per-key `close_out_tier` for each key live in another tier
+/// (long close-out; array pre-image copy + DELETE, all in SQL), one
+/// same-tier close-out UPDATE per retention mode, and one columnar INSERT.
+/// The keys' entities minted by this commit skip the probes (version 1).
+///
+/// Semantics are those of one per-key `write_value` per key in input order:
+/// the live tier by the per-key precedence (scalar, then long, then array),
+/// `version = max(all rows of the triple) + 1`, the same close-out SQL and
+/// retention. Keys must be distinct (the callers guarantee it); a repeated
+/// key, a close-out count that differs from the probe, or a list of the
+/// wrong length fails as [`DbError::Internal`], never as silent damage.
+/// Returns one [`WriteOutcome`] per input, in input order.
+pub(crate) fn write_scalars(
+    conn: &Connection,
+    commit_id: i64,
+    w: &[ScalarWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    let mut seen: std::collections::HashSet<Triple> =
+        std::collections::HashSet::with_capacity(w.len());
+    for s in w {
+        debug_assert_scalar_float_canonical(&s.value);
+        if !seen.insert(triple(&s.key)) {
+            return Err(DbError::Internal(format!(
+                "scalar batch: duplicate key {:?}",
+                s.key
+            )));
+        }
+    }
+    let mut out = Vec::with_capacity(w.len());
+    for chunk in w.chunks(LONG_INSERT_CHUNK) {
+        out.extend(write_scalar_round(conn, commit_id, chunk)?);
+    }
+    Ok(out)
+}
+
+/// One round of [`write_scalars`] over ≤ [`LONG_INSERT_CHUNK`] distinct keys.
+fn write_scalar_round(
+    conn: &Connection,
+    c: i64,
+    w: &[ScalarWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    let n = w.len();
+    // --- Probes (only for keys whose entity existed before this commit). ---
+    let mut max_version: HashMap<Triple, i64> = HashMap::new();
+    let mut live: HashMap<Triple, Live> = HashMap::new();
+    let probed = w.iter().filter(|s| !s.entity_minted).map(|s| &s.key);
+    if probed.clone().next().is_some() {
+        for (t, v, cur) in probe_keys(conn, SCALAR_PROBE_SQL, probed.clone(), true)? {
+            max_version.insert(t, v);
+            if cur > 0 {
+                live.insert(t, Live::Scalar);
+            }
+        }
+        // Long and array only for the keys not live in scalar (zero keys for a
+        // pure replace batch, so both statements are skipped). Precedence as
+        // in `live_tier`: scalar, then long, then array.
+        let rest: Vec<&ValueKey> = probed.filter(|k| !live.contains_key(&triple(k))).collect();
+        if !rest.is_empty() {
+            let long = probe_keys(conn, LONG_LIVE_SQL, rest.iter().copied(), false)?;
+            let array = probe_keys(conn, ARRAY_LIVE_SQL, rest.iter().copied(), false)?;
+            for (t, _, _) in long {
+                live.insert(t, Live::Long);
+            }
+            for (t, array_id, _) in array {
+                live.entry(t).or_insert(Live::Array(array_id));
+            }
+        }
+    }
+
+    // --- Tier transitions: the per-key close-out of the other tier, in
+    // input order (plan D4). ---
+    let mut closed = vec![0usize; n];
+    for (i, s) in w.iter().enumerate() {
+        if let Some(&cur @ (Live::Long | Live::Array(_))) = live.get(&triple(&s.key)) {
+            closed[i] = close_out_tier(conn, &s.key, c, cur, s.retained)?;
+        }
+    }
+
+    // --- Same-tier close-out: one UPDATE per retention mode. ---
+    for retained in [true, false] {
+        let idx: Vec<usize> = (0..n)
+            .filter(|&i| {
+                w[i].retained == retained && live.get(&triple(&w[i].key)) == Some(&Live::Scalar)
+            })
+            .collect();
+        if idx.is_empty() {
+            continue;
+        }
+        let sql = if retained {
+            SCALAR_CLOSE_SQL
+        } else {
+            SCALAR_CLOSE_STUB_SQL
+        };
+        let [e, p, a] = key_lists(idx.iter().map(|&i| &w[i].key));
+        let affected = conn
+            .prepare_cached(sql)?
+            .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
+        // Hard check (plan D10): exactly one current row per scalar-live key
+        // (`one_current_scalar` allows at most one).
+        if affected != idx.len() {
+            return Err(DbError::Internal(format!(
+                "scalar batch: close-out touched {affected} rows for {} live keys",
+                idx.len()
+            )));
+        }
+        for i in idx {
+            closed[i] += 1;
+        }
+    }
+
+    // --- Insert: every column built in one pass through the one encoder. ---
+    let mut versions: Vec<i16> = Vec::with_capacity(n);
+    let mut cols = ScalarColumns::default();
+    for s in w {
+        let v = max_version.get(&triple(&s.key)).copied().unwrap_or(0) + 1;
+        let v = i16::try_from(v)
+            .map_err(|_| DbError::Internal(format!("scalar batch: version {v} out of range")))?;
+        versions.push(v);
+        cols.push(s, v);
+    }
+    cols.check_column_lengths()?;
+    exec_columnar(conn, SCALAR_INSERT_SQL, n, |r| cols.params(c, r))?;
+
+    Ok(versions
+        .iter()
+        .zip(closed)
+        .map(|(&version, rows_closed)| WriteOutcome {
+            tier: Some(Tier::Scalar),
+            version: version as u16,
+            rows_written: 1,
+            rows_closed,
+            axes_created: 0,
+            axes_reused: 0,
+        })
+        .collect())
+}
+
+/// The per-key columns of one scalar round, in [`SCALAR_INSERT_SQL`] order.
+/// The value columns come from [`VCols::of`] (the one encoder); each column
+/// holds one Rust type, so it binds as a list of one `Value` variant.
+#[derive(Default)]
+struct ScalarColumns {
+    e: Vec<i64>,
+    p: Vec<i64>,
+    a: Vec<i64>,
+    pt: Vec<Option<i64>>,
+    version: Vec<i16>,
+    kind: Vec<&'static str>,
+    f: Vec<Option<f64>>,
+    i: Vec<Option<i64>>,
+    b: Vec<Option<bool>>,
+    s: Vec<Option<String>>,
+    dt: Vec<Option<i64>>,
+    dm: Vec<Option<i32>>,
+    du: Vec<Option<i64>>,
+}
+
+impl ScalarColumns {
+    fn push(&mut self, w: &ScalarWrite, version: i16) {
+        self.e.push(w.key.entity_id);
+        self.p.push(w.key.parameter_definition_id);
+        self.a.push(w.key.alternative_id);
+        self.pt.push(w.parameter_type_id);
+        self.version.push(version);
+        let vc = VCols::of(&w.value);
+        self.kind.push(vc.kind);
+        self.f.push(vc.f);
+        self.i.push(vc.i);
+        self.b.push(vc.b);
+        self.s.push(vc.s);
+        self.dt.push(vc.dt);
+        self.dm.push(vc.dm);
+        self.du.push(vc.du);
+    }
+
+    /// Every column must hold one entry per key (a short all-NULL column
+    /// would otherwise bind as a plain NULL and pass the list check).
+    fn check_column_lengths(&self) -> Result<(), DbError> {
+        let n = self.e.len();
+        let lens = [
+            self.p.len(),
+            self.a.len(),
+            self.pt.len(),
+            self.version.len(),
+            self.kind.len(),
+            self.f.len(),
+            self.i.len(),
+            self.b.len(),
+            self.s.len(),
+            self.dt.len(),
+            self.dm.len(),
+            self.du.len(),
+        ];
+        if lens.iter().any(|&l| l != n) {
+            return Err(DbError::Internal(format!(
+                "scalar batch: column lengths {lens:?} differ from {n} keys"
+            )));
+        }
+        Ok(())
+    }
+
+    fn params(&self, c: i64, r: std::ops::Range<usize>) -> Vec<Value> {
+        vec![
+            list(clip(&self.e, &r), |&v| Value::BigInt(v)),
+            list(clip(&self.p, &r), |&v| Value::BigInt(v)),
+            list(clip(&self.a, &r), |&v| Value::BigInt(v)),
+            opt_list(clip(&self.pt, &r), |&v| Value::BigInt(v)),
+            Value::BigInt(c),
+            list(clip(&self.version, &r), |&v| Value::SmallInt(v)),
+            list(clip(&self.kind, &r), |&v| Value::Text(v.to_string())),
+            opt_list(clip(&self.f, &r), |&v| Value::Double(v)),
+            opt_list(clip(&self.i, &r), |&v| Value::BigInt(v)),
+            opt_list(clip(&self.b, &r), |&v| Value::Boolean(v)),
+            opt_list(clip(&self.s, &r), |v| Value::Text(v.clone())),
+            opt_list(clip(&self.dt, &r), |&v| Value::BigInt(v)),
+            opt_list(clip(&self.dm, &r), |&v| Value::Int(v)),
+            opt_list(clip(&self.du, &r), |&v| Value::BigInt(v)),
+        ]
+    }
+}
+
+/// The per-key close-out of a live scalar row: the scalar arm of
+/// [`close_out_tier`] (deletes, and scalar → long/array transitions).
 fn close_out_scalar(
     conn: &Connection,
     key: &ValueKey,
@@ -541,23 +854,6 @@ fn close_out_scalar(
         key.parameter_definition_id,
         key.alternative_id
     ])?)
-}
-
-fn next_version_scalar(conn: &Connection, key: &ValueKey) -> Result<u16, DbError> {
-    let v: i32 = conn
-        .prepare_cached(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM value_scalar \
-             WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=?",
-        )?
-        .query_row(
-            params![
-                key.entity_id,
-                key.parameter_definition_id,
-                key.alternative_id
-            ],
-            |r| r.get(0),
-        )?;
-    Ok(v as u16)
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,10 +1486,7 @@ fn debug_assert_value_floats_canonical(value: &CanonicalValue) {
         return;
     }
     let ok = |x: f64| x.to_bits() == crate::encoding::canonical_value_f64(x).to_bits();
-    let scalar_ok = |m: &ScalarValue| match m {
-        ScalarValue::Float(x) => ok(*x),
-        _ => true,
-    };
+    let scalar_ok = scalar_float_canonical;
     let all_ok = match &value.shape {
         ShapedData::Scalar(m) => scalar_ok(m),
         ShapedData::Array(vals) => vals.iter().all(|x| ok(*x)),
@@ -1202,6 +1495,23 @@ fn debug_assert_value_floats_canonical(value: &CanonicalValue) {
     debug_assert!(
         all_ok,
         "write_value got a non-canonical value float (-0.0 or a non-canonical NaN); \
+         values must come from the canonicalization pipeline"
+    );
+}
+
+fn scalar_float_canonical(m: &ScalarValue) -> bool {
+    match m {
+        ScalarValue::Float(x) => x.to_bits() == crate::encoding::canonical_value_f64(*x).to_bits(),
+        _ => true,
+    }
+}
+
+/// The [`debug_assert_value_floats_canonical`] check for one scalar of a
+/// set-based batch.
+fn debug_assert_scalar_float_canonical(m: &ScalarValue) {
+    debug_assert!(
+        scalar_float_canonical(m),
+        "write_scalars got a non-canonical value float (-0.0 or a non-canonical NaN); \
          values must come from the canonicalization pipeline"
     );
 }
@@ -1367,6 +1677,50 @@ mod tests {
         // (the all-NULL column) is not a list and passes.
         assert!(check_list_lengths(&[Value::List(vec![])], 1).is_err());
         assert!(check_list_lengths(&[Value::Null, list(&[1i32], |&v| Value::Int(v))], 1).is_ok());
+    }
+
+    #[test]
+    fn scalar_batch_with_a_duplicate_key_is_an_internal_error() {
+        // Callers guarantee distinct keys; the set-based writer checks the
+        // invariant (plan D10) instead of writing a zero-length span.
+        let (_d, db) = fresh();
+        let before = counts(&db);
+        let w = ScalarWrite {
+            key: KEY,
+            value: ScalarValue::Float(1.0),
+            parameter_type_id: None,
+            retained: true,
+            entity_minted: false,
+        };
+        let err = with_write_txn(&db, "t", "dup", |conn, c| {
+            write_scalars(conn, c, &[w.clone(), w.clone()]).map(|_| ())
+        })
+        .expect_err("a duplicate key must be rejected");
+        assert!(
+            matches!(&err, DbError::Internal(m) if m.contains("duplicate key")),
+            "got {err:?}"
+        );
+        assert_eq!(counts(&db), before);
+    }
+
+    #[test]
+    fn scalar_round_length_check_rejects_a_short_column() {
+        let mut cols = ScalarColumns::default();
+        let w = ScalarWrite {
+            key: KEY,
+            value: ScalarValue::Int(3),
+            parameter_type_id: Some(1),
+            retained: true,
+            entity_minted: true,
+        };
+        cols.push(&w, 1);
+        cols.push(&w, 2);
+        assert!(cols.check_column_lengths().is_ok());
+        cols.i.pop();
+        assert!(matches!(
+            cols.check_column_lengths(),
+            Err(DbError::Internal(_))
+        ));
     }
 
     #[test]

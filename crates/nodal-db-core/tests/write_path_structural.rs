@@ -167,16 +167,13 @@ fn long_value_one_cell_past_the_insert_chunk_round_trips_in_cell_order() {
     long_round_trip(16_385);
 }
 
-/// 70 000 cells = four full chunks + a tail. Slow in a debug build (the
-/// bundled DuckDB is unoptimized there).
+/// 70 000 cells = four full chunks + a tail.
 #[test]
-#[ignore = "slow: pre-release tier; run via `just full` / --include-ignored"]
 fn long_value_across_several_insert_chunks_round_trips_in_cell_order() {
     long_round_trip(70_000);
 }
 
 #[test]
-#[ignore = "slow: pre-release tier; run via `just full` / --include-ignored"]
 fn array_of_525600_elements_round_trips_bit_exactly() {
     // One row, one bound DOUBLE[] parameter (arrays cannot be chunked).
     let (_d, db) = fresh_db();

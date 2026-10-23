@@ -458,9 +458,9 @@ fn direct_script(db: &Path, log: &mut String) {
         long(vec![dt_param(Y2020, 0, H, 3), label(&["x", "y"])], cells),
     ));
     // Rank 3 sparse: integer materialized x float parametric x label. (A
-    // period axis rides an array below: the writer leaves the long tier's
-    // period accelerator NULL while `audit_index_accelerator` expects the
-    // period start, and canon never emits a long period dimension.)
+    // period axis rides an array below: canon never emits a long period
+    // dimension, and the golden was generated before the long tier's period
+    // accelerator was set to the period start.)
     c1.push(Step::W(
         L_R3,
         long(

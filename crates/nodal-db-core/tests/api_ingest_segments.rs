@@ -331,3 +331,57 @@ fn ingest_into_uninitialized_db_is_api_error() {
         "no commit table created"
     );
 }
+
+/// A write that fails on a file of another schema version (e.g. a 0.3 file
+/// without `value_array.array_id`, which fails with a raw `Binder Error:
+/// Referenced column "array_id" not found`) reports the version mismatch
+/// instead; on a current-version file the same engine error passes through.
+#[test]
+fn write_error_on_other_schema_version_names_the_version() {
+    use nodal_db_core::conn::with_write_txn;
+    use nodal_db_core::error::DbError;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("old.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("schema");
+    // The kind of statement a newer core issues against an older file.
+    let fail = |conn: &Connection, _c: i64| -> Result<(), DbError> {
+        conn.execute("SELECT no_such_column FROM value_array", [])?;
+        Ok(())
+    };
+
+    let err = with_write_txn(&db, "t", "m", fail).unwrap_err();
+    assert!(
+        matches!(err, DbError::Duckdb(_)),
+        "current version: {err:?}"
+    );
+
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "UPDATE metadata SET value = '0.3-test' \
+             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+    let commits = count(&db, "SELECT count(*) FROM commit");
+    let err = with_write_txn(&db, "t", "m", fail).unwrap_err();
+    let DbError::Api(m) = &err else {
+        panic!("expected an Api error, got {err:?}")
+    };
+    assert!(m.contains("\"0.3-test\""), "{m}");
+    assert!(m.contains(nodal_db_core::compaction::SCHEMA_VERSION), "{m}");
+    assert!(m.contains("no_such_column"), "original error kept: {m}");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM commit"),
+        commits,
+        "rolled back"
+    );
+
+    // A non-engine error from the closure is never remapped.
+    let err = with_write_txn(&db, "t", "m", |_c, _id| -> Result<(), DbError> {
+        Err(DbError::Api("mine".into()))
+    })
+    .unwrap_err();
+    assert!(matches!(&err, DbError::Api(m) if m == "mine"), "{err:?}");
+}

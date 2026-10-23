@@ -38,9 +38,12 @@
 //! read as "current version > 1 with no superseded rows".
 //!
 //! **Physical write mechanism (appender_write_path_PLAN D1, D4)**: every
-//! statement is plain SQL on the caller's connection, prepared once per
-//! transaction through the connection's statement cache (`prepare_cached`; the
-//! cache capacity is raised in `conn`). The bulk inserts bind each column
+//! statement is plain SQL on the caller's connection. The hot-path statements
+//! (the `write_value` protocol: tier probes, version scans, close-outs, the
+//! bulk inserts, the array update/delete and pre-image copies) are prepared
+//! once per transaction through the connection's statement cache
+//! (`prepare_cached`; the cache capacity is raised in `conn`); the rare paths
+//! (definition defaults, the template string rewrites) use plain `execute`. The bulk inserts bind each column
 //! as ONE list parameter ("columnar bind"): a long value is
 //! `INSERT … SELECT ?, unnest(?::T[]), …` per ≤ `LONG_INSERT_CHUNK` cells,
 //! an array payload is one bound `?::DOUBLE[]`. The statement text no longer
@@ -1140,9 +1143,11 @@ impl VCols {
 }
 
 /// The `(v_datetime µs, v_num)` accelerator for a dimension's axis at `pos`.
-/// Only datetime and integer axes carry an accelerator; label/float (and the
-/// canon-unsupported period/time_pattern) leave both NULL — exactly what
-/// `audit_index_accelerator` expects.
+/// Datetime axes carry the timestamp, period axes the period's `start_ts`
+/// (the `ts` that `axis_position` renders for a period), integer axes the
+/// number; label/float/time_pattern leave both NULL — exactly what
+/// `audit_index_accelerator` expects. (Canon does not emit period axes for
+/// long values today; the period arm keeps a hand-built value audit-clean.)
 fn accel(axis: &CanonicalAxis, pos: i32) -> (Option<i64>, Option<i64>) {
     match &axis.body {
         AxisBody::DatetimeParametric { start_ts, step } => {
@@ -1151,6 +1156,7 @@ fn accel(axis: &CanonicalAxis, pos: i32) -> (Option<i64>, Option<i64>) {
         AxisBody::DatetimeMaterialized { coords } => (coords.get(pos as usize).copied(), None),
         AxisBody::IntegerParametric { start, step } => (None, Some(start + pos as i64 * step)),
         AxisBody::IntegerMaterialized { coords } => (None, coords.get(pos as usize).copied()),
+        AxisBody::Period { positions } => (positions.get(pos as usize).map(|p| p.start_ts), None),
         _ => (None, None),
     }
 }
@@ -1434,5 +1440,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!((len, ty.as_str()), (0, "DOUBLE[]"));
+    }
+
+    fn period_axis() -> CanonicalAxis {
+        CanonicalAxis {
+            length: 2,
+            properties: AxisProperties::default(),
+            body: AxisBody::Period {
+                positions: vec![
+                    crate::encoding::PeriodPos {
+                        start_ts: 1_577_836_800_000_000, // 2020-01-01
+                        end_ts: 1_609_459_200_000_000,   // 2021-01-01
+                        years_presented: None,
+                    },
+                    crate::encoding::PeriodPos {
+                        start_ts: 1_609_459_200_000_000,
+                        end_ts: 1_640_995_200_000_000, // 2022-01-01
+                        years_presented: Some(1.0),
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn period_accelerator_is_the_period_start() {
+        let ax = period_axis();
+        assert_eq!(accel(&ax, 0), (Some(1_577_836_800_000_000), None));
+        assert_eq!(accel(&ax, 1), (Some(1_609_459_200_000_000), None));
+        assert_eq!(accel(&ax, 2), (None, None));
+    }
+
+    #[test]
+    fn hand_built_long_period_value_is_accelerator_audit_clean() {
+        // Canon does not emit long period dimensions; a hand-built value must
+        // still satisfy `audit_index_accelerator` (iN_dt = period start).
+        let (_d, db) = fresh();
+        let value = CanonicalValue {
+            tier: Tier::Long,
+            value_kind: ValueKind::Float,
+            axes: vec![period_axis()],
+            shape: ShapedData::Long(rows(2)),
+        };
+        with_write_txn(&db, "t", "period", |conn, c| {
+            let mut cache = AxisCache::new();
+            write_value(
+                conn,
+                c,
+                KEY,
+                &value,
+                &mut cache,
+                &WriteOptions::default(),
+                None,
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let (cells, bad): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM value_long WHERE i1_dt IS NOT NULL), \
+                        (SELECT count(*) FROM audit_index_accelerator)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((cells, bad), (2, 0));
     }
 }

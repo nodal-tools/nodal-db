@@ -161,12 +161,14 @@ where
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
     assert_min_version(&conn)?;
-    // The write path prepares each of its statements once per transaction
-    // through this connection's statement cache (`prepare_cached`). The
-    // history protocol alone has ~20 distinct statements (3 live-tier probes,
-    // the 3 version scans, 4 close-out variants, the scalar/long/array
-    // inserts, the array UPDATE/DELETE, 2 pre-image copies, the axis count),
-    // the axis writer 7 more, plus the api lookups; duckdb-rs's default LRU
+    // The write path prepares its hot-path statements once per transaction
+    // through this connection's statement cache (`prepare_cached`; the rare
+    // paths, axis dedup lookups and the axis parent `INSERT … RETURNING` use
+    // plain prepare). The history protocol alone has ~20 distinct cached
+    // statements (3 live-tier probes, the 3 version scans, 4 close-out
+    // variants, the scalar/long/array inserts, the array UPDATE/DELETE, 2
+    // pre-image copies, the axis count), the axis writer 6 more (one child-row
+    // insert per materialized kind), plus the api lookups; duckdb-rs's default LRU
     // capacity of 16 would thrash on a mixed commit and silently re-prepare
     // (appender_write_path_PLAN critique C11).
     conn.set_prepared_statement_cache_capacity(WRITE_STATEMENT_CACHE);
@@ -212,6 +214,16 @@ where
                      create it with init first",
                     db_path.display().to_string()
                 ))
+            } else if let (DbError::Duckdb(_), Some(found)) = (&e, foreign_schema_version(&conn)) {
+                // An engine error (typically a Binder error on a column this
+                // build's statements expect) on a file of another schema
+                // version: say so instead of surfacing the raw binder text.
+                DbError::Api(format!(
+                    "database schema version {found:?} is not this nodal-db's ({:?}); \
+                     re-create the database (init + import) with this nodal-db, or use a \
+                     nodal-db build matching its schema version (original error: {e})",
+                    crate::compaction::SCHEMA_VERSION
+                ))
             } else {
                 e
             };
@@ -248,6 +260,22 @@ fn has_commit_table(conn: &Connection) -> bool {
     )
     .map(|n| n > 0)
     .unwrap_or(true)
+}
+
+/// The file's current `schema_version` metadata value when it differs from
+/// this build's [`crate::compaction::SCHEMA_VERSION`]; `None` when it matches
+/// or the probe fails (the caller then keeps the original error). Only run on
+/// a write failure, after the rollback.
+fn foreign_schema_version(conn: &Connection) -> Option<String> {
+    let found: String = conn
+        .query_row(
+            "SELECT value FROM metadata \
+             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    (found != crate::compaction::SCHEMA_VERSION).then_some(found)
 }
 
 /// Is this a DuckDB write-write conflict (VMP Part 5 retry trigger)? Matched on

@@ -259,7 +259,10 @@ it.
 of the current state. It is refused when N is not a commit, when an
 erasure marker was written after N (content valid at N was removed
 later), or when some content valid at N was not retained (a history
-stub). `run` rows have no creation commit, so an as-of extract keeps
+stub). Rows that were current at N but closed later are carried as
+current rows: their closing commit lies outside the extract's history,
+so it is cleared (version numbers and starting commits stay unchanged).
+`run` rows have no creation commit, so an as-of extract keeps
 the runs whose input and output commits are at or before N and whose
 alternative and tool entity existed at N.
 

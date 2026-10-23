@@ -1500,3 +1500,90 @@ fn t9_asof_refusals() {
         temps_in(dir.path())
     );
 }
+
+// --- sequences vs the ids actually present ------------------------------------------
+
+/// For every sequence-backed column: the sequence's next value is above every
+/// id the file holds (for `seq_value_array` also the `_hist` ids), and
+/// `array_id`s keep their odd parity. `duckdb_sequences()` reports a NULL
+/// `last_value` for a sequence re-created with `START WITH n` and unused since,
+/// so the next value is `last_value + increment_by`, else `start_value`.
+fn assert_sequences_above_ids(db: &Path, label: &str) {
+    let cols = strings(
+        db,
+        "SELECT table_name || '|' || column_name || '|' || \
+                split_part(column_default, '''', 2) \
+         FROM information_schema.columns \
+         WHERE column_default LIKE 'nextval(%' AND table_catalog = current_database() \
+         ORDER BY 1",
+    );
+    assert!(cols.len() >= 19, "{label}: {cols:?}");
+    for c in cols {
+        let parts: Vec<&str> = c.split('|').collect();
+        let (table, column, seq) = (parts[0], parts[1], parts[2]);
+        let next = scalar(
+            db,
+            &format!(
+                "SELECT coalesce(last_value + increment_by, start_value) \
+                 FROM duckdb_sequences() \
+                 WHERE sequence_name = '{seq}' AND database_name = current_database()"
+            ),
+        );
+        let mut max_sql = format!("SELECT coalesce(max(\"{column}\"), 0) FROM \"{table}\"");
+        if seq == "seq_value_array" {
+            max_sql = format!(
+                "SELECT greatest(({max_sql}), \
+                   (SELECT coalesce(max(array_id), 0) FROM value_array_hist))"
+            );
+            assert_eq!(next % 2, 1, "{label}: seq_value_array next {next} is even");
+        }
+        let max = scalar(db, &max_sql);
+        assert!(
+            next > max,
+            "{label}: {seq} would re-issue: next {next} <= max({table}.{column}) {max}"
+        );
+    }
+}
+
+#[test]
+fn sequences_stay_above_every_carried_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = churned_source(dir.path());
+    assert_sequences_above_ids(&fx.db, "source");
+
+    // Head extract of the source, then an extract of that extract (no write
+    // in between: the first extract's sequences are fresh, unused since).
+    let e1 = dir.path().join("e1.duckdb");
+    extract(&fx.db, &e1, &opts("t")).expect("extract");
+    assert_sequences_above_ids(&e1, "extract");
+    let e2 = dir.path().join("e2.duckdb");
+    extract(&e1, &e2, &opts("t")).expect("extract of an extract");
+    assert_sequences_above_ids(&e2, "extract of an extract");
+
+    // Compact the source twice with no write in between, then extract it.
+    compact(&fx.db).expect("compact 1");
+    compact(&fx.db).expect("compact 2");
+    assert_sequences_above_ids(&fx.db, "compacted twice");
+    let e3 = dir.path().join("e3.duckdb");
+    extract(&fx.db, &e3, &opts("t")).expect("extract of the compacted source");
+    assert_sequences_above_ids(&e3, "extract of a compacted source");
+
+    // As of an early commit (the erase-free fixture: an as-of N extract
+    // refuses past a later marker), then a write in every extract.
+    let dir2 = tempfile::tempdir().unwrap();
+    let fx2 = churned_source_with(dir2.path(), false);
+    let e4 = dir2.path().join("e4.duckdb");
+    extract(&fx2.db, &e4, &asof("t", fx2.c_initial)).expect("as-of extract");
+    assert_sequences_above_ids(&e4, "as-of extract");
+    for db in [&e2, &e3, &e4] {
+        write(db, "Node", "profile", "Base", array_batch("n9", 6, 1.0));
+        write(
+            db,
+            "Node",
+            "demand",
+            "fresh_alt",
+            scalar_batch(&["n9"], &[9.0]),
+        );
+        assert_sequences_above_ids(db, "after a write");
+    }
+}

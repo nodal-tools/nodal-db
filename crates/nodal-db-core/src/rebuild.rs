@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use duckdb::Connection;
+use duckdb::{Connection, OptionalExt};
 
 use crate::compaction::SCHEMA_VERSION;
 use crate::error::DbError;
@@ -591,7 +591,7 @@ pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(),
 /// ids' parity.
 ///
 /// **B2b:** `duckdb_sequences()` returns rows for BOTH databases under ATTACH,
-/// so the source state read is filtered `WHERE database_name = 'src'`.
+/// so the source state read is filtered by `database_name` ([`SRC`]).
 pub(crate) fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
     // (table, column, sequence) for every column whose DEFAULT is nextval('…').
     // Read from the temp's own catalog (main db).
@@ -629,7 +629,9 @@ pub(crate) fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
                     })
                 },
             )
-            .ok();
+            // No row = missing in the source. Any other error is real: a
+            // silent fallback to the DDL start would re-issue copied ids.
+            .optional()?;
         let Some(SeqState {
             last,
             start,
@@ -687,6 +689,16 @@ fn parse_seq_name(default_expr: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The directory holding `path`, for directory operations (`read_dir`,
+/// fsync). `Path::parent` returns `""` for a bare file name (`x.duckdb`),
+/// which `read_dir` and `File::open` reject; that is the current directory.
+pub(crate) fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    }
+}
+
 /// Remove a temp file and its WAL sidecar (abort cleanup).
 pub(crate) fn remove_temp(temp_path: &Path) {
     let _ = fs::remove_file(temp_path);
@@ -719,3 +731,16 @@ pub(crate) fn fsync_dir(dir: &Path) {
 
 #[cfg(not(unix))]
 pub(crate) fn fsync_dir(_dir: &Path) {}
+
+#[cfg(test)]
+mod parent_dir_tests {
+    use super::parent_dir;
+    use std::path::Path;
+
+    #[test]
+    fn bare_file_name_is_the_current_directory() {
+        assert_eq!(parent_dir(Path::new("x.duckdb")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("d/x.duckdb")), Path::new("d"));
+        assert_eq!(parent_dir(Path::new("/x.duckdb")), Path::new("/"));
+    }
+}

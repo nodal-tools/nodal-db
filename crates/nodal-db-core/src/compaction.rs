@@ -56,8 +56,8 @@ use crate::conn::{open_with_retry, path_lock};
 use crate::error::DbError;
 use crate::rebuild::{
     assert_temp_schema_version, attach_source_ro, check_catalog, cluster_order,
-    discover_real_columns, fsync_dir, fsync_file, q, remove_temp, restore_sequences, SRC,
-    TABLE_ORDER,
+    discover_real_columns, fsync_dir, fsync_file, parent_dir, q, remove_temp, restore_sequences,
+    SRC, TABLE_ORDER,
 };
 use crate::schema_init::init_schema;
 
@@ -253,7 +253,7 @@ fn compact_locked(db_path: &Path) -> Result<CompactionReport, DbError> {
     // Durability + atomic swap (§3): fsync the temp bytes and its directory
     // entry, rename over the original, fsync the directory again.
     fsync_file(&temp_path)?;
-    let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = parent_dir(db_path);
     fsync_dir(dir);
     fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
         path: temp_path.display().to_string(),
@@ -427,7 +427,7 @@ fn temp_prefix(db_path: &Path) -> String {
 /// where `prefix` ends in the dot of `…compact.` — is false. The explicit
 /// `compaction-baseline` exclusion below is belt-and-braces.
 pub fn sweep_orphan_temps(db_path: &Path) {
-    let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = parent_dir(db_path);
     let prefix = temp_prefix(db_path);
     let Ok(entries) = fs::read_dir(dir) else {
         return;

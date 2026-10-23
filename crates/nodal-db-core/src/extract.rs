@@ -44,10 +44,11 @@
 //!   holds the source's file lock through the copy (cross-process exclusion:
 //!   a concurrent writer sees `Busy` for the duration, as with compaction).
 //! - **Table macros are never called through the attached catalog.** A
-//!   table macro reached as `{SRC}.some_macro(…)` binds its body's unqualified
+//!   table macro reached through the attached catalog
+//!   (`nodal_rebuild_source.some_macro(…)`) binds its body's unqualified
 //!   names in the caller's default catalog and silently reads the wrong
 //!   database (pinned by a tripwire test). Views bind to their own catalog,
-//!   so the self-check compares `src.<view>` with the temp's view.
+//!   so the self-check compares the attached source's view with the temp's.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,8 +61,8 @@ use crate::conn::{canonical_path_key, open_with_retry, path_lock};
 use crate::error::DbError;
 use crate::rebuild::{
     assert_temp_schema_version, attach_source_ro, check_catalog, check_selection, cluster_order,
-    discover_real_columns, fsync_dir, fsync_file, q, remove_temp, restore_sequences, selection_for,
-    Selection, SRC, TABLE_ORDER,
+    discover_real_columns, fsync_dir, fsync_file, parent_dir, q, remove_temp, restore_sequences,
+    selection_for, Selection, SRC, TABLE_ORDER,
 };
 use crate::schema_init::init_schema;
 
@@ -221,8 +222,7 @@ pub fn extract(src: &Path, dest: &Path, opts: &ExtractOpts) -> Result<ExtractRep
         return Err(e);
     }
     remove_temp(&temp);
-    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
-    fsync_dir(dir);
+    fsync_dir(parent_dir(dest));
 
     report.bytes_source = bytes_source;
     report.bytes_extract = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
@@ -779,7 +779,7 @@ fn self_check_selection(conn: &Connection, sel: &Sel) -> Result<Vec<(String, u64
 
 /// Self-check (b), head mode: the derived (joining) views give the same
 /// result on the source and the extract. Views bind to their own catalog
-/// under ATTACH, so `src.<view>` reads the source.
+/// under ATTACH, so `<SRC>.<view>` reads the source.
 fn self_check_derived_views(conn: &Connection) -> Result<(), DbError> {
     for view in DERIVED_VIEWS {
         let probe = |rel: &str| -> Result<(i64, String), DbError> {
@@ -883,7 +883,7 @@ fn temp_prefix(dest: &Path) -> String {
 /// concurrent extract to the SAME dest in another process would lose its
 /// temp here and then fail loudly at publish; it never produces a wrong dest.)
 pub fn sweep_orphan_extract_temps(dest: &Path) {
-    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let dir = parent_dir(dest);
     let prefix = temp_prefix(dest);
     let Ok(entries) = fs::read_dir(dir) else {
         return;

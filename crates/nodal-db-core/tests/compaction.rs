@@ -832,10 +832,7 @@ fn compact_twice_keeps_unused_sequences_in_place() {
         );
     }
     assert_eq!(
-        scalar(
-            &db,
-            "SELECT count(*) - count(DISTINCT id) FROM \"commit\""
-        ),
+        scalar(&db, "SELECT count(*) - count(DISTINCT id) FROM \"commit\""),
         0
     );
 }

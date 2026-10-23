@@ -210,16 +210,26 @@ fn asof_macros(db: &Path) -> Vec<String> {
 // --- the churned fixture -----------------------------------------------------
 
 /// Commits of interest in the fixture, for the as-of tests.
-#[allow(dead_code)]
 struct Fixture {
     db: PathBuf,
+    /// After the Base writes of round 1, before the run alternatives exist.
+    c_base_only: i64,
     /// After the first round of writes (before any overwrite).
     c_initial: i64,
-    /// After the overwrites, before deletes/erase.
+    /// After the overwrites, before the deletes (and the erase).
     c_churned: i64,
+    /// After the value and entity deletes (before the erase, if any).
+    c_deleted: i64,
 }
 
 fn churned_source(dir: &Path) -> Fixture {
+    churned_source_with(dir, true)
+}
+
+/// `erase = false` leaves out the final erase-by-alternative, so as-of
+/// extracts at every earlier commit are possible (an erasure marker after N
+/// refuses an as-of-N extract).
+fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
     let db = dir.join("source.duckdb");
     init_schema_with_default(&db, Some("Base")).expect("init");
 
@@ -240,6 +250,7 @@ fn churned_source(dir: &Path) -> Fixture {
         "Base",
         long_batch("n1", &[0, 2, 5], &[1, 2, 3]),
     );
+    let c_base_only = scalar(&db, "SELECT max(id) FROM \"commit\"");
     write(
         &db,
         "Node",
@@ -398,23 +409,28 @@ fn churned_source(dir: &Path) -> Fixture {
         WriteOptions::default(),
     )
     .expect("delete entity");
-    let r = erase_alternative(
-        &db,
-        &ObjectDeleteKey {
-            kind: ObjectKind::Alternative,
-            class: None,
-            target: ObjectRef::Name("runA".into()),
-        },
-        &EraseOpts::default(),
-        "tester",
-    )
-    .expect("erase runA");
-    assert!(r.erased);
+    let c_deleted = scalar(&db, "SELECT max(id) FROM \"commit\"");
+    if erase {
+        let r = erase_alternative(
+            &db,
+            &ObjectDeleteKey {
+                kind: ObjectKind::Alternative,
+                class: None,
+                target: ObjectRef::Name("runA".into()),
+            },
+            &EraseOpts::default(),
+            "tester",
+        )
+        .expect("erase runA");
+        assert!(r.erased);
+    }
 
     Fixture {
         db,
+        c_base_only,
         c_initial,
         c_churned,
+        c_deleted,
     }
 }
 
@@ -1204,4 +1220,276 @@ fn t11_attached_macro_binds_to_callers_catalog() {
     conn.execute_batch("USE src").unwrap();
     assert_eq!(q(&format!("SELECT count(*) FROM alternative_asof({c})")), 3);
     conn.close().unwrap();
+}
+
+// --- T2: as-of N equality ------------------------------------------------------------
+
+fn asof(user: &str, n: i64) -> ExtractOpts<'_> {
+    ExtractOpts {
+        as_of: Some(n),
+        user,
+        note: None,
+    }
+}
+
+/// The source's as-of macro at N (called on the source as its own default
+/// catalog, never through an attached one) against the extract's current
+/// rows, for every as-of macro.
+fn assert_asof_equal(src: &Path, dest: &Path, n: i64) {
+    for m in asof_macros(src) {
+        let base = m.trim_end_matches("_asof");
+        let (src_q, dest_q) = if base == "value_array" {
+            (
+                format!("SELECT * EXCLUDE (valid_to_commit, content_retained) FROM {m}({n})"),
+                "SELECT * FROM value_array_current".to_string(),
+            )
+        } else if base == "metadata" {
+            (
+                format!(
+                    "SELECT * EXCLUDE (valid_to_commit) FROM {m}({n}) \
+                     WHERE lower(name) <> 'db_identity'"
+                ),
+                "SELECT * EXCLUDE (valid_to_commit) FROM metadata_current \
+                 WHERE lower(name) <> 'db_identity'"
+                    .to_string(),
+            )
+        } else {
+            (
+                format!("SELECT * EXCLUDE (valid_to_commit) FROM {m}({n})"),
+                format!("SELECT * EXCLUDE (valid_to_commit) FROM {base}_current"),
+            )
+        };
+        let a = fingerprint(src, &src_q);
+        assert!(a.is_ok(), "{src_q}: {a:?}");
+        assert_eq!(a, fingerprint(dest, &dest_q), "{m} at {n}");
+    }
+}
+
+#[test]
+fn t2_asof_extract_equals_source_asof_macros() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = churned_source_with(dir.path(), false);
+    let src = &fx.db;
+    let ns = [
+        fx.c_base_only,
+        fx.c_initial,
+        fx.c_initial + 2,
+        fx.c_churned,
+        fx.c_deleted,
+    ];
+    for (i, n) in ns.into_iter().enumerate() {
+        let dest = dir.path().join(format!("asof_{i}.duckdb"));
+        let r = extract(
+            src,
+            &dest,
+            &ExtractOpts {
+                as_of: Some(n),
+                user: "tester",
+                note: Some("for the auditors"),
+            },
+        )
+        .unwrap_or_else(|e| panic!("as-of {n}: {e}"));
+        assert_eq!(r.horizon_commit, n);
+        assert_asof_equal(src, &dest, n);
+
+        // The log is cut at N (verbatim), then E.
+        let log = format!("SELECT * FROM \"commit\" WHERE id <= {n}");
+        assert_eq!(fingerprint(src, &log), fingerprint(&dest, &log));
+        assert_eq!(
+            scalar(
+                &dest,
+                &format!("SELECT count(*) FROM \"commit\" WHERE id > {n}")
+            ),
+            1
+        );
+        assert_eq!(
+            string(
+                &dest,
+                "SELECT note FROM erasure_marker WHERE kind = 'horizon'"
+            ),
+            format!("as-of {n} extract; for the auditors")
+        );
+        // No close-out edge points past N: every carried versioned row is
+        // current, apart from the trace-closure identity rows.
+        assert_eq!(scalar(&dest, "SELECT count(*) FROM value_array_hist"), 0);
+        assert_eq!(
+            scalar(
+                &dest,
+                "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL"
+            ),
+            0
+        );
+        assert_eq!(
+            scalar(
+                &dest,
+                "SELECT count(*) FROM value_array WHERE array_id % 2 = 0"
+            ),
+            0
+        );
+        // X14: the run (result runA, tool n4) exists only once runA does.
+        let runs = scalar(&dest, "SELECT count(*) FROM run");
+        assert_eq!(runs, if n == fx.c_base_only { 0 } else { 1 }, "runs at {n}");
+        // Audits: tiling clean; nothing dangling the source did not have at N.
+        assert_eq!(
+            scalar(&dest, "SELECT count(*) FROM audit_history_tiling"),
+            0
+        );
+        assert_eq!(
+            scalar(&dest, "SELECT count(*) FROM audit_axis_integrity"),
+            0
+        );
+        assert_eq!(
+            scalar(&dest, "SELECT count(*) FROM audit_array_id_coherence"),
+            0
+        );
+        assert_eq!(
+            scalar(&dest, "SELECT count(*) FROM audit_metadata_reserved_dup"),
+            0
+        );
+        // Loud before E, exact at E.
+        let e = r.extract_commit;
+        let conn = Connection::open(&dest).unwrap();
+        let err = conn
+            .query_row(
+                &format!("SELECT count(*) FROM value_array_asof({})", e - 1),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .expect_err("as-of before E must fail");
+        assert!(err.to_string().contains("unreliable"), "{err}");
+        conn.close().unwrap();
+        // Live afterwards.
+        write(
+            &dest,
+            "Node",
+            "demand",
+            "Base",
+            scalar_batch(&["n1"], &[99.0]),
+        );
+        assert_eq!(
+            scalar(&dest, "SELECT count(*) FROM audit_history_tiling"),
+            0
+        );
+    }
+
+    // As-of the head equals the head extract (same rows, same marker shape).
+    let head = dir.path().join("head.duckdb");
+    let at_head = dir.path().join("at_head.duckdb");
+    let h = scalar(src, "SELECT max(id) FROM \"commit\"");
+    extract(src, &head, &opts("tester")).unwrap();
+    extract(src, &at_head, &asof("tester", h)).unwrap();
+    for t in strings(src, ALL_TABLES_SQL) {
+        if t == "commit" || t == "metadata" || t == "erasure_marker" {
+            continue;
+        }
+        let q = format!("SELECT * FROM \"{t}\"");
+        assert_eq!(fingerprint(&head, &q), fingerprint(&at_head, &q), "{t}");
+    }
+}
+
+// --- T9: as-of refusals --------------------------------------------------------------
+
+#[test]
+fn t9_asof_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = churned_source(dir.path());
+    let src = &fx.db;
+    let dest = dir.path().join("asof.duckdb");
+    let max = scalar(src, "SELECT max(id) FROM \"commit\"");
+
+    assert_refused(extract(src, &dest, &asof("t", 0)), "not a commit id");
+    assert_refused(
+        extract(src, &dest, &asof("t", max + 100)),
+        "not a commit id",
+    );
+    // The erase of runA happened after c_churned: the state there cannot be
+    // reconstructed.
+    assert_refused(
+        extract(src, &dest, &asof("t", fx.c_churned)),
+        "erased later",
+    );
+    // At the erase commit itself it is fine.
+    extract(src, &dest, &asof("t", max)).expect("as-of the last commit");
+    std::fs::remove_file(&dest).unwrap();
+    let _ = std::fs::remove_file(nodal_db_core::compaction::baseline_path(&dest));
+
+    // A history stub valid at N.
+    let stub_db = dir.path().join("stub.duckdb");
+    init_schema_with_default(&stub_db, Some("Base")).unwrap();
+    write(
+        &stub_db,
+        "Node",
+        "profile",
+        "Base",
+        array_batch("n1", 24, 0.0),
+    );
+    let c1 = scalar(&stub_db, "SELECT max(id) FROM \"commit\"");
+    write_parameter(
+        &stub_db,
+        "Node",
+        "profile",
+        "Base",
+        array_batch("n1", 24, 1.0),
+        &[],
+        WriteOptions {
+            force_replace: true,
+            retain_override: None,
+        },
+        "t",
+        "replace without keeping content",
+    )
+    .unwrap();
+    let c2 = scalar(&stub_db, "SELECT max(id) FROM \"commit\"");
+    assert_eq!(
+        scalar(
+            &stub_db,
+            "SELECT count(*) FROM value_array_hist WHERE NOT content_retained"
+        ),
+        1
+    );
+    assert_refused(
+        extract(&stub_db, &dest, &asof("t", c1)),
+        "not retained for parameter(s) Node.profile",
+    );
+    extract(&stub_db, &dest, &asof("t", c2)).expect("the live version at c2 is fine");
+    std::fs::remove_file(&dest).unwrap();
+    let _ = std::fs::remove_file(nodal_db_core::compaction::baseline_path(&dest));
+
+    // The schema_version valid at N differs (hand-edited history).
+    let old_schema = dir.path().join("old_schema.duckdb");
+    init_schema_with_default(&old_schema, Some("Base")).unwrap();
+    write(
+        &old_schema,
+        "Node",
+        "demand",
+        "Base",
+        scalar_batch(&["n1"], &[1.0]),
+    );
+    let c_old = scalar(&old_schema, "SELECT max(id) FROM \"commit\"");
+    let conn = Connection::open(&old_schema).unwrap();
+    for sql in [
+        "INSERT INTO \"commit\" (user, message) VALUES ('t', 'schema row history')",
+        "UPDATE metadata SET valid_to_commit = (SELECT max(id) FROM \"commit\") \
+         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+        "INSERT INTO metadata (id, name, value, valid_from_commit, version) \
+         SELECT id, name, value, valid_to_commit, 2 FROM metadata \
+         WHERE lower(name) = 'schema_version'",
+        "UPDATE metadata SET value = '0.3-old' \
+         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NOT NULL",
+    ] {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn.close().unwrap();
+    assert_refused(
+        extract(&old_schema, &dest, &asof("t", c_old)),
+        "schema_version valid at commit",
+    );
+    extract(&old_schema, &dest, &opts("t")).expect("the head extract is fine");
+    std::fs::remove_file(&dest).unwrap();
+
+    assert!(
+        temps_in(dir.path()).is_empty(),
+        "{:?}",
+        temps_in(dir.path())
+    );
 }

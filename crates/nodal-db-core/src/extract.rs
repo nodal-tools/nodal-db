@@ -307,7 +307,7 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
     let h = match mode {
         Mode::Head => src_max,
         Mode::AsOf(n) => {
-            preflight_as_of(conn, n)?;
+            preflight_as_of(conn, n, &real_cols)?;
             n
         }
     };
@@ -485,11 +485,94 @@ fn preflight_source(conn: &Connection) -> Result<String, DbError> {
     Ok(ids.into_iter().next().expect("one identity"))
 }
 
-/// As-of refusals (gated until the as-of extract lands).
-fn preflight_as_of(_conn: &Connection, _n: i64) -> Result<(), DbError> {
-    Err(DbError::Api(
-        "extract: as-of extraction is not implemented yet".into(),
-    ))
+/// As-of-N refusals, each loud and named:
+/// - N is not a commit id of the source;
+/// - the `schema_version` row valid at N is not this build's (a belt: no
+///   in-place schema bump path exists, but a hand-edited file could carry
+///   one, and it is the row the extract would copy);
+/// - an erasure marker was written after N (content valid at N was later
+///   removed; the same condition the as-of guard refuses on);
+/// - a row valid at N is a history stub (`content_retained = FALSE`): its
+///   content at N was not kept, and a promoted array stub would violate
+///   `value_array`'s payload CHECK.
+fn preflight_as_of(
+    conn: &Connection,
+    n: i64,
+    real_cols: &[(String, Vec<String>)],
+) -> Result<(), DbError> {
+    if count(
+        conn,
+        &format!("SELECT count(*) FROM src.\"commit\" WHERE id = {n}"),
+    )? != 1
+    {
+        return Err(DbError::Api(format!(
+            "as-of extract refused: {n} is not a commit id of the source"
+        )));
+    }
+    let versions = strings(
+        conn,
+        &format!(
+            "SELECT value FROM src.metadata WHERE lower(name) = 'schema_version' \
+             AND valid_from_commit <= {n} AND (valid_to_commit IS NULL OR valid_to_commit > {n})"
+        ),
+    )?;
+    if versions.len() != 1 || versions[0] != SCHEMA_VERSION {
+        return Err(DbError::Api(format!(
+            "as-of extract refused: the schema_version valid at commit {n} is {versions:?}, \
+             not the current {SCHEMA_VERSION:?}"
+        )));
+    }
+    let later = strings(
+        conn,
+        &format!(
+            "SELECT CAST(at_commit AS VARCHAR) FROM src.erasure_marker \
+             WHERE at_commit > {n} ORDER BY at_commit"
+        ),
+    )?;
+    if !later.is_empty() {
+        return Err(DbError::Api(format!(
+            "as-of extract refused: content valid at commit {n} was erased later (erasure \
+             marker(s) at commit {}); the state at {n} cannot be reconstructed",
+            later.join(", ")
+        )));
+    }
+    let mut legs = Vec::new();
+    for (table, cols) in real_cols {
+        if !cols.iter().any(|c| c == "content_retained") {
+            continue;
+        }
+        let at_n = if selection_for(table)? == Selection::ArrayHist {
+            format!("valid_from_commit <= {n} AND valid_to_commit > {n}")
+        } else {
+            format!(
+                "valid_from_commit <= {n} AND (valid_to_commit IS NULL OR valid_to_commit > {n})"
+            )
+        };
+        legs.push(format!(
+            "SELECT parameter_definition_id FROM src.{} WHERE {at_n} AND NOT content_retained",
+            q(table)
+        ));
+    }
+    let stubbed = strings(
+        conn,
+        &format!(
+            "SELECT DISTINCT ec.name || '.' || pd.name FROM ({}) s \
+             JOIN src.parameter_definition pd ON pd.id = s.parameter_definition_id \
+             JOIN src.entity_class ec ON ec.id = pd.entity_class_id \
+             QUALIFY row_number() OVER (PARTITION BY s.parameter_definition_id \
+                                        ORDER BY pd.version DESC, ec.version DESC) = 1 \
+             ORDER BY 1",
+            legs.join(" UNION ALL ")
+        ),
+    )?;
+    if !stubbed.is_empty() {
+        return Err(DbError::Api(format!(
+            "as-of extract refused: content at commit {n} was not retained for \
+             parameter(s) {} (history stubs)",
+            stubbed.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// The per-table selection SQL generator (one place for both modes, used by

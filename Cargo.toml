@@ -9,6 +9,15 @@ resolver = "2"
 [profile.dev]
 strip = true
 
+# Compile the bundled DuckDB optimized even in dev/test builds. libduckdb-sys
+# builds DuckDB with DEBUG (D_ASSERT + debug-only verification paths, -O0)
+# whenever the package has debug info; that made the test suite ~8x slower
+# (api_delete_values: 14.8 s -> 1.8 s) and changes planner behaviour (debug
+# DuckDB compresses every join key). Our own crates stay unoptimized.
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
+debug = false
+
 # Versions are pinned once here and referenced from each crate via
 # `workspace = true`. The de-risk spike (Phase 0) gates the duckdb-rs choice:
 # its bundled DuckDB must be >= 2.0 (the line the schema is verified on;

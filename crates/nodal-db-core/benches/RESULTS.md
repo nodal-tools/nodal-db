@@ -128,6 +128,33 @@ their cost is inside these numbers, not separately measurable here.
    Fine for batch tools, material for interactive editors — worth measuring
    on NVMe-class hardware before drawing conclusions.
 
+## Value-float normalization (2026-10-23, `benches/canon.rs`)
+
+Storing value floats canonical (`-0.0 → +0.0`, every NaN → `0x7ff8…`) adds one
+compare-and-select per float cell in `canon::read_value`. Measured with the
+pure pipeline bench (no DB), the baseline binary built from the commit before
+the change (`--save-baseline pre_norm`) and the new one compared against it,
+release, on a shared AMD Ryzen 9 5900XT (16C/32T) that other jobs were loading
+(load average 6–40 during the runs).
+
+| shape | pre | post | criterion change (95 % CI) |
+|---|---|---|---|
+| (a) rank-1 8 760-cell full grid (array) | 734 µs | 743 µs | +0.9 % [+0.1, +1.7] |
+| (c) rank-2 8 760-cell sparse (long) | 1.759 ms | 1.773 ms | +2.0 % [+1.2, +3.0] |
+| (b) rank-2 1 M-cell full grid, finite | 204 ms | 192 ms | −5.9 % [−7.5, −4.3] |
+| (b) same, ~1 % `-0.0`/NaN | 204 ms | 190 ms | −6.9 % [−8.8, −5.1] |
+
+That is the quietest of five alternating rounds; the others swung by −44 %
+to +250 % in both directions with the host load, so end-to-end deltas here
+are host noise, not the change. The tiebreaker measures the added work
+directly: `canonical_value_f64` over 1 M floats takes **0.24–0.27 ns per
+element**, under the ~1 ns/cell acceptance bound (against ~80–200 ns per cell
+for the pipeline itself). No `gate` rerun: the change is confined to the step
+this bench isolates.
+
+`cargo bench -p nodal-db-core --bench canon` runs it; `test = false` keeps it
+out of `cargo test --workspace`.
+
 ## Not covered here (unchanged scope)
 
 - Scenario-resolved slice (unbudgeted; in the plan's bench list, not in this

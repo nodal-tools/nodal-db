@@ -75,7 +75,7 @@ JOIN alternative al ON al.id = r.alternative_id AND al.valid_to_commit IS NULL
 WHERE lower(s.name) = lower(scenario_name);
 
 -- ---------------------------------------------------------------------------
--- Membership resolution, pass 1 (SDP Part 2): base membership
+-- Membership resolution, pass 1: base membership
 -- (alternative_id NULL, rank 0) overridden by the highest-ranked
 -- alternative-scoped row per (scenario, group, member).
 CREATE VIEW membership_resolved AS
@@ -120,8 +120,8 @@ WITH RECURSIVE flat(scenario_id, group_entity_id, member_entity_id) AS (
 )
 SELECT * FROM flat;
 
--- Base-only membership flattening, NOT gated on scenarios (critique M2:
--- D#1506 requires a model definable "with everything on Base", and with
+-- Base-only membership flattening, NOT gated on scenarios (a model must
+-- be definable "with everything on Base", and with
 -- zero scenarios the scenario-scoped views above are empty — base
 -- membership and its cycles would be invisible). Rank-0 rows only.
 CREATE VIEW membership_base_flat AS
@@ -138,7 +138,7 @@ WITH RECURSIVE flat(group_entity_id, member_entity_id) AS (
 )
 SELECT * FROM flat;
 
--- Membership resolution, pass 2 (SDP Part 2): propagate activation over
+-- Membership resolution, pass 2: propagate activation over
 -- resolved membership. An entity's own entity_alternative row always wins
 -- (rank-resolved, last-wins); absent it, deactivation propagates
 -- recursively from any containing group — deactivation-wins on overlap; a
@@ -175,7 +175,7 @@ WHERE ea.valid_to_commit IS NULL
 QUALIFY row_number() OVER (
   PARTITION BY sa.scenario_id, ea.entity_id ORDER BY sa.rank DESC) = 1;
 
--- Deactivation edges for the pass-2 fixpoint (Decision 13 option (c)): the
+-- Deactivation edges for the pass-2 fixpoint: the
 -- ONE directed "deactivates" graph, unifying two edge kinds so the recursive
 -- CTE needs a single recursive term (DuckDB allows only one). Membership
 -- edges are scenario-scoped; realizes edges are scenario-independent

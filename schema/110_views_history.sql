@@ -279,8 +279,8 @@ SELECT entity_id, parameter_definition_id, alternative_id, 'array',
        version, valid_from_commit, valid_to_commit, content_retained
 FROM value_array_hist;
 
--- Untrusted/stubbed history spans (VMP Part 5 recovery protocol +
--- retention): the viewer renders these as "changed, content not retained"
+-- Untrusted/stubbed history spans (left by the recovery protocol or the
+-- retention policy): the viewer renders these as "changed, content not retained"
 -- or "unknown before commit c" instead of silently wrong answers.
 CREATE VIEW history_untrusted_span AS
 SELECT * FROM value_timeline WHERE NOT content_retained;

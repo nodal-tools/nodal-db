@@ -216,7 +216,7 @@ LEFT JOIN axis_position p3 ON p3.axis_id = c.axis3_id AND p3.pos = c.i3_pos
 LEFT JOIN axis_position p4 ON p4.axis_id = c.axis4_id AND p4.pos = c.i4_pos
 WHERE c.axis2_id IS NOT NULL;
 
--- Canonical bulk read (VMP Part 6): one logical long shape regardless of
+-- Canonical bulk read: one logical long shape regardless of
 -- tier mix. SQL macros cannot emit per-parameter dimension-name columns —
 -- the client library renames idxN to the declared dimension names from
 -- parameter_type_dimension (canonical result shape note in ddl_sketch.md).
@@ -255,8 +255,8 @@ JOIN pd_pick ON pd_pick.id = vr.parameter_definition_id
 JOIN entity e ON e.id = vr.entity_id AND e.valid_to_commit IS NULL
 JOIN alternative al ON al.id = vr.alternative_id AND al.valid_to_commit IS NULL;
 
--- Hot-path bulk read, dense form (VMP Part 6 budget line "canonical or
--- dense form"): array-tier rows as list<double> payloads with axis ids —
+-- Hot-path bulk read, dense form: array-tier rows as list<double> payloads
+-- with axis ids —
 -- the client library renders indices and entity/alternative names from its
 -- cached dictionaries (ids only on purpose: routing the ~70 MB list payload
 -- through name joins measured +45% wall time). This is the engine-side

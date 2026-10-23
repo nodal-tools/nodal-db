@@ -31,6 +31,16 @@ declares are left out of the diagrams (they would tie every box to
 
 Output is fully sorted/deterministic so regeneration diffs are clean.
 Stdlib + duckdb only.
+
+Public-text guard. The pages built from these fragments are public, but the
+SQL comments are written for developers and cite the private design record
+(specs/, plan sections, critique items, decision ids). Only two kinds of
+comment text are published: each file's header title (first sentence of the
+header) and each view/macro purpose (first sentence of the comment paragraph
+nearest its CREATE). Those published strings are checked against
+INTERNAL_REF_RE; any hit fails the run (both modes) and names the object, so
+reword that comment sentence for a public reader. Comment text that is not
+published may keep its internal references.
 """
 from __future__ import annotations
 
@@ -80,6 +90,18 @@ SPLIT_GROUPS = {
 PER_TABLE_DIAGRAMS = {"Value tiers", "Definition defaults and prefills"}
 # Short role words used in column names for tables with longer names.
 NAME_ALIASES = {"class": "entity_class", "unit": "units_of_measure"}
+# Internal design-record references that must not appear in published text
+# (see "Public-text guard" in the module docstring).
+INTERNAL_REF_RE = re.compile(
+    r"\b(?:VMP|SDP)\b"            # value-model / schema-draft plan shorthands
+    r"|[Cc]ritique"                # critique items (#5, F3, M2, ...)
+    r"|§|specs/"                   # spec section signs and paths
+    r"|\w+_plan\b"                 # plan file names (erasure_compaction_plan)
+    r"|\bD[-#]?[A-Z]?\d+\b"        # decision / deviation ids (D1, D-E3, D#1506)
+    r"|OPEN-Q"                     # open-question ids
+    r"|\bDecision \d+|\bPart \d+"  # numbered plan decisions / parts
+    r"|\bfitness \d"                # fitness-criteria ids
+)
 
 
 # --------------------------------------------------------------------------
@@ -343,17 +365,30 @@ def render_diagrams(tables, pks, uks, fks, objects, titles) -> str:
     return "\n".join(out)
 
 
-def render_views(views, macros, objects, titles) -> str:
-    def purpose(name: str) -> str:
-        # The per-table companions are uniform; their comment blocks are
-        # group headers, so describe them structurally instead.
-        for suffix, what in (("_current", "Current rows of"), ("_asof", "Rows of")):
-            base = name[: -len(suffix)]
-            if name.endswith(suffix) and base in objects and objects[base][1] == "TABLE":
-                tail = " as of commit `c`" if suffix == "_asof" else ""
-                return f"{what} `{base}`{tail}"
-        return one_liner(objects.get(name, ("", "", []))[2]) or "—"
+def internal_refs(objects, titles, views, macros) -> list[str]:
+    """Published comment text (titles, view/macro purposes) that cites the
+    internal design record; one message per offending string."""
+    published = [(f"schema/{stem}.sql header title", t) for stem, t in titles.items()]
+    for name in list(views) + [m for m, _ in macros]:
+        stem = objects[name][0]
+        published.append((f"schema/{stem}.sql `{name}` purpose",
+                          purpose(name, objects)))
+    return [f"{where}: {text!r}" for where, text in published
+            if INTERNAL_REF_RE.search(text)]
 
+
+def purpose(name: str, objects) -> str:
+    # The per-table companions are uniform; their comment blocks are
+    # group headers, so describe them structurally instead.
+    for suffix, what in (("_current", "Current rows of"), ("_asof", "Rows of")):
+        base = name[: -len(suffix)]
+        if name.endswith(suffix) and base in objects and objects[base][1] == "TABLE":
+            tail = " as of commit `c`" if suffix == "_asof" else ""
+            return f"{what} `{base}`{tail}"
+    return one_liner(objects.get(name, ("", "", []))[2]) or "—"
+
+
+def render_views(views, macros, objects, titles) -> str:
     out = [HEADER]
     by_file: dict[str, list[tuple[str, str]]] = {}
     for v in views:
@@ -367,9 +402,13 @@ def render_views(views, macros, objects, titles) -> str:
         out.append("| --- | --- | --- |")
         for name, kind in sorted(by_file[stem]):
             base = name.split("(")[0]
-            out.append(f"| `{name}` | {kind} | {purpose(base)} |")
+            out.append(f"| `{name}` | {kind} | {purpose(base, objects)} |")
         out.append("")
     return "\n".join(out)
+
+
+class InternalRefError(Exception):
+    pass
 
 
 def generate() -> dict[pathlib.Path, str]:
@@ -380,6 +419,9 @@ def generate() -> dict[pathlib.Path, str]:
         finally:
             con.close()
     objects, titles = source_index()
+    leaks = internal_refs(objects, titles, views, macros)
+    if leaks:
+        raise InternalRefError(leaks)
     return {
         OUT_DIAGRAMS: render_diagrams(tables, pks, uks, fks, objects, titles),
         OUT_VIEWS: render_views(views, macros, objects, titles),
@@ -392,7 +434,15 @@ def main() -> int:
     ap.add_argument("--check", action="store_true",
                     help="exit 1 if the committed fragments differ from a fresh generation")
     args = ap.parse_args()
-    outputs = generate()
+    try:
+        outputs = generate()
+    except InternalRefError as e:
+        print("published schema-doc text cites internal design references "
+              "(reword these SQL comment sentences for a public reader):",
+              file=sys.stderr)
+        for msg in e.args[0]:
+            print(f"  {msg}", file=sys.stderr)
+        return 1
     if args.check:
         stale = [p for p, text in outputs.items()
                  if not p.exists() or p.read_text() != text]

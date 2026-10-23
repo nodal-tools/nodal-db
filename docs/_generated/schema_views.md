@@ -48,8 +48,8 @@ From `schema/080_views_read.sql`.
 | `axis_position` | view | One row per (axis, position) |
 | `entity_class_display(mode_name)` | macro | Resolved per-mode class presentation (Spine-Toolbox #2492) |
 | `parameter_effective_unit` | view | Effective unit = override if present, else definition default |
-| `read_parameter(class_name, parameter_name)` | macro | Canonical bulk read (VMP Part 6) |
-| `read_parameter_dense(class_name, parameter_name)` | macro | Hot-path bulk read, dense form (VMP Part 6 budget line "canonical or dense form") |
+| `read_parameter(class_name, parameter_name)` | macro | Canonical bulk read |
+| `read_parameter_dense(class_name, parameter_name)` | macro | Hot-path bulk read, dense form |
 | `read_parameter_scalar(class_name, parameter_name)` | macro | Hot-path bulk read, scalar form |
 | `value_array_cells` | view | Array tier decoded to cells |
 | `value_cells` | view | The tier-unifying cell view |
@@ -61,13 +61,13 @@ From `schema/090_views_resolution.sql`.
 
 | Name | Kind | Purpose |
 | --- | --- | --- |
-| `deact_edge` | view | Deactivation edges for the pass-2 fixpoint (Decision 13 option (c)) |
+| `deact_edge` | view | Deactivation edges for the pass-2 fixpoint |
 | `entity_activation_own` | view | — |
 | `entity_activation_resolved` | view | — |
-| `membership_base_flat` | view | Base-only membership flattening, NOT gated on scenarios (critique M2: D#1506 requires a model definable "with everything on Base", and with zero scenarios … |
+| `membership_base_flat` | view | Base-only membership flattening, NOT gated on scenarios (a model must be definable "with everything on Base", and with zero scenarios the scenario-scoped … |
 | `membership_flat` | view | Transitive flattening of resolved membership (included rows only) |
-| `membership_resolved` | view | Membership resolution, pass 1 (SDP Part 2) |
-| `realizes_edge` | view | Membership resolution, pass 2 (SDP Part 2) |
+| `membership_resolved` | view | Membership resolution, pass 1 |
+| `realizes_edge` | view | Membership resolution, pass 2 |
 | `resolved_value_rows(scenario_name)` | macro | Resolved long-shape read for one scenario (macro because views take no parameters; joins the collapsed winner back to the canonical rows) |
 | `scenario_contents(scenario_name)` | macro | Resolved-scenario-contents |
 | `scenario_diff(scenario_a, scenario_b)` | macro | Scenario-diff |
@@ -108,7 +108,7 @@ From `schema/110_views_history.sql`.
 | `entity_location_asof(c)` | macro | Rows of `entity_location` as of commit `c` |
 | `entity_metadata_asof(c)` | macro | Rows of `entity_metadata` as of commit `c` |
 | `entity_parameter_unit_asof(c)` | macro | Rows of `entity_parameter_unit` as of commit `c` |
-| `history_untrusted_span` | view | Untrusted/stubbed history spans (VMP Part 5 recovery protocol + retention) |
+| `history_untrusted_span` | view | Untrusted/stubbed history spans (left by the recovery protocol or the retention policy) |
 | `list_value_asof(c)` | macro | Rows of `list_value` as of commit `c` |
 | `membership_asof(c)` | macro | Rows of `membership` as of commit `c` |
 | `metadata_asof(c)` | macro | Rows of `metadata` as of commit `c` |
@@ -133,24 +133,24 @@ From `schema/120_views_audit.sql`.
 | Name | Kind | Purpose |
 | --- | --- | --- |
 | `audit_array_integrity` | view | Array-integrity |
-| `audit_array_payload_xor` | view | Retained-row payload XOR (critique F5) |
-| `audit_axis_integrity` | view | Axis-content integrity (critique F3) |
-| `audit_class_set_entity_name_dup` | view | Entity-name uniqueness across a class-set's members (#2364, Decision 5 — cross-table, so a view rather than an index) |
-| `audit_cross_tier_duplicate` | view | Cross-tier duplicate audit (critique #5) |
+| `audit_array_payload_xor` | view | Retained-row payload XOR |
+| `audit_axis_integrity` | view | Axis-content integrity |
+| `audit_class_set_entity_name_dup` | view | Entity-name uniqueness across a class-set's members (#2364 — cross-table, so a view rather than an index) |
+| `audit_cross_tier_duplicate` | view | Cross-tier duplicate audit |
 | `audit_dangling_ref` | view | Referential integrity (FK-intent fallback) |
-| `audit_dangling_semantic_ref` | view | Semantic_annotation FK intent (deviation D1; fitness 2b) |
-| `audit_element_arity` | view | Element arity (critique F6, the #1015 import-typo class) |
-| `audit_element_class_mismatch` | view | Element class conformance (Decision 5: set-typed dimensions accept entities of any member class; class-typed accept that class) |
+| `audit_dangling_semantic_ref` | view | Semantic_annotation FK intent (view-validated, not engine-enforced) |
+| `audit_element_arity` | view | Element arity (the #1015 import-typo class) |
+| `audit_element_class_mismatch` | view | Element class conformance (set-typed dimensions accept entities of any member class; class-typed accept that class) |
 | `audit_entity_alternative_redundant` | view | Redundant activation rows (#3010) |
-| `audit_erasure` | view | Erasure inventory (erasure_compaction_plan §1.3; reporting, NOT blocking — unlike the audit_* views above, a non-empty result is not damage: it is the … |
-| `audit_health` | view | Maintenance-health audit (VMP Part 5) |
-| `audit_history_tiling` | view | Version-tiling + span coherence (critique #1, critique F2) |
+| `audit_erasure` | view | Erasure inventory (reporting, NOT blocking — unlike the audit_* views above, a non-empty result is not damage: it is the truthful record that hard erasure … |
+| `audit_health` | view | Maintenance-health audit |
+| `audit_history_tiling` | view | Version-tiling + span coherence |
 | `audit_index_accelerator` | view | Index-accelerator audit |
-| `audit_membership_cycle` | view | Membership cycles (SDP Part 2 accepted residual risk, surfaced) |
-| `audit_metadata_reserved_dup` | view | Reserved single-valued metadata keys must not fork (critique F5) |
-| `audit_position_range` | view | Long-tier positions must fall inside the bound axis (critique F3: an out-of-range iN_pos previously vanished from every audit and rendered a NULL index) |
-| `audit_realizes_cycle` | view | Refinement (realizes) cycles (Decision 13, option (c) sibling of the membership-cycle audit) |
-| `audit_tier_intent` | view | Tier-intent audit (critique #8) |
+| `audit_membership_cycle` | view | Membership cycles (an accepted residual risk, surfaced) |
+| `audit_metadata_reserved_dup` | view | Reserved single-valued metadata keys must not fork |
+| `audit_position_range` | view | Long-tier positions must fall inside the bound axis (otherwise an out-of-range iN_pos would escape every audit and render a NULL index) |
+| `audit_realizes_cycle` | view | Refinement (realizes) cycles (sibling of the membership-cycle audit) |
+| `audit_tier_intent` | view | Tier-intent audit |
 | `audit_type_conformance` | view | Type-conformance |
 | `audit_value_class_mismatch` | view | Values whose definition belongs to a different class than the entity |
 | `audit_value_list_membership` | view | Value-list membership (writer-checked at entry, audited here) |

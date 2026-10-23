@@ -224,7 +224,8 @@ SELECT 'run', 'id=' || id, 'alternative', result_alternative_id
 FROM run
   WHERE result_alternative_id NOT IN (SELECT id FROM alternative);
 
--- semantic_annotation FK intent (deviation D1; fitness 2b): the polymorphic
+-- semantic_annotation FK intent (view-validated, not engine-enforced): the
+-- polymorphic
 -- (object_type, object_id) reference cannot be an engine FK, so each object
 -- type with a clean stable id is checked against its table's current rows. A
 -- dangling term mapping is surfaced, never blocked (express-never-assert).
@@ -255,7 +256,7 @@ SELECT 'list_value', object_id, term_iri
 FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'list_value'
   AND object_id NOT IN (SELECT id FROM list_value WHERE valid_to_commit IS NULL);
 
--- Entity-name uniqueness across a class-set's members (#2364, Decision 5 —
+-- Entity-name uniqueness across a class-set's members (#2364 —
 -- cross-table, so a view rather than an index).
 CREATE VIEW audit_class_set_entity_name_dup AS
 SELECT cs.id AS class_set_id, cs.name AS class_set, lower(e.name) AS entity_name,
@@ -267,7 +268,7 @@ WHERE cs.valid_to_commit IS NULL
 GROUP BY cs.id, cs.name, lower(e.name)
 HAVING count(*) > 1;
 
--- Element class conformance (Decision 5: set-typed dimensions accept
+-- Element class conformance (set-typed dimensions accept
 -- entities of any member class; class-typed accept that class).
 -- LEFT JOIN on the dimension (critique F6): an element at an UNDECLARED
 -- position previously dropped out of this audit — the exact malformed shape
@@ -292,7 +293,7 @@ WHERE ee.valid_to_commit IS NULL
                            AND m.valid_to_commit IS NULL)
       END;
 
--- Element arity (critique F6, the #1015 import-typo class): per current
+-- Element arity (the #1015 import-typo class): per current
 -- entity of a dimensional class, the set of current element positions must
 -- equal the declared dimension positions. Reports both directions —
 -- declared-but-missing (incl. entities with zero elements) and
@@ -329,7 +330,7 @@ JOIN parameter_definition pd ON pd.id = vk.parameter_definition_id AND pd.valid_
 WHERE e.entity_class_id <> pd.entity_class_id;
 
 -- ---------------------------------------------------------------------------
--- Axis-content integrity (critique F3). Axes are writer-created and
+-- Axis-content integrity. Axes are writer-created and
 -- immutable with no engine checks tying children to the header; a corrupt
 -- axis renders values with silently-NULL index labels — the round-trip
 -- guarantee (VMP Part 1) defeated. One row per (axis, problem).
@@ -401,9 +402,8 @@ WHERE (a.kind = 'datetime' AND a.p_start_ts IS NOT NULL)
    OR (a.kind = 'integer' AND a.p_start_int IS NOT NULL)
    OR (a.kind = 'float' AND a.p_start_dbl IS NOT NULL);
 
--- Long-tier positions must fall inside the bound axis (critique F3: an
--- out-of-range iN_pos previously vanished from every audit and rendered a
--- NULL index). Covers value_long and its definition mirror, all dims.
+-- Long-tier positions must fall inside the bound axis (otherwise an
+-- out-of-range iN_pos would escape every audit and render a NULL index). Covers value_long and its definition mirror, all dims.
 CREATE VIEW audit_position_range AS
 SELECT d.src_table, d.entity_id, d.parameter_definition_id, d.alternative_id,
        d.dim, d.axis_id, d.pos, a.length
@@ -528,7 +528,7 @@ WHERE coalesce(len(va.values), len(va.values_int)) <> (a1.length * coalesce(a2.l
    OR (va.v_min IS NOT NULL AND va.values_int IS NOT NULL AND va.v_min <> list_aggregate(va.values_int, 'min'))
    OR (va.v_max IS NOT NULL AND va.values_int IS NOT NULL AND va.v_max <> list_aggregate(va.values_int, 'max'));
 
--- Retained-row payload XOR (critique F5): value_array_hist / definition_value_array
+-- Retained-row payload XOR: value_array_hist / definition_value_array
 -- drop the live-table XOR CHECK (stubs legitimately null BOTH payloads), so a
 -- content-retained / non-stub row carrying both-or-neither payload is otherwise
 -- unguarded at rest. The live value_array XOR catches such a row the moment it
@@ -573,7 +573,7 @@ WHERE p.axis_id IS NULL   -- unrenderable position (critique F3)
    OR (p.kind = 'integer' AND (d.acc_num IS DISTINCT FROM p.num OR d.acc_dt IS NOT NULL))
    OR (p.kind IN ('label', 'time_pattern', 'float') AND (d.acc_dt IS NOT NULL OR d.acc_num IS NOT NULL));
 
--- Cross-tier duplicate audit (critique #5): no key triple current in more
+-- Cross-tier duplicate audit: no key triple current in more
 -- than one tier — guards buggy tier transitions.
 CREATE VIEW audit_cross_tier_duplicate AS
 SELECT entity_id, parameter_definition_id, alternative_id,
@@ -582,7 +582,7 @@ FROM value_keys
 GROUP BY entity_id, parameter_definition_id, alternative_id
 HAVING count(DISTINCT tier) > 1;
 
--- Tier-intent audit (critique #8): actual tier differs from the type's
+-- Tier-intent audit: actual tier differs from the type's
 -- expected_tier — surfaces raggedness at write time, never enforces.
 -- Set-aware (D2(a), template_ir_plan §3.3): fires only when the actual tier
 -- matches NONE of the current declared members' expected tiers — a value on
@@ -650,7 +650,7 @@ WHERE dv.valid_to_commit IS NULL AND dv.content_retained
         OR (dv.value_kind = 'duration' AND lv.v_dur_months = dv.v_dur_months
                                        AND lv.v_dur_micros = dv.v_dur_micros)));
 
--- Reserved single-valued metadata keys must not fork (critique F5): the
+-- Reserved single-valued metadata keys must not fork: the
 -- carried Spine (lower(name), value) uniqueness constrains duplicates of a
 -- pair, never per-key multiplicity — right for tag-like keys, wrong for the
 -- reserved keys the plans read singly (schema_version drives migration
@@ -682,7 +682,7 @@ JOIN entity e ON e.id = ea.entity_id AND e.valid_to_commit IS NULL
 JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL
 WHERE ea.valid_to_commit IS NULL AND ea.active = ec.active_by_default;
 
--- Membership cycles (SDP Part 2 accepted residual risk, surfaced).
+-- Membership cycles (an accepted residual risk, surfaced).
 -- The base branch (scenario_id NULL) covers rank-0 membership so cycles are
 -- visible even before any scenario exists (critique M2).
 CREATE VIEW audit_membership_cycle AS
@@ -694,7 +694,7 @@ SELECT NULL::BIGINT, group_entity_id
 FROM membership_base_flat
 WHERE group_entity_id = member_entity_id;
 
--- Refinement (realizes) cycles (Decision 13, option (c) sibling of the
+-- Refinement (realizes) cycles (sibling of the
 -- membership-cycle audit): the coarse->fine fixpoint terminates on a cycle
 -- via the distinct UNION, but a cycle is a modelling error worth surfacing.
 -- Flattens the refinement DAG and reports any entity reachable from itself.
@@ -711,7 +711,7 @@ SELECT coarse_id AS entity_id FROM reach WHERE coarse_id = fine_id;
 -- History audits (these two read superseded/_hist rows by definition —
 -- VMP Part 7 retraction note).
 
--- Version-tiling + span coherence (critique #1, critique F2): superseded
+-- Version-tiling + span coherence: superseded
 -- rows per key must tile 1..m contiguously, with current version = m + 1
 -- (or no current row after a delete); AND the validity spans must cohere in
 -- version order — valid_from non-decreasing, each span closed before the
@@ -789,7 +789,7 @@ SELECT tier, entity_id, parameter_definition_id, alternative_id,
 FROM spans
 WHERE problem IS NOT NULL;
 
--- Maintenance-health audit (VMP Part 5): per-tier dead fraction, _hist
+-- Maintenance-health audit: per-tier dead fraction, _hist
 -- volume, file size; advisory compaction thresholds (~30% dead — measured
 -- 2.5x scan cost at 56% dead). Trigger is manual: compaction is a
 -- first-class client-library operation, not a daemon.
@@ -849,7 +849,7 @@ SELECT 'database file', NULL, NULL, NULL, NULL, 'size: ' || database_size
 FROM pragma_database_size();
 
 -- ---------------------------------------------------------------------------
--- Erasure inventory (erasure_compaction_plan §1.3; reporting, NOT blocking —
+-- Erasure inventory (reporting, NOT blocking —
 -- unlike the audit_* views above, a non-empty result is not damage: it is the
 -- truthful record that hard erasure happened). One row per erasure_marker:
 --   - scope resolution: the marker's id resolved to the RETAINED identity row

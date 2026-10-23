@@ -30,6 +30,10 @@ full:
     cargo test --workspace -- --include-ignored
     {{py}} schema/smoke_test.py
     cargo bench
+    # The array_id index-scan guard in a release build: debug-built DuckDB
+    # compresses join keys and needs an optimizer override in that test, so
+    # only a release run checks the engine as shipped.
+    cargo test --release -p nodal-db-core --test array_id_index_scan
 
 # DuckDB schema smoke suite alone (212 checks).
 smoke:

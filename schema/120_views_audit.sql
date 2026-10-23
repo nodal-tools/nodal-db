@@ -521,8 +521,8 @@ LEFT JOIN axis a2 ON a2.id = va.axis2_id
 LEFT JOIN axis a3 ON a3.id = va.axis3_id
 LEFT JOIN axis a4 ON a4.id = va.axis4_id
 WHERE coalesce(len(va.values), len(va.values_int)) <> (a1.length * coalesce(a2.length, 1) * coalesce(a3.length, 1) * coalesce(a4.length, 1))
-   OR len(list_filter(coalesce(va.values, []) , x -> x IS NULL)) > 0
-   OR len(list_filter(coalesce(va.values_int, []), x -> x IS NULL)) > 0
+   OR len(list_filter(coalesce(va.values, []) , lambda x: x IS NULL)) > 0
+   OR len(list_filter(coalesce(va.values_int, []), lambda x: x IS NULL)) > 0
    OR (va.v_min IS NOT NULL AND va.values     IS NOT NULL AND va.v_min <> list_aggregate(va.values, 'min'))
    OR (va.v_max IS NOT NULL AND va.values     IS NOT NULL AND va.v_max <> list_aggregate(va.values, 'max'))
    OR (va.v_min IS NOT NULL AND va.values_int IS NOT NULL AND va.v_min <> list_aggregate(va.values_int, 'min'))

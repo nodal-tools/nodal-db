@@ -796,3 +796,46 @@ fn compact_preserves_array_ids_and_sequence_stride() {
         0
     );
 }
+
+/// Two compactions with no write in between: after the first, every sequence
+/// was re-created with `START WITH n` and reports a NULL `last_value` until
+/// its next use. The second compaction must carry `n` (the source's
+/// `start_value`), not reset the sequence to its DDL start, or the next
+/// auto-id re-issues an id already in the copied rows.
+#[test]
+fn compact_twice_keeps_unused_sequences_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("twice.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    write_scalar(&db, "Widget", "size", "Base", "w1", 1.0);
+    write_scalar(&db, "Widget", "size", "Base", "w2", 2.0);
+    compact(&db).expect("first compaction");
+    compact(&db).expect("second compaction, no write in between");
+
+    // New alternative, class, parameter and entities: each mints from a
+    // sequence the two compactions left untouched since the first rebuild.
+    write_scalar(&db, "Gadget", "mass", "Alt2", "g1", 3.0);
+    write_scalar(&db, "Widget", "size", "Alt2", "w3", 4.0);
+    for (table, n) in [
+        ("alternative", 2),
+        ("entity_class", 2),
+        ("parameter_definition", 2),
+        ("entity", 4),
+    ] {
+        assert_eq!(
+            scalar(
+                &db,
+                &format!("SELECT count(DISTINCT id) FROM {table} WHERE valid_to_commit IS NULL")
+            ),
+            n,
+            "{table}: a re-issued id"
+        );
+    }
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT count(*) - count(DISTINCT id) FROM \"commit\""
+        ),
+        0
+    );
+}

@@ -439,7 +439,10 @@ pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(),
 /// `n = last_value + increment_by` so the NEXT `nextval` equals it (mirrors the
 /// source's last handed-out id; DuckDB `nextval` is non-transactional so
 /// mirroring `last_value` — not `max(id)+1` — is the non-destructive bar). A
-/// source sequence that is unused (`last_value` NULL) is left at its DDL start.
+/// source sequence that has handed out nothing (`last_value` NULL) restarts at
+/// the source's `start_value`: after a rebuild every sequence is re-created
+/// with `START WITH n` and reports NULL until its next use, so a second
+/// rebuild must carry `n`, not fall back to the DDL start.
 ///
 /// **The whole sequence spec is re-emitted** (F10 fix): `INCREMENT BY`,
 /// `MINVALUE`, `MAXVALUE` and `CYCLE` are read from the source and written back
@@ -471,34 +474,43 @@ pub(crate) fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
         // Source state for THIS sequence (B2b: filter by database_name).
         let row: Option<SeqState> = conn
             .query_row(
-                "SELECT last_value, increment_by, min_value, max_value, cycle \
+                "SELECT last_value, start_value, increment_by, min_value, max_value, cycle \
                  FROM duckdb_sequences() \
                  WHERE database_name = 'src' AND sequence_name = ?",
                 [&seq],
                 |r| {
                     Ok(SeqState {
                         last: r.get(0)?,
-                        inc: r.get(1)?,
-                        min: r.get(2)?,
-                        max: r.get(3)?,
-                        cycle: r.get(4)?,
+                        start: r.get(1)?,
+                        inc: r.get(2)?,
+                        min: r.get(3)?,
+                        max: r.get(4)?,
+                        cycle: r.get(5)?,
                     })
                 },
             )
             .ok();
         let Some(SeqState {
-            last: Some(last),
+            last,
+            start,
             inc,
             min,
             max,
             cycle,
         }) = row
         else {
-            // Unused (NULL last_value) or missing ⇒ leave the fresh sequence at
-            // its DDL start (matches an unused source sequence).
+            // Missing in the source ⇒ leave the fresh sequence at its DDL start.
             continue;
         };
-        let n = last + inc;
+        // Never handed out (NULL last_value) ⇒ the source's next id is its
+        // start value. That is NOT always the DDL start: a sequence a previous
+        // rebuild re-created with `START WITH n` and that has not been used
+        // since reports NULL too, and resetting it to the DDL start would
+        // re-issue ids already in the copied rows.
+        let n = match last {
+            Some(last) => last + inc,
+            None => start,
+        };
         let cycle = if cycle { "CYCLE" } else { "NO CYCLE" };
         // The confirmed drop-default → replace → re-add-default dance, with
         // the full sequence spec (see the F10 note above).
@@ -519,6 +531,7 @@ pub(crate) fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
 /// One source sequence's state, as `duckdb_sequences()` reports it.
 struct SeqState {
     last: Option<i64>,
+    start: i64,
     inc: i64,
     min: i64,
     max: i64,

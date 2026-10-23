@@ -467,6 +467,17 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError>
     if scalar > 0 {
         return Ok(Some(Live::Scalar));
     }
+    live_below_scalar(conn, key)
+}
+
+/// The long, then array, part of [`live_tier`] (for a key not live in
+/// scalar).
+fn live_below_scalar(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError> {
+    let triple = params![
+        key.entity_id,
+        key.parameter_definition_id,
+        key.alternative_id
+    ];
     let long: i64 = conn
         .prepare_cached(
             "SELECT count(*) FROM value_long WHERE entity_id=? AND parameter_definition_id=? \
@@ -565,7 +576,19 @@ const SCALAR_INSERT_SQL: &str = "INSERT INTO value_scalar \
        unnest(?::DOUBLE[]), unnest(?::BIGINT[]), unnest(?::BOOLEAN[]), unnest(?::VARCHAR[]), \
        make_timestamp(unnest(?::BIGINT[])), unnest(?::INTEGER[]), unnest(?::BIGINT[])";
 
+/// The single-key form of [`SCALAR_PROBE_SQL`] (one row; `max` is NULL when
+/// the triple has no rows).
+const SCALAR_PROBE_ONE_SQL: &str = "SELECT max(version)::INTEGER, \
+            count(*) FILTER (WHERE valid_to_commit IS NULL) \
+     FROM value_scalar \
+     WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ?";
+
 type Triple = (i64, i64, i64);
+
+/// A key triple as three scalar binds (the point-filter statements).
+fn point(k: &ValueKey) -> [i64; 3] {
+    [k.entity_id, k.parameter_definition_id, k.alternative_id]
+}
 
 fn triple(k: &ValueKey) -> Triple {
     (k.entity_id, k.parameter_definition_id, k.alternative_id)
@@ -650,11 +673,32 @@ fn write_scalar_round(
     w: &[ScalarWrite],
 ) -> Result<Vec<WriteOutcome>, DbError> {
     let n = w.len();
+    // A round of ONE key (an editor's single-value save, `write_value`)
+    // binds its probes and close-out as plain point filters instead of list
+    // joins (plan D3(b), a statement-form switch only): same rows, same
+    // control flow, about half the per-statement cost at N = 1.
+    let single = n == 1;
     // --- Probes (only for keys whose entity existed before this commit). ---
     let mut max_version: HashMap<Triple, i64> = HashMap::new();
     let mut live: HashMap<Triple, Live> = HashMap::new();
     let probed = w.iter().filter(|s| !s.entity_minted).map(|s| &s.key);
-    if probed.clone().next().is_some() {
+    if single && probed.clone().next().is_some() {
+        let k = &w[0].key;
+        let (maxv, cur): (Option<i32>, i64) = conn
+            .prepare_cached(SCALAR_PROBE_ONE_SQL)?
+            .query_row(point(k), |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if let Some(v) = maxv {
+            max_version.insert(triple(k), i64::from(v));
+        }
+        let cur = if cur > 0 {
+            Some(Live::Scalar)
+        } else {
+            live_below_scalar(conn, k)?
+        };
+        if let Some(l) = cur {
+            live.insert(triple(k), l);
+        }
+    } else if probed.clone().next().is_some() {
         for (t, v, cur) in probe_keys(conn, SCALAR_PROBE_SQL, probed.clone(), true)? {
             max_version.insert(t, v);
             if cur > 0 {
@@ -696,15 +740,19 @@ fn write_scalar_round(
         if idx.is_empty() {
             continue;
         }
-        let sql = if retained {
-            SCALAR_CLOSE_SQL
+        let affected = if single {
+            // The point form: the per-key close-out, same SET lists.
+            close_out_scalar(conn, &w[0].key, c, retained)?
         } else {
-            SCALAR_CLOSE_STUB_SQL
+            let sql = if retained {
+                SCALAR_CLOSE_SQL
+            } else {
+                SCALAR_CLOSE_STUB_SQL
+            };
+            let [e, p, a] = key_lists(idx.iter().map(|&i| &w[i].key));
+            conn.prepare_cached(sql)?
+                .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?
         };
-        let [e, p, a] = key_lists(idx.iter().map(|&i| &w[i].key));
-        let affected = conn
-            .prepare_cached(sql)?
-            .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
         // Hard check (plan D10): exactly one current row per scalar-live key
         // (`one_current_scalar` allows at most one).
         if affected != idx.len() {

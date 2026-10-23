@@ -287,6 +287,7 @@ pub fn commit_changes(
         // round (16 384 keys, D6) and after the last segment. A closure local,
         // so a conflict retry rebuilds it from scratch.
         let mut scalars: Vec<ScalarWrite> = Vec::new();
+        let mut entities = EntityCache::new();
         // Structural changes run FIRST (§4.1): a value write / rank / activation
         // later in this same commit may target a referent an earlier structural
         // item just created, and items apply sequentially against the one open
@@ -303,6 +304,7 @@ pub fn commit_changes(
                 &mut cache,
                 &mut report,
                 &mut scalars,
+                &mut entities,
             )
             .map_err(|e| {
                 // Name the failing segment (spec §9.1) — but never rewrap a raw
@@ -819,6 +821,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
 /// One segment's DB-touching write sequence (resolve → validate → canon → tier
 /// → axis → history), run inside the caller's open transaction. Callable N
 /// times per transaction — this is what makes multi-segment ingest one commit.
+#[allow(clippy::too_many_arguments)]
 fn write_prepared(
     conn: &Connection,
     commit_id: i64,
@@ -827,6 +830,7 @@ fn write_prepared(
     cache: &mut AxisCache,
     report: &mut WriteReport,
     scalars: &mut Vec<ScalarWrite>,
+    entities: &mut EntityCache,
 ) -> Result<(), DbError> {
     report.warnings.extend(p.tz_warnings.iter().cloned());
 
@@ -864,6 +868,7 @@ fn write_prepared(
         class_id,
         &p.class,
         &p.names,
+        entities,
         &mut report.warnings,
     )?;
     let (entity_ids, entity_minted) = match resolved {
@@ -1171,11 +1176,39 @@ enum Resolved {
 /// The entity lookup of [`resolve_entities`]: every input name with its
 /// ordinal, its DuckDB `lower()` fold and the id of the current entity of the
 /// class holding that folded name (NULL when missing). The fold is DuckDB's,
-/// returned to Rust, never recomputed there (CLAUDE.md invariant 2).
+/// returned to Rust, never recomputed there (CLAUDE.md invariant 2). The
+/// predicate is the expansion of `cur_cls = ? AND cur_name = lower(n)` on the
+/// base columns (the VIRTUAL `cur_*` columns are `CASE WHEN valid_to_commit
+/// IS NULL THEN … END`): the same rows, but the plain column filters run
+/// before `lower(name)` is evaluated.
 const ENTITY_LOOKUP_SQL: &str = "WITH k AS (SELECT unnest(?::VARCHAR[]) AS n, \
                                          unnest(?::BIGINT[]) AS i) \
      SELECT k.i, lower(k.n), e.id FROM k \
-     LEFT JOIN entity e ON e.cur_cls = ? AND e.cur_name = lower(k.n)";
+     LEFT JOIN entity e ON e.entity_class_id = ? AND e.valid_to_commit IS NULL \
+                       AND lower(e.name) = lower(k.n)";
+
+/// The single-name form of [`ENTITY_LOOKUP_SQL`] (plan D3(b), a
+/// statement-form switch only): the fold and the id (NULL when missing).
+const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), (SELECT id FROM entity \
+       WHERE entity_class_id = ?2 AND valid_to_commit IS NULL AND lower(name) = lower(?1))";
+
+/// One entity name already resolved by an earlier segment of this commit.
+pub(crate) struct CachedEntity {
+    id: i64,
+    /// DuckDB's `lower()` of the name, as the lookup returned it.
+    fold: String,
+    /// Minted (auto-created) by this commit.
+    minted: bool,
+}
+
+/// The entities the segments of one commit resolved so far, keyed by class
+/// id and the EXACT input spelling (never a Rust fold). Sound because no
+/// entity is renamed or closed between the structural phase and the
+/// deletes: a spelling that resolved once resolves to the same id for the
+/// rest of the segments phase. An editor save of many parameters over few
+/// entities then pays one lookup per entity, not one per segment. A closure
+/// local of the retried commit.
+pub(crate) type EntityCache = HashMap<(i64, String), CachedEntity>;
 
 /// The columnar auto-create insert of [`resolve_entities`]; RETURNING yields
 /// the rows in input order (hard-checked).
@@ -1183,9 +1216,11 @@ const ENTITY_INSERT_SQL: &str = "INSERT INTO entity (entity_class_id, name, vali
      SELECT ?, unnest(?::VARCHAR[]), ? RETURNING id, name";
 
 /// Resolve every entity name of one segment in one set-based round
-/// (set_based_scalar_write_PLAN §3.4, D7): one lookup statement, at most one
-/// N-D probe, and one columnar insert per ≤ `LONG_INSERT_CHUNK` missing
-/// names. This is the write path's one decision-B entity auto-create site.
+/// (set_based_scalar_write_PLAN §3.4, D7): one lookup statement (none for
+/// names an earlier segment of the commit resolved, see [`EntityCache`]), at
+/// most one N-D probe, and one columnar insert per ≤ `LONG_INSERT_CHUNK`
+/// missing names. This is the write path's one decision-B entity
+/// auto-create site.
 ///
 /// Names are resolved by DuckDB's `lower()` (Unicode). Two distinct input
 /// spellings that DuckDB folds to the same name are ambiguous and rejected
@@ -1201,6 +1236,7 @@ fn resolve_entities(
     class_id: i64,
     class: &str,
     names: &[String],
+    cache: &mut EntityCache,
     warnings: &mut Vec<Warning>,
 ) -> Result<Resolved, DbError> {
     use duckdb::types::Value;
@@ -1208,9 +1244,32 @@ fn resolve_entities(
     let n = names.len();
     let mut ids: Vec<Option<i64>> = vec![None; n];
     let mut folds: Vec<Option<String>> = vec![None; n];
-    {
-        let names_list = Value::List(names.iter().map(|s| Value::Text(s.clone())).collect());
-        let ord_list = Value::List((0..n as i64).map(Value::BigInt).collect());
+    let mut minted = vec![false; n];
+    let mut lookup: Vec<usize> = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        match cache.get(&(class_id, name.clone())) {
+            Some(c) => {
+                ids[i] = Some(c.id);
+                folds[i] = Some(c.fold.clone());
+                minted[i] = c.minted;
+            }
+            None => lookup.push(i),
+        }
+    }
+    if let [i] = lookup[..] {
+        let (fold, id): (String, Option<i64>) = conn
+            .prepare_cached(ENTITY_LOOKUP_ONE_SQL)?
+            .query_row(params![names[i], class_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        folds[i] = Some(fold);
+        ids[i] = id;
+    } else if !lookup.is_empty() {
+        let names_list = Value::List(
+            lookup
+                .iter()
+                .map(|&i| Value::Text(names[i].clone()))
+                .collect(),
+        );
+        let ord_list = Value::List(lookup.iter().map(|&i| Value::BigInt(i as i64)).collect());
         let mut stmt = conn.prepare_cached(ENTITY_LOOKUP_SQL)?;
         let rows = stmt.query_map(params![names_list, ord_list, class_id], |r| {
             Ok((
@@ -1252,7 +1311,6 @@ fn resolve_entities(
     }
 
     let missing: Vec<usize> = (0..n).filter(|&i| ids[i].is_none()).collect();
-    let mut minted = vec![false; n];
     if let Some(&m) = missing.first() {
         let ndims: i64 = conn
             .prepare_cached("SELECT count(*) FROM entity_class_dimension WHERE cur_c = ?")?
@@ -1307,6 +1365,18 @@ fn resolve_entities(
                     id,
                 });
             }
+        }
+    }
+    for &i in &lookup {
+        if let (Some(id), Some(fold)) = (ids[i], folds[i].clone()) {
+            cache.insert(
+                (class_id, names[i].clone()),
+                CachedEntity {
+                    id,
+                    fold,
+                    minted: minted[i],
+                },
+            );
         }
     }
     Ok(Resolved::Ids {

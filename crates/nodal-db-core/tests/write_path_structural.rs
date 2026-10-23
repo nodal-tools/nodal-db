@@ -825,3 +825,65 @@ fn scalars_rewritten_after_erasure_restart_at_version_one() {
     );
     assert_audits_clean(&db);
 }
+
+/// Entities resolved by an earlier segment of the same commit (the
+/// per-commit entity cache): a name auto-created by segment 1 is reused by
+/// later segments, under any spelling DuckDB folds to it, and two such
+/// spellings inside one later segment are still rejected as the Api error.
+#[test]
+fn entities_resolved_by_earlier_segments_of_a_commit_are_reused() {
+    let (_d, db) = fresh_db();
+    let r = commit_changes(
+        &db,
+        vec![
+            seg("p1", "Base", scalar_batch("Äx", 1.0)),
+            seg("p2", "Base", scalar_batch("Äx", 2.0)),
+            seg("p3", "Base", scalar_batch("äx", 3.0)),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "m",
+        WriteOptions::default(),
+    )
+    .expect("write");
+    let minted = r
+        .warnings
+        .iter()
+        .filter(|w| w.object_type == "entity")
+        .count();
+    assert_eq!(minted, 1, "one entity, reused by segments 2 and 3");
+    assert_eq!(
+        q_i64(&db, "SELECT count(DISTINCT entity_id) FROM value_scalar"),
+        1
+    );
+    assert_eq!(
+        q_i64(&db, "SELECT count(*) FROM value_scalar WHERE version = 1"),
+        3
+    );
+    let err = commit_changes(
+        &db,
+        vec![
+            seg("p1", "Base", scalar_batch("Äx", 4.0)),
+            seg(
+                "p2",
+                "Base",
+                scalar_names_batch(&["Äx".to_string(), "äx".to_string()], &[5.0, 6.0]),
+            ),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "m",
+        WriteOptions::default(),
+    )
+    .expect_err("an alias pair in one segment is ambiguous");
+    assert_eq!(
+        err.to_string(),
+        "segment 2 (node:p2): entity names \"Äx\" and \"äx\" resolve to the same entity \
+         (name resolution is case-insensitive); use one spelling per batch"
+    );
+    assert_audits_clean(&db);
+}

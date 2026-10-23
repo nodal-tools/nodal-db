@@ -413,6 +413,54 @@ def test_erase_expect_present_belt(db):
 
 
 # ---------------------------------------------------------------------------
+# history-free extract / compaction
+# ---------------------------------------------------------------------------
+
+
+def test_extract_head_and_as_of(db, tmp_path):
+    for v in (1.0, 2.0, 3.0):
+        db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [v]), user="t")
+    dest = tmp_path / "slim.duckdb"
+    rep = db.extract(str(dest), user="t", note="pytest")
+    assert rep["source_identity"] == db.db_identity()
+    assert rep["extract_commit"] > rep["horizon_commit"]
+    assert rep["rows_removed"] >= 2 and rep["rows_per_table"]["value_scalar"] == 1
+    slim = nodal_db.open(str(dest))
+    assert slim.db_identity() == rep["extract_identity"] != db.db_identity()
+    assert slim.read_parameter("unit", "capacity", "Base").column("v_float").to_pylist() == [3.0]
+    assert one_value(slim, "SELECT count(*) FROM value_scalar") == 1
+    assert one_value(slim, "SELECT kind FROM erasure_marker") == "horizon"
+    # as of the commit before the last write: the previous value.
+    past = db.extract(str(tmp_path / "past.duckdb"), user="t", as_of=rep["horizon_commit"] - 1)
+    assert nodal_db.open(str(tmp_path / "past.duckdb")).read_parameter(
+        "unit", "capacity", "Base").column("v_float").to_pylist() == [2.0]
+    assert past["horizon_commit"] == rep["horizon_commit"] - 1
+    # Refusals are typed; user is required and keyword-only.
+    with pytest.raises(nodal_db.ApiError):
+        db.extract(str(dest), user="t")
+    with pytest.raises(nodal_db.ApiError):
+        db.extract(str(tmp_path / "x.duckdb"), user="t", as_of=10_000)
+    with pytest.raises(TypeError):
+        db.extract(str(tmp_path / "y.duckdb"))
+    with pytest.raises(TypeError):
+        db.extract(str(tmp_path / "z.duckdb"), "t")
+    assert not (tmp_path / "x.duckdb").exists()
+
+
+def test_compact(db):
+    for v in (1.0, 2.0):
+        db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [v]), user="t")
+    ident = db.db_identity()
+    rep = db.compact()
+    assert rep["swapped"] and rep["rows_per_table"]["value_scalar"] == 2
+    assert db.db_identity() == ident
+    assert not db.compact(if_needed=True)["swapped"]
+    assert db.compact(if_needed=True, growth=0.5)["swapped"]
+    with pytest.raises(nodal_db.ApiError):
+        db.compact(growth=2.0)
+
+
+# ---------------------------------------------------------------------------
 # G8 migration verbs (flextool_port_finale_plan.md section 1, D-F4): thin 1:1
 # exposure — every rule asserted here is core behavior observed through
 # Python. Idempotent no-ops burn no commit (asserted via the commit count).

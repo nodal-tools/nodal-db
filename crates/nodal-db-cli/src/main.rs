@@ -4,8 +4,10 @@
 //! (`specs/arrow_ipc_bulk_format.md`) through the one core canonicalizer — the
 //! CLI deserializes and expands, it NEVER re-canonicalizes (CLAUDE.md
 //! invariant 2). `template` is un-frozen (template_ir_plan phase 2/3:
-//! load / plan / apply / export); `migrate`/`maintain` remain explicit
-//! not-implemented stubs reserving the verbs (§3.3 door 3) — the reconcile
+//! load / plan / apply / export); `extract` writes a history-free copy of a
+//! database into a new file; `maintain` is a subcommand group whose first
+//! member is `compact` (the physical repack). `migrate` remains an explicit
+//! not-implemented stub reserving the verb (§3.3 door 3) — the reconcile
 //! runner lives under `template apply` in v1 (§4.4: `migrate` becomes the
 //! full-chain runner as a later door).
 
@@ -119,16 +121,67 @@ enum Command {
         #[arg(long)]
         user: Option<String>,
     },
+    /// Write a history-free copy of a database into a NEW file: the content
+    /// valid at the source's last commit (or at --as-of N), without the
+    /// superseded history. The source is only read; it stays the complete
+    /// history (the archive). The copy gets its own database identity and a
+    /// horizon marker naming the source; as-of reads at commits before the
+    /// extract's own commit fail loudly in it. Writers of the source wait (or
+    /// get "busy") while the copy runs.
+    Extract {
+        /// The source database (read only).
+        src: PathBuf,
+        /// The new file to create (must not exist).
+        dest: PathBuf,
+        /// Extract the state as it was right after this commit instead of
+        /// the current state.
+        #[arg(long)]
+        as_of: Option<i64>,
+        /// Free-form operator context, stored on the horizon marker.
+        #[arg(long)]
+        note: Option<String>,
+        /// Author of the extract's commit; defaults to the OS username.
+        #[arg(long)]
+        user: Option<String>,
+    },
     /// Not implemented in v1 core (verb reserved; the v1 reconcile runner is
     /// `template apply`).
     Migrate,
-    /// Not implemented in v1 core (verb reserved).
-    Maintain,
+    /// Database maintenance.
+    Maintain {
+        #[command(subcommand)]
+        command: MaintainCommand,
+    },
     /// Template IR operations: load / plan / apply / export.
     Template {
         #[command(subcommand)]
         command: template::TemplateCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum MaintainCommand {
+    /// Rewrite the database file densely packed, reclaiming the space of
+    /// old checkpoints and erased data. Keeps every row, history included,
+    /// and the database identity. Takes the database's lock for the
+    /// duration.
+    Compact {
+        /// Target DuckDB file.
+        db: PathBuf,
+        /// Only compact when the file has grown past the growth factor
+        /// times its size right after the last compaction (always compacts
+        /// the first time, to record that size).
+        #[arg(long)]
+        if_needed: bool,
+        /// Growth factor for --if-needed (default 3.0).
+        #[arg(long, requires = "if_needed")]
+        growth: Option<f64>,
+    },
+}
+
+/// Bytes as MiB with one decimal.
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -324,11 +377,88 @@ fn main() -> anyhow::Result<()> {
             println!("(bytes return to the OS at the next compaction)");
             Ok(())
         }
+        Command::Extract {
+            src,
+            dest,
+            as_of,
+            note,
+            user,
+        } => {
+            import::require_db(&src)?;
+            let user = import::resolve_user_from(user.as_deref())?;
+            let opts = nodal_db_core::extract::ExtractOpts {
+                as_of,
+                user: &user,
+                note: note.as_deref(),
+            };
+            let r = nodal_db_core::extract::extract(&src, &dest, &opts)?;
+            let state = match as_of {
+                Some(n) => format!("the state as of commit {n}"),
+                None => format!("the current state (commit {})", r.horizon_commit),
+            };
+            println!(
+                "extracted {state} of {} into {}",
+                src.display(),
+                dest.display()
+            );
+            println!("  source identity   {}", r.source_identity);
+            println!("  extract identity  {}", r.extract_identity);
+            println!(
+                "  horizon commit {}, extract commit {}, horizon marker {}",
+                r.horizon_commit, r.extract_commit, r.marker_id
+            );
+            println!(
+                "  size {} -> {}; {} rows left out, {} unreferenced axes dropped",
+                mib(r.bytes_source),
+                mib(r.bytes_extract),
+                r.rows_removed,
+                r.axes_dropped
+            );
+            println!(
+                "note: the extract has a NEW database identity; as-of reads before commit \
+                 {} fail in it (the source keeps the full history)",
+                r.extract_commit
+            );
+            Ok(())
+        }
         Command::Migrate => bail!(
             "migrate: not implemented in v1 core (the v1 reconcile runner is \
              `template apply`)"
         ),
-        Command::Maintain => bail!("maintain: not implemented in v1 core"),
+        Command::Maintain {
+            command:
+                MaintainCommand::Compact {
+                    db,
+                    if_needed,
+                    growth,
+                },
+        } => {
+            import::require_db(&db)?;
+            use nodal_db_core::compaction;
+            let r = if if_needed {
+                compaction::compact_if_needed(
+                    &db,
+                    growth.unwrap_or(compaction::DEFAULT_GROWTH_FACTOR),
+                )?
+            } else {
+                compaction::compact(&db)?
+            };
+            if r.swapped {
+                println!(
+                    "compacted {}: {} -> {}",
+                    db.display(),
+                    mib(r.bytes_before),
+                    mib(r.bytes_after)
+                );
+            } else {
+                println!(
+                    "{}: no compaction needed ({}; below the growth threshold)",
+                    db.display(),
+                    mib(r.bytes_before)
+                );
+            }
+            Ok(())
+        }
         Command::Template { command } => template::run(command),
     }
 }

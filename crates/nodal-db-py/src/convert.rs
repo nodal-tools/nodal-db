@@ -13,8 +13,10 @@ use pyo3::types::{PyDict, PyList};
 
 use nodal_db_core::api::{DeleteKey, Segment};
 use nodal_db_core::canon::LabelDomain;
+use nodal_db_core::compaction::CompactionReport;
 use nodal_db_core::erasure::{ErasePreview, EraseReport};
 use nodal_db_core::error::DbError;
+use nodal_db_core::extract::ExtractReport;
 use nodal_db_core::template::{ApplyOutcome, ReconcilePlan};
 use nodal_db_core::types::{
     Blocker, CascadeCounts, EntityAddr, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteOutcome,
@@ -585,6 +587,46 @@ pub(crate) fn erase_report_to_py<'py>(
     d.set_item("per_table", table_counts_to_py(py, &r.per_table)?)?;
     d.set_item("rows_total", r.rows_total)?;
     d.set_item("bytes_estimate", r.bytes_estimate)?;
+    Ok(d)
+}
+
+pub(crate) fn extract_report_to_py<'py>(
+    py: Python<'py>,
+    r: &ExtractReport,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("source_identity", &r.source_identity)?;
+    d.set_item("extract_identity", &r.extract_identity)?;
+    d.set_item("horizon_commit", r.horizon_commit)?;
+    d.set_item("extract_commit", r.extract_commit)?;
+    d.set_item("marker_id", r.marker_id)?;
+    let rows = PyDict::new(py);
+    for (t, n) in &r.rows_per_table {
+        rows.set_item(t, n)?;
+    }
+    d.set_item("rows_per_table", rows)?;
+    d.set_item("rows_removed", r.rows_removed)?;
+    d.set_item("axes_dropped", r.axes_dropped)?;
+    d.set_item("bytes_source", r.bytes_source)?;
+    d.set_item("bytes_extract", r.bytes_extract)?;
+    Ok(d)
+}
+
+pub(crate) fn compaction_report_to_py<'py>(
+    py: Python<'py>,
+    r: &CompactionReport,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("swapped", r.swapped)?;
+    d.set_item("bytes_before", r.bytes_before)?;
+    d.set_item("bytes_after", r.bytes_after)?;
+    d.set_item("blocks_before", r.blocks_before)?;
+    d.set_item("blocks_after", r.blocks_after)?;
+    let rows = PyDict::new(py);
+    for (t, n) in &r.rows_per_table {
+        rows.set_item(t, n)?;
+    }
+    d.set_item("rows_per_table", rows)?;
     Ok(d)
 }
 

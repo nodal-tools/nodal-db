@@ -39,9 +39,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use nodal_db_core::api;
+use nodal_db_core::compaction;
 use nodal_db_core::conn::with_read;
 use nodal_db_core::erasure;
 use nodal_db_core::error::DbError;
+use nodal_db_core::extract;
 use nodal_db_core::schema_init;
 use nodal_db_core::template as tpl;
 use nodal_db_core::types::{ObjectDeleteKey, WriteOptions};
@@ -737,6 +739,70 @@ impl Database {
             })
             .map_err(db_err)?;
         erase_report_to_py(py, &report)
+    }
+
+    // -- history-free extract / compaction ---------------------------------
+
+    /// Write a history-free copy of this database into the NEW file `dest`:
+    /// the content valid at the current commit (or at `as_of`), without the
+    /// superseded history. This database is only read; it stays the
+    /// complete history (the archive). The copy gets its own identity and a
+    /// horizon marker naming this one; as-of reads at commits before the
+    /// copy's own commit fail loudly in it. Returns the report dict. Open
+    /// the copy with `nodal_db.open(dest)` (this method returns no handle).
+    #[pyo3(signature = (dest, *, user, as_of = None, note = None))]
+    fn extract<'py>(
+        &self,
+        py: Python<'py>,
+        dest: PathBuf,
+        user: String,
+        as_of: Option<i64>,
+        note: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let path = self.path.clone();
+        let report = py
+            .detach(move || {
+                let opts = extract::ExtractOpts {
+                    as_of,
+                    user: &user,
+                    note: note.as_deref(),
+                };
+                extract::extract(&path, &dest, &opts)
+            })
+            .map_err(db_err)?;
+        extract_report_to_py(py, &report)
+    }
+
+    /// Rewrite the database file densely packed (keeps every row, history
+    /// included, and the identity). `if_needed=True` compacts only when the
+    /// file has grown past `growth` (default 3.0) times its size after the
+    /// last compaction. Returns the report dict (`swapped` False = skipped).
+    #[pyo3(signature = (*, if_needed = false, growth = None))]
+    fn compact<'py>(
+        &self,
+        py: Python<'py>,
+        if_needed: bool,
+        growth: Option<f64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if growth.is_some() && !if_needed {
+            return Err(ApiError::new_err(
+                "compact: growth applies only with if_needed=True",
+            ));
+        }
+        let path = self.path.clone();
+        let report = py
+            .detach(move || {
+                if if_needed {
+                    compaction::compact_if_needed(
+                        &path,
+                        growth.unwrap_or(compaction::DEFAULT_GROWTH_FACTOR),
+                    )
+                } else {
+                    compaction::compact(&path)
+                }
+            })
+            .map_err(db_err)?;
+        compaction_report_to_py(py, &report)
     }
 }
 

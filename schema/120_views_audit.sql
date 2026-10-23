@@ -733,6 +733,18 @@ SELECT coarse_id AS entity_id FROM reach WHERE coarse_id = fine_id;
 -- History audits (these two read superseded/_hist rows by definition —
 -- VMP Part 7 retraction note).
 
+-- Horizon-aware: a history-free extract (an erasure_marker of
+-- kind='horizon') keeps each key's surviving versions verbatim and drops
+-- everything older, so its keys legitimately start above version 1. The
+-- relaxation is PER KEY and only for keys that existed at the horizon: when
+-- a key's lowest surviving version started at or before the newest horizon
+-- commit, tiling is checked from that version (`base`); otherwise `base` is
+-- 1, exactly as on a database without a horizon marker. A key created after
+-- the horizon therefore still must start at 1, and a gap anywhere is still
+-- caught. Contiguity is restated from the base: superseded versions tile
+-- base..base+m-1 and the current version is base+m (base when nothing is
+-- superseded).
+--
 -- Version-tiling + span coherence: superseded
 -- rows per key must tile 1..m contiguously, with current version = m + 1
 -- (or no current row after a delete); AND the validity spans must cohere in
@@ -760,6 +772,9 @@ WITH keyed AS (
          0, 0, 0, 0, version, valid_from_commit, valid_to_commit
   FROM value_array_hist
 ),
+horizon AS (   -- newest history horizon (NULL on a database without one)
+  SELECT max(horizon_commit) AS h FROM erasure_marker WHERE kind = 'horizon'
+),
 agg AS (
   SELECT tier, entity_id, parameter_definition_id, alternative_id,
          i1_pos, i2_pos, i3_pos, i4_pos,
@@ -767,9 +782,17 @@ agg AS (
          count(*) FILTER (WHERE valid_to_commit IS NOT NULL) AS n_dead,
          min(version) FILTER (WHERE valid_to_commit IS NOT NULL) AS dead_min,
          max(version) FILTER (WHERE valid_to_commit IS NOT NULL) AS dead_max,
-         count(DISTINCT version) FILTER (WHERE valid_to_commit IS NOT NULL) AS dead_distinct
+         count(DISTINCT version) FILTER (WHERE valid_to_commit IS NOT NULL) AS dead_distinct,
+         min(version) AS min_version,
+         arg_min(valid_from_commit, version) AS min_version_from
   FROM keyed
   GROUP BY ALL
+),
+based AS (
+  SELECT agg.*,
+         CASE WHEN horizon.h IS NOT NULL AND min_version_from <= horizon.h
+              THEN min_version ELSE 1 END AS base
+  FROM agg CROSS JOIN horizon
 ),
 spans AS (   -- span coherence in version order, per key (critique F2)
   SELECT tier, entity_id, parameter_definition_id, alternative_id,
@@ -782,16 +805,19 @@ spans AS (   -- span coherence in version order, per key (critique F2)
                             alternative_id, i1_pos, i2_pos, i3_pos, i4_pos
                ORDER BY version)
 )
-SELECT *,
+SELECT tier, entity_id, parameter_definition_id, alternative_id,
+       i1_pos, i2_pos, i3_pos, i4_pos,
+       current_version, n_dead, dead_min, dead_max, dead_distinct,
        CASE
-         WHEN n_dead = 0 AND current_version <> 1
+         WHEN n_dead = 0 AND current_version <> base
            THEN 'current version > 1 with no superseded rows'
-         WHEN n_dead > 0 AND (dead_distinct <> n_dead OR dead_min <> 1 OR dead_max <> n_dead)
+         WHEN n_dead > 0 AND (dead_distinct <> n_dead OR dead_min <> base
+                              OR dead_max <> base + n_dead - 1)
            THEN 'superseded versions do not tile 1..m'
          WHEN current_version IS NOT NULL AND n_dead > 0 AND current_version <> dead_max + 1
            THEN 'current version <> superseded max + 1'
        END AS problem
-FROM agg
+FROM based
 WHERE problem IS NOT NULL
 UNION ALL
 SELECT tier, entity_id, parameter_definition_id, alternative_id,

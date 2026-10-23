@@ -253,6 +253,139 @@ def write_long_cell(con, c, e, p, a, axes, poss, kind, col, value, accels=None):
          acc["i3_dt"], acc["i3_num"], acc["i4_dt"], acc["i4_num"], kind, value])
 
 
+def horizon_and_binding_checks(workdir):
+    """History-free extract support, on scratch databases of their own (so
+    the main flow's single erasure marker and final sweep stay as they are):
+
+    1. audit_history_tiling is horizon-aware PER KEY. A key whose lowest
+       surviving version started at or before the newest horizon tiles from
+       that version; a key created after the horizon must still start at 1,
+       and a gap is still caught.
+    2. Tripwire for a DuckDB binding behaviour: a table macro called through
+       an ATTACHed catalog (`src.some_asof(c)`) binds its body's unqualified
+       names in the CALLER's default catalog, so on two nodal-db files it
+       silently reads the wrong database. Views bind to their own catalog;
+       `USE src` makes macros resolve correctly. Rule: never call a nodal-db
+       table macro through an attached catalog. If an engine upgrade changes
+       this behaviour, these checks fail and the rule needs re-deciding.
+    """
+    db = workdir / "smoke_horizon.duckdb"
+    schema_build.build(str(db), force=True)
+    con = duckdb.connect(str(db))
+
+    def tiling(key=None):
+        sql = "SELECT entity_id, problem FROM audit_history_tiling"
+        rows = con.execute(sql).fetchall()
+        return [r for r in rows if key is None or r[0] == key]
+
+    def scalar_row(e, ver, c_from, c_to=None):
+        con.execute(
+            "INSERT INTO value_scalar (entity_id, parameter_definition_id, alternative_id,"
+            " valid_from_commit, valid_to_commit, version, value_kind, v_float)"
+            " VALUES (?, 1, 1, ?, ?, ?, 'float', 1.0)", [e, c_from, c_to, ver])
+
+    # The state an extract leaves: keys whose older versions were dropped,
+    # copied with their version counters verbatim (no renumbering).
+    con.execute("BEGIN")
+    c_a = new_commit(con, "source history (kept in the log)")
+    c_h = new_commit(con, "the horizon commit H")
+    scalar_row(101, 3, c_a)         # key 101: v1, v2 dropped; v3 current
+    scalar_row(102, 7, c_h)         # key 102: v1..v6 dropped; v7 current
+    scalar_row(103, 1, c_h)         # key 103: never superseded
+    con.execute("COMMIT")
+    hits = tiling()
+    check("horizon tiling: without a horizon marker the truncated keys are"
+          " flagged (the shipped rule)", {r[0] for r in hits} == {101, 102}, str(hits))
+
+    con.execute("BEGIN")
+    c_e = new_commit(con, "extract commit E")
+    con.execute("INSERT INTO erasure_marker (kind, horizon_commit, at_commit,"
+                " continuation_db, rows_removed) VALUES ('horizon', ?, ?, 'src-uuid', 8)",
+                [c_h, c_e])
+    con.execute("COMMIT")
+    hits = tiling()
+    check("horizon tiling: the extract state is clean with the horizon marker",
+          hits == [], str(hits))
+
+    # Legitimate edits after E: supersede an extracted key twice, and create
+    # a new key with two versions.
+    con.execute("BEGIN")
+    c1 = new_commit(con, "edit after E")
+    write_scalar(con, c1, 101, 1, 1, "float", "v_float", 2.0)
+    write_scalar(con, c1, 104, 1, 1, "float", "v_float", 1.0)
+    con.execute("COMMIT")
+    con.execute("BEGIN")
+    c2 = new_commit(con, "edit after E")
+    write_scalar(con, c2, 101, 1, 1, "float", "v_float", 3.0)
+    write_scalar(con, c2, 104, 1, 1, "float", "v_float", 2.0)
+    con.execute("COMMIT")
+    hits = tiling()
+    check("horizon tiling: legitimate supersedes and a new key after E stay clean",
+          hits == [], str(hits))
+
+    # Hostile: a key created after E that is missing v1.
+    con.execute("BEGIN")
+    c3 = new_commit(con, "hostile")
+    scalar_row(105, 2, c3)
+    con.execute("COMMIT")
+    hits = tiling(105)
+    check("horizon tiling: a key created after E that is missing v1 fires",
+          hits == [(105, "current version > 1 with no superseded rows")], str(hits))
+    con.execute("DELETE FROM value_scalar WHERE entity_id = 105")
+
+    # Hostile: a middle version of an extracted key deleted after E (v4 of
+    # key 101, which now holds v3, v4 dead and v5 current).
+    con.execute("DELETE FROM value_scalar WHERE entity_id = 101 AND version = 4")
+    hits = tiling(101)
+    check("horizon tiling: a gap after E in an extracted key fires",
+          hits == [(101, "current version <> superseded max + 1")], str(hits))
+
+    # Hostile: the extracted key's lowest surviving version deleted. Its new
+    # lowest version started after the horizon, so tiling falls back to base 1.
+    con.execute("DELETE FROM value_scalar WHERE entity_id = 102")
+    con.execute("BEGIN")
+    c4 = new_commit(con, "edit after E")
+    scalar_row(102, 7, c_h, c4)
+    scalar_row(102, 8, c4)
+    con.execute("COMMIT")
+    clean = tiling(102)
+    con.execute("DELETE FROM value_scalar WHERE entity_id = 102 AND version = 7")
+    hits = tiling(102)
+    check("horizon tiling: deleting an extracted key's horizon-era version fires",
+          clean == [] and hits == [(102, "current version > 1 with no superseded rows")],
+          f"{clean} / {hits}")
+    con.close()
+
+    # ---- the attached-catalog macro binding tripwire
+    a_path = workdir / "smoke_bind_a.duckdb"
+    b_path = workdir / "smoke_bind_b.duckdb"
+    schema_build.build(str(a_path), force=True)
+    schema_build.build(str(b_path), force=True)
+    a = duckdb.connect(str(a_path))
+    a.execute("BEGIN")
+    ca = new_commit(a, "three alternatives")
+    for name in ("x", "y", "z"):
+        a.execute("INSERT INTO alternative (id, name, valid_from_commit)"
+                  " VALUES (nextval('seq_alternative'), ?, ?)", [name, ca])
+    a.execute("COMMIT")
+    a.close()
+    b = duckdb.connect(str(b_path))
+    b.execute(f"ATTACH '{a_path}' AS src (READ_ONLY)")
+    n_view = b.execute("SELECT count(*) FROM src.alternative_current").fetchone()[0]
+    n_macro = b.execute(f"SELECT count(*) FROM src.alternative_asof({ca})").fetchone()[0]
+    n_qual = b.execute(f"SELECT count(*) FROM src.main.alternative_asof({ca})").fetchone()[0]
+    b.execute("USE src")
+    n_use = b.execute(f"SELECT count(*) FROM alternative_asof({ca})").fetchone()[0]
+    b.close()
+    check("macro binding: a view reached through an attached catalog reads that"
+          " catalog", n_view == 3, f"n={n_view}")
+    check("macro binding tripwire: src.some_asof(c) silently binds to the CALLER's"
+          " catalog (0 rows, no error) — never call a table macro through an"
+          " attached catalog", n_macro == 0 and n_qual == 0, f"{n_macro}/{n_qual}")
+    check("macro binding: under USE src the same macro reads the source",
+          n_use == 3, f"n={n_use}")
+
+
 def main():
     workdir = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(tempfile.mkdtemp())
     db = workdir / "smoke.duckdb"
@@ -1578,6 +1711,9 @@ def main():
           rows == [(dbid,)], str(rows))
 
     con.close()
+
+    horizon_and_binding_checks(workdir)
+
     n_fail = RESULTS.count(False)
     print(f"\n{len(RESULTS)} checks, {n_fail} failures")
     sys.exit(1 if n_fail else 0)

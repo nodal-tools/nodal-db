@@ -143,14 +143,38 @@ fn assert_audits_clean(db: &Path) {
     conn.close().unwrap();
 }
 
+/// The `version` of every live long row of `k`, in physical order.
+fn live_long_versions(db: &Path, k: ValueKey) -> Vec<i16> {
+    let conn = Connection::open(db).unwrap();
+    let v = conn
+        .prepare(
+            "SELECT version FROM value_long \
+             WHERE entity_id = ? AND valid_to_commit IS NULL ORDER BY rowid",
+        )
+        .unwrap()
+        .query_map([k.entity_id], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    v
+}
+
 /// Write an `n`-cell long value, replace it by a sparser one (close-out +
-/// reinsert), and check both generations against the input in physical order.
+/// reinsert), and check both generations against the input in physical order,
+/// including the per-cell versions on both sides of every chunk boundary.
 fn long_round_trip(n: i32) {
     let (_d, db) = fresh_db();
     let k = key(1);
     let v = long_value(n, 1);
     write(&db, k, &v);
     assert_eq!(live_long_by_rowid(&db, k), expected_long(&v), "n={n}");
+    let vers = live_long_versions(&db, k);
+    assert_eq!(vers.len(), n as usize, "n={n}");
+    assert!(
+        vers.iter().all(|&x| x == 1),
+        "n={n}: fresh cells are version 1"
+    );
     let v2 = long_value(n, 3);
     write(&db, k, &v2);
     assert_eq!(
@@ -158,7 +182,28 @@ fn long_round_trip(n: i32) {
         expected_long(&v2),
         "n={n} replaced"
     );
+    assert!(
+        live_long_versions(&db, k).iter().all(|&x| x == 2),
+        "n={n}: every replaced cell is version 2"
+    );
+    // Back to dense: versions now differ cell by cell (3 where the sparse
+    // generation had a cell, else 2), so a chunk-misaligned version column
+    // would show.
+    write(&db, k, &v);
+    assert_eq!(
+        live_long_by_rowid(&db, k),
+        expected_long(&v),
+        "n={n} dense again"
+    );
+    let want: Vec<i16> = (0..n).map(|p| if p % 3 == 0 { 3 } else { 2 }).collect();
+    assert_eq!(live_long_versions(&db, k), want, "n={n}: per-cell versions");
     assert_audits_clean(&db);
+}
+
+/// 16 384 cells = exactly one full insert chunk, no tail.
+#[test]
+fn long_value_of_exactly_one_insert_chunk_round_trips_in_cell_order() {
+    long_round_trip(16_384);
 }
 
 /// 16 385 cells = one full insert chunk + 1.

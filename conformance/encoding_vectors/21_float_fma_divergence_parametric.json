@@ -29,5 +29,5 @@
     "expected_bits": "0x40dda52635cbf3d8",
     "fma_bits": "0x40dda52635cbf3d7"
   },
-  "notes": "Constructed deterministically (seed 12345 brute search, spec/canonical_encoding.md sec 10.2): start=-4675.83329566021 (0xc0b243d552dd4880), step=7006.486065829911 (0x40bb5e7c6ecf6b2c, >0 so strictly ascending). coord[5] non-FMA = -4675.83329566021 + (7006.486065829911 * 5.0) = 30356.59703348935 (0x40dda52635cbf3d8) with two separate roundings; fma(step,5,start) single-rounds to 0x40dda52635cbf3d7 (1 ULP lower). DuckDB 1.5.5 axis_position returns the non-FMA 0x...d8 (verified), matching this pin; roundtrip_duckdb.rs is the standing cross-engine guard."
+  "notes": "Constructed deterministically (seed 12345 brute search, specs/canonical_encoding.md sec 10.2): start=-4675.83329566021 (0xc0b243d552dd4880), step=7006.486065829911 (0x40bb5e7c6ecf6b2c, >0 so strictly ascending). coord[5] non-FMA = -4675.83329566021 + (7006.486065829911 * 5.0) = 30356.59703348935 (0x40dda52635cbf3d8) with two separate roundings; fma(step,5,start) single-rounds to 0x40dda52635cbf3d7 (1 ULP lower). DuckDB 1.5.5 axis_position returns the non-FMA 0x...d8 (verified), matching this pin; roundtrip_duckdb.rs is the standing cross-engine guard."
 }

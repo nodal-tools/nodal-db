@@ -26,3 +26,16 @@ Adopted from flextool-engine's hard-won lessons:
 
 ## PR checklist
 To be defined with the first release process.
+
+## Docs
+The documentation site is built with [Zensical](https://zensical.org) from
+`docs/` (config: `zensical.toml`) and published to GitHub Pages by
+`.github/workflows/docs.yml` on every push to `main`; PRs build it in
+strict mode. Docs tooling lives in its own venv: `just docs-venv` once, then
+`just docs` (regenerate + live preview) or `just docs-build`.
+
+The schema diagrams and view tables on the Schema page are **generated**:
+`scripts/docs/gen_schema.py` builds `schema/*.sql` into DuckDB and writes
+`docs/_generated/*.md` (never edit those by hand). After any schema change,
+run `just docs-gen` and commit the result — CI's `--check` step fails on
+stale output.

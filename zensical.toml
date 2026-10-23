@@ -1,0 +1,101 @@
+# Zensical config for the nodal-db documentation site (published to GitHub
+# Pages by .github/workflows/docs.yml). Build: `just docs-build`; preview:
+# `just docs`. Zensical reads mkdocs.yml-style settings under [project].
+[project]
+site_name = "nodal-db"
+site_description = "A planning-scale parameter database: a DuckDB schema plus an all-Rust core"
+site_url = "https://nodal-tools.github.io/nodal-db/"
+repo_url = "https://github.com/nodal-tools/nodal-db"
+repo_name = "nodal-tools/nodal-db"
+edit_uri = "edit/main/docs/"
+
+# Only docs/ is published — specs/, schema/ etc. are outside docs_dir.
+docs_dir = "docs"
+site_dir = "site"
+
+# docs/_generated/ holds fragments that pages pull in with the snippets
+# extension (`--8<--`); they are not pages of their own.
+exclude_docs = """
+_generated/
+"""
+
+nav = [
+  { "Home" = "index.md" },
+  { "Features" = "features.md" },
+  { "Using nodal-db" = "usage.md" },
+  { "Schema" = "schema.md" },
+  { "Developer docs" = [
+    { "Architecture" = "dev/architecture.md" },
+    { "Building against nodal-db" = "dev/building_against_nodal-db.md" },
+    { "Arrow-IPC import format" = "dev/arrow_import_format.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",          # CLI / Python / Rust tabs switch together site-wide
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[project.theme.icon]
+repo = "fontawesome/brands/github"
+
+# Light/dark toggle, defaulting to the OS preference.
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+# Generated fragments (scripts/docs/gen_schema.py) are included relative to
+# docs/; check_paths makes a missing fragment a build error, not a blank.
+pymdownx.snippets.base_path = ["docs"]
+pymdownx.snippets.check_paths = true
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}

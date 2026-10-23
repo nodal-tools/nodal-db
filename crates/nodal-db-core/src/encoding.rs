@@ -2,7 +2,7 @@
 //!
 //! Pure, deterministic, and free of any `duckdb` use: this module is the one
 //! canonicalizer's serialization half (`CLAUDE.md` invariant 2). It implements
-//! `spec/canonical_encoding.md` to the byte — two independent implementations
+//! `specs/canonical_encoding.md` to the byte — two independent implementations
 //! that feed the same canonical content MUST produce identical bytes and thus
 //! identical hashes. The machine-checkable oracle is
 //! `conformance/encoding_vectors/*.json`, driven by `tests/encoding_vectors.rs`.

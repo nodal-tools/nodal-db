@@ -1,7 +1,7 @@
 # Value canonical-encoding conformance vectors
 
 Language-neutral test vectors for the **value** canonical byte encoding and its
-64-bit content hash (`spec/canonical_encoding.md` §9, OPEN-7). Any
+64-bit content hash (`specs/canonical_encoding.md` §9, OPEN-7). Any
 implementation MUST reproduce `expected_canonical_hex` and `expected_hash_u64`
 byte-for-byte. Runners:
 

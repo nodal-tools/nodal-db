@@ -1,7 +1,7 @@
 # Axis canonical-encoding conformance vectors
 
 Language-neutral test vectors for the axis canonical byte encoding and the
-64-bit content hash, as pinned by `spec/canonical_encoding.md`. Any
+64-bit content hash, as pinned by `specs/canonical_encoding.md`. Any
 implementation (the Rust core, the SQL side, a future Python/engine skin) MUST
 reproduce `expected_canonical_hex` and `expected_hash_u64` byte-for-byte for
 each vector. The authoritative runner is

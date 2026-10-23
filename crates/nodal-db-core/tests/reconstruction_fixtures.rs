@@ -1,5 +1,5 @@
 //! Array-tier reconstruction conformance (rust_implementation_plan.md Part 5,
-//! deliverable 2; spec/reconstruction.md). Each
+//! deliverable 2; specs/reconstruction.md). Each
 //! `conformance/reconstruction_fixtures/*.json` gives a dense flat `DOUBLE[]`
 //! payload + its axes (declared order) and the expected long rows
 //! (index-tuple -> value). The runner reconstructs via
@@ -111,7 +111,7 @@ fn reconstruction_fixtures_match() {
 }
 
 /// The same fixtures run in the INVERSE (write) direction
-/// (spec/arrow_ipc_bulk_format.md §6.3): treat each fixture's axes as a dense
+/// (specs/arrow_ipc_bulk_format.md §6.3): treat each fixture's axes as a dense
 /// wire row's coordinate lists, expand via `expand_dense_row`, and require the
 /// (coordinate tuple, value) pairs to be exactly the fixture's expected long
 /// rows mapped through the coordinate lists — then round-trip: the expansion's

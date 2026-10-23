@@ -1,7 +1,7 @@
 //! `nodal-db` CLI — verb dispatch (`specs/rust_implementation_plan.md`
 //! Part 4). `init` applies the schema (optionally loading a template — the
 //! init-with-template path); `import` ingests the Arrow-IPC bulk format
-//! (`spec/arrow_ipc_bulk_format.md`) through the one core canonicalizer — the
+//! (`specs/arrow_ipc_bulk_format.md`) through the one core canonicalizer — the
 //! CLI deserializes and expands, it NEVER re-canonicalizes (CLAUDE.md
 //! invariant 2). `template` is un-frozen (template_ir_plan phase 2/3:
 //! load / plan / apply / export); `migrate`/`maintain` remain explicit
@@ -55,7 +55,7 @@ enum Command {
         #[arg(long, num_args = 0..=1)]
         schema_dir: Option<Option<PathBuf>>,
     },
-    /// Ingest an Arrow-IPC bulk container (spec/arrow_ipc_bulk_format.md)
+    /// Ingest an Arrow-IPC bulk container (specs/arrow_ipc_bulk_format.md)
     /// through the one core canonicalizer, atomically (one commit).
     Import {
         /// Arrow-IPC bulk container (concatenated IPC streams).
@@ -258,7 +258,7 @@ fn main() -> anyhow::Result<()> {
                         "warning: {} has no `run` provenance rows — this looks like a \
                          curated INPUT database, not a tool-produced output DB. Erase is \
                          mechanism-agnostic (D-E6) and will proceed, but the sanctioned \
-                         use is output-DB overwrite-on-rerun (schema_interop.md §9).",
+                         use is output-DB overwrite-on-rerun.",
                         db.display()
                     );
                 }

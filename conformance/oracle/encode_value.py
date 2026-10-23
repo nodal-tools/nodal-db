@@ -3,7 +3,7 @@
 
 Sibling of `encode_axis.py`: it re-derives every `conformance/value_vectors/
 *.json` vector's canonical byte string AND its XXH3-64/seed-0 hash *from the
-spec* (`spec/canonical_encoding.md` §9), sharing NO code with the Rust
+spec* (`specs/canonical_encoding.md` §9), sharing NO code with the Rust
 `encode_value`. Two independent implementations agreeing byte- and hash-for-hash
 is the point (CLAUDE.md invariant 2).
 

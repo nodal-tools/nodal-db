@@ -13,7 +13,7 @@
 //!   i3 = (k / n4) % n3,   i4 = k % n4
 //! — the row-major strides `stride[i] = ∏_{j>i} nⱼ`, `p_i = (k / stride[i]) % nᵢ`.
 //! The normative statement and the column-major (Julia/Fortran) transpose hazard
-//! are in `spec/reconstruction.md`; the machine-checkable fixtures live in
+//! are in `specs/reconstruction.md`; the machine-checkable fixtures live in
 //! `conformance/reconstruction_fixtures/` (runner
 //! `tests/reconstruction_fixtures.rs`).
 
@@ -68,7 +68,7 @@ pub fn reconstruct(axis_lengths: &[usize], values: &[f64]) -> Result<Vec<LongRow
     Ok(rows)
 }
 
-/// Expand one **dense wire row** (`spec/arrow_ipc_bulk_format.md` §6.1–6.3)
+/// Expand one **dense wire row** (`specs/arrow_ipc_bulk_format.md` §6.1–6.3)
 /// into `(coordinate tuple, value)` pairs: the write-direction inverse of the
 /// read-side [`reconstruct`], under the same row-major law (spec
 /// `reconstruction.md` §2 — last dimension varies fastest).

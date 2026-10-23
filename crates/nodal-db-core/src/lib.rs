@@ -31,7 +31,7 @@ pub mod canon;
 pub mod tier;
 
 /// Array-tier reconstruction: dense flat `DOUBLE[]` -> logical long rows, the
-/// inverse of `tier` (Phase 2, VMP Part 3; `spec/reconstruction.md`).
+/// inverse of `tier` (Phase 2, VMP Part 3; `specs/reconstruction.md`).
 pub mod reconstruct;
 
 /// One error type for the DB-facing layer (Phase 2b).

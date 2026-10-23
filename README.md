@@ -2,9 +2,9 @@
 
 A planning-scale parameter database: a DuckDB schema plus an all-Rust core
 (canonicalizing writer library, `nodal-db` CLI) for storing model inputs,
-scenarios, and aggregated outputs. See `CONTRIBUTING.md` for the spec workflow
-and `spec/` for the normative contract (canonical encoding, reconstruction,
-the Arrow-IPC bulk format).
+scenarios, and aggregated outputs. Documentation:
+<https://nodal-tools.github.io/nodal-db/> (sources in `docs/`); see
+`CONTRIBUTING.md` for development setup.
 
 ## Testing tiers
 
@@ -48,7 +48,7 @@ The `.venv` DuckDB is pinned to 1.5.5, so it always matches the file. Open
 # Interactive shell:
 .venv/bin/python -q
 >>> import duckdb; c = duckdb.connect('/tmp/demo.duckdb', read_only=True)
->>> c.sql(\"SELECT * FROM read_parameter('node', 'demand', 'Base')\")
+>>> c.sql(\"SELECT * FROM read_parameter('node', 'demand') WHERE alternative = 'Base'\")
 ```
 
 ### DuckDB CLI + web UI (needs a 1.5.x CLI)
@@ -74,7 +74,7 @@ these:
 
 ```sql
 SHOW TABLES;                                    -- everything (36 tables, 66 views, macros)
-SELECT * FROM read_parameter('<class>', '<parameter>', '<alternative>');  -- values, any tier
+SELECT * FROM read_parameter('<class>', '<parameter>');  -- values, any tier, all alternatives
 SELECT * FROM value_rows;                        -- current values as long rows
 SELECT * FROM value_cells;                       -- array/long cells expanded
 SELECT * FROM audit_health;                      -- integrity + maintenance health, one row

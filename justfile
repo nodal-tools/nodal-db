@@ -49,3 +49,29 @@ check:
 venv:
     python3 -m venv .venv
     .venv/bin/pip install -r dev-requirements.txt
+
+# --- Documentation site (Zensical; published to GitHub Pages by .github/workflows/docs.yml)
+
+docs_py := ".venv-docs/bin/python"
+
+# Kept separate from .venv so the test venv stays lean.
+# Create/refresh the docs venv (.venv-docs: zensical + pinned duckdb).
+docs-venv:
+    python3 -m venv .venv-docs
+    .venv-docs/bin/pip install -r docs-requirements.txt
+
+# Regenerate the schema diagrams/view tables (docs/_generated/) from schema/*.sql.
+docs-gen:
+    {{docs_py}} scripts/docs/gen_schema.py
+
+# Fail if the committed generated schema docs are stale (what CI runs).
+docs-check:
+    {{docs_py}} scripts/docs/gen_schema.py --check
+
+# Regenerate, then build the site into site/ (strict: warnings fail, as in CI).
+docs-build: docs-gen
+    .venv-docs/bin/zensical build --clean --strict
+
+# Regenerate, then serve the site locally with live reload (http://localhost:8000).
+docs: docs-gen
+    .venv-docs/bin/zensical serve

@@ -23,3 +23,6 @@ venv/
 
 # Local build tmp (custom TMPDIR)
 .cargo-tmp/
+
+# Docs site build output (zensical build)
+/site/

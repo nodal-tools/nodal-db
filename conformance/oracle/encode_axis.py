@@ -4,7 +4,7 @@
 This is the "second canonicalizer for validation" the conformance suite is
 designed around (CLAUDE.md invariant 2; VMP Part 3): it re-derives every
 `conformance/encoding_vectors/*.json` vector's canonical byte string AND its
-XXH3-64/seed-0 content hash *from the spec* (`spec/canonical_encoding.md`),
+XXH3-64/seed-0 content hash *from the spec* (`specs/canonical_encoding.md`),
 sharing NO code with the Rust encoder. Two independent implementations that
 agree byte- and hash-for-hash is the whole point — a spec-divergent edit to the
 Rust encoder that also regenerated its own goldens would still fail here.

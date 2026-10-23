@@ -1,5 +1,5 @@
 //! `nodal-db import` — the Arrow-IPC bulk-format importer
-//! (`spec/arrow_ipc_bulk_format.md`, implemented exactly; error classes E1–E10
+//! (`specs/arrow_ipc_bulk_format.md`, implemented exactly; error classes E1–E10
 //! per §9.1). The importer is a thin adapter: parse container → validate
 //! metadata → structurally normalize (dictionary decode, s/ms→µs timestamp
 //! upcast, dense→long expansion) → ONE `core::ingest_segments` call. It NEVER

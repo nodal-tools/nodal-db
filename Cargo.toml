@@ -24,7 +24,7 @@ strip = true
 # the `arrow-pyarrow` pin (further below) to the identical version — and
 # arrow-pyarrow's own pyo3 requirement then dictates the `pyo3` line.
 duckdb = { version = "1.10505.0", features = ["bundled"] }
-# R2 partially re-opened (spec/arrow_ipc_bulk_format.md §2.4, critique F12):
+# R2 partially re-opened (specs/arrow_ipc_bulk_format.md §2.4, critique F12):
 # the `nodal-db import` boundary needs arrow's IPC reader/writer, which
 # `duckdb::arrow` does NOT re-export (duckdb pulls arrow without the `ipc`
 # feature). This direct dependency is pinned EXACTLY (=58.4.0) to the arrow

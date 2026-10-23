@@ -1,0 +1,6 @@
+# Python deps for building the documentation site (Zensical) and the
+# generated schema diagrams (scripts/docs/gen_schema.py builds schema/*.sql
+# into DuckDB, so it needs the same pinned engine as dev-requirements.txt).
+# Kept separate so the test CI venv stays lean. Install with `just docs-venv`.
+zensical==0.0.71
+duckdb==1.5.5

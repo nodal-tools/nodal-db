@@ -1,0 +1,68 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# PRs only build + check; pushes to main also deploy. Pages deployments must
+# not overlap, but an in-flight deploy should finish rather than be cut off
+# half-published — so cancel in progress only for PR runs.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Separate docs venv (docs-requirements.txt: zensical + duckdb pinned to
+      # the engine line the schema is verified on). Same setup as
+      # `just docs-venv`; kept apart from the test venv in ci.yml.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: docs venv
+        run: |
+          python -m venv .venv-docs
+          .venv-docs/bin/pip install -r docs-requirements.txt
+
+      # The schema diagrams and view tables in docs/_generated/ are committed
+      # output of scripts/docs/gen_schema.py. A schema change that forgets to
+      # regenerate them fails here (fix: `just docs-gen` and commit).
+      - name: generated schema docs are up to date
+        run: .venv-docs/bin/python scripts/docs/gen_schema.py --check
+
+      # --strict turns warnings (broken links/anchors, missing nav targets)
+      # into a failed build. Output goes to site/.
+      - name: zensical build
+        run: .venv-docs/bin/zensical build --clean --strict
+
+      - name: upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  # Deploy only from main. Needs the repo's Pages source set to
+  # "GitHub Actions" (Settings -> Pages) — a one-time manual step.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write      # publish to Pages
+      id-token: write   # OIDC token deploy-pages uses to authenticate
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+      - id: deployment
+        uses: actions/deploy-pages@v5

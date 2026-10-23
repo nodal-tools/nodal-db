@@ -1,5 +1,5 @@
 //! End-to-end tests for `nodal-db init` + `nodal-db import`
-//! (spec/arrow_ipc_bulk_format.md): each test BUILDS a real IPC container with
+//! (specs/arrow_ipc_bulk_format.md): each test BUILDS a real IPC container with
 //! the pinned arrow-ipc StreamWriter, drives the actual binary, and verifies
 //! against the database through the core read path. One behavior per test.
 

@@ -52,7 +52,7 @@ use crate::types::{
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
-/// logical-long batches and label domains (`spec/arrow_ipc_bulk_format.md`
+/// logical-long batches and label domains (`specs/arrow_ipc_bulk_format.md`
 /// §2.2/§4). The batches are treated as ONE logical table (concatenated);
 /// dense wire rows are expanded to logical-long *before* they reach here
 /// (spec §6.3 — the importer expands, the core canonicalizes).
@@ -108,7 +108,7 @@ pub fn write_parameter(
 
 /// Ingest one or more segments in ONE atomic, conflict-retried transaction
 /// with ONE `commit` row covering every value written
-/// (`spec/arrow_ipc_bulk_format.md` §9.2, OPEN-Q3-6: whole-invocation
+/// (`specs/arrow_ipc_bulk_format.md` §9.2, OPEN-Q3-6: whole-invocation
 /// atomicity — all segments commit or nothing persists). This is the core
 /// entry point behind `nodal-db import`; [`write_parameter`] is its
 /// single-segment wrapper.
@@ -757,7 +757,7 @@ pub fn read_parameter(
 
 /// The database's stable identity UUID — the `db_identity` reserved metadata
 /// key, minted once by `900_bootstrap.sql` at init and never changed thereafter
-/// (docs/dev/schema_interop.md §9: the anchor output DBs stamp their
+/// (specs/schema_interop.md §9: the anchor output DBs stamp their
 /// "produced from input DB <identity> at commit C under scenario S" provenance
 /// against). It survives reopen and compaction (the repack copies `metadata`
 /// rows as data). One fresh RO connection per call (CLAUDE.md invariant 1).

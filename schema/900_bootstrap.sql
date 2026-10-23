@@ -15,7 +15,7 @@ INSERT INTO metadata (id, name, value, valid_from_commit)
 VALUES (nextval('seq_metadata'), 'schema_version', '0.3-erasure-marker',
         currval('seq_commit'));
 
--- DB-identity UUID (docs/dev/schema_interop.md §9): minted ONCE here — the
+-- DB-identity UUID (specs/schema_interop.md §9): minted ONCE here — the
 -- only writer — and stable for the lifetime of the database. Output DBs stamp
 -- "produced from input DB <identity> at commit C under scenario S" against it,
 -- so it must never be re-minted. It is DATA, not a DDL side effect: the

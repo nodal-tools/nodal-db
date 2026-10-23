@@ -1,4 +1,4 @@
-//! Multi-segment ingest (`api::ingest_segments`, spec/arrow_ipc_bulk_format.md
+//! Multi-segment ingest (`api::ingest_segments`, specs/arrow_ipc_bulk_format.md
 //! §9.2 OPEN-Q3-6): all segments run in ONE atomic, conflict-retried
 //! transaction with ONE commit row — all-or-nothing.
 

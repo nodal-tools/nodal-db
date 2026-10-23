@@ -25,7 +25,7 @@ Mechanics
    ambiguous member picks, and the `parameter_type_list` drift table
    ("declared X, observed Y — chain will repair"). Zero silent drops.
 
-Allowlist posture (docs/dev/schema_interop.md §3.6 + finale plan critique
+Allowlist posture (specs/schema_interop.md §3.6 + finale plan critique
 MINOR 9): allowlist OFF for migration-range imports — vocabulary imports as
 found. The closed-allowlist mode exists for curated non-migration imports
 and is out of scope here.

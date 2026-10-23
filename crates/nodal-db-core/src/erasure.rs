@@ -8,7 +8,7 @@
 //! History may be *removed with a trace*; it may never be *rewritten*.
 //!
 //! ## v1 grain: erase-by-alternative
-//! The results-architecture customer (`docs/dev/schema_interop.md` §9
+//! The results-architecture customer (`specs/schema_interop.md` §9
 //! overwrite-on-rerun): a discarded run's whole result-alternative. Scope is
 //! closed by definition — every row keyed on the alternative, ANY validity,
 //! across the seven alternative-keyed tables plus the `value_array_hist` twin
@@ -433,7 +433,7 @@ fn expect_present_problems(
             None => problems.push(format!(
                 "expect_present alternative '{n}' has no current row \
                  (rerun-overwrite ordering: commit the replacement run fully, \
-                 then erase the old one — schema_interop.md §9)"
+                 then erase the old one)"
             )),
             Some(id) if id == target_id => problems.push(format!(
                 "expect_present names the alternative being erased ('{n}')"

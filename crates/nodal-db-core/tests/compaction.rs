@@ -524,9 +524,13 @@ fn clustered_current_scan_is_measurably_faster() {
     assert_eq!(n, 2000);
     conn.close().unwrap();
     let json = std::fs::read_to_string(&prof).expect("profiling output");
-    // Crude but dependency-free: collect every "operator_rows_scanned": N.
-    let scanned_max = json
-        .match_indices("\"operator_rows_scanned\"")
+    // Crude but dependency-free: collect every per-operator rows-scanned
+    // count. DuckDB 1.5.5 names the key "operator_rows_scanned"; 2.0 renamed
+    // it "rows_scanned" (the quoted match excludes 2.0's query-level
+    // "total_rows_scanned").
+    let scanned_max = ["\"operator_rows_scanned\"", "\"rows_scanned\""]
+        .iter()
+        .flat_map(|key| json.match_indices(key))
         .filter_map(|(i, _)| {
             let tail = &json[i..];
             let colon = tail.find(':')?;
@@ -539,7 +543,7 @@ fn clustered_current_scan_is_measurably_faster() {
                 .ok()
         })
         .max()
-        .expect("operator_rows_scanned present in the profile");
+        .expect("a rows-scanned count present in the profile");
     println!("keyed range read: {scanned_max} of 2000000 rows scanned");
     assert!(
         scanned_max < 500_000,

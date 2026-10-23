@@ -3,7 +3,7 @@
 # `just docs`. Zensical reads mkdocs.yml-style settings under [project].
 [project]
 site_name = "nodal-db"
-site_description = "A planning-scale parameter database: a DuckDB schema plus an all-Rust core"
+site_description = "A general-purpose database format for structured, versioned modelling data: a DuckDB schema plus an all-Rust core"
 site_url = "https://nodal-tools.github.io/nodal-db/"
 repo_url = "https://github.com/nodal-tools/nodal-db"
 repo_name = "nodal-tools/nodal-db"
@@ -26,6 +26,7 @@ nav = [
   { "Schema" = "schema.md" },
   { "Developer docs" = [
     { "Architecture" = "dev/architecture.md" },
+    { "Design rationale: value storage" = "dev/design_rationale.md" },
     { "Building against nodal-db" = "dev/building_against_nodal-db.md" },
     { "Arrow-IPC import format" = "dev/arrow_import_format.md" },
   ] },

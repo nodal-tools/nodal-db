@@ -4,7 +4,9 @@ The first part of this page walks through creating a database, writing
 data and reading it back. The second part covers the rules that tools
 integrating with nodal-db must follow.
 
-The examples share one small data set: a `node` class with an hourly
+The examples share one small data set, taken from energy-system
+modelling (nodal-db's first use case) but standing for any kind of
+model: a `node` class with an hourly
 `demand` series, a `unit` class with a scalar `capacity`, a `Base`
 alternative and a `high_demand` alternative stacked on top of it in a
 scenario called `stress`. The outputs shown were produced by running
@@ -14,9 +16,10 @@ these examples.
 
 ### Build
 
-nodal-db has no binary releases yet. Build it from a checkout of the
-repository. You need a Rust toolchain; for the Python parts, Python 3.9
-or later.
+Versioned releases, when available, are listed on the
+[Releases page](https://github.com/nodal-tools/nodal-db/releases). To
+build from a checkout of the repository, you need a Rust toolchain and,
+for the Python parts, Python 3.9 or later.
 
 ```bash
 git clone https://github.com/nodal-tools/nodal-db.git
@@ -325,7 +328,7 @@ Commonly used parts of the read surface:
 |---|---|
 | `read_parameter(class, parameter)` | current values of one parameter, all alternatives |
 | `read_parameter_scalar(class, parameter)` | scalar values only; faster for large scalar parameters |
-| `read_parameter_dense(class, parameter)` | array-tier values as lists with axis ids, for bulk reads |
+| `read_parameter_dense(class, parameter)` | dense-array values as lists with axis ids, for bulk reads |
 | `resolved_value_rows(scenario)` | the winning value per (entity, parameter) in a scenario |
 | `scenario_value_conflict` | values that compete within a scenario, before resolution |
 | `scenario_contents(scenario)` | entities, activation and group membership in a scenario |

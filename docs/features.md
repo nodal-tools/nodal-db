@@ -1,7 +1,9 @@
 # Features
 
-This page lists what nodal-db does today. Features that are planned but
-not implemented are marked **Planned**. For commands and code, see
+This page is a tour of what nodal-db does. Features that are planned but
+not implemented are marked **Planned**. The examples use names from
+energy-system modelling (`node`, `unit`, `demand`), nodal-db's first use
+case; the structures themselves are generic. For commands and code, see
 [Using nodal-db](usage.md).
 
 ## Entity classes and entities
@@ -63,13 +65,24 @@ with values but never converted.
 
 ### Storage tiers
 
-Internally, the core stores each value in one of three **tiers**:
+Internally, the core stores each value in one of three storage **tiers**:
 
-| Tier | Used for |
-|---|---|
-| scalar | rank-0 values |
-| array | float values over a complete grid, stored as a flat array against shared axes |
-| long | everything else: sparse grids, non-float values |
+| Tier (`tier` value) | Holds | Layout |
+|---|---|---|
+| Scalar (`scalar`) | values with no index | one value |
+| Dense array (`array`) | float values on a complete grid, 1–4 dimensions | one flat list of numbers against shared axes; coordinates come from the axes |
+| Long, row-per-cell (`long`) | everything else: incomplete grids and non-float values, 1–4 dimensions | one row per cell, each with its own coordinates |
+
+"Long" refers to long format: one row per cell, each carrying its own
+coordinates. Both the dense array and the long tier hold values with
+one to four dimensions; what separates them is completeness and value
+type. A grid is complete when every combination of the coordinates that
+occur in the value has a cell. Because the axes are derived from the
+data, a one-dimensional float series is always complete over its own
+axis, so it is always stored as a dense array, even when its time steps
+are irregular. Integer, boolean, string and date-time values use the
+long tier, even on a complete grid. The tables are `value_scalar`,
+`value_array` and `value_long`.
 
 The core decides the tier from the data. Callers never choose it, and
 readers never see it: every read macro returns the same long format
@@ -77,6 +90,8 @@ whichever tier the value is stored in.
 
 **Why:** dense hourly series are stored compactly and read fast, while
 sparse and mixed data keeps a simple row layout, behind one read shape.
+The trade-offs behind this split are explained in
+[Design rationale: value storage](dev/design_rationale.md).
 
 ## Canonical encoding and shared axes
 
@@ -111,8 +126,8 @@ The `commit` table is append-only.
 Mutable rows carry `valid_from_commit` and `valid_to_commit`. An update
 **closes out** the current row by setting `valid_to_commit` and inserts a
 new row with a higher `version`. Deleting a value or an object closes it
-out the same way. For array-tier values, the previous row is copied to a
-`value_array_hist` table in the same transaction. History is never
+out the same way. For dense-array values, the previous row is copied from
+`value_array` to a `value_array_hist` table in the same transaction. History is never
 rewritten.
 
 Audit views check that history is consistent, for example
@@ -287,8 +302,9 @@ Python exceptions (`nodal_db.Busy`, `nodal_db.Conflict`,
 `nodal_db.ApiError`, …). A `Database` handle holds only the file path;
 every method opens and closes its own connection.
 
-The package is built from source with `maturin`; it is not yet published
-on PyPI.
+The package is built from source with `maturin` (see
+[Build](usage.md#build)); published packages, when available, are listed
+on the [Releases page](https://github.com/nodal-tools/nodal-db/releases).
 
 ## Spine database import
 

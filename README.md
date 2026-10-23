@@ -1,8 +1,10 @@
 # nodal-db
 
-A planning-scale parameter database: a DuckDB schema plus an all-Rust core
-(canonicalizing writer library, `nodal-db` CLI) for storing model inputs,
-scenarios, and aggregated outputs. Documentation:
+A general-purpose database format for structured, versioned modelling data:
+a DuckDB schema plus an all-Rust core (canonicalizing writer library,
+`nodal-db` CLI) for storing model inputs, alternatives and scenarios, and
+aggregated outputs, with append-only history. Its first use case is
+energy-system modelling. Documentation:
 <https://nodal-tools.github.io/nodal-db/> (sources in `docs/`); see
 `CONTRIBUTING.md` for development setup.
 

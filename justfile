@@ -39,6 +39,26 @@ smoke:
 bench:
     cargo bench
 
+# Opt-in, NOT part of `test`, `full` or `bench`: bulk ingest + read paths through
+# the core (~30 min; `--quick` ~1-2 min), then the raw-DuckDB layout comparison.
+# Results: scripts/bench/RESULTS_results_path.md. e.g. `just bench-results --quick`
+# Results-scale benchmark (ingest + reads through the core, then raw-DuckDB layout).
+bench-results *ARGS:
+    cargo bench -p nodal-db-cli --bench results_path -- all {{ARGS}}
+    {{py}} scripts/bench/raw_duckdb_layout.py {{ARGS}}
+
+# Runs under any Python with duckdb + numpy + pyarrow, e.g. a throwaway venv
+# with another DuckDB release: `just bench-raw-layout /tmp/duck2/bin/python --quick`
+# Raw-DuckDB layout comparison alone (dense lists vs lean long table).
+bench-raw-layout python=py *ARGS:
+    {{python}} scripts/bench/raw_duckdb_layout.py {{ARGS}}
+
+# Input files: `NODAL_RESULTS_DIR=/tmp/nr NODAL_RESULTS_KEEP=1 cargo bench -p nodal-db-cli
+# --bench results_path -- dense10k long`, then `--db /tmp/nr/ipc_dense_10p_r0.db`.
+# Surrogate-key value_array variant + commit-after-replace probe (any duckdb Python).
+bench-sk-variant python=py *ARGS:
+    {{python}} scripts/bench/surrogate_key_variant.py {{ARGS}}
+
 # Fast feedback loop — format check, lint, typecheck; no tests.
 check:
     cargo fmt --all --check

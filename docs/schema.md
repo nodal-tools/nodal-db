@@ -27,7 +27,7 @@ The DDL files form layers, each building on the ones before:
 | 020_alternatives | Alternatives, scenarios (rank-ordered alternatives), entity activation, and group membership. |
 | 030_parameters | Units registry, value lists, parameter definitions, per-entity unit overrides, declared parameter types. |
 | 040_axes | Shared, immutable axis objects (time grids, periods, labels, …) that array values index into. |
-| 050_values | The three physical value tiers — scalar, long (sparse/indexed rows), array (dense lists) — and the definition-level default/prefill mirrors. |
+| 050_values | The three storage tiers — scalar, dense array (one flat list per value), long (one row per cell) — and the definition-level default/prefill mirrors. |
 | 055–065 | Run provenance, authored display modes, and the ontology crosswalk (`semantic_annotation`). |
 | 070–120 | Views and table macros only: current state, the unified read surface, scenario resolution, completeness, history (as-of), and audits. |
 
@@ -36,7 +36,7 @@ The DDL files form layers, each building on the ones before:
 - **Versioned rows.** Mutable tables carry `valid_from_commit` /
   `valid_to_commit` (both `REFERENCES commit(id)`) and a `version`. A row
   is current while `valid_to_commit IS NULL`; edits close the old row and
-  append a new one, so history is never rewritten. (The array tier is the
+  append a new one, so history is never rewritten. (The dense-array tier is the
   exception: `value_array` holds current rows only and superseded ones move
   to its `value_array_hist` twin.) These versioning columns and their
   commit edges are omitted from the diagrams below to keep them legible.

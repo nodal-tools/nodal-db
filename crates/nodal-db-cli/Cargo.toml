@@ -20,3 +20,14 @@ arrow = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# Results-path benchmark (scripts/bench/RESULTS_results_path.md): bulk result
+# ingest (core API loop vs the Arrow-IPC `import` lane) + read paths at
+# solver-output scale. Lives in this crate because the IPC lane drives the
+# built `nodal-db` binary (CARGO_BIN_EXE_). `test = false` keeps it out of
+# `cargo test --workspace`; with no phase argument it is a no-op, so a bare
+# `cargo bench` does not start the ~30 min run. Run: `just bench-results`.
+[[bench]]
+name = "results_path"
+harness = false
+test = false

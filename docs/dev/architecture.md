@@ -60,8 +60,8 @@ matches `schema/*.sql`).
 - `001` meta (commit log, erasure markers, sequences, metadata) · `010`
   entities/classes/dimensions · `020` alternatives/scenarios · `030`
   parameter definitions · `040` axes (including parametric float and
-  datetime axes, and the CRS property) · `050` value tables (three tiers
-  plus the `_hist` twin of the array tier) · `055` provenance (`run`) ·
+  datetime axes, and the CRS property) · `050` value tables (three storage tiers
+  plus the `_hist` twin of the dense-array tier) · `055` provenance (`run`) ·
   `060` display modes · `065` semantic annotations
 - `070`–`120` the read surface: `_current` views, read macros
   (`read_parameter`, `value_rows`, …), scenario and activation
@@ -146,7 +146,10 @@ The pipeline:
 
 1. **NULL elimination** — NULL means absent. There is no "present but
    null" cell, so a writer that sends explicit NULLs and one that omits
-   the tuples produce the same result.
+   the tuples produce the same result. Value cells are read here too:
+   value floats are normalized (see below), and a timestamp (value or
+   coordinate) outside the store's range, 290309 BC to 294247 AD
+   (DuckDB's TIMESTAMP span), is rejected rather than stored.
 2. **Axis derivation** — axes come *from the data*: the distinct present
    coordinates per dimension, sorted by kind. Regular progressions are
    always stored in parametric form (start, step, length). Label
@@ -155,8 +158,8 @@ The pipeline:
    format).
 3. **Row-major sort** in declared-dimension order.
 4. **Tier decision** — rank 0 → scalar; rank ≥ 1, float-valued, full
-   Cartesian grid → dense array; otherwise → long. The *library*
-   decides; callers never pick a tier.
+   Cartesian grid → dense array; otherwise → long (one row per cell).
+   The *library* decides; callers never pick a tier.
 
 Then come content-verified axis deduplication (`axis`) and the history
 write protocol (`history`), all inside one atomic, conflict-retried
@@ -178,11 +181,18 @@ and
 
 ## 5. Value model
 
-- **Three physical tiers, one logical shape**: sparse or mixed data as
-  long rows, dense float grids as a flat row-major `DOUBLE[]` (with a
-  `BIGINT[]` sibling) against shared axes, and rank-0 values as
-  scalars. Readers never see the tier; the views present one long
-  format. See [storage tiers](../features.md#storage-tiers).
+- **Three storage tiers, one logical shape**: values with no index as
+  scalars (`value_scalar`); float values on a complete grid as a dense
+  array, one flat row-major `DOUBLE[]` per value against shared axes
+  (`value_array`); everything else (incomplete grids, non-float values)
+  in long format, one row per cell (`value_long`). Both the dense array
+  and the long tier go up to four dimensions. The schema also has a
+  `BIGINT[]` column on `value_array` for integer grids, which the read
+  views decode but the core does not write yet, so integer values use
+  the long tier. Readers never see the tier; the views present one long
+  format. See [storage tiers](../features.md#storage-tiers), and
+  [Design rationale: value storage](design_rationale.md) for the
+  alternatives considered and the performance trade-offs.
 - **Axes are content-addressed and immutable**, in the spirit of CF
   coordinate variables: shared by foreign key, deduplicated by content,
   parametric where regular so reconstruction is bit-exact. The
@@ -191,12 +201,15 @@ and
   Rust, so it is pinned by a conformance fixture whose inputs give a
   different result under FMA.
 - **History is a hybrid**: scalar and long tiers version rows in place
-  with from/to commits; the array tier keeps only live rows and copies
+  with from/to commits; the dense-array tier keeps only live rows and copies
   pre-images to a `_hist` twin, entirely in SQL so the engine guarantees
   atomicity. Version counters are partitioned per tier per key and
   checked by the `audit_history_tiling` view.
-- **NaN** is a legal *value* (every NaN bit pattern has the same
-  canonical encoding), never a legal axis coordinate.
+- **Float normalization**: the canonicalization pipeline stores every
+  `-0.0` as `+0.0` and every value NaN as the one quiet NaN
+  (`0x7ff8000000000000`), using the same function the canonical encoding
+  uses, so stored bits and content hashes cannot disagree. NaN is a legal
+  *value* but never a legal axis coordinate.
 - The rank cap is 4.
 
 ## 6. Concurrency and connection discipline
@@ -209,6 +222,10 @@ much, starving every commit. So everything is open → work → close:
 
 - `conn::with_write_txn` holds the read-write lock only for the span of
   one commit; `with_read` opens a fresh read-only connection per query.
+- Both refuse a path that is not an existing file before opening it (a
+  read-write open would otherwise create an empty database), and a write
+  whose `commit` insert fails on a file without a `commit` table reports
+  "not an initialized nodal-db database" instead of DuckDB's catalog error.
 - Change detection is **commit polling**: a poller makes a short
   read-only query of the newest commit id between writer commits. There
   is no notification channel and no long-lived watcher connection.
@@ -295,18 +312,20 @@ The benchmark gate lives in `crates/nodal-db-core/benches/`, with
 results recorded in
 [`benches/RESULTS.md`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/benches/RESULTS.md);
 it is re-run at each DuckDB upgrade. One known residual is recorded
-there: a point read of a single array-tier value is slower than its
+there: a point read of a single dense-array value is slower than its
 target, because DuckDB decompresses the containing segment.
 
 CI runs `cargo test --workspace` and the schema smoke suite.
 
 ## 10. Status
 
-- **Implemented**: the core write and read path, the tier pipeline, axis
-  deduplication, the history protocol, Arrow-IPC import, CLI `init`,
-  value and object deletion, structural writes and verbs, hard erasure,
-  compaction, the template loader (load / plan / apply / export), the
-  Python skin, conformance and benchmark gates.
+For the current state of the code, see the
+[commit history](https://github.com/nodal-tools/nodal-db/commits/main),
+the [Releases page](https://github.com/nodal-tools/nodal-db/releases) and
+the [CI runs](https://github.com/nodal-tools/nodal-db/actions/workflows/ci.yml).
+The components described on this page are implemented except for the
+following:
+
 - **In development**: the editor (separate repository).
 - **Planned**: CLI `migrate` and `maintain` (verbs reserved); a CLI verb
   for compaction.

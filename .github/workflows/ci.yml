@@ -14,23 +14,30 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # duckdb-rs compiles bundled DuckDB from source (minutes); cache it.
       - uses: Swatinem/rust-cache@v2
+
+      # The project venv (.venv, deps in dev-requirements.txt) is needed by
+      # both halves: `cargo test` shells out to the conformance oracles via
+      # .venv/bin/python (tests/python_oracle.rs), and the smoke suite runs
+      # on its pinned DuckDB. Same setup as `just venv`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: project venv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r dev-requirements.txt
 
       # Quick gate, half 1: Rust core. Matches `cargo test --workspace`
       # locally — slow `#[ignore]` tests stay out of this tier.
       - name: cargo test --workspace
         run: cargo test --workspace
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      # Quick gate, half 2: schema smoke (expects 198/198). DuckDB pinned to
-      # the line the schema is verified on (CLAUDE.md: DuckDB 1.5.5).
+      # Quick gate, half 2: schema smoke (expects 198/198), on the venv's
+      # DuckDB pinned to the line the schema is verified on (1.5.5).
       - name: schema smoke test
-        run: |
-          pip install duckdb==1.5.5
-          python schema/smoke_test.py
+        run: .venv/bin/python schema/smoke_test.py

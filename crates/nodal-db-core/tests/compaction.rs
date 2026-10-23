@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use duckdb::arrow::array::{ArrayRef, Float64Array, StringArray};
+use duckdb::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
@@ -710,5 +710,89 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
     assert!(
         baseline_path(&db).exists(),
         "orphan sweep must not delete the baseline sidecar"
+    );
+}
+
+// --- array_id: copied verbatim, stride and parity survive --------------------
+
+fn write_array(db: &Path, entity: &str, vals: &[f64]) {
+    let n = vals.len();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("step", DataType::Int64, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![entity; n])) as ArrayRef,
+            Arc::new(Int64Array::from((0..n as i64).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(Float64Array::from(vals.to_vec())) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    write_parameter(
+        db,
+        "node",
+        "profile",
+        "Base",
+        batch,
+        &[],
+        WriteOptions::default(),
+        "tester",
+        "array write",
+    )
+    .expect("write array");
+}
+
+/// Compaction copies every `array_id` verbatim (live and `_hist`), and the
+/// sequence restore keeps `seq_value_array`'s INCREMENT BY 2 (F10: a bare
+/// `START WITH n` used to reset it to 1) and the ids' parity.
+#[test]
+fn compact_preserves_array_ids_and_sequence_stride() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("arr.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    for i in 0..4 {
+        for e in ["a", "b", "c"] {
+            write_array(&db, e, &[i as f64, 1.0, 2.0]);
+        }
+    }
+    let ids_query = "SELECT 'live', array_id, entity_id, version FROM value_array \
+                     UNION ALL SELECT 'hist', array_id, entity_id, version FROM value_array_hist";
+    let before = fingerprint(&db, ids_query);
+    let last_before = scalar(
+        &db,
+        "SELECT last_value FROM duckdb_sequences() WHERE sequence_name = 'seq_value_array'",
+    );
+
+    compact(&db).expect("compact");
+
+    assert_eq!(
+        fingerprint(&db, ids_query),
+        before,
+        "array_ids copied verbatim"
+    );
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT increment_by FROM duckdb_sequences() WHERE sequence_name = 'seq_value_array'"
+        ),
+        2,
+        "stride survives the sequence restore"
+    );
+    // A fresh array value after compaction mints last + 2 (odd), never a
+    // re-used or adjacent id.
+    write_array(&db, "d", &[9.0, 9.0, 9.0]);
+    let new_id = scalar(
+        &db,
+        "SELECT va.array_id FROM value_array va JOIN entity e ON e.id = va.entity_id \
+         WHERE e.name = 'd'",
+    );
+    assert_eq!(new_id, last_before + 2);
+    assert_eq!(new_id % 2, 1);
+    assert_eq!(
+        scalar(&db, "SELECT count(*) FROM audit_array_id_coherence"),
+        0
     );
 }

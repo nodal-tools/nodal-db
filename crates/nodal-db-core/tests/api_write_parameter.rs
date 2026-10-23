@@ -1527,3 +1527,48 @@ fn domains_arg_wins_over_conflicting_metadata() {
         "ordinals follow the arg's order, not the metadata's"
     );
 }
+
+/// `array_id` (the physical row handle) is stable across an in-place replace:
+/// the `_hist` pre-image carries the live row's id and the old version, the
+/// live row keeps its id with the new version, and ids are odd (stride 2).
+#[test]
+fn array_id_is_stable_across_replace_and_copied_into_hist() {
+    let (_dir, db) = fresh_db();
+    for (v, msg) in [(1.0, "v1"), (2.0, "v2"), (3.0, "v3")] {
+        write_parameter(
+            &db,
+            "node",
+            "profile",
+            "Base",
+            indexed_float_batch("node_1", "step", &[0, 1, 2], &[v, v + 1.0, v + 2.0]),
+            &[],
+            WriteOptions::default(),
+            "tester",
+            msg,
+        )
+        .expect("write");
+    }
+    let conn = Connection::open(&db).unwrap();
+    let (live_id, live_ver): (i64, i16) = conn
+        .query_row("SELECT array_id, version FROM value_array", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    let hist: Vec<(i64, i16)> = conn
+        .prepare("SELECT array_id, version FROM value_array_hist ORDER BY version")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let audit: i64 = conn
+        .query_row("SELECT count(*) FROM audit_array_id_coherence", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.close().unwrap();
+    assert_eq!(live_ver, 3);
+    assert_eq!(live_id % 2, 1, "array_id minted by the stride-2 sequence");
+    assert_eq!(hist, vec![(live_id, 1), (live_id, 2)]);
+    assert_eq!(audit, 0);
+}

@@ -929,3 +929,53 @@ fn identical_keys_are_deduped() {
     );
     audit_clean(&db);
 }
+
+/// A delete followed by a re-write mints a NEW `array_id` (ids are never
+/// re-used), while versions continue per key triple across both ids.
+#[test]
+fn array_delete_then_rewrite_mints_new_array_id() {
+    let (_dir, db) = fresh_db();
+    let w = |vals: &[f64], msg: &str| {
+        write_parameter(
+            &db,
+            "node",
+            "profile",
+            "Base",
+            indexed_float_batch("node_1", "step", &[0, 1, 2], vals),
+            &[],
+            o(),
+            "t",
+            msg,
+        )
+        .expect("write");
+    };
+    w(&[1.0, 2.0, 3.0], "v1");
+    let first = count(&db, "SELECT array_id FROM value_array");
+    delete_values(
+        &db,
+        vec![dk("node", "profile", "Base", "node_1")],
+        "t",
+        "del",
+        o(),
+    )
+    .expect("del");
+    w(&[4.0, 5.0, 6.0], "v2");
+    let second = count(&db, "SELECT array_id FROM value_array");
+    assert_ne!(first, second, "re-insert mints a fresh id");
+    assert_eq!(first % 2, 1);
+    assert_eq!(second % 2, 1);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT array_id FROM value_array_hist WHERE version = 1"
+        ),
+        first,
+        "the deleted row's pre-image keeps its id"
+    );
+    assert_eq!(count(&db, "SELECT version FROM value_array"), 2);
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM audit_array_id_coherence"),
+        0
+    );
+    audit_clean(&db);
+}

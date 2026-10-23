@@ -86,11 +86,30 @@ Design points:
 
 The [schema page](../schema.md) shows the generated table diagram.
 
-The schema is verified by `schema/smoke_test.py` (198 checks), which
+The schema is verified by `schema/smoke_test.py` (199 checks), which
 includes hostile-data regressions: it plants corruptions and asserts
 that the right constraint or audit fires. Run it with the project-local
 `.venv/bin/python`; its DuckDB version must match the engine bundled in
-the core (currently 1.5.5).
+the core (currently 2.0.0).
+
+Engine facts the code relies on (DuckDB 2.0):
+
+- **Files are created in the native 2.0 storage format** (tag `v2.0.0+`
+  in `duckdb_databases()`), by every create path: `schema_init`, the CLI
+  `init`, the Python skin, compaction's rebuild, and `schema/build.py`
+  (gated to DuckDB >= 2.0). Readers need DuckDB 2.0 or newer. The format
+  matters for speed: on a 1.5-format file every write to `value_array`
+  logs the whole list column to the WAL and stalls the commit on a
+  checkpoint; on a native file the same commit takes milliseconds.
+  `tests/storage_format.rs` guards this. DuckDB 2.0 still writes an old
+  1.5-format file in its old format, so a stale local file keeps the slow
+  path until it is rebuilt: `compaction::compact` always writes a native
+  file, or re-create the file.
+- **A failed statement aborts the surrounding transaction** (DuckDB 2.0
+  default: every error invalidates it, including catalog and binder
+  errors). Probe-and-continue inside a write transaction is not allowed:
+  any "try this statement, fall back on error" step must run before
+  `BEGIN` or in its own transaction.
 
 ## 3. Workspace map
 
@@ -232,7 +251,8 @@ much, starving every commit. So everything is open → work → close:
 - Contention is *defined behavior*: bounded-backoff retry, surfacing as
   `DbError::Busy` rather than a panic or hang. The write-conflict retry
   matches on the `Conflict` substring, because DuckDB's exact message
-  changed between versions.
+  depends on the operation (`Conflict on update!` for an UPDATE,
+  `Conflict on tuple deletion!` for a DELETE).
 - **In-process serialization**: DuckDB's file lock excludes other
   *processes* only. Two threads opening the same file get independent
   database instances whose commits can silently merge or be lost. Every
@@ -293,7 +313,7 @@ Compaction is a Rust API only; there is no CLI verb yet.
 Three legs, run through `just` (`just` is the quick gate, `just full`
 the release gate that adds the `#[ignore]`d slow tests and benchmarks):
 
-1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 198
+1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 199
    checks): builds a demo model, exercises resolution, membership,
    history and audits, then plants hostile-data corruptions and asserts
    that the right constraint or audit fires.

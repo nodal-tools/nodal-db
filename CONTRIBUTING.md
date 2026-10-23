@@ -7,8 +7,13 @@ All lasting work products (plans, findings, critiques, handoffs) go in
 `specs/` under the conventions in `specs/README.md`.
 
 ## Dev setup
-To be defined when the first code lands (expected: Python 3.11+, DuckDB;
-lint with ruff before committing).
+- **Python 3.11+** (the DuckDB 2.0 Python client requires it; the skin's
+  wheels are abi3-py311) and **DuckDB 2.0** (`duckdb==2.0.0` in
+  `dev-requirements.txt` / `docs-requirements.txt`, matching the engine the
+  core bundles). `just venv` and `just docs-venv` create the two venvs.
+- Lint with ruff before committing.
+- **SQL lambdas: use `lambda x: ...` syntax only.** The single-arrow form
+  `x -> ...` is disabled by default in DuckDB 2.0 and removed in 2.1.
 
 ## Testing rules (binding once code exists)
 Adopted from flextool-engine's hard-won lessons:

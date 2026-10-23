@@ -47,7 +47,7 @@ answer will be a served API, not a protocol document.
   as a defined error (`DbError::Busy` in Rust, `nodal_db.Busy` in
   Python) after a bounded retry, not as a hang. Readers may briefly fail
   to open while a commit is in progress and should retry.
-- Use DuckDB 1.5 or newer to read; see
+- Use DuckDB 2.0 or newer to read; see
   [DuckDB version](../usage.md#duckdb-version).
 
 ## The executable specification

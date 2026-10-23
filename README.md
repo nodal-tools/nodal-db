@@ -21,14 +21,16 @@ Managed with [`just`](https://github.com/casey/just); recipes in `justfile`.
 The quick gate is what you run on every change; `just full` is for pre-release.
 Slow tests are marked `#[ignore = "slow: pre-release tier"]` so they drop out
 of the quick gate automatically — tag any new slow test the same way. First run
-compiles bundled DuckDB (~16 min, cached thereafter). `just venv` creates the
+compiles bundled DuckDB (minutes: ~4 on 32 cores, longer on small machines;
+cached thereafter). `just venv` creates the
 Python venv the smoke suite and conformance oracles need.
 
 ## Inspecting a database
 
-DB files are written by the bundled **DuckDB 1.5.5** engine. A reader must be
-1.5.x — an older DuckDB (the machine's standalone CLI may lag) will refuse to
-open a 1.5.5 file with a storage-version error.
+DB files are written by the bundled **DuckDB 2.0.0** engine, in its native 2.0
+storage format. A reader must be DuckDB 2.0 or newer; a 1.x DuckDB (the
+machine's standalone CLI may lag) refuses the file with a storage-version error
+(`version number 999`). The DuckDB 2.0 Python client needs Python 3.11+.
 
 First make one to look at (or point the commands at any `.duckdb` file):
 
@@ -39,7 +41,7 @@ cargo run -p nodal-db-cli -- init /tmp/demo.duckdb
 
 ### Easiest: the project venv (guaranteed version-matched, no install)
 
-The `.venv` DuckDB is pinned to 1.5.5, so it always matches the file. Open
+The `.venv` DuckDB is pinned to 2.0.0, so it always matches the file. Open
 **read-only** so you never contend with a writer for the single-writer lock:
 
 ```bash
@@ -53,14 +55,14 @@ The `.venv` DuckDB is pinned to 1.5.5, so it always matches the file. Open
 >>> c.sql(\"SELECT * FROM read_parameter('node', 'demand') WHERE alternative = 'Base'\")
 ```
 
-### DuckDB CLI + web UI (needs a 1.5.x CLI)
+### DuckDB CLI + web UI (needs a 2.0 CLI)
 
 The standalone CLI gives an interactive shell and a local web table browser.
-Update it to 1.5.x first (the version manager's `latest` may be stale):
+Update it to 2.0 first (the version manager's `latest` may be stale):
 
 ```bash
 curl https://install.duckdb.org | sh      # installs/updates the latest CLI
-~/.duckdb/cli/latest/duckdb --version      # confirm >= 1.5.x
+~/.duckdb/cli/latest/duckdb --version      # confirm >= v2.0.0
 
 duckdb -readonly /tmp/demo.duckdb          # interactive SQL, read-only
 duckdb -ui /tmp/demo.duckdb                # opens the web UI in a browser

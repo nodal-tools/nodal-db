@@ -19,7 +19,7 @@ these examples.
 Versioned releases, when available, are listed on the
 [Releases page](https://github.com/nodal-tools/nodal-db/releases). To
 build from a checkout of the repository, you need a Rust toolchain and,
-for the Python parts, Python 3.9 or later.
+for the Python parts, Python 3.11 or later.
 
 ```bash
 git clone https://github.com/nodal-tools/nodal-db.git
@@ -285,7 +285,7 @@ The CLI has no scenario commands; use Python or Rust, or a template.
 
 ### Read with SQL
 
-Reads use SQL views and table macros. Any DuckDB client of version 1.5
+Reads use SQL views and table macros. Any DuckDB client of version 2.0
 or newer works (see [DuckDB version](#duckdb-version)). Open
 the file **read-only** and close the connection when done:
 
@@ -369,7 +369,7 @@ table = db.query("SELECT * FROM audit_health").read_all()  # pyarrow.Table
 ```
 
 For interactive browsing, the DuckDB CLI works too, provided it is
-version 1.5 or newer: `duckdb -readonly demo.duckdb`, or `duckdb -ui
+version 2.0 or newer: `duckdb -readonly demo.duckdb`, or `duckdb -ui
 demo.duckdb` for the browser UI.
 
 ### Read history
@@ -526,11 +526,13 @@ progress and should retry.
 
 ### DuckDB version
 
-!!! warning "Readers need DuckDB 1.5 or newer"
+!!! warning "Readers need DuckDB 2.0 or newer"
     Database files are written by the DuckDB engine bundled in the core,
-    currently 1.5.5, and the schema is verified on the 1.5 line. An older
-    DuckDB, such as an outdated standalone CLI, refuses to open the file
-    with a storage-version error. Check with
+    currently 2.0.0, in DuckDB's native 2.0 storage format, and the schema
+    is verified on the 2.0 line. A 1.x DuckDB, such as an outdated
+    standalone CLI or an older `duckdb` Python package, refuses to open
+    the file with a storage-version error. The DuckDB 2.0 Python client
+    needs Python 3.11 or later. Check with
     `duckdb --version` or `python -c "import duckdb; print(duckdb.__version__)"`.
 
 ### Arrow versions

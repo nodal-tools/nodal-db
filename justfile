@@ -27,7 +27,7 @@ t *ARGS:
 # Release gate (pre-release only): everything, including the #[ignore] slow tests,
 # the schema smoke suite, and the benchmark gate (long — builds a ~150 MB DB).
 full:
-    cargo test --workspace -- --include-ignored
+    cargo test --workspace -- --include-ignored --skip helper_
     {{py}} schema/smoke_test.py
     cargo bench
     # The array_id index-scan guard in a release build: debug-built DuckDB

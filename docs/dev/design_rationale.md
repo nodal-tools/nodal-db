@@ -275,7 +275,7 @@ comparison will be added here from its results.
 | Read a whole value | One row and one list of `n` numbers. No per-cell keys. Through `read_parameter_dense` or `value_cells` the list is fetched by its `array_id` with an index scan (about 2.4 ms for one 8 760-value array in the `array_id` measurements below). A read that scans the table instead pays a fixed cost set by how much list data is stored, not by `n` (77 ms in Set A below, measured before the `array_id` key existed). | `n` rows, each with keys, positions and a value. |
 | Read a slice (a time window, or one index of a multi-dimensional value) | Costs the same as reading the whole value (see below). | A filter on positions or coordinates over the value's rows. Not benchmarked separately. |
 | Read one cell | Same as a slice. | About 1 ms in the benchmark gate. |
-| Write a new value | One row, but the list is currently passed as one SQL parameter per cell, which dominates the cost. | `n` rows, written in batched multi-row inserts. |
+| Write a new value | One row; the whole list is bound as one SQL list parameter. | `n` rows, inserted by one statement that binds each column as a list (up to 16 384 cells per execution). |
 | Change one cell | The whole value is rewritten: the old row (all `n` cells) is copied to `value_array_hist` and the current row is replaced. | The whole value is rewritten: all `n` current rows are closed out (marked, not copied) and `n` new rows are inserted. |
 | History growth per change | About one extra copy of the value. | About one extra copy of the value, at long-format row size. |
 | Effect of history on current reads | No effect on scans of current data: superseded arrays live in a separate table. The file grows (see below). | Small: closed-out rows share the table. Measured scan slowdown 1.41× with 18–33 % of rows closed out. |
@@ -322,11 +322,11 @@ Notes on the table:
 - **Very long series.** A dense array is one row however long it is.
   The core holds the whole value in memory while canonicalizing and
   writing it, in a working form several times larger than its eight
-  bytes per cell. The array is inserted as one SQL statement with one
-  parameter per cell, so a one-minute series for a year means an insert
-  with about 525 600 parameters. That statement's cost grows with `n`:
-  about 22 ms per 8 760-value series in Set B; longer series were not
-  measured. Every edit, even of one cell, rewrites the whole array and,
+  bytes per cell. The array is written as one row whose list is bound
+  as a single SQL parameter; it cannot be split across statements. In a
+  probe on DuckDB 2.0.0, a one-minute series for a year (525 600 values)
+  bound and inserted in about 0.2 s with about 135 MB of transient
+  memory. Every edit, even of one cell, rewrites the whole array and,
   with retention on, copies the old one to history.
 - **History growth and read speed.** Reads of current dense arrays use
   `value_array` only, so a growing `value_array_hist` does not slow
@@ -386,7 +386,7 @@ compress, like solver output.
 |---|---|
 | Dense-array ingest, one commit | about 280 000 values/s |
 | Long-tier ingest (876 000 integer cells) | about 5 400 values/s, about 50× slower per value |
-| Share of dense-array write time spent parsing and binding the insert statement, which carries one parameter per cell | about two thirds (about 22 ms per 8 760-value series) |
+| Share of dense-array write time spent parsing and binding the insert statement, which then carried one parameter per cell (since replaced by one list parameter, see below) | about two thirds (about 22 ms per 8 760-value series) |
 | File size, 8.76 million dense values in one commit | 71.5 MiB (about 8.2 bytes per value, net of the empty schema) |
 | File size, same data written in 10 commits | 127 MiB, before compaction |
 | File size, 876 000 long cells in one commit | 79 MiB (about 91 bytes per cell net, including indexes) |
@@ -425,6 +425,39 @@ per cent slower; a paired, interleaved comparison of the whole-parameter
 read of more than 50 series at once falls back to scanning the list
 data (51 series: 88 ms). The file grew by 256 KiB (0.04 %).
 
+**The columnar write path, before and after.** Until this change, a long
+value was inserted with multi-row `VALUES` statements carrying 30
+parameters per cell, an array with one parameter per element, and each
+child row of a materialized axis with its own statement. DuckDB 2.0
+parses such statements about three times slower than 1.5.5. Each column
+is now bound as one list parameter (see the
+[architecture page](architecture.md)). Measured with the paired,
+interleaved harness in `scripts/bench/ab_write_path/` (21 pairs per row,
+random order within each pair, median of the per-pair ratios with a
+bootstrap 95 % interval), old and new core each built in release
+against the bundled DuckDB 2.0.0, on the same AMD Ryzen 9 5900XT host
+(shared with other jobs; load average 2 to 37; the rows whose load
+changed by more than 2× during the first run were re-run at load 2 to 7
+and kept their ratios within 0.01). Times are medians per value, through
+`history::write_value` in one transaction, commit included:
+
+| Write | Before | After | Ratio (95 % interval) |
+|---|---|---|---|
+| New 8 760-cell long value | 1 781 ms | 143 ms | 0.080 (0.080–0.081) |
+| Replace an 8 760-cell long value | 1 851 ms | 239 ms | 0.127 (0.124–0.129) |
+| New 8 760-value array (20 per commit) | 111 ms | 8.0 ms | 0.073 (0.072–0.074) |
+| Replace an 8 760-value array (20 per commit) | 120 ms | 16.1 ms | 0.134 (0.133–0.137) |
+| New long value on a new irregular 8 760-point datetime axis | 5 913 ms | 162 ms | 0.027 (0.027–0.028) |
+| New scalar (400 per commit) | 7.0 ms | 2.9 ms | 0.42 (0.40–0.45) |
+| Replace a scalar (400 per commit) | 5.8 ms | 2.8 ms | 0.48 (0.47–0.49) |
+| 100 new scalar entities through `write_parameter` | 9.0 ms | 5.5 ms | 0.62 (0.60–0.65) |
+| Read: current cells of one 876-cell long value | 0.61 ms | 0.60 ms | 1.01 (0.97–1.03), unchanged |
+
+The stored rows are byte-identical before and after: a physical-write
+golden test (`tests/write_path_golden.rs`) was generated by the old code
+and passes unchanged. The Set B import of the 87.6 million dense values
+through `nodal-db import` (one commit): 1 200 s before (the `array_id` row above), 97 s after (one full-scale run, load average 4 to 12), with the file size identical to the byte (735 326 208 B).
+
 ## Known limitations and open directions
 
 - **Point and slice reads of dense arrays.** Through
@@ -437,13 +470,16 @@ data (51 series: 88 ms). The file grew by 256 KiB (0.04 %).
   `read_parameter`, `value_rows` and `value_array_asof`. A fast path for
   those is planned. The index lookup depends on DuckDB's planner
   heuristics, so a test checks the plan shape on every build.
-- **Dense-array write speed.** Each array is inserted with one SQL
-  parameter per cell. Batching array inserts, as was already done for
-  the long tier (about 12× faster there), is the identified next
-  improvement; it is not implemented yet.
-- **Long-tier write speed.** Even after batching, long-tier writes are
-  much slower per value than dense-array writes. Large result sets are
-  best kept dense: complete grids of float values.
+- **Long-tier write speed.** Long-tier writes are still much slower
+  per value than dense-array writes (about 16 µs per cell against about
+  1 µs per array value in the measurements above). Large result sets
+  are best kept dense: complete grids of float values. Closing out and
+  versioning a whole segment's keys in one statement, instead of key by
+  key, is the next planned step.
+- **Scalar write speed.** A scalar value costs a few statements of a
+  few hundred microseconds each (about 3 ms per value above), so
+  scalar-heavy saves and imports manage a few hundred values per second.
+  A set-based scalar write is planned.
 - **Edits rewrite whole values.** Changing one cell creates a full new
   version, in either tier. There is no per-cell history.
 - **The two-dimensional tier cliff.** One missing cell in a

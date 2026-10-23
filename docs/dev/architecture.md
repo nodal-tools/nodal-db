@@ -111,6 +111,22 @@ Engine facts the code relies on (DuckDB 2.0):
   errors). Probe-and-continue inside a write transaction is not allowed:
   any "try this statement, fall back on error" step must run before
   `BEGIN` or in its own transaction.
+- **Bulk inserts bind one list per column.** A long value is written as
+  `INSERT … SELECT ?, unnest(?::T[]), …` (per-key constants as scalars,
+  per-cell columns as lists, up to 16 384 cells per execution); an
+  array payload is one bound `?::DOUBLE[]`; a materialized axis's child
+  rows are one such statement per kind. The statement text does not
+  depend on the number of cells, so it is prepared once per transaction
+  (through the write connection's statement cache, capacity 64). DuckDB
+  2.0 parses a statement with thousands of placeholders slowly, which is
+  why one placeholder per cell is avoided. Two engine behaviours the code
+  relies on: several `unnest`s in one select list zip by position and
+  pad a shorter list with NULL **silently**, so every execution first
+  checks that each bound list has the chunk's length (in every build,
+  failing with `DbError::Internal`); and with the default
+  `preserve_insertion_order` the rows land in list order, which keeps a
+  long value's rows in canonical cell order. The write connection never
+  changes that setting.
 
 ## 3. Workspace map
 
@@ -128,7 +144,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `schema_init` | Apply `schema/*.sql` in numbered order (`build.py` in Rust) and the embedded schema list. |
 | `conn` | Connection discipline: open-work-close, a per-path in-process lock, bounded-backoff retry, write transactions that stamp the commit row. |
 | `axis` | Content-verified axis deduplication (the hash narrows, byte equality decides). |
-| `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; batched long-tier inserts. |
+| `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts. |
 | `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
 | `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, and entity / class / parameter creation. |

@@ -1,5 +1,18 @@
 # Pre-freeze benchmark gate — recorded results
 
+> **Re-baseline note (2026-10-23).** The gate figures below were recorded on
+> DuckDB 1.5.5 with 1.5-format files, and are **not yet re-baselined on
+> DuckDB 2.0**. The array write and commit figures (the "1 000 × 8 760 float
+> arrays" build stage and the "Write benches" section) are known to be
+> inflated by the 1.5-format WAL behaviour: on a 1.5-format file every write
+> to `value_array` logs the whole list column to the WAL and then stalls on
+> a checkpoint (`scripts/bench/RESULTS_results_path.md` §5). DuckDB 2.0
+> creates native-format files where the same single-row replace logs
+> ~0.1 MiB (`tests/storage_format.rs`). Scalar and long-tier stages have no
+> list column and should change little; the read budgets are not expected
+> to move (2.0 does not change list reads). The 2.0 column in the tables
+> below is **pending re-run** (see its note).
+
 Plan Part 5 deliverable 4 (`specs/rust_implementation_plan.md`); budgets from
 `specs/value_model_plan.md` Part 6; methodology mirrors `specs/ddl_sketch.md`
 §10. **Recording gate**: measurements are recorded against budgets; nothing
@@ -17,8 +30,19 @@ below).
 | RAM | 16 GB |
 | Disk | SATA SSD (`/dev/sda`), ext4; DB in `/tmp` (same device) |
 | DuckDB | v1.5.5 (duckdb-rs 1.10505.0, bundled) — §10 baselines were DuckDB 1.4.4 |
+| DuckDB (2.0.0 column) | v2.0.0 (duckdb-rs 1.20000.0, bundled), native-format files — **pending re-run** (see the note below this table) |
 | Profile | `bench` (inherits release, opt-level 3) |
 | criterion | 0.5.1, sample size 10 for slow benches (wall-clock accuracy over statistical polish) |
+
+**2.0.0 column status: pending re-run.** The DuckDB 2.0 upgrade (2026-10-23)
+did not publish 2.0 figures. The only machine available was a shared AMD
+Ryzen 9 5900XT host that other jobs were loading (load average swinging
+between about 2 and 35 during the session), and the 1.5.5 column was
+measured on a different machine (the i3-6100 above). A 2.0 column from that
+host would compare neither the engines nor the machines cleanly. To fill it:
+on one quiet machine, run `cargo bench` and
+`cargo bench -p nodal-db-core --bench long_write` on DuckDB 2.0, and ideally
+re-run the 1.5.5 baseline on the same machine.
 
 ## Synthetic DB (ddl_sketch §10 scale, built THROUGH `api::write_parameter`/`ingest_segments`)
 
@@ -28,13 +52,13 @@ entity-rewrites of churn), 1 000 × 8 760-cell float arrays (~70 MB, Tier A),
 
 **Build wall time — this IS the bulk-write benchmark number:**
 
-| Stage | Wall | Per unit |
-|---|---|---|
-| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) |
-| 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** |
-| 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** |
-| churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite |
-| **Total** | **6 586.5 s (109.8 min)** | |
+| Stage | Wall (1.5.5) | Per unit (1.5.5) | 2.0.0 |
+|---|---|---|---|
+| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | pending re-run |
+| 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** | pending re-run |
+| 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** | pending re-run |
+| churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite | pending re-run |
+| **Total** | **6 586.5 s (109.8 min)** | | pending re-run |
 
 Context: fresh read-only connection open + `SELECT 1` on the built 213 MB
 file: **534.5 ms** (median of 5). The §10 methodology (and the read benches
@@ -44,16 +68,16 @@ freeze.
 
 ## Read benches vs VMP Part 6 budgets (warm RO connection, end-to-end to Arrow)
 
-| Read (budget) | §10 baseline (1.4.4, ref machine) | Measured (1.5.5, this machine) | Status |
-|---|---|---|---|
-| Point scalar, triple (< 5 ms) | 1.2 ms | **0.98 ms** | PASS |
-| Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS |
-| Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below |
-| Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) |
-| 10⁵ scalars, `read_parameter_scalar` (< 20 ms) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) |
-| 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) |
-| Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded |
-| Model-load context: 1.23 M long rows canonical (< 3 s) | 587 ms | **2 063 ms** | PASS |
+| Read (budget) | §10 baseline (1.4.4, ref machine) | Measured (1.5.5, this machine) | Status | 2.0.0 |
+|---|---|---|---|---|
+| Point scalar, triple (< 5 ms) | 1.2 ms | **0.98 ms** | PASS | pending re-run |
+| Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS | pending re-run |
+| Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below | pending re-run |
+| Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | pending re-run |
+| 10⁵ scalars, `read_parameter_scalar` (< 20 ms) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | pending re-run |
+| 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | pending re-run |
+| Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | pending re-run |
+| Model-load context: 1.23 M long rows canonical (< 3 s) | 587 ms | **2 063 ms** | PASS | pending re-run |
 
 **Point-array residual on 1.5.5 — re-measured, NOT improved.** 77 ms vs the
 < 5 ms budget (was 27–31 ms on 1.4.4 on a faster machine). The cost is still
@@ -79,12 +103,12 @@ zonemaps skip fully-dead groups, exactly the VMP Part 6 prediction. PASS
 
 ## Write benches (per cycle, each = one `write_parameter` commit + CHECKPOINT)
 
-| Bench | Measured | Baseline / note |
-|---|---|---|
-| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write |
-| Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope |
-| Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below |
-| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity |
+| Bench | Measured (1.5.5) | Baseline / note | 2.0.0 |
+|---|---|---|---|
+| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | pending re-run |
+| Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope | pending re-run |
+| Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below | pending re-run |
+| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | pending re-run |
 
 The one-current generated-column unique indexes (`one_current_long` at
 7-column width, `one_current_scalar`) are maintained by every write above —

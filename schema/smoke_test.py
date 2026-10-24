@@ -39,6 +39,14 @@ def check(name, ok, detail=""):
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  [{detail}]" if detail and not ok else ""))
 
 
+def unique_index_order(con, name):
+    """A unique index's key columns, in order, as duckdb_indexes() renders
+    them (e.g. '[ca, cp, ce]'); None when there is no such index."""
+    r = con.execute("SELECT expressions FROM duckdb_indexes()"
+                    " WHERE is_unique AND index_name = ?", [name]).fetchone()
+    return r[0] if r else None
+
+
 def payload_scans(plan):
     """Scan types of every TABLE_SCAN of value_array that projects a payload
     column, from an EXPLAIN (ANALYZE, FORMAT json) plan."""
@@ -431,6 +439,15 @@ def main():
           plain == {"axis_hash", "ix_entity_lname", "ix_run_result_alt"},
           str(sorted(plain)))
 
+    # ---- one-current unique-index key ORDER: a size decision, not
+    # semantics (uniqueness is order-independent). Constant-within-a-value
+    # columns lead and the highest-fan-out column trails; the old order cost
+    # ~5x the bytes per current row. Tripwire against an accidental revert;
+    # the size itself is guarded by crates/nodal-db-core/tests/long_index_size.rs.
+    order = unique_index_order(con, "one_current_long")
+    check("index key order: one_current_long is (c4, c3, c2, ca, cp, ce, c1)",
+          order == "[c4, c3, c2, ca, cp, ce, c1]", str(order))
+
     # ---- ix_entity_lname is used only behind the OFFSET 0 fence. A realistic
     # fixture (2 classes, a closed-out row) so statistics cannot drop the
     # class/current filters; the unfenced form is the negative control. The
@@ -708,6 +725,40 @@ def main():
     except duckdb.ConstraintException:
         con.execute("ROLLBACK")
         check("one-current index rejects duplicate current row", True)
+
+    # one_current_long enforces the same tuple set in any column order: a
+    # second current cell with the same (e, p, a, i1..i4) is rejected; a cell
+    # differing only in i3_pos, and a closed row beside the current one, are
+    # accepted. Uses gas's ragged ladder cell (f=0, p=0, t=0), current at c2.
+    long_cell = ("INSERT INTO value_long (entity_id, parameter_definition_id, alternative_id,"
+                 " valid_from_commit, valid_to_commit, version, axis1_id, axis2_id, axis3_id,"
+                 " i1_pos, i2_pos, i3_pos, value_kind, v_float)"
+                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 'float', 1.0)")
+    long_axes = [ax_field, ax_p, ax_tier]
+    try:
+        con.execute("BEGIN")
+        con.execute(long_cell, [gas, ladder, base, c2, None, 9, *long_axes, 0])
+        con.execute("ROLLBACK")
+        check("one_current_long rejects a duplicate current cell", False)
+    except duckdb.ConstraintException as e:
+        con.execute("ROLLBACK")
+        check("one_current_long rejects a duplicate current cell",
+              "Duplicate key" in str(e), str(e))
+    try:
+        con.execute("BEGIN")
+        # i3_pos 7: no current gas cell (f=0, p=0) has it
+        con.execute(long_cell, [gas, ladder, base, c2, None, 1, *long_axes, 7])
+        # a closed version of the current cell (f=0, p=0, t=0), closed by a
+        # commit minted inside this rolled-back transaction
+        c_close = new_commit(con, "smoke: closed long row")
+        con.execute(long_cell, [gas, ladder, base, c2, c_close, 9, *long_axes, 0])
+        ok = True
+    except duckdb.ConstraintException as e:
+        ok = False
+        detail = str(e)
+    con.execute("ROLLBACK")
+    check("one_current_long accepts a cell differing only in i3_pos and a closed"
+          " row beside the current one", ok, "" if ok else detail)
 
     check("axis dedup: shared grid resolves to one axis object", ax_ft == ax_ft2,
           f"{ax_ft} vs {ax_ft2}")

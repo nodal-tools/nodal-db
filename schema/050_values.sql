@@ -76,7 +76,7 @@ CREATE TABLE value_long (
   v_float DOUBLE, v_int BIGINT, v_bool BOOLEAN, v_str VARCHAR,
   v_datetime TIMESTAMP, v_dur_months INTEGER, v_dur_micros BIGINT,
   -- one-current guard over (triple, positions) — 7-column generated-column
-  -- unique index (width verified on DuckDB 1.4.4):
+  -- unique index (see the column-order note at the index below):
   ce BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL,
   cp BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_definition_id END) VIRTUAL,
   ca BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL,
@@ -85,7 +85,15 @@ CREATE TABLE value_long (
   c3 INTEGER GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN i3_pos END) VIRTUAL,
   c4 INTEGER GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN i4_pos END) VIRTUAL
 );
-CREATE UNIQUE INDEX one_current_long ON value_long (ce, cp, ca, c1, c2, c3, c4);
+-- One-current guard over (triple, positions). Column ORDER is a size
+-- decision, not semantics (uniqueness is order-independent): the columns
+-- that are constant within a value (c4, c3, c2 below the declared rank, and
+-- the key triple) lead; c1, the highest-fan-out column of a large value, is
+-- last, so no constant bytes trail each row's key in the ART. The previous
+-- order (ce, cp, ca, c1..c4) cost 58-86 B per current row; this one costs
+-- ~10-18 on realistic shapes (guard: crates/nodal-db-core/tests/
+-- long_index_size.rs). Never an access path (invariant 6).
+CREATE UNIQUE INDEX one_current_long ON value_long (c4, c3, c2, ca, cp, ce, c1);
 
 -- Tier A: dense float arrays. Current table holds ONLY live rows (the
 -- hottest scan surface physically cannot degrade — VMP Part 5); history in

@@ -37,6 +37,16 @@
 //! and api_long_10x8760_replace (10 keys seeded, then replaced in one
 //! commit; only the replace is timed).
 //!
+//! Single-name lookup modes (name_index_and_unused_indexes_PLAN §6), on a
+//! COPY of `NODAL_AB_BASE`: `lookup_raw_100k` (the core's single-name entity
+//! lookup statement, 200 prepared executions on one RO connection, ms per
+//! lookup) and `ensure_entity_100k` (the public `ensure_entity` verb on an
+//! existing entity: RO open + lookups, mean of 20 calls). The statement is
+//! the core's `api::ENTITY_NAME_LOOKUP_SQL` (default feature
+//! `lookup_const`); an old arm whose core predates that const builds with
+//! `--no-default-features` and runs the pre-2026-10-24 `cur_cls`/`cur_name`
+//! statement it replaced.
+//!
 //! Save-path modes (save_path_open_reduction plan §6.2): see `save_path.rs`
 //! (`editor_save`, `editor_reload`, `editor_session_100`,
 //! `txn_1_scalar_replace`, `growth_session`, `build_m1k`). The new arm is
@@ -62,6 +72,13 @@ use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
     LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions,
 };
+
+/// The single-name entity lookup statement under test (`?1`/first: class
+/// id, `?2`/second: name).
+#[cfg(feature = "lookup_const")]
+const ENTITY_LOOKUP: &str = nodal_db_core::api::ENTITY_NAME_LOOKUP_SQL;
+#[cfg(not(feature = "lookup_const"))]
+const ENTITY_LOOKUP: &str = "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)";
 
 const T0: i64 = 1_735_689_600 * 1_000_000;
 const H: i64 = 3_600_000_000;
@@ -631,6 +648,39 @@ fn main() {
             let ns = names(0..10);
             api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 0)], vec![]);
             api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 5)], vec![])
+        }
+        // Single-name lookups on the 10^5 file (see the module docs).
+        "ensure_entity_100k" => {
+            let db = copy_base(dir.path());
+            let t = Instant::now();
+            for i in 0..20 {
+                let name = format!("s{:06}", 40_000 + i * 7);
+                nodal_db_core::verbs::ensure_entity(&db, "node", Some(&name), &[], "ab").unwrap();
+            }
+            t.elapsed().as_secs_f64() * 1e3 / 20.0
+        }
+        "lookup_raw_100k" => {
+            let db = copy_base(dir.path());
+            with_read(&db, |conn| {
+                let cid: i64 = conn.query_row(
+                    "SELECT id FROM entity_class WHERE cur_name = 'node'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let mut stmt = conn.prepare(ENTITY_LOOKUP)?;
+                for i in 0..20 {
+                    let name = format!("S{i:06}");
+                    let _: i64 = stmt.query_row(duckdb::params![cid, name], |r| r.get(0))?;
+                }
+                let t = Instant::now();
+                for i in 0..200 {
+                    let name = format!("S{:06}", 30_000 + i * 13);
+                    let id: i64 = stmt.query_row(duckdb::params![cid, name], |r| r.get(0))?;
+                    assert!(id > 0);
+                }
+                Ok(t.elapsed().as_secs_f64() * 1e3 / 200.0)
+            })
+            .unwrap()
         }
         other => panic!("unknown mode {other}"),
     };

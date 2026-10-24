@@ -662,6 +662,49 @@ the first and last ten saves.
 - On m1k the reload (≈3.0 s) dwarfs everything else; see the editor's
   reload quick win and incremental-refresh issue.
 
+## 10. Entity name index, unused indexes dropped (2026-10-24, DuckDB 2.0.0)
+
+`specs/name_index_and_unused_indexes_PLAN.md`: `ix_entity_lname ON entity
+(lower(name))`, queried behind an `OFFSET 0` fence by the single-name
+entity lookups (`lookup_entity`, `ENTITY_LOOKUP_ONE_SQL`), and the four
+never-used multi-column indexes dropped (`ix_value_scalar_triple`,
+`ix_value_long_triple`, `ix_value_array_hist_triple`,
+`ix_semantic_annotation_obj`). Harness `scripts/bench/ab_write_path`,
+release builds: old = `fa36c14` (built `--no-default-features --features
+save_api`, so `lookup_raw_100k` runs the old `cur_cls`/`cur_name`
+statement), new = the change (`--features save_api`; `lookup_raw_100k`
+runs the core's `api::ENTITY_NAME_LOOKUP_SQL`). Each arm builds its own
+`build_100k` / `build_big` base files, so each has its own index set.
+Paired, interleaved `ab.py`, N = 21 pairs, median per-pair ratio
+new/old with a bootstrap 95 % CI; shared host, load average 7-20.
+
+| Mode | old (ms) | new (ms) | ratio (95 % CI) | load |
+|---|---|---|---|---|
+| `lookup_raw_100k` (one single-name lookup, prepared, RO connection) | 3.834 | **0.494** | **0.129 (0.127-0.132)** | 20 → 12 |
+| `ensure_entity_100k` (public verb, existing entity, incl. RO open) | 58.9 | 54.2 | 0.923 (0.915-0.936) | 12 → 10 |
+| `api_1_scalar_100k` (editor-shape save: 1 scalar replace) | 124.4 | 120.7 | 1.002 (0.900-1.068) | 10 → 17 |
+| `api_1_delete_big` (one value delete on the big file) | 139.6 | 144.4¹ | 0.949 (0.896-1.053) | 17 → 19 |
+| `editor_save` (small fixture) | 82.2 | 80.4 | 0.988 (0.971-1.004) | 19 → 9 ² |
+| `api_100_scalars_100k` (100 new entities, per value) | 0.988 | 0.968 | 0.992 (0.962-1.024) | 9 → 7 |
+| `api_delete_1000_scalar_big` (per commit) | 148.0 | 144.0 | 0.991 (0.930-1.017) | 7 → 13 |
+| `api_1_long24_big` (one 24-cell long replace on the big file) | 164.3 | 137.6 | 0.879 (0.748-0.969) | 13 → 10 |
+
+¹ The arms' medians come from different pairs; the paired ratio is the
+statistic. ² The load changed by slightly more than 2× during this
+mode, so by the harness's rule it is discarded.
+
+- A single-name lookup is ×7.8 faster at 10⁵ entities: an index probe
+  (~0.5 ms) instead of a scan of `entity` (~3.8 ms). The scan term grows
+  with the table; the probe does not.
+- Whole commits on single-name paths gain one lookup's worth inside the
+  commit's fixed open and checkpoint cost (−8 % on `ensure_entity`; the
+  single long replace, which also no longer maintains
+  `ix_value_long_triple`, −12 % with a wide CI). Set-based paths (100 new
+  entities, a 1 000-key delete) are unchanged: the hash join never used
+  an index and the dropped indexes cost little to maintain.
+- No mode regressed with a CI excluding 1.0. The plan's own run (§6,
+  N = 31, old = `4f0a02b`) agrees: lookup ratio 0.137 (0.134-0.139).
+
 ## Mapping to the earlier Set B figures
 
 The earlier figures came from the same harness (restored here unchanged

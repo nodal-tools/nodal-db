@@ -18,6 +18,11 @@ nodal-db-core = { path = "../../../crates/nodal-db-core" }
 tempfile = "3.27.0"
 
 [features]
+default = ["lookup_const"]
+# lookup_raw_100k runs the core's api::ENTITY_NAME_LOOKUP_SQL. An old arm
+# whose core predates that const (before 2026-10-24) builds with
+# --no-default-features and runs the cur_cls/cur_name statement instead.
+lookup_const = []
 # The save-path new arm (save_path_open_reduction plan §6.2): saves commit
 # with `WriteOptions::expect_commit` instead of a pre-commit RO poll, and
 # `growth_session` is available. Needs a core that has `expect_commit`.

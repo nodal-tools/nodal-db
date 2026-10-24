@@ -751,8 +751,14 @@ def main():
         check("one_current_long rejects a duplicate current cell", False)
     except duckdb.ConstraintException as e:
         con.execute("ROLLBACK")
+        # a uniqueness violation, not a CHECK / FK / NOT NULL one. DuckDB
+        # words it two ways ('Duplicate key "…" violates unique constraint'
+        # against committed rows, 'PRIMARY KEY or UNIQUE constraint
+        # violation: duplicate key "…"' against the same transaction's own
+        # rows; 2.0.0), so match either.
         check("one_current_long rejects a duplicate current cell",
-              "Duplicate key" in str(e), str(e))
+              re.search(r"duplicate key|unique constraint", str(e), re.I) is not None,
+              str(e))
     try:
         con.execute("BEGIN")
         # i3_pos 7: no current gas cell (f=0, p=0) has it

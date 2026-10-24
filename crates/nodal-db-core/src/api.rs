@@ -219,6 +219,9 @@ pub fn commit_changes(
     // Unicode, and alternative names carry no ASCII charset CHECK, so the fold
     // must be Unicode too — an ASCII fold lets Ä/ä-aliased targets resolve to
     // one row and die as a raw CHECK error mid-transaction (critique F3).
+    // Rust's `to_lowercase` still differs from DuckDB's `lower()` on a few
+    // letters (final sigma, dotted capital I), so `write_prepared` repeats
+    // the check on the resolved ids; this one fails early with no DB work.
     let mut seen: HashMap<(String, String, String), ()> = HashMap::new();
     for s in &segments {
         let key = (

@@ -456,13 +456,24 @@ fn main() -> anyhow::Result<()> {
             } else {
                 compaction::compact(&db)?
             };
-            if r.swapped {
-                let why = match r.trigger {
-                    Some(compaction::CompactionTrigger::NoBaseline) => " (no baseline recorded)",
-                    Some(compaction::CompactionTrigger::Growth) => " (file growth)",
-                    Some(compaction::CompactionTrigger::Commits) => " (commit count)",
-                    Some(compaction::CompactionTrigger::Requested) | None => "",
-                };
+            let why = match r.trigger {
+                Some(compaction::CompactionTrigger::NoBaseline) => " (no baseline recorded)",
+                Some(compaction::CompactionTrigger::Growth) => " (file growth)",
+                Some(compaction::CompactionTrigger::Commits) => " (commit count)",
+                Some(compaction::CompactionTrigger::Requested) | None => "",
+            };
+            if let Some(w) = &r.warning {
+                eprintln!("warning: {w}");
+            }
+            if r.kept_original {
+                println!(
+                    "{}: compaction ran{why} but did not shrink the file \
+                     ({} rebuilt vs {}); original kept",
+                    db.display(),
+                    mib(r.bytes_rebuilt),
+                    mib(r.bytes_before)
+                );
+            } else if r.swapped {
                 println!(
                     "compacted {}: {} -> {}{why}",
                     db.display(),

@@ -822,7 +822,13 @@ impl Database {
 
     /// Rewrite the database file densely packed (keeps every row, history
     /// included, and the identity). Returns the report dict (`swapped`
-    /// False = skipped; `trigger` names why it ran).
+    /// False = skipped or original kept; `trigger` names why it ran).
+    ///
+    /// When the rebuilt file is not smaller than the original,
+    /// `if_needed=True` keeps the original (`kept_original` True, the
+    /// discarded size in `bytes_rebuilt`) and still resets the baseline, so
+    /// it does not retry until the next threshold; a plain `compact()`
+    /// replaces the file anyway. Both set `warning` (a string, else None).
     ///
     /// `if_needed=True` compacts only when due: the file has grown past
     /// `growth` (default 3.0) times its size after the last compaction, OR

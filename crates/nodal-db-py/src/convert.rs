@@ -660,6 +660,9 @@ pub(crate) fn compaction_report_to_py<'py>(
     d.set_item("bytes_after", r.bytes_after)?;
     d.set_item("blocks_before", r.blocks_before)?;
     d.set_item("blocks_after", r.blocks_after)?;
+    d.set_item("kept_original", r.kept_original)?;
+    d.set_item("bytes_rebuilt", r.bytes_rebuilt)?;
+    d.set_item("warning", r.warning.as_deref())?;
     let rows = PyDict::new(py);
     for (t, n) in &r.rows_per_table {
         rows.set_item(t, n)?;

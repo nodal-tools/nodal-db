@@ -262,9 +262,11 @@ fn generated_for(table: &str) -> &'static [&'static str] {
 ///
 ///   - table has a `valid_to_commit` column (from/to tiers and all narrow
 ///     versioned tables; also `value_array_hist`, whose liveness expression is
-///     constant-false) ⇒ `ORDER BY (valid_to_commit IS NULL) DESC, <keys>,
-///     valid_from_commit` — **current-first**, then key locality, then history
-///     order;
+///     constant-false) ⇒ `ORDER BY (valid_to_commit IS NULL) DESC,
+///     valid_to_commit, <keys>, valid_from_commit` — **current-first**; the
+///     current prefix is in key order (its `valid_to_commit` is all NULL);
+///     the closed rows are grouped **by close commit**, then key, then
+///     history order;
 ///   - otherwise (append-only tables, axis children, the all-live
 ///     `value_array`) ⇒ `ORDER BY <keys>` — natural/key order, locality only.
 ///
@@ -282,6 +284,19 @@ fn generated_for(table: &str) -> &'static [&'static str] {
 /// order-independent (`count` + `bit_xor(hash(...))`), so clustering needs
 /// zero self-check changes; determinism costs no flag surface, and the sort
 /// is bounded by compaction already being a whole-file rewrite.
+///
+/// **Closed rows by close commit (D-E4 amended 2026-10-24,
+/// `specs/compaction_growth_FINDINGS.md`).** The first cut sorted closed rows
+/// by key, which interleaves every cell's versions. DuckDB keeps a hidden
+/// persistent ART for each `REFERENCES` (not listed in `duckdb_indexes()`);
+/// with the row ids of one commit scattered, the two commit-FK ARTs of
+/// `value_long` grew ≈9×, and `valid_from_commit` / `valid_to_commit` /
+/// `version` lost their run-length encoding. Compaction then grew
+/// history-heavy files (1.81 → 2.94 GB at 228 M rows); by close commit it
+/// shrinks them (→ 1.38 GB). The trade: closed rows lose per-key locality
+/// (a cell's history spans close-commit groups, so key-filtered history
+/// reads prune less) and gain min/max pruning on `valid_to_commit` (the
+/// as-of pruning route §4.1 names). Current rows are unaffected.
 ///
 /// Every listed column is validated against the live catalog at repack time
 /// ([`cluster_order`] hard-errors on a missing column), so this map cannot
@@ -419,6 +434,16 @@ pub(crate) fn cluster_order(table: &str, real_cols: &[String]) -> Result<String,
     if versioned {
         // Current-first (D-E4): live rows form one contiguous prefix.
         parts.push("(\"valid_to_commit\" IS NULL) DESC".to_string());
+        // Closed rows grouped by CLOSE COMMIT before the keys (D-E4 amended
+        // 2026-10-24, `specs/compaction_growth_FINDINGS.md`). Key-first order
+        // interleaves the versions of each cell, which scatters the row ids
+        // of one commit id; that bloats the engine's hidden FK indexes on
+        // `valid_from_commit` / `valid_to_commit` → `commit` (≈9× on
+        // history-heavy long tables) and drops the commit columns (and
+        // `version`) from RLE to bit-packing. Net: compaction GREW such
+        // files (1.81 → 2.94 GB); this order shrinks them. Current rows
+        // all tie on NULL here, so they still fall through to key order.
+        parts.push(q("valid_to_commit"));
     }
     parts.extend(keys.iter().map(|k| q(k)));
     if versioned {

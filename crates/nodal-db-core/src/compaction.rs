@@ -18,9 +18,25 @@
 //!
 //! ## Clustering (erasure_compaction_plan §4.1, D-E4 — always-on)
 //! The rebuild copy ORDER-BYs each table per `rebuild::CLUSTER_KEYS`: current-first on
-//! versioned tables, key/natural order elsewhere. Content is untouched (the
+//! versioned tables (closed rows grouped by close commit, D-E4 amended
+//! 2026-10-24), key/natural order elsewhere. Content is untouched (the
 //! order-independent self-check still covers every row); only physical layout
 //! changes — see the `CLUSTER_KEYS` docs for the verified mechanism.
+//!
+//! ## Size guard (`specs/compaction_growth_FINDINGS.md` §5)
+//! The rebuilt temp's on-disk size (after its `CHECKPOINT` and close, so its
+//! WAL is empty) is compared with the source file's before the swap. When it
+//! is **not smaller**:
+//! - an **automatic** trigger ([`compact_if_due`] / [`compact_if_needed`]:
+//!   no baseline, growth, commit count) keeps the original, deletes the temp
+//!   and still resets the baseline (size and head), so the commit backstop
+//!   waits another `N` commits instead of re-paying the repack on every save
+//!   (`swapped == false`, [`CompactionReport::kept_original`]);
+//! - an **explicit** [`compact`] swaps anyway (the caller asked for the
+//!   repack) and reports it in [`CompactionReport::warning`].
+//!
+//! The kept-original path is the self-check-abort path: the original is never
+//! written, so crash safety and invariant 3 are unchanged.
 //!
 //! ## Crash safety (§3)
 //! The original is only ever *read* (attached RO) until the final `rename`.
@@ -61,10 +77,12 @@ use crate::rebuild::{
 };
 use crate::schema_init::init_schema;
 
-/// Report of one repack. `swapped == false` marks a [`compact_if_needed`] no-op
-/// (the reclaimable-space signal was below the threshold), in which case the
-/// `bytes_after`/`blocks_after` mirror the "before" values and `rows_per_table`
-/// is empty (nothing was copied).
+/// Report of one repack. `swapped == false` marks either a gate no-op
+/// ([`compact_if_needed`] / [`compact_if_due`] below their thresholds:
+/// `trigger == None`, `rows_per_table` empty) or a kept original
+/// (`kept_original == true`: a rebuild ran and was discarded). In both cases
+/// the file is unchanged and `bytes_after` / `blocks_after` mirror the
+/// "before" values.
 #[derive(Debug, Clone, Default)]
 pub struct CompactionReport {
     pub bytes_before: u64,
@@ -84,6 +102,19 @@ pub struct CompactionReport {
     /// `true` ⇒ [`CompactionBackoff`] skipped the gate entirely because a
     /// repack failed recently (no stat, no sidecar read, no DB open).
     pub backed_off: bool,
+    /// `true` ⇒ an automatic trigger rebuilt the file, the rebuild was not
+    /// smaller than the source, and the original was kept (the temp was
+    /// deleted; the baseline was still reset). `swapped` is then `false`,
+    /// `trigger` names the gate that fired, and `bytes_rebuilt` holds the
+    /// discarded rebuild's size.
+    pub kept_original: bool,
+    /// On-disk bytes of the rebuilt temp, measured after its `CHECKPOINT`
+    /// and close; `0` when nothing was rebuilt (a gate no-op).
+    pub bytes_rebuilt: u64,
+    /// Set when the rebuild was not smaller than the source: on a kept
+    /// original (automatic trigger) and on an explicit [`compact`] that
+    /// swapped anyway. Callers surface it (the CLI prints it to stderr).
+    pub warning: Option<String>,
 }
 
 /// What made a repack run ([`CompactionReport::trigger`]).
@@ -221,6 +252,10 @@ pub const DEFAULT_GROWTH_FACTOR: f64 = 3.0;
 /// Physical repack of `db_path` (Sense A). See the module docs. Always performs
 /// the rewrite (no gate); use [`compact_if_due`] on the save path. On success
 /// it refreshes the baseline sidecar to the new file size and head commit.
+///
+/// An explicit repack **always swaps**, even when the rebuild is not smaller
+/// than the source (then [`CompactionReport::warning`] says so). Only the
+/// automatic triggers keep the original on no gain (see the module docs).
 pub fn compact(db_path: &Path) -> Result<CompactionReport, DbError> {
     compact_locked(db_path, CompactionTrigger::Requested)
 }
@@ -396,6 +431,9 @@ fn no_op_report(current: u64) -> CompactionReport {
         swapped: false,
         trigger: None,
         backed_off: false,
+        kept_original: false,
+        bytes_rebuilt: 0,
+        warning: None,
     }
 }
 
@@ -477,7 +515,45 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     };
 
     // Close the temp handle BEFORE the swap (Windows caveat, §3).
-    conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
+    if let Err((_, e)) = conn.close() {
+        remove_temp(&temp_path);
+        return Err(DbError::Duckdb(e));
+    }
+
+    // ---- Size guard (compaction_growth_FINDINGS §5) ------------------------
+    // Measured on disk after the temp's CHECKPOINT and close: its WAL is then
+    // empty or gone, but it is counted anyway so a leftover WAL can never
+    // make a rebuild look smaller than it is.
+    let bytes_rebuilt = on_disk_bytes(&temp_path);
+    let not_smaller = bytes_rebuilt >= bytes_before;
+    let warning = not_smaller.then(|| {
+        format!(
+            "compaction did not shrink {}: rebuilt {bytes_rebuilt} bytes >= source \
+             {bytes_before} bytes",
+            db_path.display()
+        )
+    });
+    if not_smaller && trigger != CompactionTrigger::Requested {
+        // Automatic trigger, no gain: keep the original (the self-check-abort
+        // path: the original is never written). Reset the baseline anyway, so
+        // the commit backstop waits another N commits instead of retrying on
+        // every save; the size is the original's, which is what stays.
+        remove_temp(&temp_path);
+        write_baseline(db_path, bytes_before, head);
+        return Ok(CompactionReport {
+            bytes_before,
+            bytes_after: bytes_before,
+            blocks_before,
+            blocks_after: blocks_before,
+            rows_per_table,
+            swapped: false,
+            trigger: Some(trigger),
+            backed_off: false,
+            kept_original: true,
+            bytes_rebuilt,
+            warning: warning.map(|w| format!("{w}; original kept")),
+        });
+    }
 
     // Stale-WAL hygiene (erasure_compaction_plan §7 item 7 / critique m7b),
     // BEFORE the rename so the removal can only ever hit a WAL of the OLD
@@ -533,7 +609,18 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         swapped: true,
         trigger: Some(trigger),
         backed_off: false,
+        kept_original: false,
+        bytes_rebuilt,
+        warning: warning.map(|w| format!("{w}; swapped anyway (explicit compact)")),
     })
+}
+
+/// A database file's on-disk bytes: the main file plus its WAL, if any.
+fn on_disk_bytes(path: &Path) -> u64 {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push(".wal");
+    let len = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    len(path) + len(Path::new(&wal))
 }
 
 /// What [`repack_into`] produced: the per-table copied counts, the

@@ -20,7 +20,7 @@ use nodal_db_core::api::head_commit;
 use nodal_db_core::api::{db_identity, write_parameter};
 use nodal_db_core::compaction::{
     baseline_path, compact, compact_if_due, compact_if_needed, read_baseline, sweep_orphan_temps,
-    CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionTrigger,
+    CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionReport, CompactionTrigger,
 };
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract::{extract, ExtractOpts};
@@ -76,6 +76,13 @@ fn fingerprint(db: &Path, query: &str) -> (i64, String) {
         .unwrap();
     conn.close().unwrap();
     out
+}
+
+/// A gated call that fired: it either swapped or (the size guard) rebuilt and
+/// kept the original. Tiny fixtures often do not shrink, so the gate tests
+/// assert "ran", not "swapped".
+fn ran(r: &CompactionReport) -> bool {
+    r.trigger.is_some() && (r.swapped || r.kept_original)
 }
 
 fn scalar(db: &Path, sql: &str) -> i64 {
@@ -699,7 +706,7 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
     std::fs::write(&sidecar, b"1").unwrap();
     let r3 = compact_if_needed(&db, 3.0).expect("watermark-tripped run");
     assert!(
-        r3.swapped,
+        ran(&r3),
         "must fire once current bytes exceed 3x the baseline"
     );
     // Firing refreshes the baseline to the fresh size (no longer the tiny "1").
@@ -903,7 +910,7 @@ fn commit_gate_fires_at_exactly_n() {
     write_scalar(&db, "Widget", "size", "Base", "w1", 3.0);
     let head = head_commit(&db).unwrap();
     let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
-    assert!(r.swapped, "3 commits = N");
+    assert!(ran(&r), "3 commits = N");
     assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
     let b = read_baseline(&db).unwrap();
     assert_eq!(b.commit, Some(head));
@@ -922,7 +929,7 @@ fn byte_gate_and_missing_baseline_through_compact_if_due() {
     let head = head_commit(&db).unwrap();
     write_sidecar(&db, &format!("bytes=1\ncommit={head}\n"));
     let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
-    assert!(r.swapped);
+    assert!(ran(&r));
     assert_eq!(r.trigger, Some(CompactionTrigger::Growth));
 
     std::fs::remove_file(baseline_path(&db)).unwrap();
@@ -1005,7 +1012,7 @@ fn head_below_baseline_commit_compacts() {
     let bytes = std::fs::metadata(&db).unwrap().len();
     write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head + 100));
     let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
-    assert!(r.swapped);
+    assert!(ran(&r));
     assert_eq!(r.trigger, Some(CompactionTrigger::NoBaseline));
     assert_eq!(read_baseline(&db).unwrap().commit, Some(head));
 }
@@ -1115,6 +1122,245 @@ fn failed_repack_backs_off() {
     // The cause clears; past the next window the repack runs and clears it.
     set_version(&real);
     let r = b.compact_if_due(&db, policy, head + 10).unwrap();
-    assert!(r.swapped && !r.backed_off);
+    assert!(ran(&r) && !r.backed_off);
     assert_eq!(b.failed_at(), None);
+}
+
+// --- closed rows by close commit (compaction_growth_FINDINGS, D-E4 amended) --
+
+/// `PRAGMA database_size().used_blocks` (the findings' "used" measure).
+fn used_blocks(db: &Path) -> i64 {
+    scalar(db, "SELECT used_blocks FROM pragma_database_size()")
+}
+
+/// Raw-build the history-heavy long shape of the growth findings, scaled to
+/// test size: `cells` rank-1 long cells (`series` entities × `cells/series`
+/// positions on one integer axis), fully rewritten `rounds` times, one commit
+/// per round, appended round by round (the write path's append order) with a
+/// checkpoint after each round. Round `r` closes at the next round's commit;
+/// the last round is current. Raw SQL like [`build_interleaved`]: compaction
+/// copies rows verbatim, so the write path adds nothing to what is measured.
+fn build_history_heavy(dir: &Path, series: i64, cells: i64, rounds: i64) -> std::path::PathBuf {
+    let db = dir.join("history_heavy.duckdb");
+    nodal_db_core::schema_init::init_schema(&db).expect("init");
+    let per = cells / series;
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO axis (kind, length, content_hash, p_start_int, p_step_int) \
+         VALUES ('integer', {per}, 0, 0, 1);"
+    ))
+    .unwrap();
+    let axis: i64 = conn
+        .query_row("SELECT max(id) FROM axis", [], |r| r.get(0))
+        .unwrap();
+    let mut commits = Vec::with_capacity(rounds as usize);
+    for _ in 0..rounds {
+        commits.push(
+            conn.query_row(
+                "INSERT INTO \"commit\" (user, message) VALUES ('t', 'round') RETURNING id",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+        );
+    }
+    for r in 0..rounds as usize {
+        let from = commits[r];
+        let to = commits
+            .get(r + 1)
+            .map_or_else(|| "NULL".to_string(), |c| c.to_string());
+        conn.execute_batch(&format!(
+            "INSERT INTO value_long (entity_id, parameter_definition_id, alternative_id, \
+               valid_from_commit, valid_to_commit, version, axis1_id, i1_pos, value_kind, v_float) \
+             SELECT c // {per}, 1, 1, {from}, {to}, {ver}, {axis}, (c % {per})::INTEGER, \
+                    'float', (hash(c, {r}) % 100000) / 7.0 \
+             FROM range({cells}) t(c) ORDER BY c; \
+             CHECKPOINT;",
+            ver = r + 1,
+        ))
+        .unwrap();
+    }
+    conn.close().unwrap();
+    db
+}
+
+/// The growth regression (compaction_growth_FINDINGS §1, §3): closed rows
+/// sorted by key interleaved each cell's versions, which bloated the hidden
+/// commit-FK indexes and broke the commit columns' RLE, so compaction grew
+/// history-heavy files (used space 20.8 → 24.0 MiB at the findings'
+/// test-fixture size). Sorted by close commit, it shrinks them. Asserts the
+/// size (file and used blocks) AND the order property itself.
+#[test]
+fn compact_shrinks_history_heavy_long_table() {
+    let dir = tempfile::tempdir().unwrap();
+    // 50 k cells × 21 full rewrites = 1.05 M rows (the findings' fixture).
+    let db = build_history_heavy(dir.path(), 50, 50_000, 21);
+    let rows = scalar(&db, "SELECT count(*) FROM value_long");
+    assert_eq!(rows, 1_050_000);
+    let used_before = used_blocks(&db);
+    let fp = fingerprint(&db, "SELECT * FROM value_long");
+
+    let r = compact(&db).expect("compact");
+    let used_after = used_blocks(&db);
+    println!(
+        "history-heavy: file {} -> {} bytes; used blocks {used_before} -> {used_after}",
+        r.bytes_before, r.bytes_after
+    );
+    assert!(r.swapped && !r.kept_original);
+    assert!(
+        r.bytes_after < r.bytes_before,
+        "compaction must shrink a history-heavy file: {} -> {}",
+        r.bytes_before,
+        r.bytes_after
+    );
+    assert!(r.warning.is_none(), "{:?}", r.warning);
+    assert!(
+        used_after <= used_before,
+        "compaction grew the used space: {used_before} -> {used_after} blocks"
+    );
+    assert_eq!(fingerprint(&db, "SELECT * FROM value_long"), fp);
+
+    // The order itself (rowid = physical order): the current rows form one
+    // prefix in key order; the closed rows follow, non-decreasing by close
+    // commit, key order within one close commit.
+    let violations = scalar(
+        &db,
+        "SELECT count(*) FROM ( \
+           SELECT valid_to_commit AS t, entity_id AS e, i1_pos AS p, \
+                  lag(valid_to_commit) OVER w AS pt, lag(entity_id) OVER w AS pe, \
+                  lag(i1_pos) OVER w AS pp, \
+                  lag(valid_to_commit IS NULL) OVER w AS plive \
+           FROM value_long WINDOW w AS (ORDER BY rowid)) \
+         WHERE plive IS NOT NULL AND ( \
+           (t IS NULL AND NOT plive) \
+           OR (t IS NULL AND (e, p) < (pe, pp)) \
+           OR (t IS NOT NULL AND pt IS NOT NULL AND t < pt) \
+           OR (t IS NOT NULL AND t = pt AND (e, p) < (pe, pp)))",
+    );
+    assert_eq!(
+        violations, 0,
+        "physical order is not current-first / by close commit"
+    );
+}
+
+/// The size guard on the automatic triggers: a rebuild that is not smaller
+/// (here: re-compacting a freshly compacted file) keeps the original, deletes
+/// the temp, warns, and still resets the baseline (bytes and commit), so the
+/// commit backstop waits another N commits instead of retrying every save.
+#[test]
+fn automatic_trigger_keeps_original_when_rebuild_is_not_smaller() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    let head = head_commit(&db).unwrap();
+    let bytes = std::fs::metadata(&db).unwrap().len();
+    let content = std::fs::read(&db).unwrap();
+
+    // The growth gate fires (a tiny recorded baseline) on a file that is
+    // already densely packed.
+    write_sidecar(&db, &format!("bytes=1\ncommit={head}\n"));
+    let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Growth));
+    assert!(r.kept_original && !r.swapped, "{r:?}");
+    assert!(r.bytes_rebuilt >= bytes, "{r:?}");
+    assert_eq!((r.bytes_before, r.bytes_after), (bytes, bytes));
+    assert!(
+        !r.rows_per_table.is_empty(),
+        "the rebuild ran and self-checked"
+    );
+    assert!(
+        r.warning
+            .as_deref()
+            .is_some_and(|w| w.contains("original kept")),
+        "{:?}",
+        r.warning
+    );
+    // The original is untouched, and no temp is left behind.
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        content,
+        "original must be kept"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".compact."))
+        .collect();
+    assert!(leftovers.is_empty(), "temp left behind: {leftovers:?}");
+    // The baseline is reset to the kept file's size and the head.
+    let b = read_baseline(&db).unwrap();
+    assert_eq!((b.bytes, b.commit), (bytes, Some(head)));
+
+    // The same through compact_if_needed (the byte gate alone).
+    write_sidecar(&db, &format!("bytes=1\ncommit={head}\n"));
+    let r = compact_if_needed(&db, 3.0).unwrap();
+    assert!(r.kept_original && r.trigger == Some(CompactionTrigger::Growth));
+    assert_eq!(read_baseline(&db).unwrap().bytes, bytes);
+
+    // The commit backstop: after a kept original it waits N commits again.
+    write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head - 3));
+    let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+    assert!(r.kept_original, "{r:?}");
+    assert_eq!(
+        read_baseline(&db).unwrap().commit,
+        Some(head),
+        "the backstop restarts from the head"
+    );
+    let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+    assert!(r.trigger.is_none(), "no retry on the next save: {r:?}");
+    for i in 1..3 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", 50.0 + i as f64);
+        let h = head_commit(&db).unwrap();
+        let r = compact_if_due(&db, commits_only(3), Some(h)).unwrap();
+        assert!(r.trigger.is_none(), "{i} commits < N");
+    }
+    write_scalar(&db, "Widget", "size", "Base", "w1", 60.0);
+    let r = compact_if_due(&db, commits_only(3), None).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+}
+
+/// An explicit compact swaps even when the rebuild is not smaller, and says
+/// so in the report's warning.
+#[test]
+fn explicit_compact_swaps_anyway_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    let head = head_commit(&db).unwrap();
+    // Mark the current file so the swap is observable without inode APIs.
+    let marker = dir.path().join("pre-swap.duckdb");
+    std::fs::hard_link(&db, &marker).unwrap();
+    let r = compact(&db).expect("re-compact a compacted file");
+    assert_eq!(r.trigger, Some(CompactionTrigger::Requested));
+    assert!(r.swapped && !r.kept_original, "{r:?}");
+    assert!(r.bytes_rebuilt >= r.bytes_before, "{r:?}");
+    assert_eq!(r.bytes_after, r.bytes_rebuilt);
+    assert!(
+        r.warning
+            .as_deref()
+            .is_some_and(|w| w.contains("swapped anyway")),
+        "{:?}",
+        r.warning
+    );
+    // The old inode now has only the marker link: the file was replaced.
+    let replaced = !same_file(&db, &marker);
+    assert!(replaced, "the file must have been replaced");
+    let b = read_baseline(&db).unwrap();
+    assert_eq!((b.bytes, b.commit), (r.bytes_after, Some(head)));
+}
+
+/// Same inode (the rename-over replacement is observable on unix; elsewhere
+/// this check is skipped).
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (ma, mb) = (std::fs::metadata(a).unwrap(), std::fs::metadata(b).unwrap());
+        ma.ino() == mb.ino() && ma.dev() == mb.dev()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
 }

@@ -530,7 +530,14 @@ def test_compact(db):
     assert rep["swapped"] and rep["rows_per_table"]["value_scalar"] == 2
     assert db.db_identity() == ident
     assert not db.compact(if_needed=True)["swapped"]
-    assert db.compact(if_needed=True, growth=0.5)["swapped"]
+    # The growth gate fires, but the file was just compacted: the rebuild is
+    # not smaller, so the automatic trigger keeps the original.
+    rep = db.compact(if_needed=True, growth=0.5)
+    assert rep["trigger"] == "growth" and rep["kept_original"]
+    assert not rep["swapped"] and rep["warning"] and rep["bytes_rebuilt"] > 0
+    # An explicit compact swaps anyway and warns.
+    rep = db.compact()
+    assert rep["swapped"] and not rep["kept_original"] and rep["warning"]
     with pytest.raises(nodal_db.ApiError):
         db.compact(growth=2.0)
     with pytest.raises(nodal_db.ApiError):
@@ -557,7 +564,8 @@ def test_compact_if_needed_fires_on_commit_count(db):
     assert not db.compact(if_needed=True, max_commits=0)["swapped"]
     # ... but due at max_commits=2.
     rep = db.compact(if_needed=True, max_commits=2)
-    assert rep["swapped"] and rep["trigger"] == "commits"
+    assert rep["trigger"] == "commits"
+    assert rep["swapped"] != rep["kept_original"]
     assert not db.compact(if_needed=True, max_commits=2)["swapped"]
 
 

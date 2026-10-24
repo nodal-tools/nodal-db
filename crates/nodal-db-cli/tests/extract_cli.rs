@@ -200,24 +200,33 @@ fn maintain_compact_through_the_cli() {
     // --if-needed right after a compaction: below the threshold.
     let out = run_ok(bin().args(["maintain", "compact", "--if-needed"]).arg(&db));
     assert!(out.contains("no compaction needed"), "{out}");
-    // A tiny growth factor fires.
-    let out = run_ok(
-        bin()
-            .args(["maintain", "compact", "--if-needed", "--growth", "0.5"])
-            .arg(&db),
+    // A tiny growth factor fires. The file was just compacted, so the
+    // rebuild does not shrink it: an automatic trigger keeps the original
+    // and says so (stdout), with the warning on stderr.
+    let o = bin()
+        .args(["maintain", "compact", "--if-needed", "--growth", "0.5"])
+        .arg(&db)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let (out, err) = (
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr),
     );
-    assert!(out.contains("compacted"), "{out}");
-    // The commit count fires: one commit after the compaction, N = 1.
+    assert!(
+        out.contains("(file growth)") && out.contains("original kept"),
+        "{out}"
+    );
+    assert!(err.contains("warning:"), "{err}");
+    // The commit count fires: one commit after the compaction, N = 1
+    // (swapped or kept, depending on whether that commit grew the file).
     write_one_more(&db);
     let out = run_ok(
         bin()
             .args(["maintain", "compact", "--if-needed", "--max-commits", "1"])
             .arg(&db),
     );
-    assert!(
-        out.contains("compacted") && out.contains("commit count"),
-        "{out}"
-    );
+    assert!(out.contains("commit count"), "{out}");
     // --max-commits 0 disables the count: nothing due.
     write_one_more(&db);
     let out = run_ok(

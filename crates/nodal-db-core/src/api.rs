@@ -767,17 +767,44 @@ pub(crate) fn lookup_parameter(
     )
 }
 
+/// The single-name entity lookup of `lookup_entity` (`?1` class id, `?2`
+/// name): the id of the current entity of the class whose DuckDB `lower()`
+/// fold equals the name's. Same rows as `cur_cls = ?1 AND cur_name =
+/// lower(?2)`, written so the `ix_entity_lname` expression index is used.
+///
+/// **The `OFFSET 0` fence.** DuckDB 2.0 scans through an index only when the
+/// scan carries exactly one filter (`table_scan.cpp`: `FilterCount() != 1`
+/// falls back to a sequential scan). The class and current-row filters can be
+/// dropped from the scan only when zone-map statistics prove them always true
+/// (one class, no closed-out rows: toy files), so on any real file the plain
+/// three-conjunct form is a sequential scan. The inner query carries the
+/// index filter alone; `OFFSET 0` stops the optimizer from pushing the outer
+/// filters into it (filter pushdown stops at every LIMIT node except
+/// `LIMIT 0`). It returns the 1–few rows of that folded name in any class,
+/// current or closed out, and the outer WHERE picks the current one.
+///
+/// This is an optimizer behaviour, not a documented contract; the guard is
+/// `tests/entity_name_index_scan.rs` (production SQL, realistic fixture,
+/// unfenced negative control). Pre-agreed fallbacks if a DuckDB bump breaks
+/// the fence (name_index_and_unused_indexes_PLAN.md D1, §10 C1), in order:
+/// (d) the aggregate fence `SELECT any_value(id) FILTER (WHERE
+/// entity_class_id = ?1 AND valid_to_commit IS NULL) FROM entity WHERE
+/// lower(name) = lower(?2)`; then (c) fetch `(id, entity_class_id,
+/// valid_to_commit)` by `lower(name)` alone and filter in Rust. Never a
+/// `MATERIALIZED` CTE: DuckDB's `CTEFilterPusher` already pushes filters into
+/// one of this shape.
+#[doc(hidden)]
+pub const ENTITY_NAME_LOOKUP_SQL: &str = "SELECT id FROM \
+       (SELECT id, entity_class_id, valid_to_commit FROM entity \
+        WHERE lower(name) = lower(?2) OFFSET 0) \
+     WHERE entity_class_id = ?1 AND valid_to_commit IS NULL";
+
 pub(crate) fn lookup_entity(
     conn: &Connection,
     class_id: i64,
     name: &str,
 ) -> Result<Option<i64>, DbError> {
-    opt_id(
-        conn,
-        "SELECT id FROM entity WHERE cur_cls = ? AND cur_name = lower(?)",
-        class_id,
-        name,
-    )
+    opt_id(conn, ENTITY_NAME_LOOKUP_SQL, class_id, name)
 }
 
 pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
@@ -1675,10 +1702,16 @@ const ENTITY_LOOKUP_SQL: &str = "WITH k AS (SELECT unnest(?::VARCHAR[]) AS n, \
      LEFT JOIN entity e ON e.entity_class_id = ? AND e.valid_to_commit IS NULL \
                        AND lower(e.name) = lower(k.n)";
 
-/// The single-name form of [`ENTITY_LOOKUP_SQL`] (plan D3(b), a
+/// The single-name form of `ENTITY_LOOKUP_SQL` (plan D3(b), a
 /// statement-form switch only): the fold and the id (NULL when missing).
-const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), (SELECT id FROM entity \
-       WHERE entity_class_id = ?2 AND valid_to_commit IS NULL AND lower(name) = lower(?1))";
+/// `?1` name, `?2` class id. The id comes through the same `OFFSET 0` fence
+/// as [`ENTITY_NAME_LOOKUP_SQL`] (see there for why, the guard and the
+/// fallbacks), so it uses the `ix_entity_lname` index.
+#[doc(hidden)]
+pub const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), (SELECT id FROM \
+       (SELECT id, entity_class_id, valid_to_commit FROM entity \
+        WHERE lower(name) = lower(?1) OFFSET 0) \
+     WHERE entity_class_id = ?2 AND valid_to_commit IS NULL)";
 
 /// Look up `names` among the current entities of `class_id`: per name, in
 /// input order, DuckDB's `lower()` fold of it and the id of the current

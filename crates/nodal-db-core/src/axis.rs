@@ -145,10 +145,21 @@ fn ensure_wellformed(axis: &CanonicalAxis) -> Result<(), DbError> {
     Ok(())
 }
 
+/// The candidate query of `candidate_ids` (`?1` content hash, `?2` kind).
+/// The `kind` filter runs outside an `OFFSET 0` fence so the `axis_hash`
+/// index scan carries its filter alone: DuckDB 2.0 scans through an index only
+/// for a lone filter, and `content_hash = ? AND kind = ?` falls back to a
+/// sequential scan once the table holds two kinds. Same fence, guard and
+/// fallbacks as [`crate::api::ENTITY_NAME_LOOKUP_SQL`].
+#[doc(hidden)]
+pub const AXIS_CANDIDATES_SQL: &str = "SELECT id FROM \
+       (SELECT id, kind FROM axis WHERE content_hash = ?1 OFFSET 0) \
+     WHERE kind = ?2";
+
 /// Candidate `axis.id`s sharing the content hash and kind — the accelerated
 /// narrowing before byte-compare.
 fn candidate_ids(conn: &Connection, hash: u64, kind: &str) -> Result<Vec<i64>, DbError> {
-    let mut stmt = conn.prepare("SELECT id FROM axis WHERE content_hash = ? AND kind = ?")?;
+    let mut stmt = conn.prepare(AXIS_CANDIDATES_SQL)?;
     let ids = stmt
         .query_map(duckdb::params![hash, kind], |r| r.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;

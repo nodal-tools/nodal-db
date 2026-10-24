@@ -9,7 +9,7 @@ It is a recording benchmark: nothing here gates a build.
 
 | Harness | What it measures | Run |
 |---|---|---|
-| `crates/nodal-db-cli/benches/results_path.rs` | Ingest (core API loop and Arrow-IPC import), file size, bind cost of the array INSERT, read paths, the `value_array_cells` A/B gate (`cellsgate`), row-group steel-man, long-tier reads. DuckDB as bundled by the core. | `just bench-results` (full: ~30-40 min on 1.5.5, 21 min on current `main`, §6) or `just bench-results --quick` (~1 min) |
+| `crates/nodal-db-cli/benches/results_path.rs` | Ingest (core API loop and Arrow-IPC import), file size, bind cost of the array INSERT, read paths, the `value_array_cells` A/B gate (`cellsgate`), row-group steel-man, long-tier reads. DuckDB as bundled by the core. | `just bench-results` (full: ~30-40 min on 1.5.5, 21 min at `eaf2551` (§6), 19 min on `main` at `1507cf5` (§11)) or `just bench-results --quick` (~1 min) |
 | `scripts/bench/raw_duckdb_layout.py` | Dense `DOUBLE[]` lists against a lean sorted `(k, pos, v)` long table in plain DuckDB, no nodal-db schema. Any DuckDB version. | runs after the Rust bench in `just bench-results`; alone: `just bench-raw-layout <python> [--quick]` |
 | `scripts/bench/long_tier_size_breakdown.py` | Where the long tier's bytes go: `value_long` built from the real schema, with its one-current unique index in the old column order, then without that index, its triple index, its foreign keys and its `i1_dt` column, against a lean table (§7.1, §7.3). Three shapes (`--shape`). Optional cross-check on a core-written file. | `just bench-long-size [--shape rank1\|sparse2d\|rank3] [--core-db <file>]` (~30 s; `sparse2d` ~1 min) |
 | `scripts/bench/surrogate_key_variant.py` | Superseded by schema 0.4 (§4b); needs a 0.3-schema input file. The real `value_array` (composite primary key) against a copy with a single-column `array_id` key; the long tier's equivalent; commit cost after an array replace. Any DuckDB version. | `just bench-sk-variant <python> --db <file> [--long-db <file>] [--commit-probe] [--commit-probe-native]` (input files: see the script's docstring) |
@@ -32,8 +32,10 @@ with no phase argument the bench prints its usage and exits.
 | DuckDB (core) | 1.5.5 (duckdb-rs 1.10505.0, bundled) for §1-§2; 2.0.0 (duckdb-rs 1.20000.0, bundled) for §4b, §4c and §6 |
 | DuckDB (Python) | 1.5.5 (project `.venv`), 2.0.0 (throwaway venv); Python 3.12.3, numpy 2.5, pyarrow 25 / 26 |
 
-Section 6 is the full re-run on current `main` (DuckDB 2.0.0) and has its
-own run conditions; it is the current set of figures. Section 7 adds the
+Section 6 is the full re-run at `eaf2551` (DuckDB 2.0.0) and has its
+own run conditions. Section 11 is the full re-run on `main` at `1507cf5`
+(2026-10-25), after the 2026-10-24 merges: it is the current set of
+figures. Section 7 adds the
 long-tier size breakdown and a one-year-of-minutes array, measured later
 the same day. Sections 1-5 are kept
 as recorded.
@@ -779,6 +781,143 @@ mode, so by the harness's rule it is discarded.
   an index and the dropped indexes cost little to maintain.
 - No mode regressed with a CI excluding 1.0. The plan's own run (§6,
   N = 31, old = `4f0a02b`) agrees: lookup ratio 0.137 (0.134-0.139).
+
+## 11. Current `main` after the 2026-10-24 merges (full run, 2026-10-25)
+
+Full scale (no `--quick`): `just bench-results` (`results_path.rs -- all`
+then `raw_duckdb_layout.py`), then `just bench-long-size` for each of the
+three shapes and `just bench-raw-layout` once more, one after another, on
+`main` at `1507cf5`. Since §6 (`eaf2551`) `main` gained: the set-based
+scalar, long, array and delete writes (§8, and
+`crates/nodal-db-core/benches/RESULTS.md`), the per-commit name-resolution
+cache, the `lower(name)` entity index with four unused indexes dropped
+(§10), the one-current index reorder (§7.3), compaction's close-commit
+clustering order and size guard, skip-unchanged writes (P1) and the long
+cell diff (P2), and the save-path staleness check and commit backstop
+(§9).
+
+| | |
+|---|---|
+| Date | 2026-10-25: Rust bench 00:44-01:01 (1 016.8 s), raw-DuckDB script 01:01-01:03 (108.3 s); `bench-long-size` 01:03-01:04 (rank1 13 s, sparse2d 38 s, rank3 15 s); `bench-raw-layout` 01:04-01:06 (103.6 s) |
+| Machine | the same AMD Ryzen 9 5900XT host as §6 (16C/32T, 70 GB, WD_BLACK SN850X NVMe, databases in `/tmp`); Linux 6.14.0-37-generic, rustc 1.98.0, `bench` profile |
+| DuckDB | core: bundled `v2.0.0-dev88614` (duckdb-rs 1.20000.0); Python: duckdb 2.0.0 (project `.venv`), Python 3.12.3 |
+| Load | 1-min load average 1.7-5.6 during the Rust bench (1.7-2.5 from 00:48 to 00:53, during the 10k ingests; 3-5.6 during the reads); 3.0-6.3 during the first raw-DuckDB script; 4.5-8.5 during `bench-long-size` and the second raw-DuckDB script. Shared host: another user's Python test jobs came and went (up to six processes at 0.5-1.7 cores each), and one interactive process used about 0.7 of a core throughout. The `cellsgate` phase logged 3.12 at its start and 3.86 at its end. The core `cargo bench` gate ran just before (00:35-00:44), not concurrently. |
+
+Load is comparable to §6 (1.8-3.0 for most of that run), so the two runs
+compare as same-machine runs within that noise. Ratios below are this run
+against §6; the code differs in all the ways listed above.
+
+### 11.1 Ingest
+
+| Shape / lane | Wall (current `main`) | values/s | File | Gross / net B/value | §6 (`eaf2551`) | ratio |
+|---|---|---|---|---|---|---|
+| dense 1 000 series, API loop (2 runs: 6.6 / 7.0 s) | 6.6 s | 1.33 M | 126.8 MiB | 15.17 / 14.93 | 11.3 s, 126.3 MiB | 0.58 |
+| dense 1 000 series, IPC import (2 runs: 5.3 / 5.4 s) | 5.3 s | 1.66 M | 70.0 MiB | 8.38 / 8.14 | 10.0 s, 69.8 MiB | 0.53 |
+| dense 10 000 series, API loop (1 run) | 98.0 s | 894 k | 957.5 MiB | 11.46 / 11.44 | 127.1 s, 957.5 MiB | 0.77 |
+| dense 10 000 series, IPC import (1 run) | 50.5 s | 1.73 M | 701.5 MiB | 8.40 / 8.37 | 86.4 s, 701.3 MiB | 0.58 |
+| long, 1 000 × 876 integer cells, API loop (2 runs: 5.2 / 5.2 s) | 5.2 s | 168 k | 30.3 MiB | 36.22 / 33.82 | 13.4 s, 71.5 MiB | 0.39 |
+| long, same, IPC import (2 runs: 4.1 / 4.1 s) | 4.1 s | 214 k | 26.8 MiB | 32.03 / 29.63 | 12.0 s, 67.3 MiB | 0.34 |
+
+Empty-schema baseline for "net": 2 109 440 B, as in §6.
+
+- The long rows match §8 (5.6-5.7 s API, 4.4-4.5 s IPC) and the §7.3 file
+  sizes (30.5 and 26.8 MiB; the API-loop file is 0.2 MiB smaller here).
+  §6 → now combines the set-based long write (§8) and the index reorder
+  (§7.3).
+- The dense ingests are 0.53-0.77 of §6. This run does not attribute that
+  gain to a particular change; the set-based array write is the one that
+  touches this path (`crates/nodal-db-core/benches/RESULTS.md`, set-based
+  long, array and delete write).
+- The 10k API loop's per-100-entity commit runs 0.44-1.29 s (median
+  0.89 s, first 0.44 s, last 1.29 s), against 0.81-1.55 s (median 1.18 s)
+  in §6. It still grows with table size.
+- Dense file sizes are 0.0-0.5 MiB larger than in §6 (the 1k API file by
+  0.5 MiB, the 10k IPC file by 0.2 MiB; the 10k API file is unchanged to
+  the 0.1 MiB). Not diagnosed.
+
+**Bind probe**: unchanged (former `list_value` INSERT 63.8 / 65.3 ms
+prepare, 15.6 / 17.1 ms execute; bound-list INSERT 0.25 / 0.26 ms and
+1.35 / 1.39 ms). The "statement-building share" line still measures the
+former mechanism only (§6.1).
+
+**One very long array** (`bigarray`, 525 600 values, three fresh files,
+load about 3-4): first write 442-473 ms, peak RSS +166-172 MiB; replace
+984-1 017 ms, +163-173 MiB. About 0.85-0.9 µs per value for the first
+write and 1.9 µs for the replace, against 587-796 and 1 309-1 560 ms in
+§7.2 (load 9-14 there, so the load difference is part of the gap).
+
+### 11.2 Reads through the core (10 000-series files)
+
+Warm min / median, ms (cold min / median in brackets); §6 warm min for
+comparison.
+
+| Read | IPC-built (701.5 MiB) | §6 | API-built (957.5 MiB) | §6 |
+|---|---|---|---|---|
+| RO connection open | [29.3 / 29.4] | [27.6] | [114.3 / 116.1] | [114.1] |
+| one series, whole value, `read_parameter_dense` | 2.35 / 2.62 [6.03 / 7.88] | 2.35 | 2.39 / 2.60 [6.83 / 6.89] | 2.42 |
+| one series, week slice | 2.48 / 2.82 [6.25 / 6.66] | 2.47 | 2.46 / 2.58 [6.95 / 7.01] | 2.48 |
+| one series, single cell | 2.37 / 2.53 [6.07 / 6.67] | 2.48 | 2.41 / 2.53 [6.74 / 6.87] | 2.35 |
+| one series, min/max only | 2.36 / 2.52 [3.96 / 4.16] | 2.38 | 2.36 / 2.54 [4.45 / 4.86] | 2.34 |
+| week × 20 series, (a) dense + client slice | 3.62 / 3.97 [11.27 / 15.40] | 3.78 | 3.93 / 4.11 [15.42 / 15.76] | 3.97 |
+| week × 20 series, (b) SQL list slice | 3.68 / 3.96 [10.62 / 15.66] | 3.77 | 3.82 / 4.07 [15.16 / 15.66] | 3.73 |
+| week × 20 series, (c) unnest on `value_array` by triple | 85.09 / 86.91 [188.9 / 192.9] | 84.56 | 33.46 / 34.99 [178.1 / 184.6] | 34.54 |
+| week × 20 series, (d) `read_parameter` + `idx1_ts` | 3 002 / 3 052 [3 496 / 3 500] | 3 010 | 3 095 / 3 133 [3 308 / 3 538] | 3 133 |
+| 2 adjacent series, dense macro | 2.39 / 2.60 [6.29 / 6.94] | 2.48 | 2.43 / 2.58 [7.27 / 7.35] | 3.03 |
+| 51 series, dense macro (past the 50-key index limit) | 89.56 / 91.15 [192.2 / 196.6] | 24.04 | 103.05 / 108.34 [202.9 / 203.7] | 48.82 |
+| `read_parameter`, whole parameter (8.76 M rows) | 4 090 / 4 131 [4 381 / 4 398] | 4 069 | 4 205 / 4 294 [4 428 / 4 527] | 4 251 |
+
+- Every read except the 51-key one is within a few percent of §6: the
+  merges did not move the read path.
+- The 51-key read (the sequential-scan fallback) is 89.6 ms warm here,
+  against 24.0 ms in §6 and 88 ms in §4b; its cold figure (192 ms)
+  matches both. §6 called its 24 ms "not explained"; this run agrees with
+  §4b, so the §6 warm figure looks like the outlier rather than this one
+  a regression. Not diagnosed further.
+
+**`value_array_cells` gate** (`cellsgate`, threads = 8, 21 randomized
+pairs, threshold 1.10): old view median 7 534 ms, new 7 915 ms; per-pair
+ratio median **1.054**, 95 % bootstrap CI **[1.047, 1.062]** → **PASS**.
+Load 3.12 → 3.86 (1-min drift 1.24×, valid). §6: 1.052 [1.043, 1.062].
+
+**Row-group steel-man** (warm min ms, whole / week / cell, min/max, 20
+series week): default 1 row group, 690.5 MiB: 19.5 / 19.8 / 19.8, 0.67,
+21.0; ROW_GROUP_SIZE 2048, 5 row groups, 594.8 MiB: 31.8 / 32.8 / 32.3,
+0.66, 34.5. Same as §6: smaller row groups still do not help.
+
+**Long tier** (`value_long`, 876 000 live integer cells, 8 row groups;
+the IPC-built file is now 26.8 MiB, 67.3 MiB in §6):
+
+| Read | Warm min / median | Cold min / median | §6 warm min |
+|---|---|---|---|
+| RO connection open | — | 26.7 / 27.3 ms | [27.9] |
+| one cell | 0.83 / 0.88 ms | 1.37 / 1.47 ms | 1.58 |
+| one series, week window (17 points) | 0.85 / 0.94 ms | 1.46 / 1.59 ms | 0.93 |
+| one series, whole (876 points) | 0.70 / 0.72 ms | 1.67 / 1.82 ms | 0.77 |
+| one series, min/max aggregate | 0.92 / 0.98 ms | 1.77 / 1.87 ms | 1.07 |
+| 20 series, week window | 3.44 / 3.54 ms | 5.47 / 6.75 ms | 3.50 |
+| `read_parameter`, 20 series, timestamp window | 48.9 / 51.5 ms | 58.0 / 59.2 ms | 50.4 |
+
+The one-cell read is about half of §6 (0.83 against 1.58 ms warm min; §6
+had a median of 2.92, so that row was noisy there); the rest are within
+10 %. Cold reads are faster on the smaller file (e.g. one cell 1.37
+against 1.96 ms). The roughly 2× gap to the 1.5.5 figures that §6 noted
+remains for the 20-series rows.
+
+### 11.3 Raw DuckDB layout and long-tier size breakdown
+
+Raw layout, two runs (inside `just bench-results`, then `just
+bench-raw-layout`): sizes as §6.3 to the 0.1 % (dense default 832.8 MiB,
+rg 2048 595.3 MiB, long 649.5 / 649.8 MiB, long_int 3.8 MiB at 4.19 B/value
+net); built in 28.1 / 28.4 s. Warm min reads, run 1 / run 2: dense
+default one cell 102.5 / 97.7 ms, one week × 20 series 323 / 322 ms, full
+aggregate 699 / 709 ms; dense rg 2048 one week × 20 series 95.3 / 95.3 ms;
+long one cell 0.85 / 0.82 ms, whole series 0.77 / 0.76 ms, 20 series
+1.74 / 1.67 ms, full aggregate 23.1 / 22.9 ms. §6.3's conclusions stand.
+
+`just bench-long-size`, the three shapes: every variant identical to the
+§7.3 table to the 0.01 B/cell (rank1 A 20.35, sparse2d A 18.16, rank3 A
+43.03; A0 68.83 / 66.48 / 86.67; L 4.19 / 2.36 / 4.24). The sizes are
+deterministic and the schema's long tier has not changed since §7.3.
 
 ## Mapping to the earlier Set B figures
 

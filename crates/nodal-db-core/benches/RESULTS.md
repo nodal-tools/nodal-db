@@ -8,6 +8,12 @@
 > engines nor the code cleanly: read each column against the budgets, not
 > against the other. What changed in the code between them is listed under
 > "What changed since the 1.5.5 baseline" below.
+>
+> **Current-`main` column (2026-10-25).** Same Ryzen host and DuckDB 2.0.0
+> as the 2.0.0 column, `main` at `1507cf5`, after the 2026-10-24 merges
+> (listed under "What changed since the 2.0.0 column"). This column and
+> the 2.0.0 column are comparable as same-machine runs, within the load
+> noise of each.
 
 Plan Part 5 deliverable 4 (`specs/rust_implementation_plan.md`); budgets from
 `specs/value_model_plan.md` Part 6; methodology mirrors `specs/ddl_sketch.md`
@@ -16,7 +22,8 @@ here fails the build (gating scope is Q6, deliberately open). Reproduce with
 `cargo bench` (builds the synthetic DB through the core write path first —
 ~2 h wall on the i3-6100 at 1.5.5, dominated by the long-tier write
 findings below; ~18 min on the Ryzen host at 2.0.0 including a 3 min
-compile, 11.5 min of it the build).
+compile, 11.5 min of it the build; ~9 min for all five core benches on
+current `main`, 2026-10-25, the synthetic build 59 s of it).
 
 **Absolute budgets are machine-specific.** The millisecond budgets here
 hold on the recorded machine (the Environment tables below) under the
@@ -52,8 +59,26 @@ by comparing its absolute numbers with this file's.
 | DuckDB | v2.0.0 (`v2.0.0-dev88614`; duckdb-rs 1.20000.0, bundled), native-format files |
 | Load | 1-min load average 2.2-7.0 while criterion measured (00:00-00:06); 2.8-11 during the synthetic build after its own DuckDB compile finished (34 at the very start, from that compile). One other interactive process used about 0.7 of a core throughout. No other bench ran. |
 
+**Current-`main` column: run conditions.**
+
+| | |
+|---|---|
+| Date | 2026-10-25 00:35 to 00:44 (`cargo bench`, all five core benches: `canon`, `compaction_size`, `extract`, `gate`, `long_write`; 33 s incremental compile) |
+| Code | `main` at `1507cf5` |
+| Machine, OS, Rust, DuckDB | as the 2.0.0 column (AMD Ryzen 9 5900XT 16C/32T, 70 GB, WD_BLACK SN850X NVMe, DB in `/tmp`; Linux 6.14.0-37-generic; rustc 1.98.0; bundled `v2.0.0-dev88614`) |
+| Load | 1-min load average 3.5-11.3 during the run (6.5 at the start, 3.4 at the end; peaks of 9.8-11.3 around 00:39-00:40, during the synthetic build and the first read benches). Shared host: about six Python processes of another user's job (`venv-spi`) used 0.5-1.1 cores each, and one interactive process about 0.7 of a core. No other bench ran. |
+
 The 1.5.5 column has not been re-run on the Ryzen host; there is no
 same-machine 1.5.5 baseline.
+
+**What changed since the 2.0.0 column** (code, same machine), all merged
+2026-10-24: the set-based scalar, long, array and delete writes; the
+per-commit name-resolution cache; the `lower(name)` entity index and the
+four unused multi-column indexes dropped (`RESULTS_results_path.md` §10);
+the one-current unique indexes reordered (§7.3 there); compaction's
+close-commit clustering order and size guard; skip-unchanged writes (P1)
+and the long cell diff (P2); the save-path staleness check and commit
+backstop (§9 there).
 
 **What changed since the 1.5.5 baseline** (code, not machine):
 
@@ -79,40 +104,42 @@ same-machine 1.5.5 baseline.
 1 226 400 live long rows @ 17.6% dead (140 entities × 8 760 int cells; 30
 entity-rewrites of churn), 1 000 × 8 760-cell float arrays (~70 MB, Tier A),
 100 000 single-parameter scalars. On-disk: **213 MB** after CHECKPOINT on
-1.5.5; **165 MiB** on 2.0.0 (native format, current `main`).
+1.5.5; **165 MiB** on 2.0.0 (native format); **136 MiB** on current `main`
+(2026-10-25: the one-current indexes reordered and four unused indexes
+dropped; same rows).
 
 **Build wall time — this IS the bulk-write benchmark number:**
 
-| Stage | Wall (1.5.5) | Per unit (1.5.5) | 2.0.0 (wall, per unit) |
-|---|---|---|---|
-| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | 619.3 s, **6.2 ms/entity** (5.0 ms/entity at best, 7.5 ms/entity on the last 10 k; grows with entity-table size). **Set-based scalar write (2026-10-24): 2.1 s, 0.021 ms/entity** |
-| 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** | 14.4 s, **14.4 ms/entity** |
-| 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** | 39.6 s, **0.28 s/entity ≈ 32 µs/cell** |
-| churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite | 13.0 s, 0.43 s/rewrite |
-| **Total** | **6 586.5 s (109.8 min)** | | **687.4 s (11.5 min)**; scalars are now 90 % of it. **Set-based scalar write: 64.2 s** (scalars 2.1, arrays 10.2, long 37.7, churn 13.1) |
+| Stage | Wall (1.5.5) | Per unit (1.5.5) | 2.0.0 (wall, per unit) | Current `main` (2026-10-25) |
+|---|---|---|---|---|
+| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | 619.3 s, **6.2 ms/entity** (5.0 ms/entity at best, 7.5 ms/entity on the last 10 k; grows with entity-table size). **Set-based scalar write (2026-10-24): 2.1 s, 0.021 ms/entity** | 1.9 s, **0.019 ms/entity** (0.17-0.21 s per 10 k chunk, flat) |
+| 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** | 14.4 s, **14.4 ms/entity** | 6.8 s, **6.8 ms/entity** |
+| 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** | 39.6 s, **0.28 s/entity ≈ 32 µs/cell** | 35.9 s, **0.26 s/entity ≈ 29 µs/cell** |
+| churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite | 13.0 s, 0.43 s/rewrite | 13.0 s, 0.43 s/rewrite |
+| **Total** | **6 586.5 s (109.8 min)** | | **687.4 s (11.5 min)**; scalars are now 90 % of it. **Set-based scalar write: 64.2 s** (scalars 2.1, arrays 10.2, long 37.7, churn 13.1) | **58.8 s**; the long tier (build + churn) is 83 % of it |
 
 Context: fresh read-only connection open + `SELECT 1` on the built 213 MB
 file: **534.5 ms** (median of 5) on 1.5.5; **203.3 ms** on the 165 MiB
-2.0.0 file. The §10 methodology (and the read benches
+2.0.0 file; **212.7 ms** on the 136 MiB current-`main` file. The §10 methodology (and the read benches
 below) hold a warm connection; the per-operation open-read-close discipline
 (CLAUDE.md invariant 1) pays this per operation — worth its own look before
 freeze.
 
 ## Read benches vs VMP Part 6 budgets (warm RO connection, end-to-end to Arrow)
 
-| Read (budget) | §10 baseline (1.4.4, ref machine) | Measured (1.5.5, i3-6100) | Status (1.5.5) | 2.0.0 (Ryzen) | Status (2.0.0) |
-|---|---|---|---|---|---|
-| Point scalar, triple (< 5 ms) | 1.2 ms | **0.98 ms** | PASS | **0.97 ms** | PASS |
-| Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS | **1.24 ms** | PASS |
-| Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below | **50.6 ms** | RECORDED-OVER as the direct-table form; the budget is met through the macro (next rows) |
-| Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | **0.70 ms** | (context) |
-| Point array via `read_parameter_dense` (`array_point_dense_macro`, added with the `array_id` key, schema 0.4) | — | — (bench added after the 1.5.5 run) | new | **2.52 ms** | **PASS** (< 5 ms; the API path for a point array) |
-| Point array by `array_id = ?` (`array_point_by_array_id`, the index-lookup floor) | — | — (bench added after the 1.5.5 run) | new | **0.61 ms** | (floor) |
-| 10⁵ scalars, `read_parameter_scalar`, the loader's columns (< 20 ms; bench added 2026-10-24, see below) | — | — | — | **20.3-20.9 ms** on a shared host (≈ 18 ms scaled to the quiet run) | **AT BUDGET** (see below) |
-| 10⁵ scalars, `read_parameter_scalar`, every column (context; was the budget row) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | **22.5 ms** | context (+12 % over 20 ms; the budget now applies to the loader's columns) |
-| 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | **240.1 ms** | **PASS** |
-| Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | **3 151 ms** | recorded |
-| Model-load context: 1.23 M long rows canonical (< 3 s) | 587 ms | **2 063 ms** | PASS | **1 065 ms** | PASS |
+| Read (budget) | §10 baseline (1.4.4, ref machine) | Measured (1.5.5, i3-6100) | Status (1.5.5) | 2.0.0 (Ryzen) | Status (2.0.0) | Current `main` (2026-10-25) | Status (current `main`) |
+|---|---|---|---|---|---|---|---|
+| Point scalar, triple (< 5 ms) | 1.2 ms | **0.98 ms** | PASS | **0.97 ms** | PASS | **0.93 ms** | PASS |
+| Point long cell, triple (< 5 ms) | 2.2 ms | **0.98 ms** | PASS | **1.24 ms** | PASS | **1.30 ms** | PASS |
+| Point array, triple, full payload (< 5 ms) | 27–31 ms | **77.3 ms** | RECORDED-OVER — the known residual; see below | **50.6 ms** | RECORDED-OVER as the direct-table form; the budget is met through the macro (next rows) | **54.9 ms** | RECORDED-OVER as the direct-table form (the macro row meets the budget) |
+| Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | **0.70 ms** | (context) | **0.73 ms** | (context) |
+| Point array via `read_parameter_dense` (`array_point_dense_macro`, added with the `array_id` key, schema 0.4) | — | — (bench added after the 1.5.5 run) | new | **2.52 ms** | **PASS** (< 5 ms; the API path for a point array) | **2.66 ms** | **PASS** |
+| Point array by `array_id = ?` (`array_point_by_array_id`, the index-lookup floor) | — | — (bench added after the 1.5.5 run) | new | **0.61 ms** | (floor) | **0.63 ms** | (floor) |
+| 10⁵ scalars, `read_parameter_scalar`, the loader's columns (< 20 ms; bench added 2026-10-24, see below) | — | — | — | **20.3-20.9 ms** on a shared host (≈ 18 ms scaled to the quiet run) | **AT BUDGET** (see below) | **20.0 ms** [19.8, 20.4] | **AT BUDGET**: the estimate is 0.1 % over 20 ms and its interval straddles it, at load 3.5-11 (see below) |
+| 10⁵ scalars, `read_parameter_scalar`, every column (context; was the budget row) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | **22.5 ms** | context (+12 % over 20 ms; the budget now applies to the loader's columns) | **24.9 ms** | context (+24 % over 20 ms) |
+| 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | **240.1 ms** | **PASS** | **253.3 ms** | **PASS** |
+| Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | **3 151 ms** | recorded | **3 278 ms** | recorded |
+| Model-load context: 1.23 M long rows canonical (< 3 s) | 587 ms | **2 063 ms** | PASS | **1 065 ms** | PASS | **1 045 ms** | PASS |
 
 **Point-array residual on 1.5.5 — re-measured, NOT improved.** 77 ms vs the
 < 5 ms budget (was 27–31 ms on 1.4.4 on a faster machine). The cost is still
@@ -159,13 +186,21 @@ is 0.79-0.82 of the full read; applied to the quiet-host full read
 (22.5 ms) that is about 18 ms, under the budget, but a quiet-host
 measurement of the new row is still to do.
 
+**Current `main` (2026-10-25, `1507cf5`, load 3.5-11):** the loader's
+columns 20.02 ms [19.80, 20.43], the full read 24.89 ms [24.13, 25.40];
+the projection is 0.80 of the full read, as before. The row sits on the
+budget: by its estimate 0.1 % over, with an interval that includes values
+under it. It is not a clean PASS on this shared host, and the quiet-host
+measurement is still to do. Like every absolute budget in this file, the
+verdict holds for this machine and load only.
+
 ## From/to scan degradation vs dead fraction (raw current-rows long scan, Arrow end-to-end)
 
-| Dead fraction | Scan (1.5.5) | vs 0% dead (1.5.5) | Scan (2.0.0) | vs 17.6% (2.0.0) |
-|---|---|---|---|---|
-| 0% (pre-churn, builder-measured, median of 5) | 16.1 ms | 1.00× | 27.3 ms | (not comparable, see below) |
-| 17.6% | 22.8 ms | **1.41×** | 14.6 ms | 1.00× |
-| 33.3% | 22.7 ms | **1.41×** | 14.3 ms | **0.98×** |
+| Dead fraction | Scan (1.5.5) | vs 0% dead (1.5.5) | Scan (2.0.0) | vs 17.6% (2.0.0) | Scan (current `main`) | vs 17.6% (current `main`) |
+|---|---|---|---|---|---|---|
+| 0% (pre-churn, builder-measured, median of 5) | 16.1 ms | 1.00× | 27.3 ms | (not comparable, see below) | 29.1 ms | (not comparable) |
+| 17.6% | 22.8 ms | **1.41×** | 14.6 ms | 1.00× | 15.5 ms | 1.00× |
+| 33.3% | 22.7 ms | **1.41×** | 14.3 ms | **0.98×** | 15.0 ms | **0.97×** |
 
 On 2.0.0 the builder's 0 %-dead figure (a median of 5 on a connection
 opened right after the post-build CHECKPOINT, while the build had just
@@ -181,12 +216,12 @@ zonemaps skip fully-dead groups, exactly the VMP Part 6 prediction. PASS
 
 ## Write benches (per cycle, each = one `write_parameter` commit + CHECKPOINT)
 
-| Bench | Measured (1.5.5) | Baseline / note | 2.0.0 (Ryzen) |
-|---|---|---|---|
-| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | **499 ms**; 499 ms again with the set-based scalar write (the floor, not the row write) |
-| Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope | **967 ms** |
-| Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below | **803 ms** |
-| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | **1.128 s → 11.3 ms/entity** (2.0 build average 6.2 ms/entity). **Set-based scalar write: 380 ms → 3.8 ms/entity**, mostly the commit's open/close on the 165 MiB file |
+| Bench | Measured (1.5.5) | Baseline / note | 2.0.0 (Ryzen) | Current `main` (2026-10-25) |
+|---|---|---|---|---|
+| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | **499 ms**; 499 ms again with the set-based scalar write (the floor, not the row write) | **507 ms** [497, 516] |
+| Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope | **967 ms** | **997 ms** [972, 1 034] |
+| Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below | **803 ms** | **755 ms** [735, 775] |
+| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | **1.128 s → 11.3 ms/entity** (2.0 build average 6.2 ms/entity). **Set-based scalar write: 380 ms → 3.8 ms/entity**, mostly the commit's open/close on the 165 MiB file | **385 ms → 3.8 ms/entity** [369, 394] |
 
 The one-current generated-column unique indexes (`one_current_long` at
 7-column width, `one_current_scalar`) are maintained by every write above —
@@ -238,6 +273,13 @@ re-profiled here.
    |---|---|---|
    | first-write (`long_insert_8760`) | **272 ms** [222, 299] | 31 µs |
    | replace cycle (`long_replace_8760`) | **499 ms** [474, 518] | 57 µs |
+
+   **Current `main` (2026-10-25, `1507cf5`, load 3.5-6 at the end of
+   the run):** `long_insert_8760` **258 ms** [211, 285] (29 µs/cell),
+   `long_replace_8760` **486 ms** [459, 501] (55 µs/cell): unchanged
+   within the wide intervals. The replace rewrites every cell, so the P2
+   long cell diff (which closes and inserts only changed cells) does not
+   apply to this shape.
 
    Different machine from the before/after rows above, so no ratio is
    given. The insert figure is slower than the A/B harness's 143 ms for
@@ -474,6 +516,13 @@ element**, under the ~1 ns/cell acceptance bound (against ~80–200 ns per cell
 for the pipeline itself). No `gate` rerun: the change is confined to the step
 this bench isolates.
 
+**Current `main` (2026-10-25, `1507cf5`, load 6.5-11 at the start of
+the `cargo bench` run):** (a) 891 µs, (c) 1.229 ms, (b) 196.1 ms finite
+and 193.5 ms with ~1 % `-0.0`/NaN; `canonical_value_f64` over 1 M floats
+250 µs, **0.25 ns per element**. Within the spread of the rounds above
+((c) faster, (a) slower than the quietest round); the per-element cost
+is unchanged.
+
 `cargo bench -p nodal-db-core --bench canon` runs it; `test = false` keeps it
 out of `cargo test --workspace`.
 
@@ -497,6 +546,14 @@ uses a fresh read-only connection per sample.
 
 Compaction 2.6 s, extract 1.6 s; 31 141 rows left out, no axis dropped
 (every version reused the same axes).
+
+**Current `main` (2026-10-25, `1507cf5`, load 5-11):** source 75.3 MiB
+(133.2 ms RO open + cookie), compacted 43.3 MiB (37.4 ms), head extract
+16.8 MiB (36.9 ms); long scan 1.2 / 1.4 / 1.2 ms, array point read
+2.3 / 2.2 / 2.5 ms; compaction 2.1 s, extract 1.4 s; the same 31 141
+rows left out, extract 2.6× smaller than the compacted source. The
+compacted and extract sizes are unchanged; the source is 1.8 MiB larger
+(not diagnosed here).
 
 Reading, honestly scoped:
 
@@ -543,6 +600,11 @@ times indicative), close-commit order in both:
 |---|---|---|---|
 | `(ce, cp, ca, c1, c2, c3, c4)` (base) | 127.3 / 126.0 MiB | 123.3 / 122.0 MiB | 13.1 s |
 | `(c4, c3, c2, ca, cp, ce, c1)` | **104.3 / 103.0 MiB** | **100.3 / 99.0 MiB** | 12.7 s |
+
+**Current `main` (2026-10-25, `1507cf5`, load 5-11):** 104.3 / 103.0
+MiB → **100.3 / 99.0 MiB**, compaction 12.1 s; the automatic re-run kept
+the original (`kept_original: true`, rebuilt 100.3 MiB). Identical sizes
+to the row above.
 
 The 23 MiB saved is the index on the 0.5 M current rows (about 48 B per
 current row); the 10 M closed rows are not in the index in either order

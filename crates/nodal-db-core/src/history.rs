@@ -295,6 +295,45 @@ pub fn write_value(
     Ok(write_arrays(conn, commit_id, std::slice::from_ref(&w))?[0])
 }
 
+/// Write several long values at `commit_id` through the set-based long
+/// writer with N > 1 (one grouped probe, one cell diff per key, set-based
+/// close-out and insert), as `api::commit_changes` writes the long values
+/// of a call; [`write_value`] is the N = 1 form. Each entry is (key,
+/// canonical long value, binding, options). Keys must be distinct and
+/// every value long-tier, else [`DbError::Internal`] / [`DbError::Api`].
+/// One outcome per entry, in order. Hidden: the conformance tests' direct
+/// handle on the multi-key rounds, not an API.
+#[doc(hidden)]
+pub fn write_long_values(
+    conn: &Connection,
+    commit_id: i64,
+    values: &[(ValueKey, &CanonicalValue, Option<i64>, &WriteOptions)],
+    cache: &mut AxisCache,
+) -> Result<Vec<WriteOutcome>, DbError> {
+    let mut w = Vec::with_capacity(values.len());
+    for &(key, value, parameter_type_id, opts) in values {
+        let retained = keeps_content(opts);
+        debug_assert_value_floats_canonical(value);
+        if value.tier != Tier::Long {
+            return Err(DbError::Api(
+                "write_long_values takes long-tier values only".into(),
+            ));
+        }
+        let (axis_ids, axes_created, axes_reused) = resolve_axes(conn, cache, &value.axes)?;
+        w.push(LongWrite {
+            key,
+            value: Cow::Borrowed(value),
+            axis_ids,
+            axes_created,
+            axes_reused,
+            parameter_type_id,
+            retained,
+            entity_minted: false,
+        });
+    }
+    write_longs(conn, commit_id, &w)
+}
+
 /// Delete the value currently live for `key` at `commit_id`: close-out on the
 /// scalar/long tiers, move-to-`_hist` on the array tier (VMP Part 5). A no-op
 /// (no live tier) returns a zero outcome. `force_replace`/`retain_override`

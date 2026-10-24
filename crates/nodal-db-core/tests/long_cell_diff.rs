@@ -2,7 +2,8 @@
 //! independent model of per-cell history, plus targeted cases.
 //!
 //! The randomized test drives seeded sequences of direct `write_value` /
-//! `delete_value` commits over a few keys: cell edits, adds and removes on
+//! `delete_value` commits, and set-based rounds of several long values
+//! (`write_long_values`, as `commit_changes` writes them), over a few keys: cell edits, adds and removes on
 //! the same axes, identical rewrites, axis and kind changes (whole-value
 //! rewrites), transitions to and from the scalar and array tiers, deletes
 //! and rewrites, with and without content retention, interleaved with
@@ -26,7 +27,7 @@ use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
 use nodal_db_core::conn::with_write_txn;
 use nodal_db_core::encoding::{AxisBody, AxisProperties, CanonicalAxis};
-use nodal_db_core::history::{delete_value, write_value};
+use nodal_db_core::history::{delete_value, write_long_values, write_value};
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::{
     LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions, WriteOutcome,
@@ -528,11 +529,33 @@ fn next_value(r: &mut Rng, cur: &Option<Val>) -> Option<Val> {
     }
 }
 
-fn write(conn: &Connection, c: i64, k: ValueKey, v: Option<&Val>, retained: bool) -> WriteOutcome {
-    let opts = WriteOptions {
+fn opts_for(retained: bool) -> WriteOptions {
+    WriteOptions {
         force_replace: !retained,
         ..WriteOptions::default()
-    };
+    }
+}
+
+/// Write several long values in one set-based round (N > 1); returns the
+/// outcomes in order.
+fn write_set(
+    conn: &Connection,
+    c: i64,
+    ws: &[(i64, &Val, bool, Option<i64>)],
+) -> Vec<WriteOutcome> {
+    let canon: Vec<CanonicalValue> = ws.iter().map(|(_, v, _, _)| canonical(v)).collect();
+    let opts: Vec<WriteOptions> = ws.iter().map(|(_, _, r, _)| opts_for(*r)).collect();
+    let entries: Vec<(ValueKey, &CanonicalValue, Option<i64>, &WriteOptions)> = ws
+        .iter()
+        .zip(&canon)
+        .zip(&opts)
+        .map(|(((e, _, _, pt), cv), o)| (key(*e), cv, *pt, o))
+        .collect();
+    write_long_values(conn, c, &entries, &mut AxisCache::new()).unwrap()
+}
+
+fn write(conn: &Connection, c: i64, k: ValueKey, v: Option<&Val>, retained: bool) -> WriteOutcome {
+    let opts = opts_for(retained);
     match v {
         Some(v) => write_value(
             conn,
@@ -548,22 +571,27 @@ fn write(conn: &Connection, c: i64, k: ValueKey, v: Option<&Val>, retained: bool
     }
 }
 
-fn run_seed(seed: u64, commits: usize) {
+/// How a set round's values related to their keys' current values:
+/// [unchanged, cell-diffed, rewritten whole], counted over a run.
+type SetMix = [usize; 3];
+
+fn run_seed(seed: u64, commits: usize) -> SetMix {
+    let mut mix: SetMix = [0; 3];
     let (_d, db) = fresh_db();
     let mut r = Rng(seed);
-    let longs = [1i64, 2];
+    let longs = [1i64, 2, 3];
     let other = 9i64;
     let mut models: BTreeMap<i64, KeyModel> =
         longs.iter().map(|&e| (e, KeyModel::default())).collect();
     let mut commit_ids = Vec::new();
     for step in 0..commits {
-        // Which keys this commit writes: one long key, both, or only the
-        // other key (a commit that leaves the long keys alone).
+        // Which keys this commit writes: one long key, all of them, or
+        // only the other key (a commit that leaves the long keys alone).
         let pick = r.below(10);
         let targets: Vec<i64> = match pick {
             0..=1 => vec![],
-            2 => longs.to_vec(),
-            _ => vec![longs[r.below(2) as usize]],
+            2..=4 => longs.to_vec(),
+            _ => vec![longs[r.below(longs.len() as u64) as usize]],
         };
         let mut plan: Vec<(i64, Option<Val>, bool)> = Vec::new();
         for &e in &targets {
@@ -576,10 +604,43 @@ fn run_seed(seed: u64, commits: usize) {
             plan.push((e, next, !r.chance(20)));
         }
         let other_val = (r.below(4) as f64).to_bits();
+        // Usually the long values of a multi-key commit go through one
+        // set-based round (N > 1: the grouped probe, the set close-outs),
+        // as `commit_changes` writes them; the rest one key at a time.
+        let set_round = plan
+            .iter()
+            .filter(|(_, v, _)| matches!(v, Some(Val::Long { .. })))
+            .count()
+            > 1
+            && r.chance(75);
         let c = with_write_txn(&db, "t", &format!("step {step}"), |conn, c| {
+            let mut outcomes: Vec<(i64, WriteOutcome)> = Vec::new();
+            let mut set: Vec<(i64, &Val, bool, Option<i64>)> = Vec::new();
             for (e, v, retained) in &plan {
-                let o = write(conn, c, key(*e), v.as_ref(), *retained);
+                match v {
+                    Some(lv @ Val::Long { .. }) if set_round => set.push((*e, lv, *retained, None)),
+                    _ => outcomes.push((*e, write(conn, c, key(*e), v.as_ref(), *retained))),
+                }
+            }
+            if !set.is_empty() {
+                for (e, v, _, _) in &set {
+                    let i = match &models[e].cur {
+                        Some(cur) if cur == *v => 0,
+                        Some(Val::Long { shape, int, .. })
+                            if matches!(v, Val::Long { shape: s, int: i, .. } if s == shape && i == int) =>
+                        {
+                            1
+                        }
+                        _ => 2,
+                    };
+                    mix[i] += 1;
+                }
+                let os = write_set(conn, c, &set);
+                outcomes.extend(set.iter().map(|w| w.0).zip(os));
+            }
+            for (e, o) in &outcomes {
                 // An unchanged long write reports it.
+                let v = &plan.iter().find(|p| p.0 == *e).unwrap().1;
                 if let (Some(Val::Long { .. }), Some(Val::Long { .. })) = (&models[e].cur, v) {
                     if models[e].cur.as_ref() == v.as_ref() {
                         assert!(o.unchanged, "seed {seed} step {step}: {o:?}");
@@ -663,14 +724,23 @@ fn run_seed(seed: u64, commits: usize) {
         );
     }
     conn.close().unwrap();
+    mix
 }
 
-/// Seeds 1-6 x 60 commits; `LCD_SEED=n` runs one seed (to debug it).
+/// Seeds 1-6 x 60 commits over three long keys, most multi-key commits as
+/// one set-based round; `LCD_SEED=n` runs one seed (to debug it).
 #[test]
 fn randomized_cell_diff_is_exact_as_of_every_commit() {
     let only: Option<u64> = std::env::var("LCD_SEED").ok().map(|s| s.parse().unwrap());
+    let mut mix: SetMix = [0; 3];
     for seed in (1..=6u64).filter(|s| only.is_none_or(|o| o == *s)) {
-        run_seed(seed, 60);
+        let m = run_seed(seed, 60);
+        (0..3).for_each(|i| mix[i] += m[i]);
+    }
+    if only.is_none() {
+        // The set rounds diffed values, kept unchanged ones and rewrote
+        // others whole, side by side.
+        assert!(mix.iter().all(|&n| n > 0), "set-round mix {mix:?}");
     }
 }
 
@@ -886,4 +956,316 @@ fn value_timeline_long_leg_is_value_level_change_spans() {
         .unwrap();
     assert_eq!(untrusted, vec![(5, c6)]);
     conn.close().unwrap();
+}
+
+/// One set-based round over three keys (the grouped probe and the set
+/// close-outs, N > 1): one value cell-diffed, one unchanged, one rewritten
+/// whole (other axes). Each gets its own outcome and exactly its rows.
+#[test]
+fn a_set_round_diffs_keeps_and_rewrites_side_by_side() {
+    let (_d, db) = fresh_db();
+    let a = long_of(&[(0, 1.0), (1, 2.0), (2, 3.0)]);
+    let (c1, _) = with_write_txn(&db, "t", "seed", |conn, c| {
+        let os = write_set(
+            conn,
+            c,
+            &[
+                (1, &a, true, None),
+                (2, &a, true, None),
+                (3, &a, true, None),
+            ],
+        );
+        Ok((c, os))
+    })
+    .unwrap();
+    let diffed = long_of(&[(0, 1.0), (1, 2.5), (2, 3.0)]);
+    let whole = Val::Long {
+        shape: (4, None),
+        int: false,
+        cells: [
+            ([0, 0], 1f64.to_bits() as i64),
+            ([1, 0], 2f64.to_bits() as i64),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let (c2, os) = with_write_txn(&db, "t", "round", |conn, c| {
+        let os = write_set(
+            conn,
+            c,
+            &[
+                (1, &diffed, true, None),
+                (2, &a, true, None),
+                (3, &whole, false, None),
+            ],
+        );
+        Ok((c, os))
+    })
+    .unwrap();
+    let got: Vec<_> = os
+        .iter()
+        .map(|o| {
+            (
+                o.unchanged,
+                o.cells_unchanged,
+                o.rows_written,
+                o.rows_closed,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![(false, 2, 1, 1), (true, 3, 0, 0), (false, 0, 2, 3)],
+        "diffed / unchanged / whole"
+    );
+    assert_eq!(
+        long_rows(&db, 1),
+        vec![
+            (0, 1, c1, None, true),
+            (1, 1, c1, Some(c2), true),
+            (1, 2, c2, None, true),
+            (2, 1, c1, None, true),
+        ]
+    );
+    assert_eq!(
+        long_rows(&db, 2),
+        vec![
+            (0, 1, c1, None, true),
+            (1, 1, c1, None, true),
+            (2, 1, c1, None, true)
+        ]
+    );
+    assert_eq!(
+        long_rows(&db, 3),
+        vec![
+            (0, 1, c1, Some(c2), false),
+            (0, 2, c2, None, true),
+            (1, 1, c1, Some(c2), false),
+            (1, 2, c2, None, true),
+            (2, 1, c1, Some(c2), false),
+        ]
+    );
+    assert_audits_clean(&db, "set round");
+}
+
+/// A string long value with the given cells (position, text).
+fn string_long(cells: &[(i32, &str)]) -> CanonicalValue {
+    CanonicalValue {
+        tier: Tier::Long,
+        value_kind: ValueKind::String,
+        axes: vec![int_axis(5)],
+        shape: ShapedData::Long(
+            cells
+                .iter()
+                .map(|&(p, t)| LongRow {
+                    positions: vec![p],
+                    value: ScalarValue::Str(t.to_string()),
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn write_canon(db: &Path, e: i64, v: &CanonicalValue, pt: Option<i64>) -> (i64, WriteOutcome) {
+    with_write_txn(db, "t", "w", |conn, c| {
+        let o = write_value(
+            conn,
+            c,
+            key(e),
+            v,
+            &mut AxisCache::new(),
+            &WriteOptions::default(),
+            pt,
+        )?;
+        Ok((c, o))
+    })
+    .unwrap()
+}
+
+/// String cells compare by their stored bytes: an identical value is
+/// unchanged, and an NFC-equal but byte-different string (precomposed
+/// `é` vs `e` + combining acute) is a change, stored as given — in the
+/// single-key and the set round alike.
+#[test]
+fn string_cells_compare_by_bytes() {
+    let (_d, db) = fresh_db();
+    let composed = "caf\u{e9}";
+    let decomposed = "cafe\u{301}";
+    assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+    let v1 = string_long(&[(0, "a"), (1, composed), (2, "")]);
+    write_canon(&db, 1, &v1, None);
+    write_canon(&db, 2, &v1, None);
+    let (_, o) = write_canon(&db, 1, &v1, None);
+    assert!(o.unchanged && o.cells_unchanged == 3, "{o:?}");
+    let v2 = string_long(&[(0, "a"), (1, decomposed), (2, "")]);
+    let (c2, o) = write_canon(&db, 1, &v2, None);
+    assert_eq!(
+        (
+            o.unchanged,
+            o.cells_unchanged,
+            o.rows_written,
+            o.rows_closed
+        ),
+        (false, 2, 1, 1)
+    );
+    // The set form of the same comparison.
+    let cv2 = v2.clone();
+    let o = with_write_txn(&db, "t", "set", |conn, c| {
+        let opts = WriteOptions::default();
+        write_long_values(
+            conn,
+            c,
+            &[(key(2), &cv2, None, &opts), (key(1), &cv2, None, &opts)],
+            &mut AxisCache::new(),
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        (o[0].unchanged, o[0].rows_written, o[0].rows_closed),
+        (false, 1, 1),
+        "key 2: the decomposed string is a change"
+    );
+    assert!(o[1].unchanged, "key 1 already holds it: {:?}", o[1]);
+    let conn = Connection::open(&db).unwrap();
+    let stored: Vec<(i64, String)> = conn
+        .prepare(
+            "SELECT entity_id, v_str FROM value_long \
+             WHERE i1_pos = 1 AND valid_to_commit IS NULL ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        stored,
+        vec![(1, decomposed.to_string()), (2, decomposed.to_string())],
+        "stored byte for byte"
+    );
+    let closed_at_c2: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM value_long WHERE entity_id = 1 AND valid_to_commit = ?",
+            [c2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(closed_at_c2, 1);
+    conn.close().unwrap();
+    assert_audits_clean(&db, "strings");
+}
+
+/// A binding change (`parameter_type_id`, NULL to set or one id to
+/// another) with the same axes, kind and cells rewrites the value whole
+/// (plan D8); the same binding again is unchanged.
+#[test]
+fn a_binding_change_rewrites_the_value_whole() {
+    let (_d, db) = fresh_db();
+    let v = canonical(&long_of(&[(0, 1.0), (1, 2.0), (2, 3.0)]));
+    let (c1, _) = write_canon(&db, 1, &v, None);
+    let (c2, o) = write_canon(&db, 1, &v, Some(41));
+    assert_eq!(
+        (
+            o.unchanged,
+            o.cells_unchanged,
+            o.rows_written,
+            o.rows_closed
+        ),
+        (false, 0, 3, 3),
+        "NULL -> 41"
+    );
+    let (_, o) = write_canon(&db, 1, &v, Some(41));
+    assert!(o.unchanged, "same binding: {o:?}");
+    let (c3, o) = write_canon(&db, 1, &v, Some(43));
+    assert_eq!(
+        (
+            o.unchanged,
+            o.cells_unchanged,
+            o.rows_written,
+            o.rows_closed
+        ),
+        (false, 0, 3, 3),
+        "41 -> 43"
+    );
+    let rows = long_rows(&db, 1);
+    for p in 0..3 {
+        assert!(rows.contains(&(p, 1, c1, Some(c2), true)), "{rows:?}");
+        assert!(rows.contains(&(p, 2, c2, Some(c3), true)), "{rows:?}");
+        assert!(rows.contains(&(p, 3, c3, None, true)), "{rows:?}");
+    }
+    let conn = Connection::open(&db).unwrap();
+    let pts: Vec<Option<i64>> = conn
+        .prepare(
+            "SELECT DISTINCT parameter_type_id FROM value_long \
+             WHERE entity_id = 1 AND valid_to_commit IS NULL",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(pts, vec![Some(43)]);
+    conn.close().unwrap();
+}
+
+/// The "close all but the kept cells" form of a one-key diff binds the
+/// kept positions while there are at most 16,384 of them, and falls back
+/// to closing the changed cells by position beyond. On both sides of the
+/// boundary (exactly 16,384 kept, and 16,385) a diff that changes more
+/// cells than it keeps closes exactly the changed cells.
+#[test]
+fn the_kept_list_boundary_closes_exactly_the_changed_cells() {
+    const CHUNK: i32 = 16_384;
+    for kept in [CHUNK, CHUNK + 1] {
+        let (_d, db) = fresh_db();
+        let changed = kept + 1;
+        let n = kept + changed;
+        let value = |bump: f64| CanonicalValue {
+            tier: Tier::Long,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(n + 1)],
+            shape: ShapedData::Long(
+                (0..n)
+                    .map(|p| LongRow {
+                        positions: vec![p],
+                        // The odd positions (`kept` of them) change.
+                        value: ScalarValue::Float(p as f64 + if p % 2 == 1 { bump } else { 0.0 }),
+                    })
+                    .collect(),
+            ),
+        };
+        // The even positions 0, 2, .., n - 1 are kept + 1; the last one
+        // changes too, so exactly `kept` stay and `kept + 1` change.
+        let v1 = value(0.0);
+        let mut v2 = value(0.5);
+        if let ShapedData::Long(rows) = &mut v2.shape {
+            let last = rows.last_mut().unwrap();
+            last.value = ScalarValue::Float((n - 1) as f64 + 0.5);
+        }
+        let (c1, _) = write_canon(&db, 1, &v1, None);
+        let (c2, o) = write_canon(&db, 1, &v2, None);
+        assert_eq!(
+            (o.cells_unchanged, o.rows_written, o.rows_closed),
+            (kept as usize, changed as usize, changed as usize),
+            "kept {kept}"
+        );
+        let conn = Connection::open(&db).unwrap();
+        let (live, closed, kept_rows, wrong): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT count(*) FILTER (valid_to_commit IS NULL), \
+                        count(*) FILTER (valid_to_commit = ?2), \
+                        count(*) FILTER (valid_to_commit IS NULL AND valid_from_commit = ?1), \
+                        count(*) FILTER (valid_to_commit = ?2 \
+                            AND i1_pos % 2 = 0 AND i1_pos <> ?3) \
+                 FROM value_long WHERE entity_id = 1",
+                duckdb::params![c1, c2, n - 1],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        conn.close().unwrap();
+        assert_eq!(
+            (live, closed, kept_rows, wrong),
+            (n as i64, changed as i64, kept as i64, 0),
+            "kept {kept}"
+        );
+    }
 }

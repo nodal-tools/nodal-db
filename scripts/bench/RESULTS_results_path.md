@@ -11,7 +11,7 @@ It is a recording benchmark: nothing here gates a build.
 |---|---|---|
 | `crates/nodal-db-cli/benches/results_path.rs` | Ingest (core API loop and Arrow-IPC import), file size, bind cost of the array INSERT, read paths, the `value_array_cells` A/B gate (`cellsgate`), row-group steel-man, long-tier reads. DuckDB as bundled by the core. | `just bench-results` (full: ~30-40 min on 1.5.5, 21 min on current `main`, §6) or `just bench-results --quick` (~1 min) |
 | `scripts/bench/raw_duckdb_layout.py` | Dense `DOUBLE[]` lists against a lean sorted `(k, pos, v)` long table in plain DuckDB, no nodal-db schema. Any DuckDB version. | runs after the Rust bench in `just bench-results`; alone: `just bench-raw-layout <python> [--quick]` |
-| `scripts/bench/long_tier_size_breakdown.py` | Where the long tier's bytes go: `value_long` built from the real schema, then without its one-current unique index, its triple index, its foreign keys and its `i1_dt` column, against a lean table (§7.1). Optional cross-check on a core-written file. | `just bench-long-size [--core-db <file>]` (~15 s) |
+| `scripts/bench/long_tier_size_breakdown.py` | Where the long tier's bytes go: `value_long` built from the real schema, with its one-current unique index in the old column order, then without that index, its triple index, its foreign keys and its `i1_dt` column, against a lean table (§7.1, §7.3). Three shapes (`--shape`). Optional cross-check on a core-written file. | `just bench-long-size [--shape rank1\|sparse2d\|rank3] [--core-db <file>]` (~30 s; `sparse2d` ~1 min) |
 | `scripts/bench/surrogate_key_variant.py` | Superseded by schema 0.4 (§4b); needs a 0.3-schema input file. The real `value_array` (composite primary key) against a copy with a single-column `array_id` key; the long tier's equivalent; commit cost after an array replace. Any DuckDB version. | `just bench-sk-variant <python> --db <file> [--long-db <file>] [--commit-probe] [--commit-probe-native]` (input files: see the script's docstring) |
 
 All data is deterministic (splitmix64, fixed seed); the raw-DuckDB script
@@ -524,6 +524,8 @@ identical figures.
 Historical record: measured before `ix_value_long_triple` was dropped
 from the schema (2026-10-24, `name_index_and_unused_indexes_PLAN.md`).
 On the current schema variant A measures 68.53 and C equals B (11.07).
+Both are before the one-current key-order change: §7.3 has the figures
+after it.
 
 | Variant | Used B/cell |
 |---|---|
@@ -584,6 +586,73 @@ array figures of §4c (0.9 and 1.8 µs, 20 values per commit, at lower
 load). An earlier probe of the bind step alone, outside the core (176 ms,
 135 MB peak, `specs/Done/appender_write_path_PLAN.md` C7), is superseded
 by these end-to-end figures.
+
+### 7.3 After the one-current key-order change (2026-10-24)
+
+`one_current_long` was re-created over the same seven columns in the order
+`(c4, c3, c2, ca, cp, ce, c1)` instead of `(ce, cp, ca, c1, c2, c3, c4)`
+(`schema/050_values.sql`; guard: `crates/nodal-db-core/tests/long_index_size.rs`).
+Uniqueness does not depend on column order; the size does. DuckDB's ART
+stores each row's key bytes after its last branch point, so the old order
+paid on every row for the columns that are constant within a value
+(`c2..c4` below the declared rank, the key triple, the zero high bytes of
+each position).
+
+Same host as §7.1, shared: 1-min load average 7-34 during these runs (the
+sizes are deterministic: two rank1 runs gave identical figures; the times
+are not used). Python duckdb 2.0.0, numpy 2.5.4, pyarrow 26.0.0, Python
+3.12.3; bundled DuckDB `v2.0.0-dev88614` for the core runs.
+
+**Breakdown script** (`just bench-long-size`, new variant A0 = A with the
+index re-created in the old order). Used B/cell:
+
+| Variant | rank1 (1 000 × 876, 876 000 cells) | sparse2d (one 8 760 × 840 value at 62 %, 4 562 207 cells) | rank3 (1 000 × 5 × 8 × 24 at 90 %, 865 000 cells) |
+|---|---|---|---|
+| A0: A with `one_current_long` in the old order | 68.83 | 66.48 | 86.67 |
+| A: schema as built | **20.35** | **18.16** | **43.03** |
+| B: A without `one_current_long` | 11.07 | 5.00 | 4.85 |
+| C: B without `ix_value_long_triple` (absent) | 11.07 | 5.00 | 4.85 |
+| D: C without the foreign keys | 10.47 | 4.31 | 3.64 |
+| E: D without `i1_dt` | 4.19 | 4.31 | 3.64 |
+| L: lean `(k, pos, v)` | 4.19 | 2.36 | 4.24 |
+
+| Part (B/cell) | rank1 | sparse2d | rank3 |
+|---|---|---|---|
+| key order: old minus current (A0 − A) | 48.48 | 48.32 | 43.64 |
+| `one_current_long` | 9.28 | 13.16 | 38.19 |
+| foreign keys: the engine's hidden FK ARTs (not in `duckdb_indexes()`) | 0.60 | 0.69 | 1.21 |
+| `i1_dt` | 6.28 | 0.00 | 0.00 |
+| remaining columns (variant E) | 4.19 | 4.31 | 3.64 |
+
+- On rank1 the index drops from 57.8 to 9.3 B/cell, about one 8-byte child
+  slot per row: the long tier as a whole goes from 68.8 to 20.4 B/cell, and
+  the index is now under half of it. On the large sparse value it costs
+  13.2 B/cell.
+- rank3 is the order's weak case: the last column (`c1`, 5 values) has
+  little fan-out inside each subtree, so each row also pays for a
+  half-empty node and a per-value prefix. It still halves.
+- sparse2d's `i1_dt` costs nothing: axis 1 is the outer axis, so the
+  column changes only every ~520 rows and compresses to almost nothing.
+
+**Cross-check on a core-written file** (`--core-db` on `ipc_long_r0.db`
+from the `results_path.rs -- long` run below, net of an empty schema): 29.03
+B/cell as written; 19.75 without `one_current_long` (so the index is 9.28
+B/cell, the same as variant A); 8.38 with `value_long` dropped.
+
+**Ingest storage through the core** (`cargo bench -p nodal-db-cli --bench
+results_path -- long`, both arms in this session: the base `4681d57` and
+the change, each two reps with identical sizes):
+
+| Lane | Before: file, gross / net B/cell | After: file, gross / net B/cell |
+|---|---|---|
+| core API loop (100 series per commit) | 71.3 MiB, 85.30 / 82.89 | **30.5 MiB, 36.52 / 34.11** |
+| Arrow-IPC import (one commit) | 67.0 MiB, 80.21 / 77.81 | **26.8 MiB, 32.03 / 29.63** |
+
+Write times are unchanged: a paired, interleaved `ab.py` run (N = 21,
+load 7-19) gave median per-pair ratios new/old of 1.01 for `long_insert`,
+0.98 for `long_replace`, 1.00 for `scalar_insert` and 1.03 for
+`scalar_replace` (`one_current_scalar` was reordered to `(ca, cp, ce)` in
+the same change), all within ±3 %.
 
 ## 8. Set-based long write (2026-10-24, DuckDB 2.0.0)
 

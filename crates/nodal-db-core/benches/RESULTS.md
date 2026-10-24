@@ -191,6 +191,8 @@ zonemaps skip fully-dead groups, exactly the VMP Part 6 prediction. PASS
 The one-current generated-column unique indexes (`one_current_long` at
 7-column width, `one_current_scalar`) are maintained by every write above —
 their cost is inside these numbers, not separately measurable here.
+(Reordered 2026-10-24: same columns, about 5× smaller; write times
+unchanged in a paired A/B, `scripts/bench/RESULTS_results_path.md` §7.3.)
 
 On 2.0.0 the three replace cycles are now all under 1 s, so the cycle is
 dominated by the fixed cost (CHECKPOINT and the RW open/close on the
@@ -530,6 +532,20 @@ locally; "after" is the closed-rows-by-close-commit order.
 |---|---|---|---|
 | before: `(valid_to IS NULL) DESC, <keys>, valid_from` | 127.3 / 126.0 MiB | **166.3 / 165.0 MiB** (+31 %) | 14.1 s |
 | after: `(valid_to IS NULL) DESC, valid_to, <keys>, valid_from` | 127.3 / 126.0 MiB | **123.3 / 122.0 MiB** (−3 %) | 14.3 s |
+
+**After the one-current key-order change (2026-10-24).** Re-run of both
+arms in one session (base `4681d57` and the change; load average 15-28,
+times indicative), close-commit order in both:
+
+| `one_current_long` order | source file / used | compacted file / used | compaction |
+|---|---|---|---|
+| `(ce, cp, ca, c1, c2, c3, c4)` (base) | 127.3 / 126.0 MiB | 123.3 / 122.0 MiB | 13.1 s |
+| `(c4, c3, c2, ca, cp, ce, c1)` | **104.3 / 103.0 MiB** | **100.3 / 99.0 MiB** | 12.7 s |
+
+The 23 MiB saved is the index on the 0.5 M current rows (about 48 B per
+current row); the 10 M closed rows are not in the index in either order
+(their key columns are all NULL). The automatic re-run kept the original
+in both arms.
 
 At the `-- --quick` / test-fixture size (50 k cells × 21, 1.05 M rows;
 `tests/compaction.rs::compact_shrinks_history_heavy_long_table`): file

@@ -47,6 +47,16 @@
 //! `--no-default-features` and runs the pre-2026-10-24 `cur_cls`/`cur_name`
 //! statement it replaced.
 //!
+//! Skip-unchanged modes (skip_unchanged_writes_PLAN §6.4), on a fresh file,
+//! ms per timed commit (the seed commit is untimed): `api_scalar_10k_
+//! unchanged` / `_changed` (10 000 scalars re-written identical / changed),
+//! `api_long_10x8760_unchanged` (10 x 8 760-cell long values re-written
+//! identical; the changed twin is `api_long_10x8760_replace`), and
+//! `api_array_200x8760_unchanged` / `_changed` (every value shifted, so the
+//! v_min/v_max prefilter already proves the change) / `_changed_pinned`
+//! (min and max kept, interior changed: the payload is fetched and
+//! compared before the write — the worst case).
+//!
 //! Save-path modes (save_path_open_reduction plan §6.2): see `save_path.rs`
 //! (`editor_save`, `editor_reload`, `editor_session_100`,
 //! `txn_1_scalar_replace`, `growth_session`, `build_m1k`). The new arm is
@@ -305,6 +315,46 @@ fn series_seg(parameter: &str, names: &[String], cells: usize, int: bool, seed: 
         parameter: parameter.into(),
         alternative: "Base".into(),
         batches: vec![series_batch(names, cells, int, seed)],
+        domains: vec![],
+    }
+}
+
+/// The float series of `series_seg(parameter, names, cells, false, 0)`
+/// with every interior element moved by 0.25: each array keeps its first
+/// (minimum) and last (maximum) element, so its `v_min` / `v_max` match the
+/// stored ones and only the payload differs.
+fn pinned_seg(parameter: &str, names: &[String], cells: usize) -> Segment {
+    let base = series_batch(names, cells, false, 0);
+    let vals = base
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let moved: Vec<f64> = (0..vals.len())
+        .map(|i| {
+            let c = i % cells;
+            let v = vals.value(i);
+            if c == 0 || c == cells - 1 {
+                v
+            } else {
+                v + 0.25
+            }
+        })
+        .collect();
+    let batch = RecordBatch::try_new(
+        base.schema(),
+        vec![
+            base.column(0).clone(),
+            base.column(1).clone(),
+            Arc::new(Float64Array::from(moved)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    Segment {
+        class: "node".into(),
+        parameter: parameter.into(),
+        alternative: "Base".into(),
+        batches: vec![batch],
         domains: vec![],
     }
 }
@@ -648,6 +698,43 @@ fn main() {
             let ns = names(0..10);
             api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 0)], vec![]);
             api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 5)], vec![])
+        }
+        // --- skip_unchanged_writes_PLAN §6.4 (ms per commit, the timed
+        // commit only; the seed commit is untimed). `_unchanged` re-writes
+        // identical values (the new core skips them and makes no commit);
+        // `_changed` re-writes changed ones (the comparison is overhead);
+        // `_changed_pinned` keeps every array's min and max and changes its
+        // interior, so the array prefilter passes and the payload is
+        // fetched and compared before the write (the worst case, e.g.
+        // results pinned at 0 and capacity).
+        "api_scalar_10k_unchanged" | "api_scalar_10k_changed" => {
+            let ns = names(0..10_000);
+            let vals: Vec<f64> = (0..10_000).map(|i| i as f64 * 0.5).collect();
+            api_scalars(&db, "p", &ns, &vals);
+            let bump = if mode.ends_with("_changed") {
+                0.25
+            } else {
+                0.0
+            };
+            let vals: Vec<f64> = vals.iter().map(|v| v + bump).collect();
+            api_scalars(&db, "p", &ns, &vals)
+        }
+        "api_long_10x8760_unchanged" => {
+            let ns = names(0..10);
+            api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 0)], vec![]);
+            api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 0)], vec![])
+        }
+        "api_array_200x8760_unchanged"
+        | "api_array_200x8760_changed"
+        | "api_array_200x8760_changed_pinned" => {
+            let ns = names(0..200);
+            api_commit(&db, vec![series_seg("a8760", &ns, 8760, false, 0)], vec![]);
+            let seg = match mode {
+                "api_array_200x8760_unchanged" => series_seg("a8760", &ns, 8760, false, 0),
+                "api_array_200x8760_changed" => series_seg("a8760", &ns, 8760, false, 5),
+                _ => pinned_seg("a8760", &ns, 8760),
+            };
+            api_commit(&db, vec![seg], vec![])
         }
         // Single-name lookups on the 10^5 file (see the module docs).
         "ensure_entity_100k" => {

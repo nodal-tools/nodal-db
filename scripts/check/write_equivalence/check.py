@@ -36,10 +36,14 @@ the default mode (it proves the changed path is untouched).
 `--logical`: a repeat-heavy workload printing only the logical state
 (reports without commit ids, value/row counts and tiers; current values
 after every call; as-of values at every call boundary). The arms must
-match line for line, except that an as-of row OLD stubbed may carry
-content in NEW (an unchanged write supersedes nothing, so there is
-nothing to stub); NEW must also have no more history rows than OLD and
-no audit finding OLD lacks.
+match line for line, except that an as-of row may be a content-less
+stub in one arm and carry content in the other: the arms version
+different spans. OLD re-versions an identical write (with
+--force-replace it stubs the identical old version; without, it keeps
+that version's content), NEW keeps one row across it, so a later stub
+covers a longer span in NEW and a shorter one in OLD. The current
+state must match exactly; NEW must also have no more history rows than
+OLD and no audit finding OLD lacks.
 """
 
 import argparse
@@ -160,9 +164,16 @@ def compare_logical(old, new):
     """The `--logical` rules (module docs); returns the problems found."""
     problems = []
     so, sn = sections(old), sections(new)
-    if [h for h, _ in so] != [h for h, _ in sn]:
-        ho = [h for h, _ in so]
-        hn = [h for h, _ in sn]
+
+    def shape(h):
+        # The history and audit headers carry counts compared by rule below.
+        if h.startswith("## history_rows ") or h.startswith("## audit "):
+            return h.rsplit(" ", 1)[0]
+        return h
+
+    ho = [shape(h) for h, _ in so]
+    hn = [shape(h) for h, _ in sn]
+    if ho != hn:
         first = next((i for i, (a, b) in enumerate(zip(ho, hn)) if a != b), min(len(ho), len(hn)))
         problems.append(f"headers differ at block {first}: old {ho[first:first + 1]} new {hn[first:first + 1]}")
         return problems
@@ -175,8 +186,8 @@ def compare_logical(old, new):
             if bo != bn:
                 problems.append(f"{h}: bodies differ")
             continue
-        # As of a call boundary: rows sorted by identity; OLD may have
-        # stubbed what NEW kept.
+        # As of a call boundary: rows sorted by identity; a stub in either
+        # arm matches any payload (module docs).
         ro = sorted(bo, key=lambda line: line.split("\t")[0])
         rn = sorted(bn, key=lambda line: line.split("\t")[0])
         if len(ro) != len(rn):
@@ -185,7 +196,7 @@ def compare_logical(old, new):
         for a, b in zip(ro, rn):
             ia, pa = a.split("\t", 1)
             ib, pb = b.split("\t", 1)
-            if ia != ib or (pa != pb and pa != "STUB"):
+            if ia != ib or (pa != pb and "STUB" not in (pa, pb)):
                 problems.append(f"{h}: old {a[:200]!r} new {b[:200]!r}")
                 break
     hist = {}

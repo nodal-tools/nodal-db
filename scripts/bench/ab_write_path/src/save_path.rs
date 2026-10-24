@@ -27,7 +27,8 @@
 //!   save cycle `commit(expect) → compact_if_due(Some(id)) → reload`,
 //!   repeated, printing one JSON summary. Env: `NODAL_AB_SAVES` (default
 //!   100), `NODAL_AB_BACKSTOP` = `off` | `auto` | N (default `auto`),
-//!   `NODAL_AB_FILE` = a file to run on a copy of (default: the fixture).
+//!   `NODAL_AB_FILE` = a `build_m1k` file to run on a copy of (the saves
+//!   target its `cls0`/`s00`/`e0_000`; default: the fixture).
 //! - `build_m1k <path>`: the critique probe's 1 000-entity model (4 classes
 //!   x 250 entities; 16 scalar params x 2 alternatives, 2 hourly 8 760-pt
 //!   series on 25 entities and 2 weekly 168-pt series on all, per class).

@@ -492,8 +492,9 @@ To compact a database in place instead (keeping all history), use
 `--if-needed` (Python: `db.compact(if_needed=True)`) compacts only when
 it is due: when the file has grown to three times its size after the
 last compaction (`--growth`), or when 50 commits have landed since then
-(`--max-commits`; scaled up to 200 for files of several hundred MiB, `0`
-in the CLI or `None` in Python disables it). The commit count matters
+(`--max-commits`; the default grows with the file size above about
+70 MiB, to about 100 at 400 MiB and at most 200; `0` in the CLI or
+`None` in Python disables it). The commit count matters
 even when the file does not grow: every commit makes each later open of
 the file slightly slower until the next compaction. The size and commit
 of the last compaction are kept in a `demo.duckdb.compaction-baseline`

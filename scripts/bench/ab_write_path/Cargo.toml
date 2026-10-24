@@ -16,3 +16,9 @@ publish = false
 # place and build it there.
 nodal-db-core = { path = "../../../crates/nodal-db-core" }
 tempfile = "3.27.0"
+
+[features]
+# The save-path new arm (save_path_open_reduction plan §6.2): saves commit
+# with `WriteOptions::expect_commit` instead of a pre-commit RO poll, and
+# `growth_session` is available. Needs a core that has `expect_commit`.
+save_api = []

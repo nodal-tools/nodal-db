@@ -600,6 +600,64 @@ The API loop's ratio is against the appender plan's D10 gate of
 The long tier now ingests at about 150-200 k values/s against 0.9-1.0 M
 for the array tier, about 5x slower per value (§6.1: 14x).
 
+## 9. Save path: staleness check and commit backstop (2026-10-24, DuckDB 2.0.0)
+
+Harness `scripts/bench/ab_write_path` (`src/save_path.rs`), release
+builds, three arms: old = `c92ac18`; nofeat = the new tree without the
+`save_api` feature (the editor's save today: RO head poll, then
+`commit_changes`); new = the new tree with it (`commit_changes` with
+`WriteOptions::expect_commit`). Fixture: 5 classes × 40 entities × 10
+scalar parameters; a save replaces one scalar. The post-save reload
+(`model_slurp`, a copy of the editor's `ModelCache::load` statement
+sequence without its decode) is timed on its own: it dominates a save and
+is the same in both arms. Paired, interleaved `ab.py`; medians and
+bootstrap 95 % CIs. The first pass ran at load average 18-22 (shared
+host); the rows marked † were re-run at load 2.8-3.5.
+
+| Mode | arms | old | new | ratio (95 % CI) |
+|---|---|---|---|---|
+| `editor_save` † (commit span, ms/save) | nofeat → new | 125.4 | 79.0 | 0.630 (0.625-0.636) |
+| `editor_save` (same, load ≈21) | nofeat → new | 166.8 | 105.3 | 0.636 (0.619-0.647) |
+| `editor_reload` (ms) | nofeat → new | 354.9 | 354.6 | 0.995 (0.989-1.031) |
+| `editor_session_100` † (growth slope, ms/save) | nofeat → new | 2.73 | 1.85 | 0.70 (0.66-0.90) |
+| `editor_session_100` (load 18 → 8: discard by the 2× rule) | nofeat → new | 2.84 | 1.81 | 0.64 (0.48-0.97) |
+| `editor_save` † | old → nofeat | 123.8 | 125.0 | 1.011 (0.995-1.030) |
+| `scalar_replace` (400 values/txn, ms/value) | old → nofeat | 2.516 | 2.499 | 1.000 (0.991-1.011) |
+| `txn_1_scalar_replace` (ms/commit) | nofeat → new (`expect_commit = Some`) | 75.29 | 75.90 | 1.010 (1.000-1.019) |
+
+- One RO open less per save: −46 ms (load 3) / −61 ms (load 21) on the
+  commit span. The growth of the per-save time falls from ≈2.7-2.8 to
+  ≈1.8-1.9 ms per save (three opens per save → two).
+- With `expect_commit = None` the new tree is the old one (both CIs
+  include 1.0). `Some` adds the in-transaction `SELECT max(id)`: +0.6 ms
+  per commit.
+
+**Commit backstop sessions** (`growth_session`, new arm, one binary, load
+≈4-12). Each save: `commit(expect)` → `compact_if_due(Some(id))` →
+reload; the file is compacted once before the series. "Save" = commit +
+reload, excluding the compaction stall; "first10"/"last10" are means of
+the first and last ten saves.
+
+| Saves | backstop | compactions | stall (ms) | save mean incl. stalls | first10 / last10 | commit first10 / last10 | RO open+close at end |
+|---|---|---|---|---|---|---|---|
+| 100 | off | 0 | – | 432.8 | 343.7 / 513.0 | 78.7 / 169.7 | 132.2 |
+| 100 | auto (N = 50) | 2 | 1 137 | 407.2 | 343.3 / 419.8 | 77.5 / 123.6 | 41.3 |
+| 200 | off | 0 | – | 527.6 | 345.3 / 714.4 | 79.2 / 274.5 | 222.6 |
+| 200 | 30 | 6 | 1 086 | **388.5** | 343.2 / 354.3 | 78.3 / 86.2 | 61.5 |
+| 200 | 50 | 4 | 1 112 | 395.6 | 332.6 / 408.3 | 74.5 / 118.8 | 38.3 |
+| 200 | 100 | 2 | 1 190 | 431.6 | 336.6 / 489.6 | 76.8 / 163.9 | 40.3 |
+| 60, m1k (25 MiB) | auto (N = 50) | 1 | 1 394 | 3 153.6 | 3 074 / 3 123 | 80.4 / 84.7 | 48.9 |
+
+- Without the backstop the save keeps slowing (+1.9 ms per save; after
+  200 saves a save is 2× slower and an empty RO open costs 223 ms).
+- N = 30 and N = 50 are within 2 % of each other in mean save time
+  (388.5 vs 395.6 ms); N = 100 is 9 % slower. This matches the plan's
+  estimate (optimum ≈35 for a two-open save, flat between 30 and 100).
+- The stall is ≈1.1 s on the fixture-sized file and 1.4 s on m1k (plan
+  §11: 1.05 s and 1.34 s).
+- On m1k the reload (≈3.0 s) dwarfs everything else; see the editor's
+  reload quick win and incremental-refresh issue.
+
 ## Mapping to the earlier Set B figures
 
 The earlier figures came from the same harness (restored here unchanged

@@ -36,6 +36,13 @@
 //! commits); on a fresh file: api_long_1000x24_new, api_array_1000x24_new
 //! and api_long_10x8760_replace (10 keys seeded, then replaced in one
 //! commit; only the replace is timed).
+//!
+//! Save-path modes (save_path_open_reduction plan §6.2): see `save_path.rs`
+//! (`editor_save`, `editor_reload`, `editor_session_100`,
+//! `txn_1_scalar_replace`, `growth_session`, `build_m1k`). The new arm is
+//! built with `--features save_api`.
+
+mod save_path;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -362,7 +369,19 @@ fn main() {
         build_big(Path::new(&args[2]));
         return;
     }
+    if mode == "build_m1k" {
+        save_path::build_m1k(Path::new(&args[2]));
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
+    if mode == "growth_session" {
+        save_path::growth_session(dir.path());
+        return;
+    }
+    if let Some(ms) = save_path::run(mode, dir.path()) {
+        println!("{ms:.6}");
+        return;
+    }
     let db = dir.path().join("ab.duckdb");
     init_schema_with_default(&db, Some("Base")).unwrap();
 

@@ -87,7 +87,7 @@ Design points:
 
 The [schema page](../schema.md) shows the generated table diagram.
 
-The schema is verified by `schema/smoke_test.py` (228 checks), which
+The schema is verified by `schema/smoke_test.py` (233 checks), which
 includes hostile-data regressions: it plants corruptions and asserts
 that the right constraint or audit fires. Run it with the project-local
 `.venv/bin/python`; its DuckDB version must match the engine bundled in
@@ -132,8 +132,14 @@ Engine facts the code relies on (DuckDB 2.0):
   silently (in every build, failing with `DbError::Internal`); and with
   the default
   `preserve_insertion_order` the rows land in list order, which keeps a
-  long value's rows in canonical cell order. The write connection never
-  changes that setting.
+  freshly written long value's rows in canonical cell order. The write
+  connection never changes that setting. A cell diff appends the cells
+  it inserts after the value's other rows, so a value's current rows are
+  in cell order only until its first partial rewrite; compaction's
+  clustering restores the order. **Value rows have no physical-order
+  contract**: every reader that needs cell order orders by positions
+  (`ORDER BY idx1_ordinal, …` on `read_parameter`), and the core's own
+  readers sort or key by position.
 - **Point lookups are sequential scans; value writes and deletes are
   set-based.** DuckDB 2.0 never scans through a multi-column index (so the
   value tables carry no key-triple index; their one-current unique indexes
@@ -257,8 +263,20 @@ equal means the same tier, binding (`parameter_type_id`), axis ids, and
 per row or cell the same `value_kind` and payload bits, with the row's
 content retained. Every doubt errs toward "changed": a false "changed"
 costs one extra version, a false "unchanged" would silently drop a
-write. A long value is compared whole for now (a per-cell diff is
-planned). On top, `commit_changes` and its wrappers make no commit for
+write. A long value is diffed cell by cell: when every current cell
+shares one set of axis ids, one value kind and one binding, equal to
+the new value's, only the changed and removed cells are closed out (one
+UPDATE joined on the bound positions, in chunks of 16 384) and only the
+changed and added cells are inserted; otherwise, or when every cell
+changed, the whole value is closed by the key-level UPDATE. A one-key
+diff that closes more cells than it keeps (at most 16 384 kept) closes
+"every current cell but the kept ones" instead, an anti-join at the
+key-level UPDATE's per-row cost. The
+per-position probe streams the stored cells through Arrow into a
+compact position-sorted vector (32 bytes per cell, no per-row string;
+about 180 MB for a 4.6 million-cell value) and the diff is a sort-merge
+with the new value's cells, which canon emits in position order. On
+top, `commit_changes` and its wrappers make no commit for
 a call that provably changed nothing (every item reported a known
 no-op: unchanged values, deletes that found nothing, structural no-ops,
 object deletes that found nothing, no auto-create); the transaction is
@@ -533,7 +551,7 @@ make a compaction on the commit path fail on it.
 Three legs, run through `just` (`just` is the quick gate, `just full`
 the release gate that adds the `#[ignore]`d slow tests and benchmarks):
 
-1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 228
+1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 233
    checks): builds a demo model, exercises resolution, membership,
    history and audits, then plants hostile-data corruptions and asserts
    that the right constraint or audit fires.

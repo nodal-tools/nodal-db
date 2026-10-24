@@ -79,7 +79,10 @@ must still be byte-identical (the changed path is untouched);
 state (current values after every call, as-of values at every call
 boundary, reports without commit ids and counts), and requires the new
 arm to have no more history rows and no audit finding the old arm lacks.
-See `check.py`.
+An as-of row may be a content-less stub in one arm only (the arms version
+different spans): an old-arm stub matches any content, a new-arm stub
+only when the old arm shows at most one distinct content across that
+stub's whole span. See `check.py`.
 
 ## PR checklist
 To be defined with the first release process.

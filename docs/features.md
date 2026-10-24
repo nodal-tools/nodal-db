@@ -134,6 +134,16 @@ Writing a value equal to the stored one changes nothing: no new version
 and no history row. A call that changes nothing at all creates no
 commit (its report has commit id 0).
 
+Long-format values keep **cell-level history**. When a long value is
+rewritten on the same axes, with the same value kind and parameter type,
+only the cells that changed or disappeared are closed out, and only the
+changed and new cells are inserted; the other cells keep their row and
+their version. Editing one cell of a 4.6 million-cell value writes one
+row, not 4.6 million. A rewrite on other axes (a coordinate added to or
+removed from a derived axis), with another value kind or another
+parameter type replaces every cell, as before. As-of reads are exact
+either way, because every row carries its own commit span.
+
 Audit views check that history is consistent, for example
 `audit_history_tiling` for version continuity.
 
@@ -147,6 +157,11 @@ returns the table as it was at commit `c`: `value_scalar_asof`,
 `value_long_asof`, `value_array_asof` (current rows plus `_hist`),
 `entity_asof`, `alternative_asof`, `parameter_definition_asof` and so on.
 `value_timeline` lists every version of every value across all tiers.
+For a long-format value a version is a *change span*: a new span starts
+at every commit that changed any of its cells, a deletion leaves a gap,
+and `content_retained` is false when any cell valid in the span was kept
+only as a stub. `history_untrusted_span` lists the spans whose content
+was not retained.
 
 **Why:** you can reproduce exactly what a model run saw, or compare the
 current data with any earlier state, using SQL.

@@ -329,8 +329,8 @@ tier works; measured figures for both tiers follow in
 | Read a slice (a time window, or one index of a multi-dimensional value) | Costs the same as reading the whole value (see below). | A filter on positions or coordinates over the value's rows. |
 | Read one cell | Same as a slice. | Same as a slice. |
 | Write a new value | One row; the whole list is bound as one SQL list parameter. | `n` rows, inserted by one statement that binds each column as a list (up to 16 384 cells per execution). |
-| Change one cell | The whole value is rewritten: the old row (all `n` cells) is copied to `value_array_hist` and the current row is replaced. | The whole value is rewritten: all `n` current rows are closed out (marked, not copied) and `n` new rows are inserted. |
-| History growth per change | About one extra copy of the value. | About one extra copy of the value, at long-format row size. |
+| Change one cell | The whole value is rewritten: the old row (all `n` cells) is copied to `value_array_hist` and the current row is replaced. | Only the changed cell is rewritten: its current row is closed out (marked, not copied) and one new row is inserted. The other cells keep their rows. This holds while the axes, the value kind and the parameter type stay the same; otherwise all `n` rows are closed and `n` new rows inserted. |
+| History growth per change | About one extra copy of the value. | One row per changed cell. |
 | Effect of history on current reads | No effect on scans of current data: superseded arrays live in a separate table. The file grows (see below). | Closed-out rows share the table; scans of current rows skip blocks that hold only closed-out rows. |
 
 Notes on the table:
@@ -352,10 +352,34 @@ Notes on the table:
   scan cost in the tests. Reading only the per-row minimum and
   maximum, without touching the list, takes under a millisecond on the
   table itself.
-- **Every write replaces the whole value.** The write API takes whole
-  values; there is no per-cell update. Writing a value identical to the
-  stored one creates no version: the core compares the stored columns
-  and skips it, and a call that changes nothing makes no commit.
+- **The write API takes whole values.** There is no per-cell update
+  call. Writing a value identical to the stored one creates no version:
+  the core compares the stored columns and skips it, and a call that
+  changes nothing makes no commit. A long value is compared cell by
+  cell (the *cell diff*): on the same axes, value kind and parameter
+  type, a changed cell is closed out and re-inserted at its version + 1,
+  a removed cell is closed out, an added cell is inserted at its
+  position's highest version + 1, and an equal cell is left alone. A
+  long value's current cells may therefore come from several commits,
+  each with its own version; `value_timeline` turns them back into
+  value-level versions, and `audit_long_value_coherence` checks that
+  they still share one set of axes, one kind and one parameter type. On
+  the 4.6 million-cell value of the scale study, a one-cell edit
+  through the API costs about 3.3 s end to end, against about 62 s for
+  the whole rewrite it replaces (paired A/B, 19x). Most of the 3.3 s is
+  canonicalizing the incoming value; the write itself, the read and
+  merge of the stored cells, takes about 0.8 s. Closing cells costs
+  about 7 µs per cell when they are named by position, and about 5 µs
+  per cell for the key-level UPDATE that closes a whole value. A diff
+  that closes more cells of one value than it keeps (with at most 16 384
+  kept) therefore closes "every cell but the kept ones" in one statement
+  at the key-level rate, so a re-import in which nearly every cell
+  changed costs what the whole rewrite cost. Between those cases the
+  diff closes by position: with 10 % of the cells changed a save takes
+  0.18 times the whole rewrite, with half 0.61 times, with 90 % the
+  same. Dense
+  arrays are still compared and rewritten whole: a partial update would
+  copy the whole pre-image to `value_array_hist` anyway.
 - **History can be kept without content.** When the parameter
   definition has `retain_content` set to false, or with the
   `force_replace` write option (or `retain_override` set to false), the

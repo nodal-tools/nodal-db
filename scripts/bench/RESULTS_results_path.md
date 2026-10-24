@@ -581,6 +581,25 @@ load). An earlier probe of the bind step alone, outside the core (176 ms,
 135 MB peak, `specs/Done/appender_write_path_PLAN.md` C7), is superseded
 by these end-to-end figures.
 
+## 8. Set-based long write (2026-10-24, DuckDB 2.0.0)
+
+`cargo bench -p nodal-db-cli --bench results_path -- long`, full scale,
+two runs per arm, run back to back on the same host (load average
+4.6-5.3): old = `ee3f369` (per-key long writer), new = the set-based
+long write (`specs/set_based_long_and_delete_PLAN.md`; the long insert
+moved its `unnest`s into a FROM subquery).
+
+| Shape / lane | old | new | ratio |
+|---|---|---|---|
+| long, 1 000 × 876 integer cells, API loop (10 commits) | 11.8 / 11.6 s (75 k values/s) | 5.7 / 5.6 s (156 k values/s) | 0.48 |
+| long, same, IPC import (one commit) | 10.4 / 10.3 s (85 k values/s) | 4.4 / 4.5 s (197 k values/s) | 0.43 |
+| file size (API / IPC) | 74 985 472 / 70 529 024 B | identical | |
+
+The API loop's ratio is against the appender plan's D10 gate of
+<= 0.85. The old arm here is faster than §6.1's 13.4 s (lower load).
+The long tier now ingests at about 150-200 k values/s against 0.9-1.0 M
+for the array tier, about 5x slower per value (§6.1: 14x).
+
 ## Mapping to the earlier Set B figures
 
 The earlier figures came from the same harness (restored here unchanged

@@ -319,6 +319,64 @@ open/close floor); every read row within noise of the 2.0.0 column.
 The single-value save stays at the per-commit floor (RW open ~30-40 ms,
 close ~20 ms) that the set-based write does not touch.
 
+## Set-based long, array and delete write (2026-10-24, DuckDB 2.0.0)
+
+`history::write_longs`, `write_arrays` and `delete_values` write a
+commit's long values, arrays and deletes in set-based rounds on the
+scalar skeleton (`specs/set_based_long_and_delete_PLAN.md`): one probe
+per tier for the live state and the versions, one close-out per tier and
+retention mode, one insert (the long insert in the key-ordinal form,
+with every `unnest` in a FROM subquery; the array insert with
+pre-minted `array_id`s, the array replace one UPDATE in place). A round
+of one key keeps the point probes and close-outs. The axis dedup now
+reports whether it inserted, so the two `count(*) FROM axis` probes per
+value are gone.
+
+Paired A/B (`scripts/bench/ab_write_path`, old = `ee3f369`, the per-key
+writers with the new modes, both release builds against the bundled
+DuckDB 2.0.0). Whole commits, open and close included: the `_big` rows
+run on a copy of a 101 MiB file (10^5 scalar entities, 10 000 x 24-cell
+and 100 x 8 760-cell int long values, 2 000 x 24-element arrays; built
+in 56 s by the old code). 15 pairs per row for the new modes, 21 for the
+existing ones; median per-pair ratio new/old, bootstrap 95 % CI; shared
+AMD Ryzen 9 5900XT, load average 3.5-16.5. The two editor rows were
+re-run with 31 pairs at load 3.5-6.8 after the first run's load moved
+> 2x (it had read 1.24 for the long save).
+
+| Row | old median | new median | ratio [95 % CI] | bound |
+|---|---|---|---|---|
+| `api_delete_1000_scalar_big` (one commit) | 8 386 ms | 147 ms | 0.018 [0.017, 0.019] | <= 0.05 |
+| `api_delete_1000_long_big` (24 cells each) | 10 837 ms | 482 ms | 0.045 [0.044, 0.046] | <= 0.10 |
+| `api_delete_500_array_big` | 4 662 ms | 155 ms | 0.033 [0.032, 0.036] | <= 0.05 |
+| `api_long_1000x24_new` (fresh file) | 3 986 ms | 217 ms | 0.056 [0.054, 0.060] | <= 0.20 |
+| `api_long_1000x24_replace_big` | 7 398 ms | 621 ms | 0.086 [0.082, 0.092] | <= 0.25 |
+| `api_array_1000x24_new` (fresh file) | 3 417 ms | 122 ms | 0.036 [0.036, 0.037] | <= 0.10 |
+| `api_array_1000x24_replace_big` | 4 304 ms | 194 ms | 0.045 [0.045, 0.046] | <= 0.10 |
+| `api_20x1_long24_big` (20 segments x 1 value, per commit) | 350 ms | 231 ms | 0.67 [0.65, 0.67] | <= 0.85 |
+| `api_1_long24_big` (editor save, per commit) | 137.6 ms | 138.9 ms | 1.00 [0.98, 1.02] | <= 1.15 |
+| `api_1_delete_big` (editor delete, per commit) | 115.7 ms | 115.6 ms | 0.99 [0.97, 1.01] | <= 1.15 |
+| `api_1_array24_big` (per commit) | 132.1 ms | 129.2 ms | 0.98 [0.90, 1.04] | <= 1.15 |
+| `api_long_10x8760_replace` (one commit) | 1 313 ms | 1 038 ms | 0.79 [0.78, 0.80] | <= 1.05 |
+| `long_insert` / `long_replace` (`write_value`, 8 760 cells) | 149 / 235 ms | 125 / 216 ms | 0.84 [0.83, 0.85] / 0.92 [0.90, 0.93] | CI in [0.95, 1.05] |
+| `array_insert` / `array_replace` | 8.2 / 16.7 ms | 7.7 / 16.2 ms | 0.95 [0.93, 0.96] / 0.98 [0.96, 0.99] | CI in [0.95, 1.05] |
+| `axis_insert` / `read_long` | 168 / 0.57 ms | 143 / 0.56 ms | 0.85 [0.84, 0.87] / 1.00 [0.98, 1.01] | CI in [0.95, 1.05] |
+| scalar modes (`scalar_insert`, `scalar_replace`, `api_100_scalars`, `api_10k_scalars`, `api_100_scalars_100k`, `api_1_scalar_100k`, `api_20x1_scalars_100k`) | | | 0.99-1.01, every CI in [0.97, 1.03] | CI in [0.95, 1.05] |
+
+Every bound is met. The rows outside [0.95, 1.05] are faster, not
+slower: the long insert's FROM-subquery form (an 8 760-cell insert takes
+about half the time) and the two dropped axis probes per value. The
+factors include the fixed cost of opening and closing the file, about
+100-130 ms per commit on the big file, which the set-based write does
+not touch: a 1 000-key scalar delete is ~57x end to end, its body alone
+more. The single-value saves stay at that floor.
+
+`results_path.rs -- long` (full scale, two runs per arm, load 4.6-5.3,
+same host): the long API loop (1 000 series x 876 integer cells, 10
+commits) 11.8 / 11.6 s -> 5.7 / 5.6 s, ratio 0.48 against the
+appender plan's D10 gate of <= 0.85; the IPC import of the same cells
+10.4 / 10.3 s -> 4.4 / 4.5 s. File sizes identical to the byte
+(74 985 472 and 70 529 024 B).
+
 ## Value-float normalization (2026-10-23, `benches/canon.rs`)
 
 Storing value floats canonical (`-0.0 → +0.0`, every NaN → `0x7ff8…`) adds one

@@ -92,8 +92,11 @@ CREATE TABLE value_long (
 -- that are constant within a value (c4, c3, c2 below the declared rank, and
 -- the key triple) lead; c1, the highest-fan-out column of a large value, is
 -- last, so no constant bytes trail each row's key in the ART. The previous
--- order (ce, cp, ca, c1..c4) cost 58-86 B per current row; this one costs
--- ~10-18 on realistic shapes (guard: crates/nodal-db-core/tests/
+-- order (ce, cp, ca, c1..c4) cost 57-87 B per current row across the
+-- measured shapes; this one costs 9-13 on dense and large sparse values and
+-- ~18 on small rank-2 values. The exception is rank 3-4 with a short first
+-- axis (few c1 values per subtree): ~36-38 B, about half the old order on
+-- rank 3 and level with it on rank 4 (guard: crates/nodal-db-core/tests/
 -- long_index_size.rs). Never an access path (invariant 6).
 CREATE UNIQUE INDEX one_current_long ON value_long (c4, c3, c2, ca, cp, ce, c1);
 

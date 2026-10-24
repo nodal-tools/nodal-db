@@ -654,6 +654,12 @@ load 7-19) gave median per-pair ratios new/old of 1.01 for `long_insert`,
 `scalar_replace` (`one_current_scalar` was reordered to `(ca, cp, ce)` in
 the same change), all within ±3 %.
 
+The `one_current_scalar` and `one_current_def_long` reorders are separate
+commits that can be reverted on their own. If either is reverted, edit by
+hand the lines that mention it: the `scalar_*` sentence above, the note at
+the write benches in `crates/nodal-db-core/benches/RESULTS.md`, and the
+smoke count wherever it is quoted (each reorder adds one smoke check).
+
 ## 8. Set-based long write (2026-10-24, DuckDB 2.0.0)
 
 `cargo bench -p nodal-db-cli --bench results_path -- long`, full scale,

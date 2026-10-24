@@ -192,7 +192,9 @@ The one-current generated-column unique indexes (`one_current_long` at
 7-column width, `one_current_scalar`) are maintained by every write above —
 their cost is inside these numbers, not separately measurable here.
 (Reordered 2026-10-24: same columns, about 5× smaller; write times
-unchanged in a paired A/B, `scripts/bench/RESULTS_results_path.md` §7.3.)
+unchanged in a paired A/B, `scripts/bench/RESULTS_results_path.md` §7.3.
+The `one_current_scalar` reorder is a separate commit: if it is reverted,
+edit this note by hand.)
 
 On 2.0.0 the three replace cycles are now all under 1 s, so the cycle is
 dominated by the fixed cost (CHECKPOINT and the RW open/close on the

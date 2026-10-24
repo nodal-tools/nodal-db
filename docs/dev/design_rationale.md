@@ -800,7 +800,7 @@ once and report the second as nothing to delete.
   arrays and deletes set-based (see
   [the set-based long, array and delete write](#the-set-based-long-array-and-delete-write-before-and-after)).
   Long-tier writes are still slower per value than dense-array writes
-  (about 14 µs per cell written alone, about 5–6 µs in a bulk ingest,
+  (about 14 µs per cell written alone, about 5–6.5 µs in a bulk ingest,
   against about 1 µs per array value). Large result sets are best kept
   dense: complete grids of float values.
 - **Scalar write speed.** Done: a commit writes its scalars set-based

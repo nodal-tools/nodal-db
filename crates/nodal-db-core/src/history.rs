@@ -2101,11 +2101,11 @@ impl LongColumns {
         Ok(())
     }
 
-    /// The 23 per-cell bind values of one execution over cells `r`, in the
+    /// The 22 per-cell bind values of one execution over cells `r`, in the
     /// order of the FROM subquery of [`LONG_INSERT_SQL`]. A column that is
     /// NULL in every cell of the chunk binds a plain NULL (the zip pads it).
     fn params(&self, r: std::ops::Range<usize>) -> Vec<Value> {
-        let mut p: Vec<Value> = Vec::with_capacity(23);
+        let mut p: Vec<Value> = Vec::with_capacity(22);
         p.push(list(clip(&self.k, &r), |&v| Value::Int(v)));
         p.push(list(clip(&self.version, &r), |&v| Value::SmallInt(v)));
         for d in 0..4 {

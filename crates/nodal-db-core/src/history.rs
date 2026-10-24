@@ -1727,6 +1727,136 @@ mod tests {
         assert!(check_list_lengths(&[Value::Null, list(&[1i32], |&v| Value::Int(v))], 1).is_ok());
     }
 
+    /// Every row of entity 1 (the `KEY` entity) in every value table, as
+    /// text, in a stable order.
+    fn key_rows(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut out = Vec::new();
+        for t in [
+            "value_scalar",
+            "value_long",
+            "value_array",
+            "value_array_hist",
+        ] {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT CAST(t AS VARCHAR) FROM (SELECT * FROM {t} WHERE entity_id = 1 \
+                     ORDER BY ALL) t"
+                ))
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            out.extend(rows.into_iter().map(|r| format!("{t}: {r}")));
+        }
+        conn.close().unwrap();
+        out
+    }
+
+    /// The point-filter statement form a round of ONE key uses (plan
+    /// D3(b)) and the list-join form of a larger round give the same rows
+    /// and outcome for the same key, over every prior state of the key
+    /// (none, scalar live, scalar closed, long live, array live) and both
+    /// retention modes, plus a minted key.
+    #[test]
+    fn single_key_round_matches_the_set_round() {
+        const OTHER: ValueKey = ValueKey {
+            entity_id: 9,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        let scalar = |x: f64| CanonicalValue {
+            tier: Tier::Scalar,
+            value_kind: ValueKind::Float,
+            axes: vec![],
+            shape: ShapedData::Scalar(ScalarValue::Float(x)),
+        };
+        let array = CanonicalValue {
+            tier: Tier::Array,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(3)],
+            shape: ShapedData::Array(vec![1.0, 2.0, 3.0]),
+        };
+        let opts = WriteOptions::default();
+        // Each prior state of KEY, as a sequence of per-commit steps
+        // (Some(value) writes, None deletes).
+        let states: Vec<(&str, Vec<Option<CanonicalValue>>)> = vec![
+            ("none", vec![]),
+            ("scalar live", vec![Some(scalar(1.0)), Some(scalar(2.0))]),
+            ("scalar closed", vec![Some(scalar(1.0)), None]),
+            ("long live", vec![Some(scalar(1.0)), Some(long_value(3))]),
+            ("array live", vec![Some(array.clone())]),
+            (
+                "array replaced",
+                vec![Some(array.clone()), Some(array.clone())],
+            ),
+        ];
+        let setup = |db: &Path, steps: &[Option<CanonicalValue>]| {
+            for step in steps {
+                with_write_txn(db, "t", "setup", |conn, c| match step {
+                    Some(v) => write_value(conn, c, KEY, v, &mut AxisCache::new(), &opts, None),
+                    None => delete_value(conn, c, KEY, &opts),
+                })
+                .unwrap();
+            }
+            with_write_txn(db, "t", "other", |conn, c| {
+                write_value(
+                    conn,
+                    c,
+                    OTHER,
+                    &scalar(5.0),
+                    &mut AxisCache::new(),
+                    &opts,
+                    None,
+                )
+            })
+            .unwrap();
+        };
+        for (name, steps) in &states {
+            for retained in [true, false] {
+                for minted in [false, true] {
+                    if minted && !steps.is_empty() {
+                        continue;
+                    }
+                    let w = ScalarWrite {
+                        key: KEY,
+                        value: ScalarValue::Float(7.5),
+                        parameter_type_id: Some(4),
+                        retained,
+                        entity_minted: minted,
+                    };
+                    let other = ScalarWrite {
+                        key: OTHER,
+                        value: ScalarValue::Float(6.0),
+                        parameter_type_id: None,
+                        retained: !retained,
+                        entity_minted: false,
+                    };
+                    let (_da, a) = fresh();
+                    let (_db, b) = fresh();
+                    setup(&a, steps);
+                    setup(&b, steps);
+                    let oa = with_write_txn(&a, "t", "w", |conn, c| {
+                        write_scalars(conn, c, std::slice::from_ref(&w))
+                    })
+                    .unwrap();
+                    let ob = with_write_txn(&b, "t", "w", |conn, c| {
+                        write_scalars(conn, c, &[w.clone(), other.clone()])
+                    })
+                    .unwrap();
+                    let case = format!("{name}, retained={retained}, minted={minted}");
+                    assert_eq!(oa.len(), 1, "{case}");
+                    assert_eq!(format!("{:?}", oa[0]), format!("{:?}", ob[0]), "{case}");
+                    let rows = key_rows(&a);
+                    assert!(!rows.is_empty(), "{case}");
+                    assert_eq!(rows, key_rows(&b), "{case}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn scalar_batch_with_a_duplicate_key_is_an_internal_error() {
         // Callers guarantee distinct keys; the set-based writer checks the

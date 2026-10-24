@@ -78,11 +78,11 @@ entity-rewrites of churn), 1 000 × 8 760-cell float arrays (~70 MB, Tier A),
 
 | Stage | Wall (1.5.5) | Per unit (1.5.5) | 2.0.0 (wall, per unit) |
 |---|---|---|---|
-| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | 619.3 s, **6.2 ms/entity** (5.0 ms/entity at best, 7.5 ms/entity on the last 10 k; grows with entity-table size) |
+| 100 k scalars (10 commits × 10 k entities) | 1 125.2 s | **11.3 ms/entity** (7.6 ms/entity on the first 10 k, 12.8 ms/entity by the last — grows with entity-table size) | 619.3 s, **6.2 ms/entity** (5.0 ms/entity at best, 7.5 ms/entity on the last 10 k; grows with entity-table size). **Set-based scalar write (2026-10-24): 2.1 s, 0.021 ms/entity** |
 | 1 000 × 8 760 float arrays (10 commits × 100) | 82.0 s | **82 ms/entity** | 14.4 s, **14.4 ms/entity** |
 | 140 × 8 760 int long rows (1 commit/entity) | 4 369.8 s | **31.2 s/entity ≈ 3.6 ms/cell** | 39.6 s, **0.28 s/entity ≈ 32 µs/cell** |
 | churn: 30 long-entity rewrites | 1 006.7 s | 33.6 s/rewrite | 13.0 s, 0.43 s/rewrite |
-| **Total** | **6 586.5 s (109.8 min)** | | **687.4 s (11.5 min)**; scalars are now 90 % of it |
+| **Total** | **6 586.5 s (109.8 min)** | | **687.4 s (11.5 min)**; scalars are now 90 % of it. **Set-based scalar write: 64.2 s** (scalars 2.1, arrays 10.2, long 37.7, churn 13.1) |
 
 Context: fresh read-only connection open + `SELECT 1` on the built 213 MB
 file: **534.5 ms** (median of 5) on 1.5.5; **203.3 ms** on the 165 MiB
@@ -162,10 +162,10 @@ zonemaps skip fully-dead groups, exactly the VMP Part 6 prediction. PASS
 
 | Bench | Measured (1.5.5) | Baseline / note | 2.0.0 (Ryzen) |
 |---|---|---|---|
-| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | **499 ms** |
+| Scalar replace cycle | **1.24 s** | dominated by CHECKPOINT + RW open/close on the 213 MB file, not the row write | **499 ms**; 499 ms again with the set-based scalar write (the floor, not the row write) |
 | Array replace cycle (8 760 cells, `_hist` pre-image copy) | **2.43 s** | research: 4.3 s/cycle for pre-image copy at larger scope | **967 ms** |
 | Long replace cycle (8 760 cells close-out + re-insert) | **38.1 s** | research churn baseline: 0.9 s per 10-cycle single-table churn — see the alarm below | **803 ms** |
-| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | **1.128 s → 11.3 ms/entity** (2.0 build average 6.2 ms/entity) |
+| 100 new scalar entities, one commit (no checkpoint) | **2.38 s → 23.8 ms/entity** | at the 100 k-entity table size; from-empty build average is 11.3 ms/entity | **1.128 s → 11.3 ms/entity** (2.0 build average 6.2 ms/entity). **Set-based scalar write: 380 ms → 3.8 ms/entity**, mostly the commit's open/close on the 165 MiB file |
 
 The one-current generated-column unique indexes (`one_current_long` at
 7-column width, `one_current_scalar`) are maintained by every write above —
@@ -282,7 +282,42 @@ load 2-7 and kept their ratio within 0.01). Per value, commit included:
 The remaining per-value cost is statement count, not insert mechanics:
 a scalar still issues ~5 statements at the ~0.3-0.8 ms DuckDB 2.0 floor,
 and a long replace closes out and versions key by key. The set-based
-per-segment write (plan D6(c), D10) is the follow-up.
+per-segment write (plan D6(c), D10) is the follow-up. Scalars: done, see
+the next section; the long tier (D10) remains.
+
+## Set-based scalar write (2026-10-24, DuckDB 2.0.0)
+
+`history::write_scalars` writes all scalars of a commit in rounds of
+<= 16 384 keys (one live + version probe, a long/array live probe for
+keys not live as scalars, one close-out per retention mode, one columnar
+insert; point-filter forms for a one-key round), and each segment's
+entity names resolve in one statement, reused across the commit's
+segments. Paired A/B (`scripts/bench/ab_write_path`, old = the per-key
+writer, 21 pairs per row, 11 for `api_10k_scalars`; load 2.7-10.8, the
+`api_20x1` row re-run at 4.6-8.0 after its load moved > 2x). Whole
+commits; the 10^5-scalar file was built once (2.9 s) and copied per
+sample.
+
+| Row | old median | new median | ratio [95 % CI] | bound |
+|---|---|---|---|---|
+| `api_10k_scalars` (10 000 new, one commit, per value) | 4.98 ms | 0.020 ms | 0.004 [0.004, 0.004] | <= 0.05 |
+| `api_100_scalars_100k` (100 new on a 10^5 file, per value) | 8.75 ms | 0.99 ms | 0.113 [0.109, 0.115] | <= 0.30 |
+| `api_100_scalars` (fresh file, per value) | 5.01 ms | 0.72 ms | 0.146 [0.143, 0.148] | |
+| `api_20x1_scalars_100k` (20 segments x 1 value, per commit) | 349 ms | 191 ms | 0.56 [0.54, 0.57] | <= 0.80 |
+| `api_1_scalar_100k` (single-value save, per commit) | 94.2 ms | 95.3 ms | 1.00 [0.99, 1.02] | <= 1.15 |
+| `scalar_insert` (`write_value`, 400 per commit) | 2.74 ms | 2.60 ms | 0.94 [0.91, 0.96] | <= 1.25 |
+| `scalar_replace` (`write_value`, 400 per commit) | 2.81 ms | 2.51 ms | 0.89 [0.89, 0.90] | <= 1.25 |
+| `long_insert` / `long_replace` | 148 / 237 ms | 149 / 238 ms | 1.01 [0.99, 1.04] / 1.01 [1.00, 1.03] | CI in [0.95, 1.05] |
+| `array_insert` / `array_replace` | 8.5 / 16.5 ms | 8.4 / 16.6 ms | 0.99 [0.96, 1.03] / 1.01 [0.99, 1.02] | CI in [0.95, 1.05] |
+| `axis_insert` / `read_long` | 169 / 0.57 ms | 169 / 0.57 ms | 1.00 [0.99, 1.02] / 1.00 [0.99, 1.02] | CI in [0.95, 1.05] |
+
+Gate re-run on the branch (same host, `cargo bench -p nodal-db-core
+--bench gate`): synthetic build 687.4 s -> 64.2 s (scalars 619.3 s ->
+2.1 s); `write_100_new_scalar_entities` 1.128 s -> 380 ms;
+`replace_scalar_cycle_ckpt` 499 ms (unchanged: the CHECKPOINT and
+open/close floor); every read row within noise of the 2.0.0 column.
+The single-value save stays at the per-commit floor (RW open ~30-40 ms,
+close ~20 ms) that the set-based write does not touch.
 
 ## Value-float normalization (2026-10-23, `benches/canon.rs`)
 

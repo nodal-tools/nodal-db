@@ -127,6 +127,22 @@ Engine facts the code relies on (DuckDB 2.0):
   `preserve_insertion_order` the rows land in list order, which keeps a
   long value's rows in canonical cell order. The write connection never
   changes that setting.
+- **Point lookups are sequential scans; scalar writes are set-based.**
+  DuckDB 2.0 uses neither the compound key indexes on the value tables
+  nor any index on a VIRTUAL generated column (`cur_name`, `cur_cls`) for
+  a point lookup: each per-key statement scans the table, zone-map
+  pruned, at a floor of roughly 0.5–1 ms. So a commit writes all of its
+  scalars in one set-based round (`history::write_scalars`, per ≤ 16 384
+  keys): one grouped live + version probe, a long/array live probe only
+  for keys not live as scalars, one close-out `UPDATE` per retention
+  mode, one columnar `INSERT`; the keys bind as zipped lists. A tier
+  transition still uses the per-key close-out. A round of one key binds
+  the same steps as point filters, which are cheaper at that size. A
+  segment's entity names are resolved the same way: one lookup per
+  segment (none for names an earlier segment of the commit resolved), one
+  columnar `INSERT … RETURNING` for the missing ones. The writer defers a
+  commit's scalars until after its last segment and before its deletes;
+  long and array values are still written key by key as they come.
 
 ## 3. Workspace map
 
@@ -144,7 +160,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `schema_init` | Apply `schema/*.sql` in numbered order (`build.py` in Rust) and the embedded schema list. |
 | `conn` | Connection discipline: open-work-close, a per-path in-process lock, bounded-backoff retry, write transactions that stamp the commit row. |
 | `axis` | Content-verified axis deduplication (the hash narrows, byte equality decides). |
-| `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts. |
+| `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; the set-based scalar write (one round per commit). |
 | `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
 | `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, and entity / class / parameter creation. |

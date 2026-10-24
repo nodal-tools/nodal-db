@@ -521,6 +521,10 @@ blocks after CHECKPOINT, net of the same file before the insert; one
 block is 256 KiB, so the resolution is about 0.3 B/cell. Three runs gave
 identical figures.
 
+Historical record: measured before `ix_value_long_triple` was dropped
+from the schema (2026-10-24, `name_index_and_unused_indexes_PLAN.md`).
+On the current schema variant A measures 68.53 and C equals B (11.07).
+
 | Variant | Used B/cell |
 |---|---|
 | A: schema as built (foreign keys, `one_current_long`, `ix_value_long_triple`) | 69.13 |

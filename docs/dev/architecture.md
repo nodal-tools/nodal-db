@@ -135,10 +135,11 @@ Engine facts the code relies on (DuckDB 2.0):
   long value's rows in canonical cell order. The write connection never
   changes that setting.
 - **Point lookups are sequential scans; value writes and deletes are
-  set-based.** DuckDB 2.0 uses neither the compound key indexes on the
-  value tables nor any index on a VIRTUAL generated column (`cur_name`,
-  `cur_cls`) for a point lookup: each per-key statement scans the table,
-  zone-map pruned, at a floor of roughly 0.5–1 ms. So a commit buffers
+  set-based.** DuckDB 2.0 never scans through a multi-column index (so the
+  value tables carry no key-triple index; their one-current unique indexes
+  are integrity, not access paths) nor through any index on a VIRTUAL
+  generated column (`cur_name`, `cur_cls`): each per-key value statement
+  scans the table, zone-map pruned, at a floor of roughly 0.5–1 ms. So a commit buffers
   its values per tier and writes each buffer in set-based rounds, one
   writer per tier: `history::write_scalars`, `write_longs` and
   `write_arrays`. A round is one probe per tier for the live state
@@ -293,6 +294,17 @@ and
   by 2, which keeps id sets non-contiguous so lookups use the index.
   Compaction re-creates sequences with their full specification
   (increment included) so the stride survives.
+- **Single-key indexes are used only behind a fence.** DuckDB 2.0 scans
+  through an index only when the scan carries that one filter and nothing
+  else that statistics cannot drop. Single-name entity lookups therefore
+  query the `ix_entity_lname` expression index (`lower(name)`) alone in a
+  subquery fenced by `OFFSET 0` and apply the class and current-row
+  filters outside it (axis dedup does the same with `axis_hash` and the
+  axis kind). That is an optimizer behaviour, not a documented contract, so
+  `crates/nodal-db-core/tests/entity_name_index_scan.rs` checks the
+  production statements with `EXPLAIN ANALYZE` on a fixture with several
+  classes and closed-out rows, next to an unfenced negative control.
+  Every other plain index was dropped; a new one needs such a guard.
 - **Float normalization**: the canonicalization pipeline stores every
   `-0.0` as `+0.0` and every value NaN as the one quiet NaN
   (`0x7ff8000000000000`), using the same function the canonical encoding

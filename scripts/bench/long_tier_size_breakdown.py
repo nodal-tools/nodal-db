@@ -10,9 +10,15 @@ Every variant starts from the real schema, built by `schema/build.py` from
 `schema/*.sql` (no hand copy of the DDL). Variants remove one part at a time:
 
   A  schema as built: foreign keys, the 7-column one-current unique index
-     `one_current_long`, the key-triple index `ix_value_long_triple`
+     `one_current_long` (and, before 2026-10-24, the key-triple index
+     `ix_value_long_triple`)
   B  A without `one_current_long`
-  C  B without `ix_value_long_triple`
+  C  B without `ix_value_long_triple`. The schema has not had that index
+     since 2026-10-24 (DuckDB 2.0 never scans through a multi-column index;
+     specs/name_index_and_unused_indexes_PLAN.md), so C is B and its row in
+     the attribution reads 0.00; the letter stays because RESULTS §7.1 and
+     the long-tier findings cite A-E by letter. `--core-db` on a file
+     written before that date still measures it.
   D  C with `value_long` re-created without its REFERENCES clauses (DDL taken
      from the built file's catalog, REFERENCES stripped)
   E  D without the `i1_dt` scan-accelerator column
@@ -180,7 +186,7 @@ def prepare_variant(con, variant: str) -> None:
     if variant in ("B", "C", "D", "E"):
         con.execute("DROP INDEX one_current_long")
     if variant in ("C", "D", "E"):
-        con.execute("DROP INDEX ix_value_long_triple")
+        con.execute("DROP INDEX IF EXISTS ix_value_long_triple")
     if variant in ("D", "E"):
         ddl = value_long_ddl_without_fks(con)
         con.execute("DROP TABLE value_long")
@@ -246,7 +252,8 @@ def measure_lean(workdir: str, entities: int) -> dict:
 def check_core_db(core_db: str, workdir: str) -> dict:
     """Cross-check on a file the core wrote (e.g. the results-path bench's
     kept long-tier file): used blocks as written, after dropping
-    one_current_long, after also dropping ix_value_long_triple, and after
+    one_current_long, after also dropping ix_value_long_triple (present only
+    in files written before 2026-10-24; a no-op otherwise), and after
     dropping value_long altogether (what the other tables hold). Works on a
     scratch copy; the input file is not modified."""
     path = os.path.join(workdir, "core_copy.db")
@@ -255,7 +262,7 @@ def check_core_db(core_db: str, workdir: str) -> dict:
     n = con.execute("SELECT count(*) FROM value_long").fetchone()[0]
     steps = [("as written", None),
              ("without one_current_long", "DROP INDEX one_current_long"),
-             ("also without ix_value_long_triple", "DROP INDEX ix_value_long_triple"),
+             ("also without ix_value_long_triple", "DROP INDEX IF EXISTS ix_value_long_triple"),
              ("without value_long (other tables only)", "DROP TABLE value_long")]
     out = []
     for label, sql in steps:
@@ -269,9 +276,9 @@ def check_core_db(core_db: str, workdir: str) -> dict:
 
 
 LABELS = {
-    "A": "schema as built (FKs + one_current_long + triple index)",
+    "A": "schema as built (FKs + one_current_long)",
     "B": "A without one_current_long",
-    "C": "B without ix_value_long_triple",
+    "C": "B without ix_value_long_triple (absent since 2026-10-24)",
     "D": "C without REFERENCES (no foreign keys)",
     "E": "D without the i1_dt accelerator column",
     "L": "lean (k, pos, v BIGINT), no nodal-db schema",
@@ -303,14 +310,14 @@ def main() -> None:
     by = {r["variant"]: r for r in rows}
 
     print("\nvariant sizes (net of the same file before the insert, after CHECKPOINT):")
-    print(f"  {'':2} {'':52} {'used B/cell':>12} {'file B/cell':>12}")
+    print(f"  {'':2} {'':58} {'used B/cell':>12} {'file B/cell':>12}")
     for r in rows:
-        print(f"  {r['variant']:2} {LABELS[r['variant']]:52} "
+        print(f"  {r['variant']:2} {LABELS[r['variant']]:58} "
               f"{r['used_B_per_cell']:12.2f} {r['file_B_per_cell']:12.2f}")
 
     parts = [
         ("one_current_long (7-column unique index)", "A", "B"),
-        ("ix_value_long_triple (key-triple index)", "B", "C"),
+        ("ix_value_long_triple (absent since 2026-10-24)", "B", "C"),
         ("foreign keys (commit, axis)", "C", "D"),
         ("i1_dt accelerator column", "D", "E"),
     ]
@@ -319,11 +326,11 @@ def main() -> None:
     for name, hi, lo in parts:
         v = by[hi]["used_B_per_cell"] - by[lo]["used_B_per_cell"]
         breakdown[name] = v
-        print(f"  {name:44} {v:7.2f}")
+        print(f"  {name:46} {v:7.2f}")
     breakdown["remaining columns (variant E)"] = by["E"]["used_B_per_cell"]
-    print(f"  {'remaining columns (variant E)':44} {by['E']['used_B_per_cell']:7.2f}")
-    print(f"  {'total (variant A)':44} {by['A']['used_B_per_cell']:7.2f}")
-    print(f"  {'lean reference (variant L)':44} {by['L']['used_B_per_cell']:7.2f}")
+    print(f"  {'remaining columns (variant E)':46} {by['E']['used_B_per_cell']:7.2f}")
+    print(f"  {'total (variant A)':46} {by['A']['used_B_per_cell']:7.2f}")
+    print(f"  {'lean reference (variant L)':46} {by['L']['used_B_per_cell']:7.2f}")
 
     print("\ncompression per column, variant D (no indexes, no FKs):")
     for col, comp in by["D"]["compression"]:
@@ -345,7 +352,7 @@ def main() -> None:
         print(f"\ncross-check on the core-written file {args.core_db} ({n} cells), "
               f"used blocks net of an empty schema ({empty_used} B):")
         for label, b in core["used_bytes"]:
-            print(f"  {label:44} {(b - empty_used) / n:7.2f} B/cell")
+            print(f"  {label:46} {(b - empty_used) / n:7.2f} B/cell")
         core["empty_schema_used_bytes"] = empty_used
 
     if args.json:

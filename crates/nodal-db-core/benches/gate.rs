@@ -150,7 +150,23 @@ fn bench_bulk_reads(c: &mut Criterion) {
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(10));
 
-    // 10^5 scalar rows, budget path (< 20 ms; §10: 24.5 ms on 1.4.4).
+    // 10^5 scalar rows, budget path (< 20 ms): the columns a model loader
+    // reads, here the nodal-editor's scalar-sheet load (`model.rs`: entity,
+    // alternative, value_kind and the four value columns).
+    g.bench_function("scalars_100k_read_parameter_scalar_loader_cols", |b| {
+        b.iter(|| {
+            let rows = arrow_rows(
+                &conn,
+                "SELECT entity, alternative, value_kind, v_float, v_int, v_bool, v_str \
+                 FROM read_parameter_scalar('bench_scalar', 'p_scalar')",
+                &[],
+            );
+            assert_eq!(rows, SCALAR_ENTITIES);
+            black_box(rows)
+        })
+    });
+
+    // The same read with every column (context; §10: 24.5 ms on 1.4.4).
     g.bench_function("scalars_100k_read_parameter_scalar", |b| {
         b.iter(|| {
             let rows = arrow_rows(

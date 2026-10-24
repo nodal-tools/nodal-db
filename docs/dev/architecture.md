@@ -283,7 +283,10 @@ object deletes that found nothing, no auto-create); the transaction is
 rolled back and the report carries `commit_id` 0, so the head and the
 polling cookie do not move. The check is an allow-list, so a new
 outcome or channel commits until it is classified. A write and a delete
-of the same value in one call is refused up front. Direct `history`
+of the same value in one call is refused up front, and so is a write
+of a value that an object delete in the same call would cascade over
+(the cascade closes only rows older than the commit, so it would keep
+the cells the write just inserted). Direct `history`
 callers in their own transaction still commit.
 
 Canonical encodings: axes and values serialize to a pinned byte layout

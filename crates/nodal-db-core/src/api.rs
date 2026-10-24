@@ -48,12 +48,15 @@ use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
 };
-use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
+use crate::object_delete::{
+    apply_object_delete, prepare_object_deletes, preview_one, written_value_covered,
+    PreparedObjectDelete,
+};
 use crate::structural::{apply_structural, prepare_structural};
 use crate::types::{
     DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview,
-    ObjectDeleteResult, ShapedData, StructuralChange, StructuralEffect, Tier, ValueKey, ValueKind,
-    Warning, WarningKind, WriteOptions, WriteReport,
+    ObjectDeleteResult, ObjectKind, ObjectRef, ShapedData, StructuralChange, StructuralEffect,
+    Tier, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -203,7 +206,10 @@ pub struct DeleteKey {
 /// commit message is not recorded. Its `seq_commit` value stays consumed
 /// (commit ids may skip, as after a conflict retry). A value delete of a
 /// key the same call writes is refused up front as [`DbError::Api`],
-/// whatever the content (D9).
+/// whatever the content (D9), and so is a value write that an object delete
+/// in the same call covers — its entity (or a container of it), parameter
+/// definition, alternative or class — whatever the content, the tier or
+/// the delete's `cascade` option (D10).
 #[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
@@ -291,8 +297,10 @@ pub fn commit_changes(
     // and the cross-channel object-delete orphan guard (M2). No DB touched.
     prepare_structural(&structural, &object_deletes)?;
     // A value written and deleted in one call: rejected whatever the
-    // content (D9).
+    // content (D9); likewise a value written while an object delete in
+    // the same call covers it (D10).
     reject_write_and_delete(&prepared, &prepared_deletes)?;
+    reject_write_and_object_delete(&prepared, &prepared_object_deletes)?;
 
     // --- The atomic, retried commit. Everything below re-reads/re-creates DB
     // state inside a fresh transaction on each retry (VMP Part 5), so the axis
@@ -385,6 +393,18 @@ pub fn commit_changes(
             &buffers.keys,
             &mut report,
         )?;
+        // D10 on the resolved ids, before any object closes: no object
+        // delete may cover a value this call wrote (the up-front check
+        // folds names in Rust and cannot see cascade containers).
+        for p in &prepared_object_deletes {
+            if let Some(k) = written_value_covered(conn, &p.key, &buffers.keys)? {
+                return Err(object_delete_covers_write_error(
+                    p.key_index,
+                    &p.key,
+                    Some(k),
+                ));
+            }
+        }
         // Object deletes run LAST, under the same commit_id (object_delete plan
         // §2): every close-out is guarded by `valid_from < commit_id`, so a row
         // this commit created is never closed (would trip the span CHECK).
@@ -508,6 +528,83 @@ fn reject_write_and_delete(
         }
     }
     Ok(())
+}
+
+/// D10 (P2 review): a call that writes a value and also deletes an object
+/// whose cascade covers it (its entity, a container entity of it, its
+/// parameter definition, its alternative, or a class above them) is
+/// rejected up front, whatever the content, the tier or the request's
+/// `cascade` option. The cascade closes only rows older than the commit
+/// (`valid_from < commit_id`), so under the long cell diff it would close
+/// the unchanged old cells and keep the changed ones the write inserted: a
+/// partial value under a closed object. This pure check compares Rust
+/// folds of the names the request spells out; the commit repeats it on the
+/// resolved ids over the full cascade closure
+/// (`object_delete::written_value_covered`).
+fn reject_write_and_object_delete(
+    prepared: &[PreparedSegment],
+    object_deletes: &[PreparedObjectDelete],
+) -> Result<(), DbError> {
+    if prepared.is_empty() || object_deletes.is_empty() {
+        return Ok(());
+    }
+    for od in object_deletes {
+        let name = match &od.key.target {
+            ObjectRef::Name(n) => n.to_lowercase(),
+            // An element tuple resolves only in the DB (the commit-time check).
+            ObjectRef::Elements(_) => continue,
+        };
+        let class = od.key.class.as_deref().map(str::to_lowercase);
+        let covers = |p: &PreparedSegment| -> bool {
+            let same_class = || class.as_deref() == Some(p.class.to_lowercase().as_str());
+            match od.key.kind {
+                ObjectKind::Alternative => p.alternative.to_lowercase() == name,
+                ObjectKind::Class => p.class.to_lowercase() == name,
+                ObjectKind::Parameter => same_class() && p.parameter.to_lowercase() == name,
+                ObjectKind::Entity => {
+                    same_class() && p.names.iter().any(|n| n.to_lowercase() == name)
+                }
+                ObjectKind::Scenario => false,
+            }
+        };
+        if prepared.iter().any(covers) {
+            return Err(object_delete_covers_write_error(
+                od.key_index,
+                &od.key,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The D10 refusal; `ids` names the covered (entity, parameter definition,
+/// alternative) when the commit-time check found it.
+fn object_delete_covers_write_error(
+    i: usize,
+    k: &ObjectDeleteKey,
+    ids: Option<(i64, i64, i64)>,
+) -> DbError {
+    let target = match &k.target {
+        ObjectRef::Name(n) => n.clone(),
+        ObjectRef::Elements(es) => format!("({})", es.join(", ")),
+    };
+    let class = k
+        .class
+        .as_deref()
+        .map(|c| format!(" in class {c}"))
+        .unwrap_or_default();
+    let which = match ids {
+        Some((e, p, a)) => {
+            format!(" (entity id {e}, parameter definition id {p}, alternative id {a})")
+        }
+        None => String::new(),
+    };
+    DbError::Api(format!(
+        "object-delete key {i} ({} {target}{class}) covers a value this call also \
+         writes{which}: a value cannot be written and its object deleted in one call",
+        k.kind.tag()
+    ))
 }
 
 fn same_key_error(i: usize, k: &DeleteKey) -> DbError {

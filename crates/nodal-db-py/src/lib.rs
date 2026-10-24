@@ -323,7 +323,9 @@ impl Database {
     /// whose every item changes nothing (unchanged values, deletes that
     /// find nothing, structural no-ops, object deletes that find nothing)
     /// makes no commit: `commit_id` is 0. A call that writes and deletes
-    /// the same value is refused before anything is written.
+    /// the same value, or writes a value and deletes an object it belongs
+    /// to (entity, parameter, alternative, class), is refused before
+    /// anything is written.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
                         object_deletes = None, user, message = String::new(),
                         force_replace = false, retain_override = None, expect_commit = None))]

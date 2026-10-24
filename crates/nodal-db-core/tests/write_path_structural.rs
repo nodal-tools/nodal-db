@@ -25,8 +25,8 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::history::write_value;
 use nodal_db_core::schema_init::{init_schema, init_schema_with_default};
 use nodal_db_core::types::{
-    LongRow, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind, ObjectRef,
-    ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions,
+    LongRow, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, ScalarValue, ShapedData,
+    Tier, ValueKey, ValueKind, WriteOptions,
 };
 
 fn fresh_db() -> (tempfile::TempDir, PathBuf) {
@@ -486,11 +486,40 @@ fn seg(parameter: &str, alternative: &str, b: RecordBatch) -> Segment {
     }
 }
 
+/// The columnar insert is one ordinary SQL statement: its rows are visible
+/// at once to every later statement of the same transaction. (The object
+/// delete that used to observe this through the API — a RESTRICT delete of
+/// an alternative the same call writes into — is now refused up front,
+/// skip_unchanged_writes_PLAN D10, so the visibility is checked directly
+/// and the refusal separately.)
 #[test]
-fn rows_written_earlier_in_a_commit_are_visible_to_its_object_delete() {
-    // The columnar insert is one ordinary SQL statement: its rows are
-    // visible at once to every later statement of the same transaction. A
-    // RESTRICT object delete later in the same commit counts them.
+fn rows_written_earlier_in_a_commit_are_visible_to_its_later_statements() {
+    let (_d, db) = fresh_db();
+    let seen = with_write_txn(&db, "t", "write then count", |conn, c| {
+        write_value(
+            conn,
+            c,
+            key(1),
+            &long_value(10, 3),
+            &mut AxisCache::new(),
+            &WriteOptions::default(),
+            None,
+        )?;
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM value_long WHERE valid_from_commit = ? AND valid_to_commit IS NULL",
+            [c],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    })
+    .expect("write");
+    assert_eq!(
+        seen, 4,
+        "the 4 long cells written earlier in this txn are visible"
+    );
+
+    // The API path: a RESTRICT object delete over a value the call writes is
+    // refused, whatever the cascade option.
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("api.duckdb");
     init_schema_with_default(&db, Some("Base")).unwrap();
@@ -505,7 +534,7 @@ fn rows_written_earlier_in_a_commit_are_visible_to_its_object_delete() {
         WriteOptions::default(),
     )
     .unwrap();
-    let r = commit_changes(
+    let err = commit_changes(
         &db,
         vec![seg(
             "flow",
@@ -526,18 +555,10 @@ fn rows_written_earlier_in_a_commit_are_visible_to_its_object_delete() {
         "write then restrict",
         WriteOptions::default(),
     )
-    .unwrap();
-    let ObjectDeleteResult::Restricted { blockers } = &r.object_deletes[0].result else {
-        panic!("expected Restricted, got {:?}", r.object_deletes[0].result)
-    };
-    let long_rows = blockers
-        .iter()
-        .find(|b| b.table == "value_long")
-        .map(|b| b.count);
-    assert_eq!(
-        long_rows,
-        Some(3),
-        "the 3 long cells written earlier in this commit are visible"
+    .expect_err("a write under an alternative the call deletes is refused");
+    assert!(
+        matches!(&err, DbError::Api(m) if m.contains("its object deleted in one call")),
+        "{err:?}"
     );
 }
 

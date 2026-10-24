@@ -716,18 +716,19 @@ fn combined_atomicity_one_commit() {
     audit_tiling_clean(&db);
 }
 
-// --- test 8b: the §2 same-commit write-then-cascade guard holds ------------
+// --- test 8b: a same-call write under the deleted alternative is refused ---
 
+/// Writing a value into a brand-new alternative `fresh` (auto-created by the
+/// write, valid_from = commit_id) and cascade-deleting `fresh` in one call:
+/// before skip_unchanged_writes_PLAN D10 the `valid_from < commit_id` guard
+/// skipped both (NotFound, the value survived). The call is now refused up
+/// front — an object delete may not cover a value the same call writes —
+/// and nothing is written (the guard stays as defense in depth).
 #[test]
 fn same_commit_write_then_cascade_guard() {
     let (_dir, db) = fresh_db();
     let commits_before = count(&db, "SELECT count(*) FROM commit");
-
-    // In ONE commit: write a value into a BRAND-NEW alternative `fresh` (which
-    // this write auto-creates, valid_from = commit_id) AND cascade-delete it.
-    // The guard (`valid_from < commit_id`) skips both the same-commit object row
-    // and its same-commit value ⇒ NotFound, no span-CHECK trip, value survives.
-    let r = commit_changes(
+    let err = commit_changes(
         &db,
         vec![seg("node", "demand", "fresh", scalar_batch("node_1", 7.0))],
         vec![],
@@ -737,32 +738,23 @@ fn same_commit_write_then_cascade_guard() {
         "hazard",
         o(),
     )
-    .expect("commit must not trip the span CHECK");
-
-    assert_eq!(
-        count(&db, "SELECT count(*) FROM commit") - commits_before,
-        1,
-        "one commit"
+    .expect_err("a write under an alternative the call deletes is refused");
+    assert!(
+        err.to_string().contains("its object deleted in one call"),
+        "{err}"
     );
     assert_eq!(
-        r.object_deletes[0].result,
-        ObjectDeleteResult::NotFound,
-        "same-commit-created target is guarded ⇒ NotFound, not an error"
-    );
-    // The value (and its alternative) survived — the guard protected them.
-    let got = read_parameter(&db, "node", "demand", "fresh").expect("read");
-    assert_eq!(
-        entity_names(&got),
-        vec!["node_1".to_string()],
-        "value survives"
+        count(&db, "SELECT count(*) FROM commit"),
+        commits_before,
+        "no commit"
     );
     assert_eq!(
         count(
             &db,
             "SELECT count(*) FROM alternative WHERE cur_name=lower('fresh')"
         ),
-        1,
-        "alternative still live"
+        0,
+        "the alternative was not auto-created"
     );
     audit_tiling_clean(&db);
 }
@@ -3163,19 +3155,16 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
     audit_tiling_clean(&db);
 }
 
-// --- Fix 3b: same-commit ARRAY write + cascade guard (move-to-hist) ---------
+// --- Fix 3b: same-call ARRAY write under the deleted alternative ----------
 
+/// The array-tier twin of test 8b: before D10 the move-to-hist guard
+/// skipped the same-commit array row; the call is now refused up front and
+/// nothing reaches `value_array` or `value_array_hist`.
 #[test]
 fn same_commit_array_write_then_cascade_guard() {
     let (_dir, db) = fresh_db();
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
-
-    // In ONE commit: write an ARRAY value into a BRAND-NEW alternative `afresh`
-    // (valid_from = commit_id) AND cascade-delete it. The move-to-hist guard
-    // (`valid_from_commit < commit_id`) must skip the same-commit array row, so
-    // NOTHING is inserted into value_array_hist (whose span CHECK has no NULL
-    // branch) ⇒ no trip, result NotFound, and the array value survives.
-    let r = commit_changes(
+    let err = commit_changes(
         &db,
         vec![seg(
             "node",
@@ -3190,32 +3179,20 @@ fn same_commit_array_write_then_cascade_guard() {
         "array hazard",
         o(),
     )
-    .expect("commit must not trip the value_array_hist span CHECK");
-
-    assert_eq!(
-        r.object_deletes[0].result,
-        ObjectDeleteResult::NotFound,
-        "same-commit-created target is guarded ⇒ NotFound, not an error"
+    .expect_err("an array write under an alternative the call deletes is refused");
+    assert!(
+        err.to_string().contains("its object deleted in one call"),
+        "{err}"
     );
     assert_eq!(
         count(&db, "SELECT count(*) FROM value_array_hist") - hist_before,
         0,
-        "no same-commit array row moved to hist"
-    );
-    // The array value (and its alternative) survived — the guard protected them.
-    let got = read_parameter(&db, "node", "profile", "afresh").expect("read");
-    assert_eq!(
-        entity_names(&got),
-        vec!["node_1".to_string(); 3],
-        "array value survives"
+        "nothing moved to hist"
     );
     assert_eq!(
-        count(
-            &db,
-            "SELECT count(*) FROM alternative WHERE cur_name=lower('afresh')"
-        ),
-        1,
-        "alternative still live"
+        count(&db, "SELECT count(*) FROM value_array"),
+        0,
+        "nothing written"
     );
     audit_tiling_clean(&db);
 }

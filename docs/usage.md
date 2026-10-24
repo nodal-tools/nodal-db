@@ -290,7 +290,11 @@ changed values get the new commit. `--force-replace` (or
 `force_replace`) only decides what the replaced versions keep; it does
 not make the core rewrite unchanged values. A call may not write a
 value and delete the same value; the core refuses it before writing
-anything.
+anything. Likewise a call may not write a value and delete an object
+that the value belongs to: its entity (or an entity it is an element
+of), its parameter, its alternative or its class. The core refuses
+such a call whatever the values and whatever the `cascade` option.
+Write the values and delete the objects in separate calls.
 
 ### Build a scenario
 

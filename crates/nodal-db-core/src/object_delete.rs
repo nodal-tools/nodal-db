@@ -1427,6 +1427,44 @@ fn apply_one(
     })
 }
 
+/// The first value key in `written` that this object delete would cascade
+/// over, or `None` (skip_unchanged_writes_PLAN D10, the resolved-id repeat of
+/// `api::reject_write_and_object_delete`). The scope is the target's FULL
+/// cascade closure — every entity, parameter definition and alternative it
+/// reaches — whatever `cascade` says: a value written and its object
+/// deleted in one call is refused whatever the request's options. A target
+/// that does not resolve covers nothing (it would be `NotFound`).
+pub(crate) fn written_value_covered(
+    conn: &Connection,
+    key: &ObjectDeleteKey,
+    written: &std::collections::HashSet<(i64, i64, i64)>,
+) -> Result<Option<(i64, i64, i64)>, DbError> {
+    use std::collections::HashSet;
+    if written.is_empty() || object_legs(key.kind).is_none() {
+        return Ok(None);
+    }
+    let Some(target) = resolve_target(conn, key)? else {
+        return Ok(None);
+    };
+    let mut entities: HashSet<i64> = HashSet::new();
+    let mut params: HashSet<i64> = HashSet::new();
+    let mut alts: HashSet<i64> = HashSet::new();
+    for (k, id) in cascade_closure(conn, key.kind, target.id)? {
+        match k {
+            ObjectKind::Entity => entities.insert(id),
+            ObjectKind::Parameter => params.insert(id),
+            ObjectKind::Alternative => alts.insert(id),
+            // A class reaches its values only through its child entities
+            // and parameters (both in the closure); a scenario has none.
+            ObjectKind::Class | ObjectKind::Scenario => false,
+        };
+    }
+    Ok(written
+        .iter()
+        .find(|(e, p, a)| entities.contains(e) || params.contains(p) || alts.contains(a))
+        .copied())
+}
+
 // ---------------------------------------------------------------------------
 // Preview (§3, decision D6). Read-only; drives the SAME leg registry as forward
 // COUNTs. Best-effort snapshot — the commit-time outcome is authoritative

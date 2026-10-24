@@ -377,6 +377,54 @@ appender plan's D10 gate of <= 0.85; the IPC import of the same cells
 10.4 / 10.3 s -> 4.4 / 4.5 s. File sizes identical to the byte
 (74 985 472 and 70 529 024 B).
 
+## Per-commit name-resolution cache; FROM-subquery unnest form (2026-10-24, DuckDB 2.0.0)
+
+Follow-ups C11 and C2 of `specs/Done/set_based_long_and_delete_PLAN.md`.
+Paired A/B as above (`scripts/bench/ab_write_path`, release builds,
+median per-pair ratio new/old, bootstrap 95 % CI), on the same Ryzen host
+but **shared with other benchmark jobs**: load average 10-48, so the CIs
+are wider than in the sections above.
+
+**C11, adopted: the class / parameter / alternative resolution cache**
+(`api::ResolveCache`, one transaction attempt). Old = `4f0a02b`, new =
+the cache; 31 pairs per row.
+
+| Row | old median | new median | ratio [95 % CI] | load | bound |
+|---|---|---|---|---|---|
+| `api_20x1_scalars_100k` (20 segments x 1 value, per commit) | 205 ms | 188 ms | 0.92 [0.87, 0.94] | 48 -> 40 | |
+| `api_20x1_long24_big` (20 segments x 1 value, per commit) | 305 ms | 314 ms | 0.96 [0.90, 1.06] | 40 -> 17 | |
+| `api_1_scalar_100k` (single-value save, per commit) | 127 ms | 122 ms | 1.00 [0.98, 1.03] | 17 -> 18 | <= 1.02 |
+| `api_1_long24_big` (single-value save, per commit) | 184 ms | 199 ms | 0.99 [0.98, 1.07] | 18 -> 13 | <= 1.02 |
+
+The 20-segment commit saves about 17 ms (the plan expected 25-35 ms of a
+~310 ms commit on a quiet host); the single saves are unchanged within
+noise (medians 1.00 and 0.99). The `long24` row's load moved more than
+2x, so read it as within noise. Equivalence: the cache-on / cache-off
+test (`tests/api_resolve_cache.rs`), the write-path golden, and
+`scripts/check/write_equivalence` against `73e70d6`.
+
+**C2, measured, not adopted: the FROM-subquery `unnest` form** (the form
+the long insert adopted in D7) for `SCALAR_INSERT_SQL` and the six axis
+child inserts, written as `INSERT ... SELECT * FROM (SELECT ?::BIGINT,
+unnest(...), ...) u`. The golden matched unchanged. Old = the C11 build,
+new = C11 + the FROM form; 21 pairs per row.
+
+| Row | old median | new median | ratio [95 % CI] | load |
+|---|---|---|---|---|
+| `scalar_insert` (`write_value`, 400 per commit, per value) | 2.54 ms | 2.62 ms | 1.03 [1.02, 1.05] | 13 -> 11 |
+| `scalar_replace` (per value) | 3.16 ms | 3.24 ms | 1.03 [1.00, 1.08] | 11 -> 18 |
+| `api_10k_scalars` (per value) | 0.021 ms | 0.022 ms | 1.02 [0.99, 1.06] | 18 -> 15 |
+| `api_100_scalars_100k` (per value) | 1.15 ms | 1.16 ms | 1.00 [0.98, 1.02] | 15 -> 20 |
+| `axis_insert` (8 760 `axis_datetime` children, whole commit) | 177 ms | 174 ms | 0.95 [0.92, 1.00] | 20 -> 19 |
+| `api_1_scalar_100k` (per commit) | 138 ms | 127 ms | 1.02 [0.84, 1.04] | 19 -> 16 |
+| `api_20x1_scalars_100k` (per commit) | 175 ms | 175 ms | 1.03 [1.01, 1.04] | 16 -> 13 |
+
+The adoption bar was >= 5 % faster with no regression. The scalar
+insert is 2-3 % slower in the FROM form, and the axis insert's 5 % sits
+at the edge of its CI. The long insert's gain came from replacing
+per-cell key lists with key ordinals, not from the subquery itself; both
+statements keep the plain `SELECT unnest(...)` form.
+
 ## Value-float normalization (2026-10-23, `benches/canon.rs`)
 
 Storing value floats canonical (`-0.0 → +0.0`, every NaN → `0x7ff8…`) adds one

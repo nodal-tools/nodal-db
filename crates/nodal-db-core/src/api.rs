@@ -589,13 +589,16 @@ fn apply_deletes(
     // --- Entities: one lookup per class over its distinct spellings. ---
     let mut by_class: HashMap<i64, Vec<&str>> = HashMap::new();
     let mut class_order: Vec<i64> = Vec::new();
+    // Distinct (class, spelling) pairs: a set, not a scan of the class's
+    // list, so a large delete batch stays linear in its keys.
+    let mut listed: HashSet<(i64, &str)> = HashSet::new();
     for ((_, dk), p) in deletes.iter().zip(&partial) {
         if let Ok((class_id, _, _)) = p {
             let names = by_class.entry(*class_id).or_insert_with(|| {
                 class_order.push(*class_id);
                 Vec::new()
             });
-            if !names.contains(&dk.entity.as_str()) {
+            if listed.insert((*class_id, dk.entity.as_str())) {
                 names.push(&dk.entity);
             }
         }

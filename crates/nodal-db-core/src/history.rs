@@ -141,67 +141,44 @@ use crate::types::{
     ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions, WriteOutcome,
 };
 
-/// The comparison columns of a key's current row(s), appended to the
-/// grouped probes after the version and current-count columns: the 8 value
-/// columns of the current row (`any_value … FILTER` over the at most one
-/// current row of a scalar key, or of a long position; the probes only use
-/// them when that count is exactly 1, so `any_value` skipping NULLs cannot
-/// matter), then its binding and its `content_retained` (critique C3.4: a
-/// current stub never compares equal).
+/// The comparison columns of a current value row (table alias `$t`), read
+/// by the probes for the unchanged check: the 8 value columns, then the
+/// row's binding and its `content_retained` (critique C3.4: a current stub
+/// never compares equal). Plain columns, never aggregates: the probes read
+/// the current rows in one UNION leg and the closed rows' max version in
+/// another (an aggregate per column cost ~1-2 ms of planning per point
+/// probe, measured).
 macro_rules! cur_value_cols {
     ($t:literal) => {
         concat!(
-            "any_value(",
             $t,
-            ".value_kind) FILTER (WHERE ",
+            ".value_kind, ",
             $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
+            ".v_float, ",
             $t,
-            ".v_float) FILTER (WHERE ",
+            ".v_int, ",
             $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
+            ".v_bool, ",
             $t,
-            ".v_int) FILTER (WHERE ",
+            ".v_str, ",
             $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
+            ".v_datetime, ",
             $t,
-            ".v_bool) FILTER (WHERE ",
+            ".v_dur_months, ",
             $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
+            ".v_dur_micros, ",
             $t,
-            ".v_str) FILTER (WHERE ",
+            ".parameter_type_id, ",
             $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
-            $t,
-            ".v_datetime) FILTER (WHERE ",
-            $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
-            $t,
-            ".v_dur_months) FILTER (WHERE ",
-            $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
-            $t,
-            ".v_dur_micros) FILTER (WHERE ",
-            $t,
-            ".valid_to_commit IS NULL), ",
-            "any_value(",
-            $t,
-            ".parameter_type_id) FILTER (WHERE ",
-            $t,
-            ".valid_to_commit IS NULL), ",
-            "bool_and(",
-            $t,
-            ".content_retained) FILTER (WHERE ",
-            $t,
-            ".valid_to_commit IS NULL)"
+            ".content_retained"
         )
+    };
+}
+
+/// The closed-rows leg's placeholders for [`cur_value_cols!`].
+macro_rules! cur_value_nulls {
+    () => {
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
     };
 }
 
@@ -210,12 +187,16 @@ macro_rules! cur_value_cols {
 macro_rules! long_cur_cols {
     () => {
         concat!(
-            "any_value(l.axis1_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
-            "any_value(l.axis2_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
-            "any_value(l.axis3_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
-            "any_value(l.axis4_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
+            "l.axis1_id, l.axis2_id, l.axis3_id, l.axis4_id, ",
             cur_value_cols!("l")
         )
+    };
+}
+
+/// The closed-rows leg's placeholders for [`long_cur_cols!`].
+macro_rules! long_cur_nulls {
+    () => {
+        concat!("NULL, NULL, NULL, NULL, ", cur_value_nulls!())
     };
 }
 
@@ -882,17 +863,28 @@ const SCALAR_KEYS_CTE: &str = "WITH k AS (SELECT unnest(?::BIGINT[]) AS e, \
 
 /// Per key: the max version over all `value_scalar` rows of the triple
 /// (current and closed: the `audit_history_tiling` partition), the count
-/// of current rows, the current row's version and its comparison columns
-/// ([`cur_value_cols!`], for the unchanged check).
-const SCALAR_PROBE_SQL: &str = concat!(
-    "SELECT s.entity_id, s.parameter_definition_id, s.alternative_id, \
+/// of current rows, then the current row's version and comparison columns
+/// (`any_value … FILTER (WHERE current)`: used only when exactly one row is
+/// current, so `any_value` skipping NULLs cannot matter). One join with
+/// aggregates: measured cheaper on a 10 000-key round than the two-leg
+/// current/closed UNION the long probe uses (whose second join doubled the
+/// probe), and bounded by the key count however long the histories are.
+const SCALAR_PROBE_SQL: &str = "SELECT s.entity_id, s.parameter_definition_id, s.alternative_id, \
             max(s.version)::INTEGER, count(*) FILTER (WHERE s.valid_to_commit IS NULL), \
-            (any_value(s.version) FILTER (WHERE s.valid_to_commit IS NULL))::INTEGER, ",
-    cur_value_cols!("s"),
-    " FROM value_scalar s JOIN k ON s.entity_id = k.e \
+            any_value(s.version::INTEGER) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.value_kind) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_float) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_int) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_bool) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_str) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_datetime) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_dur_months) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.v_dur_micros) FILTER (WHERE s.valid_to_commit IS NULL), \
+            any_value(s.parameter_type_id) FILTER (WHERE s.valid_to_commit IS NULL), \
+            bool_and(s.content_retained) FILTER (WHERE s.valid_to_commit IS NULL) \
+     FROM value_scalar s JOIN k ON s.entity_id = k.e \
           AND s.parameter_definition_id = k.p AND s.alternative_id = k.a \
-     GROUP BY ALL"
-);
+     GROUP BY ALL";
 
 /// The keys with a current `value_long` row.
 const LONG_LIVE_SQL: &str = "SELECT DISTINCT l.entity_id, l.parameter_definition_id, \
@@ -1117,12 +1109,13 @@ const SCALAR_INSERT_SQL: &str = "INSERT INTO value_scalar \
        unnest(?::DOUBLE[]), unnest(?::BIGINT[]), unnest(?::BOOLEAN[]), unnest(?::VARCHAR[]), \
        make_timestamp(unnest(?::BIGINT[])), unnest(?::INTEGER[]), unnest(?::BIGINT[])";
 
-/// The single-key form of [`SCALAR_PROBE_SQL`] (one row; `max` is NULL when
-/// the triple has no rows).
+/// The single-key form of [`SCALAR_PROBE_SQL`]: every row of the triple
+/// (one key's history), with the current flag and the comparison columns,
+/// folded by [`ScalarProbe`]. Plain columns: the aggregate form cost ~1.7
+/// ms more per point probe (planning and execution, measured), the
+/// editor's single-value save.
 const SCALAR_PROBE_ONE_SQL: &str = concat!(
-    "SELECT max(s.version)::INTEGER, \
-            count(*) FILTER (WHERE s.valid_to_commit IS NULL), \
-            (any_value(s.version) FILTER (WHERE s.valid_to_commit IS NULL))::INTEGER, ",
+    "SELECT s.version::INTEGER, (s.valid_to_commit IS NULL)::BIGINT, ",
     cur_value_cols!("s"),
     " FROM value_scalar s \
      WHERE s.entity_id = ? AND s.parameter_definition_id = ? AND s.alternative_id = ?"
@@ -1130,9 +1123,37 @@ const SCALAR_PROBE_ONE_SQL: &str = concat!(
 
 type Triple = (i64, i64, i64);
 
-/// A scalar key's current row as its probe read it: the row's version and
-/// comparison columns (`None` when the key has no current scalar row).
-type CurScalar = Option<(u16, CurRow)>;
+/// One scalar key as its probe rows fold: the max version over all its
+/// rows, the number of current rows and, when there is exactly one, that
+/// row's version and comparison columns.
+#[derive(Default)]
+struct ScalarProbe {
+    max_version: Option<i64>,
+    current: i64,
+    row: Option<(u16, CurRow)>,
+}
+
+impl ScalarProbe {
+    /// Fold one probe row: version at `o`, current flag at `o + 1`, the
+    /// comparison block from `o + 2`.
+    fn push(&mut self, r: &duckdb::Row, o: usize) -> duckdb::Result<()> {
+        let version: i32 = r.get(o)?;
+        let cur: i64 = r.get(o + 1)?;
+        self.max_version = Some(
+            self.max_version
+                .map_or(version as i64, |m| m.max(version as i64)),
+        );
+        if cur > 0 {
+            self.current += cur;
+            self.row = if self.current == 1 {
+                Some((version as u16, CurRow::read(r, o + 2, 1)?))
+            } else {
+                None
+            };
+        }
+        Ok(())
+    }
+}
 
 /// A key triple as three scalar binds (the point-filter statements).
 fn point(k: &ValueKey) -> [i64; 3] {
@@ -1236,22 +1257,19 @@ fn write_scalar_round(
     let probed = w.iter().filter(|s| !s.entity_minted).map(|s| &s.key);
     if single && probed.clone().next().is_some() {
         let k = &w[0].key;
-        let (maxv, cur, row) = conn.prepare_cached(SCALAR_PROBE_ONE_SQL)?.query_row(
-            point(k),
-            |r| -> duckdb::Result<(Option<i32>, i64, CurScalar)> {
-                let cur: i64 = r.get(1)?;
-                let version: Option<i32> = r.get(2)?;
-                let row = match version {
-                    Some(v) => Some((v as u16, CurRow::read(r, 3, cur)?)),
-                    None => None,
-                };
-                Ok((r.get(0)?, cur, row))
-            },
-        )?;
-        if let Some(v) = maxv {
-            max_version.insert(triple(k), i64::from(v));
+        let mut probe = ScalarProbe::default();
+        {
+            let mut stmt = conn.prepare_cached(SCALAR_PROBE_ONE_SQL)?;
+            let mut rows = stmt.query(point(k))?;
+            while let Some(r) = rows.next()? {
+                probe.push(r, 0)?;
+            }
         }
-        if let Some(row) = row {
+        if let Some(v) = probe.max_version {
+            max_version.insert(triple(k), v);
+        }
+        let cur = probe.current;
+        if let Some(row) = probe.row {
             current.insert(triple(k), row);
         }
         let cur = if cur > 0 {
@@ -1263,30 +1281,21 @@ fn write_scalar_round(
             live.insert(triple(k), l);
         }
     } else if probed.clone().next().is_some() {
-        let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{SCALAR_PROBE_SQL}"))?;
-        let rows = stmt.query_map(
-            duckdb::params_from_iter(key_lists(probed.clone())),
-            |r| -> duckdb::Result<(Triple, i64, i64, CurScalar)> {
+        {
+            let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{SCALAR_PROBE_SQL}"))?;
+            let mut rows = stmt.query(duckdb::params_from_iter(key_lists(probed.clone())))?;
+            while let Some(r) = rows.next()? {
+                let t: Triple = (r.get(0)?, r.get(1)?, r.get(2)?);
+                max_version.insert(t, r.get(3)?);
                 let cur: i64 = r.get(4)?;
-                let version: Option<i32> = r.get(5)?;
-                let row = match version {
-                    Some(v) => Some((v as u16, CurRow::read(r, 6, cur)?)),
-                    None => None,
-                };
-                Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?, cur, row))
-            },
-        )?;
-        for row in rows {
-            let (t, v, cur, row) = row?;
-            max_version.insert(t, v);
-            if cur > 0 {
-                live.insert(t, Live::Scalar);
-            }
-            if let Some(row) = row {
-                current.insert(t, row);
+                if cur > 0 {
+                    live.insert(t, Live::Scalar);
+                }
+                if let Some(v) = r.get::<_, Option<i32>>(5)? {
+                    current.insert(t, (v as u16, CurRow::read(r, 6, cur)?));
+                }
             }
         }
-        drop(stmt);
         // Long and array only for the keys not live in scalar (zero keys for a
         // pure replace batch, so both statements are skipped). Precedence as
         // in `live_tier`: scalar, then long, then array.
@@ -2100,30 +2109,45 @@ pub(crate) fn write_longs(
     Ok(out)
 }
 
-/// Per key: the max version of each position tuple over every
-/// `value_long` row of the key (current and closed, as
-/// `current_long_cells` reads it), that tuple's current-cell count (0 or
-/// 1), the current cell's axis ids and its comparison columns
-/// ([`cur_value_cols!`]), grouped per (key, positions): the version source
-/// of the write and the read of the unchanged check in one scan (critique
-/// C6, D7).
+/// Per key, in two legs: every current cell (its positions, version, the
+/// flag 1, its axis ids and comparison columns, [`long_cur_cols!`]) and per
+/// position tuple the max version over the closed rows (flag 0). Folded
+/// per position ([`LongCells::finish`]) they give the max version over
+/// every `value_long` row of the (key, positions), as `current_long_cells`
+/// reads it, plus the current cell: the version source of the write and
+/// the read of the unchanged check in one statement (critique C6, D7). The
+/// current leg reads plain columns, not one aggregate per column, which
+/// measured ~2x the planning and execution cost of today's probe.
 const LONG_PROBE_SQL: &str = concat!(
     "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
-            l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, \
-            count(*) FILTER (WHERE l.valid_to_commit IS NULL), ",
+            l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, l.version::INTEGER, 1::BIGINT, ",
     long_cur_cols!(),
     " FROM value_long l JOIN k ON l.entity_id = k.e \
           AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
+     WHERE l.valid_to_commit IS NULL \
+     UNION ALL \
+     SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
+            l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, 0::BIGINT, ",
+    long_cur_nulls!(),
+    " FROM value_long l JOIN k ON l.entity_id = k.e \
+          AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
+     WHERE l.valid_to_commit IS NOT NULL \
      GROUP BY ALL"
 );
 
-/// The single-key form of [`LONG_PROBE_SQL`].
+/// The single-key form of [`LONG_PROBE_SQL`] (the key binds twice).
 const LONG_PROBE_ONE_SQL: &str = concat!(
-    "SELECT l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, \
-            count(*) FILTER (WHERE l.valid_to_commit IS NULL), ",
+    "SELECT l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, l.version::INTEGER, 1::BIGINT, ",
     long_cur_cols!(),
     " FROM value_long l \
      WHERE l.entity_id = ? AND l.parameter_definition_id = ? AND l.alternative_id = ? \
+       AND l.valid_to_commit IS NULL \
+     UNION ALL \
+     SELECT l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, 0::BIGINT, ",
+    long_cur_nulls!(),
+    " FROM value_long l \
+     WHERE l.entity_id = ? AND l.parameter_definition_id = ? AND l.alternative_id = ? \
+       AND l.valid_to_commit IS NOT NULL \
      GROUP BY l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos"
 );
 
@@ -2152,8 +2176,9 @@ struct LongCells {
 }
 
 impl LongCells {
-    /// Fold one probe row: its position, max version, current count and
-    /// (from column `o`) the current cell's axis ids and comparison block.
+    /// Fold one probe row (from column `o`: version, current flag, the
+    /// current cell's axis ids and comparison block). A position may come
+    /// in twice, once per leg; [`Self::finish`] merges.
     fn push(&mut self, r: &duckdb::Row, pos: [i32; 4], o: usize) -> duckdb::Result<()> {
         if self.cells.is_empty() {
             self.coherent = true;
@@ -2181,8 +2206,30 @@ impl LongCells {
         Ok(())
     }
 
+    /// Sort by position tuple and merge the rows of one position: the max
+    /// version of both legs, and its current cell (none, or not comparable
+    /// when a damaged position has more than one).
     fn finish(&mut self) {
         self.cells.sort_unstable_by_key(|c| c.pos);
+        let mut merged: Vec<ProbeCell> = Vec::with_capacity(self.cells.len());
+        for c in self.cells.drain(..) {
+            match merged.last_mut() {
+                Some(m) if m.pos == c.pos => {
+                    m.version = m.version.max(c.version);
+                    if let Some(cur) = c.current {
+                        m.current = match m.current.take() {
+                            None => Some(cur),
+                            Some(prev) => Some(CurRow {
+                                cell: None,
+                                pt: prev.pt,
+                            }),
+                        };
+                    }
+                }
+                _ => merged.push(c),
+            }
+        }
+        self.cells = merged;
     }
 
     /// The probed cell at `pos` (binary search; the cells are sorted).
@@ -2401,11 +2448,8 @@ fn write_long_round(
 /// current cell. The single-key form of [`LONG_PROBE_SQL`].
 fn current_long_cells(conn: &Connection, key: &ValueKey) -> Result<LongCells, DbError> {
     let mut stmt = conn.prepare_cached(LONG_PROBE_ONE_SQL)?;
-    let mut rows = stmt.query(params![
-        key.entity_id,
-        key.parameter_definition_id,
-        key.alternative_id
-    ])?;
+    let [e, p, a] = point(key);
+    let mut rows = stmt.query(params![e, p, a, e, p, a])?;
     let mut cells = LongCells::default();
     while let Some(r) = rows.next()? {
         let pos = [r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?];

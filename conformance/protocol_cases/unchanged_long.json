@@ -1,0 +1,36 @@
+{
+  "name": "long identical re-write is unchanged (every cell keeps its open span), then a full change versions every cell",
+  "pending": "P1 of skip_unchanged_writes_PLAN (whole-value skip)",
+  "key": [19, 29, 39],
+  "steps": [
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 10.0 }, { "pos": 2, "value": 30.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": null, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": null, "retained": true, "v_float": 30.0 }
+        ]
+      }
+    },
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 10.0 }, { "pos": 2, "value": 30.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": null, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": null, "retained": true, "v_float": 30.0 }
+        ]
+      }
+    },
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 11.0 }, { "pos": 2, "value": 31.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": 3, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": 3, "retained": true, "v_float": 30.0 },
+          { "i1_pos": 0, "version": 2, "valid_to_step": null, "retained": true, "v_float": 11.0 },
+          { "i1_pos": 2, "version": 2, "valid_to_step": null, "retained": true, "v_float": 31.0 }
+        ]
+      }
+    }
+  ]
+}

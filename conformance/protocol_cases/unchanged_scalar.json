@@ -1,0 +1,32 @@
+{
+  "name": "scalar identical re-write is unchanged (no close-out, no new row), then a change versions",
+  "pending": "P1 of skip_unchanged_writes_PLAN (whole-value skip)",
+  "key": [17, 27, 37],
+  "steps": [
+    {
+      "op": { "scalar_float": { "v": 1.5 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": null, "retained": true, "v_float": 1.5 }
+        ]
+      }
+    },
+    {
+      "op": { "scalar_float": { "v": 1.5 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": null, "retained": true, "v_float": 1.5 }
+        ]
+      }
+    },
+    {
+      "op": { "scalar_float": { "v": 2.5 } },
+      "expect": {
+        "scalar": [
+          { "version": 1, "valid_to_step": 3, "retained": true, "v_float": 1.5 },
+          { "version": 2, "valid_to_step": null, "retained": true, "v_float": 2.5 }
+        ]
+      }
+    }
+  ]
+}

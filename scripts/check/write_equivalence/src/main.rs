@@ -12,13 +12,35 @@
 //!
 //! Not deterministic across runs, so excluded from the dump: the commit
 //! log's wall-clock `timestamp` and the per-file `db_identity` metadata
-//! row. Engine error texts are reduced to "Duckdb error".
+//! row. Engine error texts are reduced to "Duckdb error". Reports print a
+//! fixed field subset (not `{:?}`), so a core that adds a report field
+//! still prints the same text.
+//!
+//! Modes (the optional 5th argument):
+//! - `plain` (default): the random workload above; values repeat now and
+//!   then by chance.
+//! - `fresh`: every written cell differs from every value any earlier
+//!   commit wrote to its key (floats, ints, timestamps and strings carry a
+//!   commit-indexed term; a bool cell flips the last value this workload
+//!   committed to it), and a `commit_changes` call without segments is not
+//!   made. No write is ever identical to the stored value and no call is a
+//!   no-op, so a core that skips unchanged writes must print exactly what
+//!   a core that versions them prints (skip_unchanged_writes_PLAN §6.1).
+//! - `logical`: a repeat-heavy workload (about 30 % of the segments and
+//!   direct values replay an earlier one) that prints only what the
+//!   skip-unchanged change must leave alone: reports without commit ids,
+//!   value and row counts or tiers; the current values (keys, axes,
+//!   positions, payload; no commit, version or array_id columns) after
+//!   every call; the as-of values at every call boundary at the end; then
+//!   `history_rows` and the audit counts, which `check.py --logical`
+//!   compares by rule instead of by text (plan §6.3).
 //!
 //! The workload uses only API present since `73e70d6` (2026-10-24); to
 //! compare older revisions, use a copy of this crate from their time.
 //!
-//! usage: write_equivalence <seed> <commits> <big:0|1> <dir>
+//! usage: write_equivalence <seed> <commits> <big:0|1> <dir> [plain|fresh|logical]
 
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,7 +67,7 @@ use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::template::ir::{DimSpec, TypeDecl};
 use nodal_db_core::types::{
     LongRow, ObjectDeleteKey, ObjectKind, ObjectRef, ScalarValue, ShapedData, StructuralChange,
-    Tier, ValueKey, ValueKind, WriteOptions,
+    Tier, ValueKey, ValueKind, WriteOptions, WriteOutcome, WriteReport,
 };
 
 struct Rng(u64);
@@ -223,7 +245,50 @@ const ALTS: &[&str] = &["Base", "alt1", "run1", "Alt1", "run2"];
 /// a second spelling of it, and a second class.
 const CLASSES: &[&str] = &["node", "node", "node", "Node", "unit"];
 
-fn float_val(r: &mut Rng) -> f64 {
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Plain,
+    Fresh,
+    Logical,
+}
+
+/// The value generator's state: the mode, the commit-indexed term of the
+/// current call (`fresh` mode) and the bool cells this workload committed
+/// (`fresh` mode flips them; a cell is keyed by its class, parameter,
+/// alternative and entity, all folded, plus its coordinates).
+struct Gen {
+    mode: Mode,
+    /// 0 for the setup call, `ci + 1` for loop iteration `ci`.
+    term: i64,
+    bools: HashMap<String, bool>,
+    /// The bool cells of the call being built, committed to `bools` only
+    /// when the call succeeds.
+    pending: Vec<(String, bool)>,
+}
+
+impl Gen {
+    fn fresh(&self) -> bool {
+        self.mode == Mode::Fresh
+    }
+
+    /// The call succeeded: its bool cells are now the stored ones.
+    fn commit(&mut self) {
+        for (k, v) in self.pending.drain(..) {
+            self.bools.insert(k, v);
+        }
+    }
+
+    /// The call failed: nothing it wrote is stored.
+    fn rollback(&mut self) {
+        self.pending.clear();
+    }
+}
+
+fn float_val(r: &mut Rng, g: &Gen) -> f64 {
+    if g.fresh() {
+        // Disjoint per call: [term*2000 - 1000, term*2000 + 1000) * 0.125.
+        return ((g.term * 2000 + r.below(2000) as i64) as f64 - 1000.0) * 0.125;
+    }
     match r.below(10) {
         0 => nan(),
         1 => -0.0,
@@ -232,8 +297,16 @@ fn float_val(r: &mut Rng) -> f64 {
     }
 }
 
-/// Build one segment's batch for `entities` (names) of parameter `p`.
-fn param_batch(r: &mut Rng, p: &Param, names: &[String]) -> RecordBatch {
+/// Build one segment's batch for `entities` (names) of parameter `p`;
+/// `cell_key` is the folded `class|parameter|alternative` of the segment
+/// (the `fresh` mode's bool cells).
+fn param_batch(
+    r: &mut Rng,
+    g: &mut Gen,
+    cell_key: &str,
+    p: &Param,
+    names: &[String],
+) -> RecordBatch {
     let rank = p.dims.len();
     let mut ent: Vec<String> = Vec::new();
     let mut coords: Vec<Vec<usize>> = vec![Vec::new(); rank];
@@ -296,26 +369,47 @@ fn param_batch(r: &mut Rng, p: &Param, names: &[String]) -> RecordBatch {
             }
         }
     }
+    let term = if g.fresh() { g.term } else { 0 };
     let vals: ArrayRef = match p.meas {
         MeasK::F => Arc::new(Float64Array::from(
-            (0..nrows).map(|_| float_val(r)).collect::<Vec<_>>(),
+            (0..nrows).map(|_| float_val(r, g)).collect::<Vec<_>>(),
         )),
         MeasK::I => Arc::new(Int64Array::from(
             (0..nrows)
-                .map(|_| r.below(100) as i64 - 50)
+                .map(|_| r.below(100) as i64 - 50 + term * 1000)
                 .collect::<Vec<_>>(),
         )),
-        MeasK::B => Arc::new(BooleanArray::from(
-            (0..nrows).map(|_| r.chance(50)).collect::<Vec<_>>(),
-        )),
+        MeasK::B => {
+            let mut v = Vec::with_capacity(nrows);
+            for &i in &order {
+                let x = r.chance(50);
+                if g.fresh() {
+                    let coord: Vec<usize> = (0..rank).map(|d| coords[d][i]).collect();
+                    let k = format!("{cell_key}|{}|{coord:?}", ent[i].to_lowercase());
+                    let x = g.bools.get(&k).map_or(x, |&last| !last);
+                    g.pending.push((k, x));
+                    v.push(x);
+                } else {
+                    v.push(x);
+                }
+            }
+            Arc::new(BooleanArray::from(v))
+        }
         MeasK::S => Arc::new(StringArray::from(
             (0..nrows)
-                .map(|_| ["x", "", "it's", "ÄÖ", "''"][r.below(5)])
+                .map(|_| {
+                    let base = ["x", "", "it's", "ÄÖ", "''"][r.below(5)];
+                    if g.fresh() {
+                        format!("{base}#{term}")
+                    } else {
+                        base.to_string()
+                    }
+                })
                 .collect::<Vec<_>>(),
         )),
         MeasK::T => Arc::new(TimestampMicrosecondArray::from(
             (0..nrows)
-                .map(|_| T0 + r.below(1000) as i64 * 60_000_000)
+                .map(|_| T0 + (term * 1000 + r.below(1000) as i64) * 60_000_000)
                 .collect::<Vec<_>>(),
         )),
     };
@@ -338,7 +432,7 @@ fn label_domains(p: &Param) -> Vec<LabelDomain> {
 
 /// A `mixed` segment: rank 0 float (scalar), rank 1 int measure (long) or
 /// rank 1 float (array).
-fn mixed_batch(r: &mut Rng, names: &[String]) -> RecordBatch {
+fn mixed_batch(r: &mut Rng, g: &Gen, names: &[String]) -> RecordBatch {
     let shape = r.below(3);
     let mut ent = Vec::new();
     let mut t = Vec::new();
@@ -356,13 +450,16 @@ fn mixed_batch(r: &mut Rng, names: &[String]) -> RecordBatch {
         fields.push(Field::new("t", DataType::Int64, false));
         cols.push(Arc::new(Int64Array::from(t)));
     }
+    let term = if g.fresh() { g.term } else { 0 };
     let vals: ArrayRef = if shape == 1 {
         Arc::new(Int64Array::from(
-            (0..nrows).map(|i| i as i64).collect::<Vec<_>>(),
+            (0..nrows)
+                .map(|i| i as i64 + term * 1000)
+                .collect::<Vec<_>>(),
         ))
     } else {
         Arc::new(Float64Array::from(
-            (0..nrows).map(|_| float_val(r)).collect::<Vec<_>>(),
+            (0..nrows).map(|_| float_val(r, g)).collect::<Vec<_>>(),
         ))
     };
     fields.push(Field::new("value", vals.data_type().clone(), false));
@@ -380,7 +477,10 @@ fn int_axis(len: i32, start: i64) -> CanonicalAxis {
 
 /// A random direct value: every tier, every kind including duration,
 /// period and time-pattern axes, empty arrays.
-fn direct_value(r: &mut Rng) -> CanonicalValue {
+/// In `fresh` mode every cell carries the call's term, and the empty array
+/// sits on a per-call axis (an empty payload cannot change).
+fn direct_value(r: &mut Rng, g: &Gen) -> CanonicalValue {
+    let term = if g.fresh() { g.term } else { 0 };
     let scalar = |v: ScalarValue| CanonicalValue {
         tier: Tier::Scalar,
         value_kind: v.kind(),
@@ -388,9 +488,9 @@ fn direct_value(r: &mut Rng) -> CanonicalValue {
         shape: ShapedData::Scalar(v),
     };
     match r.below(7) {
-        0 => scalar(ScalarValue::Float(float_val(r).max(f64::MIN) + 0.0)),
+        0 => scalar(ScalarValue::Float(float_val(r, g).max(f64::MIN) + 0.0)),
         1 => scalar(ScalarValue::Duration {
-            months: r.below(5) as i32,
+            months: r.below(5) as i32 + term as i32 * 10,
             micros: r.below(100) as i64 - 7,
         }),
         2 => {
@@ -424,7 +524,7 @@ fn direct_value(r: &mut Rng) -> CanonicalValue {
                         .map(|p| LongRow {
                             positions: vec![p],
                             value: ScalarValue::Duration {
-                                months: p,
+                                months: p + term as i32 * 2,
                                 micros: -(p as i64),
                             },
                         })
@@ -468,7 +568,7 @@ fn direct_value(r: &mut Rng) -> CanonicalValue {
                         .into_iter()
                         .map(|c| LongRow {
                             positions: vec![(c / 3) as i32, (c % 3) as i32],
-                            value: ScalarValue::Float(c as f64 * 0.5),
+                            value: ScalarValue::Float(c as f64 * 0.5 + term as f64 * 8.0),
                         })
                         .collect(),
                 ),
@@ -477,7 +577,7 @@ fn direct_value(r: &mut Rng) -> CanonicalValue {
         4 => CanonicalValue {
             tier: Tier::Array,
             value_kind: ValueKind::Float,
-            axes: vec![int_axis(1, 0)],
+            axes: vec![int_axis(1, term)],
             shape: ShapedData::Array(vec![]),
         },
         5 => {
@@ -499,7 +599,7 @@ fn direct_value(r: &mut Rng) -> CanonicalValue {
                 shape: ShapedData::Array(
                     (0..n)
                         .map(|_| {
-                            let x = float_val(r);
+                            let x = float_val(r, g);
                             if x == 0.0 {
                                 0.0
                             } else {
@@ -521,7 +621,11 @@ fn direct_value(r: &mut Rng) -> CanonicalValue {
                         .into_iter()
                         .map(|c| LongRow {
                             positions: vec![c as i32],
-                            value: ScalarValue::Str(format!("s{c}")),
+                            value: ScalarValue::Str(if g.fresh() {
+                                format!("s{c}#{term}")
+                            } else {
+                                format!("s{c}")
+                            }),
                         })
                         .collect(),
                 ),
@@ -546,11 +650,84 @@ fn err_text(e: &DbError) -> String {
     }
 }
 
-fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> std::path::PathBuf {
+/// A report as text: a fixed field subset (every core this workload builds
+/// against has these fields), so a core that adds a field prints the same
+/// line. `logical` drops what a core that skips unchanged writes changes by
+/// design: the commit id, the value and row counts and the tiers.
+fn report_text(r: &WriteReport, mode: Mode) -> String {
+    if mode == Mode::Logical {
+        return format!(
+            "axes_created={} axes_reused={} warnings={:?} object_deletes={:?} structural={:?}",
+            r.axes_created, r.axes_reused, r.warnings, r.object_deletes, r.structural
+        );
+    }
+    format!(
+        "commit_id={} values_written={} rows_written={} rows_closed={} axes_created={} \
+         axes_reused={} tiers={:?} warnings={:?} object_deletes={:?} structural={:?}",
+        r.commit_id,
+        r.values_written,
+        r.rows_written,
+        r.rows_closed,
+        r.axes_created,
+        r.axes_reused,
+        r.tiers,
+        r.warnings,
+        r.object_deletes,
+        r.structural
+    )
+}
+
+/// A direct write's outcome as text (fixed field subset, as for reports).
+fn outcome_text(o: &WriteOutcome, mode: Mode) -> String {
+    if mode == Mode::Logical {
+        return format!(
+            "tier={:?} axes_created={} axes_reused={}",
+            o.tier, o.axes_created, o.axes_reused
+        );
+    }
+    format!(
+        "tier={:?} version={} rows_written={} rows_closed={} axes_created={} axes_reused={}",
+        o.tier, o.version, o.rows_written, o.rows_closed, o.axes_created, o.axes_reused
+    )
+}
+
+fn result_text<T>(r: &Result<T, DbError>, f: impl Fn(&T) -> String) -> String {
+    match r {
+        Ok(v) => format!("Ok({})", f(v)),
+        Err(e) => format!("Err({:?})", err_text(e)),
+    }
+}
+
+/// The commit a call leaves the database at: its own commit, or (a failed
+/// or no-op call, `commit_id == 0`) the boundary before it.
+fn boundary(prev: i64, commit_id: Option<i64>) -> i64 {
+    match commit_id {
+        Some(c) if c > 0 => c,
+        _ => prev,
+    }
+}
+
+type Target = (String, String, String);
+
+struct Run {
+    db: std::path::PathBuf,
+    /// The commit each call left the database at, in call order.
+    boundaries: Vec<i64>,
+}
+
+fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut String) -> Run {
     let db = dir.join("write_equivalence.duckdb");
     let _ = std::fs::remove_file(&db);
     init_schema_with_default(&db, Some("Base")).unwrap();
     let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut g = Gen {
+        mode,
+        term: 0,
+        bools: HashMap::new(),
+        pending: Vec::new(),
+    };
+    let mut boundaries: Vec<i64> = Vec::new();
+    let mut head = 0i64;
     let mixed = StructuralChange::CreateParameter {
         class: "node".into(),
         name: "mixed".into(),
@@ -570,13 +747,20 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
         value_list: None,
         description: None,
     };
+    let setup = param_batch(
+        &mut r,
+        &mut g,
+        "node|sc_f|base",
+        &PARAMS[0],
+        &["ασ".to_string()],
+    );
     let rep = commit_changes(
         &db,
         vec![Segment {
             class: "node".into(),
             parameter: "sc_f".into(),
             alternative: "Base".into(),
-            batches: vec![param_batch(&mut r, &PARAMS[0], &["ασ".to_string()])],
+            batches: vec![setup],
             domains: vec![],
         }],
         vec![],
@@ -586,7 +770,13 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
         "setup",
         WriteOptions::default(),
     );
-    writeln!(log, "## setup {:?}", rep.map_err(|e| err_text(&e))).unwrap();
+    g.commit();
+    writeln!(
+        log,
+        "## setup {}",
+        result_text(&rep, |r| report_text(r, mode))
+    )
+    .unwrap();
     let rep = commit_changes(
         &db,
         vec![],
@@ -597,7 +787,12 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
         "mixed",
         WriteOptions::default(),
     );
-    writeln!(log, "## setup mixed {:?}", rep.map_err(|e| err_text(&e))).unwrap();
+    writeln!(
+        log,
+        "## setup mixed {}",
+        result_text(&rep, |r| report_text(r, mode))
+    )
+    .unwrap();
     {
         let conn = Connection::open(&db).unwrap();
         for name in ["res", "res_a"] {
@@ -609,10 +804,20 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
             )
             .unwrap();
         }
+        head = conn
+            .query_row("SELECT max(id) FROM \"commit\"", [], |r| r.get(0))
+            .unwrap_or(head);
         conn.close().unwrap();
     }
 
+    // The `logical` mode's replay sources: the last segment generated per
+    // target (with its entity names) and the last direct value per key.
+    let mut last_seg: BTreeMap<Target, (Segment, Vec<String>)> = BTreeMap::new();
+    let mut last_direct: HashMap<i64, CanonicalValue> = HashMap::new();
+    let replay = |r: &mut Rng| mode == Mode::Logical && r.chance(30);
+
     for ci in 0..commits {
+        g.term = ci as i64 + 1;
         // Erasure of run1 now and then.
         if r.chance(3) {
             let rep = erase_alternative(
@@ -628,9 +833,12 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
             writeln!(
                 log,
                 "## {ci} erase {:?}",
-                rep.map(|r| r.erased).map_err(|e| err_text(&e))
+                rep.as_ref().map(|r| r.erased).map_err(err_text)
             )
             .unwrap();
+            head = boundary(head, rep.as_ref().ok().map(|r| r.commit_id));
+            boundaries.push(head);
+            logical_state(&db, mode, &format!("{ci} erase"), log);
         }
         // Direct commits now and then.
         if r.chance(12) {
@@ -639,8 +847,10 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
                     let e = 100_000 + r.below(6) as i64;
                     let v = if r.chance(20) {
                         None
+                    } else if replay(&mut r) && last_direct.contains_key(&e) {
+                        Some(last_direct[&e].clone())
                     } else {
-                        Some(direct_value(&mut r))
+                        Some(direct_value(&mut r, &g))
                     };
                     (e, v, r.chance(20))
                 })
@@ -666,9 +876,28 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
                         None => delete_value(conn, c, key, &opts)?,
                     });
                 }
-                Ok(out)
+                Ok((c, out))
             });
-            writeln!(log, "## {ci} direct {:?}", rep.map_err(|e| err_text(&e))).unwrap();
+            writeln!(
+                log,
+                "## {ci} direct {}",
+                result_text(&rep, |(_, out)| {
+                    let parts: Vec<String> = out.iter().map(|o| outcome_text(o, mode)).collect();
+                    format!("[{}]", parts.join(", "))
+                })
+            )
+            .unwrap();
+            if rep.is_ok() {
+                for (e, v, _) in &steps {
+                    match v {
+                        Some(v) => last_direct.insert(*e, v.clone()),
+                        None => last_direct.remove(e),
+                    };
+                }
+            }
+            head = boundary(head, rep.as_ref().ok().map(|(c, _)| *c));
+            boundaries.push(head);
+            logical_state(&db, mode, &format!("{ci} direct"), log);
             continue;
         }
 
@@ -698,28 +927,42 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
         let mut segments: Vec<Segment> = Vec::new();
         let mut written: std::collections::HashSet<(String, String, String, String)> =
             Default::default();
-        let mut targets = std::collections::HashSet::new();
+        let mut targets: std::collections::HashSet<Target> = Default::default();
         let nseg = 1 + r.below(8);
         for _ in 0..nseg {
+            if replay(&mut r) && !last_seg.is_empty() {
+                // Replay an earlier segment verbatim (identical values for
+                // every entity whose value has not changed since).
+                let (t, (seg, names)) = last_seg.iter().nth(r.below(last_seg.len())).unwrap();
+                if !targets.insert(t.clone()) {
+                    continue;
+                }
+                for n in names {
+                    written.insert((t.0.clone(), t.1.clone(), t.2.clone(), n.to_lowercase()));
+                }
+                segments.push(seg.clone());
+                continue;
+            }
             let class = CLASSES[r.below(CLASSES.len())];
             let alt = ALTS[r.below(ALTS.len())];
             let (cl, al) = (class.to_lowercase(), alt.to_lowercase());
             let pi = r.below(PARAMS.len() + 2);
             let (pname, batch, domains, names) = if pi >= PARAMS.len() {
-                if !targets.insert((cl.clone(), "mixed", al.clone())) {
+                if !targets.insert((cl.clone(), "mixed".into(), al.clone())) {
                     continue;
                 }
                 let names: Vec<String> = r.subset(ENTITIES, 1).into_iter().map(ename).collect();
-                ("mixed", mixed_batch(&mut r, &names), vec![], names)
+                ("mixed", mixed_batch(&mut r, &g, &names), vec![], names)
             } else {
                 let p = &PARAMS[pi];
-                if !targets.insert((cl.clone(), p.name, al.clone())) {
+                if !targets.insert((cl.clone(), p.name.into(), al.clone())) {
                     continue;
                 }
                 let names: Vec<String> = r.subset(ENTITIES, 1).into_iter().map(ename).collect();
+                let cell_key = format!("{cl}|{}|{al}", p.name);
                 (
                     p.name,
-                    param_batch(&mut r, p, &names),
+                    param_batch(&mut r, &mut g, &cell_key, p, &names),
                     label_domains(p),
                     names,
                 )
@@ -727,17 +970,20 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
             for n in &names {
                 written.insert((cl.clone(), pname.to_string(), al.clone(), n.to_lowercase()));
             }
-            segments.push(Segment {
+            let seg = Segment {
                 class: class.into(),
                 parameter: pname.into(),
                 alternative: alt.into(),
                 batches: vec![batch],
                 domains,
-            });
+            };
+            if mode == Mode::Logical {
+                last_seg.insert((cl, pname.into(), al), (seg.clone(), names));
+            }
+            segments.push(seg);
         }
         // Big rounds now and then.
-        let big_free =
-            |p: &'static str| !targets.contains(&("node".to_string(), p, "alt1".to_string()));
+        let big_free = |p: &str| !targets.contains(&("node".into(), p.into(), "alt1".into()));
         if big && r.chance(4) && big_free("l_i1") {
             let names: Vec<String> = (0..700).map(|i| format!("b{i:03}")).collect();
             let p = Param {
@@ -754,7 +1000,7 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
                 class: "node".into(),
                 parameter: "l_i1".into(),
                 alternative: "alt1".into(),
-                batches: vec![param_batch(&mut r, &p, &names)],
+                batches: vec![param_batch(&mut r, &mut g, "node|l_i1|alt1", &p, &names)],
                 domains: vec![],
             });
         }
@@ -774,7 +1020,7 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
                 class: "node".into(),
                 parameter: "a_f1".into(),
                 alternative: "alt1".into(),
-                batches: vec![param_batch(&mut r, &p, &names)],
+                batches: vec![param_batch(&mut r, &mut g, "node|a_f1|alt1", &p, &names)],
                 domains: vec![],
             });
         }
@@ -826,6 +1072,14 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
             }
         }
         if segments.is_empty() && deletes.is_empty() && structural.is_empty() {
+            g.rollback();
+            continue;
+        }
+        // `fresh`: a call without a (changed) value write may change nothing
+        // (deletes that miss, a create that exists); a core that commits no
+        // such call would differ by a commit row, so it is not made.
+        if mode == Mode::Fresh && segments.is_empty() {
+            g.rollback();
             continue;
         }
         let rep = commit_changes(
@@ -838,9 +1092,22 @@ fn run(seed: u64, commits: usize, big: bool, dir: &Path, log: &mut String) -> st
             &format!("c{ci}"),
             opts,
         );
-        writeln!(log, "## {ci} {:?}", rep.map_err(|e| err_text(&e))).unwrap();
+        if rep.is_ok() {
+            g.commit();
+        } else {
+            g.rollback();
+        }
+        writeln!(
+            log,
+            "## {ci} {}",
+            result_text(&rep, |r| report_text(r, mode))
+        )
+        .unwrap();
+        head = boundary(head, rep.as_ref().ok().map(|r| r.commit_id));
+        boundaries.push(head);
+        logical_state(&db, mode, &ci.to_string(), log);
     }
-    db
+    Run { db, boundaries }
 }
 
 fn render(v: &Value) -> String {
@@ -870,6 +1137,144 @@ fn render(v: &Value) -> String {
         }
         other => format!("{other:?}"),
     }
+}
+
+/// The logical value columns per tier: `(tier tag, identity columns,
+/// payload columns, source)`. Identity: the key triple, the binding, the
+/// axes, the positions and the value kind; payload: the value columns. No
+/// commit, version or `array_id` column.
+const LOGICAL: &[(&str, &str, &str, &str)] = &[
+    (
+        "S",
+        "entity_id, parameter_definition_id, alternative_id, parameter_type_id, value_kind",
+        "v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros",
+        "value_scalar",
+    ),
+    (
+        "L",
+        "entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+         axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, value_kind",
+        "v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros",
+        "value_long",
+    ),
+    (
+        "A",
+        "entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+         axis1_id, axis2_id, axis3_id, axis4_id",
+        "values, values_int",
+        "value_array",
+    ),
+];
+
+/// The rows of one logical query as `identity\tpayload` lines (payload
+/// `STUB` for a row whose content was not retained). `None` when the query
+/// fails (an as-of read behind an erasure marker).
+fn logical_rows(conn: &Connection, sql: &str, n_id: usize) -> Option<Vec<String>> {
+    let mut stmt = conn.prepare(sql).ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    let n = rows.as_ref().unwrap().column_count();
+    let mut out = Vec::new();
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        let cells: Vec<String> = (0..n)
+            .map(|i| render(&row.get::<_, Value>(i).unwrap()))
+            .collect();
+        // The last column is content_retained.
+        let payload = if cells[n - 1] == "false" {
+            "STUB".to_string()
+        } else {
+            cells[n_id..n - 1].join("|")
+        };
+        out.push(format!("{}\t{payload}", cells[..n_id].join("|")));
+    }
+    Some(out)
+}
+
+/// `logical` mode: the current values after a call, under `## {tag} state`.
+fn logical_state(db: &Path, mode: Mode, tag: &str, log: &mut String) {
+    if mode != Mode::Logical {
+        return;
+    }
+    let conn = Connection::open(db).unwrap();
+    writeln!(log, "## {tag} state").unwrap();
+    for (t, id, payload, table) in LOGICAL {
+        let current = if *table == "value_array" {
+            "TRUE"
+        } else {
+            "valid_to_commit IS NULL"
+        };
+        let retained = if *table == "value_array" {
+            "TRUE"
+        } else {
+            "content_retained"
+        };
+        let sql = format!(
+            "SELECT '{t}', {id}, {payload}, {retained} FROM {table} WHERE {current} ORDER BY ALL"
+        );
+        let n_id = 1 + id.split(',').count();
+        for line in logical_rows(&conn, &sql, n_id).expect("current state") {
+            writeln!(log, "{line}").unwrap();
+        }
+    }
+    conn.close().unwrap();
+}
+
+/// `logical` mode, at the end: the values as of every call boundary
+/// (`ERR` where the as-of guard refuses), the history row count and the
+/// audit counts.
+fn logical_end(db: &Path, boundaries: &[i64], log: &mut String) {
+    let conn = Connection::open(db).unwrap();
+    for (k, c) in boundaries.iter().enumerate() {
+        writeln!(log, "## asof {k}").unwrap();
+        for (t, id, payload, table) in LOGICAL {
+            let sql = format!(
+                "SELECT '{t}', {id}, {payload}, content_retained FROM {table}_asof({c}) ORDER BY ALL"
+            );
+            let n_id = 1 + id.split(',').count();
+            match logical_rows(&conn, &sql, n_id) {
+                Some(lines) => {
+                    for line in lines {
+                        writeln!(log, "{line}").unwrap();
+                    }
+                }
+                None => writeln!(log, "{t}\tERR").unwrap(),
+            }
+        }
+    }
+    let hist: i64 = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL) \
+                  + (SELECT count(*) FROM value_long WHERE valid_to_commit IS NOT NULL) \
+                  + (SELECT count(*) FROM value_array_hist)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    writeln!(log, "## history_rows {hist}").unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT view_name FROM duckdb_views() \
+             WHERE database_name = current_database() AND schema_name = 'main' \
+               AND starts_with(view_name, 'audit_') ORDER BY view_name",
+        )
+        .unwrap();
+    let audits: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(stmt);
+    for a in audits {
+        let n: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM \"{a}\""), [], |r| r.get(0))
+            .unwrap();
+        writeln!(log, "## audit {a} {n}").unwrap();
+    }
+    conn.close().unwrap();
 }
 
 /// Every row of every base table (sorted), the sequence counters and the
@@ -929,9 +1334,19 @@ fn main() {
     let commits: usize = a[2].parse().unwrap();
     let big = a[3] == "1";
     let dir = Path::new(&a[4]);
+    let mode = match a.get(5).map(String::as_str) {
+        None | Some("plain") => Mode::Plain,
+        Some("fresh") => Mode::Fresh,
+        Some("logical") => Mode::Logical,
+        Some(other) => panic!("unknown mode {other:?} (plain, fresh or logical)"),
+    };
     std::fs::create_dir_all(dir).unwrap();
     let mut log = String::new();
-    let db = run(seed, commits, big, dir, &mut log);
-    dump(&db, &mut log);
+    let out = run(seed, commits, big, mode, dir, &mut log);
+    if mode == Mode::Logical {
+        logical_end(&out.db, &out.boundaries, &mut log);
+    } else {
+        dump(&out.db, &mut log);
+    }
     print!("{log}");
 }

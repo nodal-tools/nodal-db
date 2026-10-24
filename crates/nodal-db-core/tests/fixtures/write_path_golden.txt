@@ -121,7 +121,7 @@ WriteReport { commit_id: 34, values_written: 5, rows_written: 3, rows_closed: 8,
 ## outcomes c5 empty array
 WriteOutcome { tier: Some(Array), version: 1, rows_written: 1, rows_closed: 0, axes_created: 0, axes_reused: 1 }
 ## outcomes c5 empty array replace
-WriteOutcome { tier: Some(Array), version: 2, rows_written: 1, rows_closed: 1, axes_created: 0, axes_reused: 1 }
+WriteOutcome { tier: Some(Array), version: 2, rows_written: 1, rows_closed: 1, axes_created: 1, axes_reused: 0 }
 ## outcomes c5 empty array delete
 WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_created: 0, axes_reused: 0 }
 ## commit (id,user,message)
@@ -205,6 +205,7 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 40|"integer"|1|4403148322668063625|NULL|NULL|NULL|4|0|NULL|NULL|NULL|NULL|NULL
 41|"integer"|2|5399690306421051090|NULL|NULL|NULL|2|1|NULL|NULL|NULL|NULL|NULL
 42|"integer"|3|10805691140112450646|NULL|NULL|NULL|1|1|NULL|NULL|NULL|NULL|NULL
+43|"integer"|1|13229551248671944172|NULL|NULL|NULL|1|1|NULL|NULL|NULL|NULL|NULL
 ## axis_datetime (axis_id,pos,ts)
 5|0|ts:-9223372022400000000
 5|1|ts:-1
@@ -3009,13 +3010,13 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 41|5|1|1|1|29|1|19|NULL|NULL|NULL|[f:4008000000000000,f:4010000000000000]|NULL|f:4008000000000000|f:4010000000000000|34|true
 47|7|1|1|1|30|1|19|NULL|NULL|NULL|[f:0000000000000000,f:7ff8000000000000]|NULL|f:0000000000000000|f:7ff8000000000000|33|true
 53|1060|1003|1001|0|35|1|17|NULL|NULL|NULL|[]|NULL|f:7ff8000000000000|f:fff0000000000000|36|true
-53|1060|1003|1001|0|36|2|17|NULL|NULL|NULL|[]|NULL|f:7ff8000000000000|f:fff0000000000000|37|true
+53|1060|1003|1001|0|36|2|43|NULL|NULL|NULL|[]|NULL|f:7ff8000000000000|f:fff0000000000000|37|true
 ## definition_value_scalar (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,value_kind,v_float,v_int,v_bool,v_str,v_datetime,v_dur_months,v_dur_micros,cp,cs)
 ## definition_value_long (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,axis1_id,axis2_id,axis3_id,axis4_id,i1_pos,i2_pos,i3_pos,i4_pos,i1_dt,i1_num,i2_dt,i2_num,i3_dt,i3_num,i4_dt,i4_num,value_kind,v_float,v_int,v_bool,v_str,v_datetime,v_dur_months,v_dur_micros,cp,cs,c1,c2,c3,c4)
 ## definition_value_array (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,axis1_id,axis2_id,axis3_id,axis4_id,values,values_int,v_min,v_max,cp,cs)
 ## sequences (sequence_name,last_value)
 "seq_alternative"|4
-"seq_axis"|42
+"seq_axis"|43
 "seq_axis_label"|12
 "seq_class_set"|NULL
 "seq_commit"|37

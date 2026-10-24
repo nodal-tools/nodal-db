@@ -30,6 +30,11 @@ use nodal_db_core::types::{
 struct Case {
     #[allow(dead_code)]
     name: String,
+    /// A case for semantics that are planned but not built yet: it must
+    /// currently FAIL (so the marker cannot go stale) and is reported as
+    /// pending. Remove the marker in the change that makes it pass.
+    #[serde(default)]
+    pending: Option<String>,
     key: [i64; 3],
     steps: Vec<Step>,
 }
@@ -350,8 +355,22 @@ fn all_protocol_cases() {
         .collect();
     files.sort();
     assert!(!files.is_empty(), "no protocol cases found in {dir:?}");
+    let mut pending = 0;
     for f in &files {
-        run_case(f);
+        let text = std::fs::read_to_string(f).expect("read case");
+        let case: Case = serde_json::from_str(&text).expect("parse case");
+        match case.pending {
+            None => run_case(f),
+            Some(why) => {
+                pending += 1;
+                let passed = std::panic::catch_unwind(|| run_case(f)).is_ok();
+                assert!(
+                    !passed,
+                    "{f:?} is marked pending ({why}) but passes: remove the marker"
+                );
+                eprintln!("pending (fails as expected): {f:?} ({why})");
+            }
+        }
     }
-    eprintln!("ran {} protocol cases", files.len());
+    eprintln!("ran {} protocol cases ({pending} pending)", files.len());
 }

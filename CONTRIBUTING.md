@@ -71,6 +71,16 @@ seeds at the default 100 commits takes a few minutes more. `--big` adds
 rounds that cross the write path's chunk and round thresholds (slower).
 The workload uses API present since `73e70d6`.
 
+Two modes compare a core that skips unchanged writes with one that
+versions them: `--fresh-values` makes every written cell differ from its
+stored value and makes no call that could change nothing, so the outputs
+must still be byte-identical (the changed path is untouched);
+`--logical` runs a repeat-heavy workload and compares only the logical
+state (current values after every call, as-of values at every call
+boundary, reports without commit ids and counts), and requires the new
+arm to have no more history rows and no audit finding the old arm lacks.
+See `check.py`.
+
 ## PR checklist
 To be defined with the first release process.
 

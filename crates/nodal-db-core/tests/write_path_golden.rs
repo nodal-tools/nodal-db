@@ -57,7 +57,7 @@ use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::template::ir::{DimSpec, TypeDecl};
 use nodal_db_core::types::{
     LongRow, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, ScalarValue, ShapedData,
-    StructuralChange, Tier, ValueKey, ValueKind, WriteOptions,
+    StructuralChange, Tier, ValueKey, ValueKind, WriteOptions, WriteOutcome, WriteReport,
 };
 
 const FIXTURE: &str = "tests/fixtures/write_path_golden.txt";
@@ -303,8 +303,39 @@ fn run_commit(db: &Path, msg: &str, steps: Vec<Step>, log: &mut String) {
     .unwrap_or_else(|e| panic!("commit {msg}: {e}"));
     writeln!(log, "## outcomes {msg}").unwrap();
     for o in outcomes {
-        writeln!(log, "{o:?}").unwrap();
+        writeln!(log, "{}", outcome_text(&o)).unwrap();
     }
+}
+
+/// A report line: the `Debug` text of the fields the golden was generated
+/// with, written out field by field, so that a field added later shows up
+/// only where a test chooses to print it (skip_unchanged_writes_PLAN §10
+/// C4: the diff of a report change stays reviewable at a glance).
+fn report_text(r: &WriteReport) -> String {
+    format!(
+        "WriteReport {{ commit_id: {}, values_written: {}, rows_written: {}, rows_closed: {}, \
+         axes_created: {}, axes_reused: {}, tiers: {:?}, warnings: {:?}, object_deletes: {:?}, \
+         structural: {:?} }}",
+        r.commit_id,
+        r.values_written,
+        r.rows_written,
+        r.rows_closed,
+        r.axes_created,
+        r.axes_reused,
+        r.tiers,
+        r.warnings,
+        r.object_deletes,
+        r.structural
+    )
+}
+
+/// An outcome line, field by field like [`report_text`].
+fn outcome_text(o: &WriteOutcome) -> String {
+    format!(
+        "WriteOutcome {{ tier: {:?}, version: {}, rows_written: {}, rows_closed: {}, \
+         axes_created: {}, axes_reused: {} }}",
+        o.tier, o.version, o.rows_written, o.rows_closed, o.axes_created, o.axes_reused
+    )
 }
 
 // Entity numbers of the direct-write keys (all >= 1000, disjoint from the
@@ -721,7 +752,7 @@ fn api_script(db: &Path, log: &mut String) {
         o,
     )
     .expect("a1");
-    writeln!(log, "## report a1\n{r:?}").unwrap();
+    writeln!(log, "## report a1\n{}", report_text(&r)).unwrap();
 
     // a2: writes, then deletes of OTHER keys, then an object delete — all in
     // one commit (the read-after-write order of the plan's §4.1).
@@ -760,7 +791,7 @@ fn api_script(db: &Path, log: &mut String) {
         o,
     )
     .expect("a2");
-    writeln!(log, "## report a2\n{r:?}").unwrap();
+    writeln!(log, "## report a2\n{}", report_text(&r)).unwrap();
 
     // a3: cascade-delete the alternative: closes rows written by a1 and a2.
     let r = commit_changes(
@@ -774,7 +805,7 @@ fn api_script(db: &Path, log: &mut String) {
         o,
     )
     .expect("a3");
-    writeln!(log, "## report a3\n{r:?}").unwrap();
+    writeln!(log, "## report a3\n{}", report_text(&r)).unwrap();
 
     api_scalar_batches(db, log);
     api_long_array_delete_batches(db, log);
@@ -802,7 +833,7 @@ fn api_commit(
         opts,
     )
     .unwrap_or_else(|e| panic!("{tag}: {e}"));
-    writeln!(log, "## report {tag}\n{r:?}").unwrap();
+    writeln!(log, "## report {tag}\n{}", report_text(&r)).unwrap();
 }
 
 /// API-path scalar batches (set_based_scalar_write_PLAN §5.1, a4-a8):
@@ -1430,10 +1461,13 @@ fn direct_empty_arrays(db: &Path, log: &mut String) {
         vec![Step::W(E, array(vec![int_param(0, 1, 1)], vec![]))],
         log,
     );
+    // The replace goes to another axis (skip_unchanged_writes_PLAN §10 C4):
+    // the same empty payload on the same axis and binding is an unchanged
+    // write, which would skip the replace path this step pins.
     run_commit(
         db,
         "c5 empty array replace",
-        vec![Step::W(E, array(vec![int_param(0, 1, 1)], vec![]))],
+        vec![Step::W(E, array(vec![int_param(1, 1, 1)], vec![]))],
         log,
     );
     // An empty live array fails `audit_array_integrity` (length 0 against a

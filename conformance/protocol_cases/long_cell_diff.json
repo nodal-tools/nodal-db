@@ -1,0 +1,28 @@
+{
+  "name": "long 1-cell edit closes and re-inserts only the changed cell (per-cell spans)",
+  "pending": "P2 of skip_unchanged_writes_PLAN (long cell diff)",
+  "key": [20, 30, 40],
+  "steps": [
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 10.0 }, { "pos": 1, "value": 20.0 }, { "pos": 2, "value": 30.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": null, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 1, "version": 1, "valid_to_step": null, "retained": true, "v_float": 20.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": null, "retained": true, "v_float": 30.0 }
+        ]
+      }
+    },
+    {
+      "op": { "long": { "start": 0, "step": 1, "length": 3, "cells": [ { "pos": 0, "value": 10.0 }, { "pos": 1, "value": 21.0 }, { "pos": 2, "value": 30.0 } ] } },
+      "expect": {
+        "long": [
+          { "i1_pos": 0, "version": 1, "valid_to_step": null, "retained": true, "v_float": 10.0 },
+          { "i1_pos": 1, "version": 1, "valid_to_step": 2, "retained": true, "v_float": 20.0 },
+          { "i1_pos": 2, "version": 1, "valid_to_step": null, "retained": true, "v_float": 30.0 },
+          { "i1_pos": 1, "version": 2, "valid_to_step": null, "retained": true, "v_float": 21.0 }
+        ]
+      }
+    }
+  ]
+}

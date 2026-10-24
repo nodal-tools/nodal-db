@@ -473,10 +473,14 @@ fn preflight_source(conn: &Connection) -> Result<String, DbError> {
         ))
     })?;
     if versions.len() != 1 || versions[0] != SCHEMA_VERSION {
-        return Err(DbError::Api(format!(
-            "extract refused: source schema_version {versions:?} != current \
-             {SCHEMA_VERSION:?} (to migrate, re-init a fresh database and re-import)"
-        )));
+        return Err(DbError::SchemaMismatch {
+            message: format!(
+                "extract refused: source schema_version {versions:?} != current \
+                 {SCHEMA_VERSION:?} (to migrate, re-init a fresh database and re-import)"
+            ),
+            found: found_version(versions),
+            expected: SCHEMA_VERSION.to_string(),
+        });
     }
     let ids = strings(
         conn,
@@ -493,6 +497,16 @@ fn preflight_source(conn: &Connection) -> Result<String, DbError> {
         )));
     }
     Ok(ids.into_iter().next().expect("one identity"))
+}
+
+/// The `found` of a [`DbError::SchemaMismatch`] from the `schema_version`
+/// rows read: the one value, or the rendered list when there are none or
+/// several (a damaged file).
+fn found_version(versions: Vec<String>) -> String {
+    match <[String; 1]>::try_from(versions) {
+        Ok([v]) => v,
+        Err(vs) => format!("{vs:?}"),
+    }
 }
 
 /// As-of-N refusals, each loud and named:
@@ -527,10 +541,14 @@ fn preflight_as_of(
         ),
     )?;
     if versions.len() != 1 || versions[0] != SCHEMA_VERSION {
-        return Err(DbError::Api(format!(
-            "as-of extract refused: the schema_version valid at commit {n} is {versions:?}, \
-             not the current {SCHEMA_VERSION:?}"
-        )));
+        return Err(DbError::SchemaMismatch {
+            message: format!(
+                "as-of extract refused: the schema_version valid at commit {n} is \
+                 {versions:?}, not the current {SCHEMA_VERSION:?}"
+            ),
+            found: found_version(versions),
+            expected: SCHEMA_VERSION.to_string(),
+        });
     }
     let later = strings(
         conn,

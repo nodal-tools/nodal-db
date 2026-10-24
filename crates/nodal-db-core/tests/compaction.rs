@@ -319,7 +319,11 @@ fn compact_rejects_schema_version_mismatch() {
         format!("{err}").contains("schema_version"),
         "unexpected error: {err}"
     );
-    assert!(matches!(err, DbError::Api(_)));
+    assert!(
+        matches!(&err, DbError::SchemaMismatch { found, expected, .. }
+            if found == "9.9-bogus" && expected == nodal_db_core::compaction::SCHEMA_VERSION),
+        "{err:?}"
+    );
 
     // Original left intact (no temp swapped in): still opens and matches the
     // (poisoned) source, unchanged in size aside from the in-place UPDATE.
@@ -1096,6 +1100,7 @@ fn failed_repack_backs_off() {
     let policy = commits_only(3);
     let err = b.compact_if_due(&db, policy, head).unwrap_err();
     assert!(err.to_string().contains("schema_version"), "{err}");
+    assert!(matches!(err, DbError::SchemaMismatch { .. }), "{err:?}");
     assert_eq!(b.failed_at(), Some(head));
     // Inside the window (max(5, 3/5) = 5 commits): skipped, no attempt.
     for h in [head, head + 1, head + 4] {

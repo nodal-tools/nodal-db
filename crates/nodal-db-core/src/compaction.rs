@@ -438,11 +438,15 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // a named-column INSERT..SELECT against a differently-shaped source would
     // silently drop/misfill columns.
     if src_version != SCHEMA_VERSION {
-        return Err(DbError::Api(format!(
-            "compaction refused: source schema_version {src_version:?} != current {SCHEMA_VERSION:?} \
-             (compaction copies named columns against the current schema; to migrate, \
-             re-init a fresh database and re-import)"
-        )));
+        return Err(DbError::SchemaMismatch {
+            message: format!(
+                "compaction refused: source schema_version {src_version:?} != current \
+                 {SCHEMA_VERSION:?} (compaction copies named columns against the current \
+                 schema; to migrate, re-init a fresh database and re-import)"
+            ),
+            found: src_version,
+            expected: SCHEMA_VERSION.to_string(),
+        });
     }
 
     // ---- Build the fresh temp and repack into it ---------------------------

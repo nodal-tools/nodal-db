@@ -69,6 +69,22 @@ pub enum DbError {
     )]
     Stale { expected: i64, found: i64 },
 
+    /// The database file's `schema_version` is `found`, not this build's
+    /// `expected` ([`crate::compaction::SCHEMA_VERSION`]): the file was made
+    /// by another nodal-db schema version. Raised by a write that fails on
+    /// such a file (the engine error is kept in `message`) and by the
+    /// compaction, extract and erase pre-checks. Its own variant so callers
+    /// can match it structurally instead of the text; never retried. The
+    /// remedy is to re-create the database with this build (init + import)
+    /// or to use a build matching the file. `message` is the full text,
+    /// worded per operation.
+    #[error("{message}")]
+    SchemaMismatch {
+        found: String,
+        expected: String,
+        message: String,
+    },
+
     /// The public write API (`api::write_parameter` / `api::ingest_segments`)
     /// was handed a batch it cannot interpret — wrong column count, a
     /// non-string entity column, an unsupported Arrow type for a dimension or

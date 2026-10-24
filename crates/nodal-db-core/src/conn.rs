@@ -270,12 +270,17 @@ where
                 // An engine error (typically a Binder error on a column this
                 // build's statements expect) on a file of another schema
                 // version: say so instead of surfacing the raw binder text.
-                DbError::Api(format!(
-                    "database schema version {found:?} is not this nodal-db's ({:?}); \
-                     re-create the database (init + import) with this nodal-db, or use a \
-                     nodal-db build matching its schema version (original error: {e})",
-                    crate::compaction::SCHEMA_VERSION
-                ))
+                let expected = crate::compaction::SCHEMA_VERSION;
+                DbError::SchemaMismatch {
+                    message: format!(
+                        "database schema version {found:?} is not this nodal-db's \
+                         ({expected:?}); re-create the database (init + import) with this \
+                         nodal-db, or use a nodal-db build matching its schema version \
+                         (original error: {e})"
+                    ),
+                    found,
+                    expected: expected.to_string(),
+                }
             } else {
                 e
             };

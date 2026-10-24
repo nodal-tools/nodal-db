@@ -335,7 +335,9 @@ fn ingest_into_uninitialized_db_is_api_error() {
 /// A write that fails on a file of another schema version (e.g. a 0.3 file
 /// without `value_array.array_id`, which fails with a raw `Binder Error:
 /// Referenced column "array_id" not found`) reports the version mismatch
-/// instead; on a current-version file the same engine error passes through.
+/// instead, as `DbError::SchemaMismatch` (not retried, the engine error kept
+/// in the message); on a current-version file the same engine error passes
+/// through.
 #[test]
 fn write_error_on_other_schema_version_names_the_version() {
     use nodal_db_core::conn::with_write_txn;
@@ -366,9 +368,17 @@ fn write_error_on_other_schema_version_names_the_version() {
     }
     let commits = count(&db, "SELECT count(*) FROM commit");
     let err = with_write_txn(&db, "t", "m", fail).unwrap_err();
-    let DbError::Api(m) = &err else {
-        panic!("expected an Api error, got {err:?}")
+    let DbError::SchemaMismatch {
+        found,
+        expected,
+        message: m,
+    } = &err
+    else {
+        panic!("expected a SchemaMismatch error, got {err:?}")
     };
+    assert_eq!(found, "0.3-test");
+    assert_eq!(expected, nodal_db_core::compaction::SCHEMA_VERSION);
+    assert_eq!(m, &err.to_string());
     assert!(m.contains("\"0.3-test\""), "{m}");
     assert!(m.contains(nodal_db_core::compaction::SCHEMA_VERSION), "{m}");
     assert!(m.contains("no_such_column"), "original error kept: {m}");

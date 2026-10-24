@@ -414,11 +414,15 @@ fn assert_schema_version(db: &Path) -> Result<(), DbError> {
     })?;
     let expected = crate::compaction::SCHEMA_VERSION;
     if found != expected {
-        return Err(DbError::Api(format!(
-            "erase refused: database schema_version {found:?} != current {expected:?} \
-             (erase writes against the current schema; to migrate, re-init a fresh \
-             database and re-import)"
-        )));
+        return Err(DbError::SchemaMismatch {
+            message: format!(
+                "erase refused: database schema_version {found:?} != current {expected:?} \
+                 (erase writes against the current schema; to migrate, re-init a fresh \
+                 database and re-import)"
+            ),
+            found,
+            expected: expected.to_string(),
+        });
     }
     Ok(())
 }

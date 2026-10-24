@@ -97,6 +97,17 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    SchemaMismatch,
+    ApiError,
+    "The database file was made by another nodal-db schema version \
+     (DbError::SchemaMismatch): a write failed on it, or compaction, extract \
+     or erase refused it. Attributes: `found` (the file's schema_version) and \
+     `expected` (this build's). Re-create the database with this build \
+     (init + import), or use a build matching the file. A subclass of \
+     ApiError, so `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
     VersionTooOld,
     NodalDbError,
     "The bundled DuckDB is older than the verified line (DbError::VersionTooOld)."
@@ -973,6 +984,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("Conflict", py.get_type::<Conflict>())?;
     m.add("ApiError", py.get_type::<ApiError>())?;
     m.add("Stale", py.get_type::<Stale>())?;
+    m.add("SchemaMismatch", py.get_type::<SchemaMismatch>())?;
     m.add("VersionTooOld", py.get_type::<VersionTooOld>())?;
     m.add("SchemaError", py.get_type::<SchemaError>())?;
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;

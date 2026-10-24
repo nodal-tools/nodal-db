@@ -391,6 +391,33 @@ def test_template_apply_stale_plan_refused(db, tmp_path):
     assert ei.value.found == db.head_commit()
 
 
+def test_other_schema_version_is_schema_mismatch(db):
+    # A file of another schema version: compaction refuses it with the typed
+    # SchemaMismatch (an ApiError subclass) carrying both versions.
+    duckdb = pytest.importorskip(
+        "duckdb",
+        reason="python 'duckdb' package missing — install the declared test "
+        "deps (pip install 'nodal-db[test]')",
+    )
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    con = duckdb.connect(db.path)
+    try:
+        (expected,) = con.execute(
+            "SELECT value FROM metadata "
+            "WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL"
+        ).fetchone()
+        con.execute(
+            "UPDATE metadata SET value = '0.3-test' "
+            "WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL"
+        )
+    finally:
+        con.close()
+    with pytest.raises(nodal_db.ApiError, match="schema_version") as ei:
+        db.compact()
+    assert isinstance(ei.value, nodal_db.SchemaMismatch)
+    assert (ei.value.found, ei.value.expected) == ("0.3-test", expected)
+
+
 # ---------------------------------------------------------------------------
 # expect_commit / Stale / head_commit
 # ---------------------------------------------------------------------------

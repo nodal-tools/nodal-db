@@ -27,7 +27,7 @@ use nodal_db_core::types::{
 
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, DatabaseError, InternalError, SchemaError,
-    Stale, VersionTooOld,
+    SchemaMismatch, Stale, VersionTooOld,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -39,6 +39,9 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::Conflict { .. } => Conflict::new_err(msg),
         DbError::Api(_) => ApiError::new_err(msg),
         DbError::Stale { expected, found } => stale_err(msg, expected, found),
+        DbError::SchemaMismatch {
+            found, expected, ..
+        } => schema_mismatch_err(msg, found, expected),
         DbError::VersionTooOld { .. } => VersionTooOld::new_err(msg),
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::Duckdb(_) => DatabaseError::new_err(msg),
@@ -58,6 +61,19 @@ fn stale_err(msg: String, expected: i64, found: i64) -> PyErr {
         // Best-effort: the message carries both ids in any case.
         let _ = v.setattr("expected", expected);
         let _ = v.setattr("found", found);
+    });
+    err
+}
+
+/// A `SchemaMismatch` exception carrying `found` / `expected` (the file's
+/// and this build's `schema_version`) as attributes.
+fn schema_mismatch_err(msg: String, found: String, expected: String) -> PyErr {
+    let err = SchemaMismatch::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message carries both versions in any case.
+        let _ = v.setattr("found", found);
+        let _ = v.setattr("expected", expected);
     });
     err
 }

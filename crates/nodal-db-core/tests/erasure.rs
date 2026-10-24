@@ -23,6 +23,7 @@ use duckdb::Connection;
 use nodal_db_core::api::write_parameter;
 use nodal_db_core::compaction::compact;
 use nodal_db_core::erasure::{erase_alternative, preview_erase_alternative, EraseOpts};
+use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
     ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, WriteOptions,
@@ -1130,6 +1131,10 @@ fn erase_refuses_schema_version_mismatch_cleanly() {
     let commits = scalar(&db, "SELECT count(*) FROM \"commit\"");
     let err = erase_alternative(&db, &alt_key("runA"), &EraseOpts::default(), "tester")
         .expect_err("version mismatch must refuse");
+    assert!(
+        matches!(&err, DbError::SchemaMismatch { found, .. } if found == "9.9-bogus"),
+        "{err:?}"
+    );
     let msg = format!("{err}");
     assert!(
         msg.contains("schema_version") && msg.contains("re-init"),

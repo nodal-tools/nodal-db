@@ -1019,7 +1019,12 @@ fn t9_refusals_leave_no_dest_and_no_temp() {
     )
     .unwrap();
     conn.close().unwrap();
-    assert_refused(extract(&bad_schema, &dest, &opts("t")), "schema_version");
+    let r = extract(&bad_schema, &dest, &opts("t"));
+    assert!(
+        matches!(&r, Err(DbError::SchemaMismatch { found, .. }) if found == "0.0-old"),
+        "{r:?}"
+    );
+    assert_refused(r, "schema_version");
 
     let no_id = dir.path().join("no_id.duckdb");
     std::fs::copy(src, &no_id).unwrap();
@@ -1484,10 +1489,12 @@ fn t9_asof_refusals() {
         conn.execute_batch(sql).unwrap();
     }
     conn.close().unwrap();
-    assert_refused(
-        extract(&old_schema, &dest, &asof("t", c_old)),
-        "schema_version valid at commit",
+    let r = extract(&old_schema, &dest, &asof("t", c_old));
+    assert!(
+        matches!(&r, Err(DbError::SchemaMismatch { found, .. }) if found == "0.3-old"),
+        "{r:?}"
     );
+    assert_refused(r, "schema_version valid at commit");
     extract(&old_schema, &dest, &opts("t")).expect("the head extract is fine");
     std::fs::remove_file(&dest).unwrap();
 

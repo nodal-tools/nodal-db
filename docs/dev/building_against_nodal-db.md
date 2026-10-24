@@ -51,6 +51,12 @@ answer will be a served API, not a protocol document.
   as a defined error (`DbError::Busy` in Rust, `nodal_db.Busy` in
   Python) after a bounded retry, not as a hang. Readers may briefly fail
   to open while a commit is in progress and should retry.
+- A file made by another nodal-db schema version is a defined error
+  too: `SchemaMismatch` (`DbError::SchemaMismatch { found, expected, .. }`,
+  `nodal_db.SchemaMismatch`, an `ApiError` subclass) from a write that
+  fails on it and from compaction, extract and erase. Match the variant,
+  not the message text. See
+  [connection discipline](../usage.md#connection-discipline).
 - **Never call a table macro through an attached database.** Views of
   an attached file (`ATTACH … AS other`, then `other.<view>`) read that
   file, but a table macro called as `other.<macro>(…)` resolves its
@@ -78,4 +84,4 @@ the README files in the subdirectories explain the vector formats.
   parameters, columns, types and semantics.
 - Per-language snippets for reading correctly (open-query-close and
   commit polling).
-- An error reference beyond `Busy`.
+- An error reference beyond `Busy`, `Stale` and `SchemaMismatch`.

@@ -649,6 +649,15 @@ defined error (`DbError::Busy` in Rust, `nodal_db.Busy` in Python) after
 a bounded retry; a reader may briefly fail to open while a commit is in
 progress and should retry.
 
+A database file made by another nodal-db schema version is reported as
+`SchemaMismatch` (`DbError::SchemaMismatch { found, expected, .. }` in
+Rust, `nodal_db.SchemaMismatch` with `found` and `expected` attributes
+in Python, a subclass of `ApiError`): a write that fails on such a file,
+and compaction, extract and erase, which refuse it up front. `found` is
+the file's `schema_version`, `expected` this build's. It is never
+retried. Re-create the database with this build (init, then import), or
+use a nodal-db build that matches the file.
+
 ### DuckDB version
 
 !!! warning "Readers need DuckDB 2.0 or newer"

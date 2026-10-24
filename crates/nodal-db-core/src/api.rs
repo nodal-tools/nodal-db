@@ -44,7 +44,8 @@ use crate::canon::{canonicalize, LabelDomain};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::history::{
-    delete_value, keeps_content, write_scalars, write_value, ScalarWrite, LONG_INSERT_CHUNK,
+    self as history, keeps_content, write_scalars, write_value, DeleteWrite, ScalarWrite,
+    LONG_INSERT_CHUNK,
 };
 use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
 use crate::structural::{apply_structural, prepare_structural};
@@ -164,10 +165,11 @@ pub struct DeleteKey {
 ///
 /// Segments are prepared (validated, deduped) up front, purely; deletes are
 /// validated + deduped up front too. Then, inside one retried closure and under
-/// one `commit_id`, the prepared writes run FIRST, then each `DeleteKey` is
+/// one `commit_id`, the prepared writes run FIRST, then the `DeleteKey`s are
 /// resolved (case-insensitive, lookup-only — never auto-created) and closed out
-/// via `history::delete_value`. A missing referent or already-absent value is a
-/// machine-readable [`Warning`] + skip, never a hard error (delete design §2).
+/// in one set-based round (`history::delete_values`). A missing referent or
+/// already-absent value is a machine-readable [`Warning`] + skip, never a hard
+/// error (delete design §2).
 /// Non-empty `user`; empty across ALL channels ⇒ [`DbError::Api`].
 ///
 /// `object_deletes` (object_delete plan §2) join the SAME atomic commit, applied
@@ -339,9 +341,7 @@ pub fn commit_changes(
         flush_scalars(conn, commit_id, &mut scalars, &mut report)?;
         // Deletes resolve + close out AFTER the writes, under the same commit —
         // one atomic invocation (delete design MAJOR-2).
-        for (key_index, dk) in &prepared_deletes {
-            apply_delete(conn, commit_id, *key_index, dk, opts, &mut report)?;
-        }
+        apply_deletes(conn, commit_id, &prepared_deletes, opts, &mut report)?;
         // Object deletes run LAST, under the same commit_id (object_delete plan
         // §2): every close-out is guarded by `valid_from < commit_id`, so a row
         // this commit created is never closed (would trip the span CHECK).
@@ -498,84 +498,193 @@ fn prepare_deletes(keys: &[DeleteKey]) -> Result<Vec<(usize, DeleteKey)>, DbErro
     Ok(out)
 }
 
-/// Resolve one `DeleteKey` (lookup-only, case-insensitive — never auto-create)
-/// and close out its live value under `commit_id`. A missing referent short-
-/// circuits to an [`WarningKind::UnknownReferent`] + skip; a fully-resolved key
-/// with no live value yields [`WarningKind::NothingToDelete`]. Retention obeys
-/// the definition's `retain_content` unless the caller overrode it — identical
-/// to the write path (`api.rs` `write_prepared`).
-fn apply_delete(
+/// How one prepared delete key resolved (see [`apply_deletes`]).
+enum DeleteResolution {
+    /// The first missing referent level and its name.
+    Unknown(&'static str, String),
+    /// Resolved to the `i`-th key of the delete round.
+    Key(usize),
+    /// Resolved to the same key as an earlier delete key (two spellings that
+    /// DuckDB's `lower()` folds together): nothing left to delete (D10).
+    Repeat,
+}
+
+/// Resolve every `DeleteKey` (lookup-only, case-insensitive: never
+/// auto-create) and close out their live values under `commit_id` in one
+/// set-based round (set_based_long_and_delete_PLAN §3.4, D9). The class,
+/// parameter and alternative lookups are today's point lookups, memoized per
+/// exact spelling (nothing renames or creates them during the delete
+/// phase); the entity names of each class resolve in one lookup
+/// ([`lookup_entities`]). The values close through `history::delete_values`.
+///
+/// Per key, in key order, as one per-key delete each: the first missing
+/// level (class, parameter, alternative, entity) yields
+/// [`WarningKind::UnknownReferent`] and a skip; a resolved key with no live
+/// value yields [`WarningKind::NothingToDelete`]. Two keys that resolve to
+/// one value (spellings the up-front Rust fold keeps apart but DuckDB's
+/// `lower()` merges, e.g. a final sigma): the first deletes, the later ones
+/// get `NothingToDelete`, as a second per-key delete would (plan D10).
+/// Retention obeys the definition's `retain_content` unless the caller
+/// overrode it, as in the write path (`write_prepared`).
+fn apply_deletes(
     conn: &Connection,
     commit_id: i64,
-    key_index: usize,
-    dk: &DeleteKey,
+    deletes: &[(usize, DeleteKey)],
     opts: WriteOptions,
     report: &mut WriteReport,
 ) -> Result<(), DbError> {
-    let class_id = match lookup_entity_class(conn, &dk.class)? {
-        Some(id) => id,
-        None => {
-            return {
-                unknown(report, key_index, "entity_class", &dk.class);
-                Ok(())
+    if deletes.is_empty() {
+        return Ok(());
+    }
+    // --- Class, parameter and alternative: memoized point lookups, in key
+    // order (a key stops at its first missing level, as before). ---
+    let mut classes: HashMap<&str, Option<i64>> = HashMap::new();
+    let mut params: HashMap<(i64, &str), Option<i64>> = HashMap::new();
+    let mut alts: HashMap<&str, Option<i64>> = HashMap::new();
+    // Per key: Err(unknown level + name) or Ok((class, pd, alt)).
+    type Partial = Result<(i64, i64, i64), (&'static str, String)>;
+    let mut partial: Vec<Partial> = Vec::with_capacity(deletes.len());
+    for (_, dk) in deletes {
+        let class_id = match classes.get(dk.class.as_str()) {
+            Some(&id) => id,
+            None => {
+                let id = lookup_entity_class(conn, &dk.class)?;
+                classes.insert(&dk.class, id);
+                id
             }
-        }
-    };
-    let pd_id = match lookup_parameter(conn, class_id, &dk.parameter)? {
-        Some(id) => id,
-        None => {
-            return {
-                unknown(report, key_index, "parameter_definition", &dk.parameter);
-                Ok(())
+        };
+        let Some(class_id) = class_id else {
+            partial.push(Err(("entity_class", dk.class.clone())));
+            continue;
+        };
+        let pd_id = match params.get(&(class_id, dk.parameter.as_str())) {
+            Some(&id) => id,
+            None => {
+                let id = lookup_parameter(conn, class_id, &dk.parameter)?;
+                params.insert((class_id, &dk.parameter), id);
+                id
             }
-        }
-    };
-    let alt_id = match lookup_alternative(conn, &dk.alternative)? {
-        Some(id) => id,
-        None => {
-            return {
-                unknown(report, key_index, "alternative", &dk.alternative);
-                Ok(())
+        };
+        let Some(pd_id) = pd_id else {
+            partial.push(Err(("parameter_definition", dk.parameter.clone())));
+            continue;
+        };
+        let alt_id = match alts.get(dk.alternative.as_str()) {
+            Some(&id) => id,
+            None => {
+                let id = lookup_alternative(conn, &dk.alternative)?;
+                alts.insert(&dk.alternative, id);
+                id
             }
-        }
-    };
-    let entity_id = match lookup_entity(conn, class_id, &dk.entity)? {
-        Some(id) => id,
-        None => {
-            return {
-                unknown(report, key_index, "entity", &dk.entity);
-                Ok(())
-            }
-        }
-    };
+        };
+        let Some(alt_id) = alt_id else {
+            partial.push(Err(("alternative", dk.alternative.clone())));
+            continue;
+        };
+        partial.push(Ok((class_id, pd_id, alt_id)));
+    }
 
-    // Fold the definition's retain_content into retain_override unless the
-    // caller already overrode it — else a delete on a retain_content=FALSE
-    // definition would silently keep the closed-out payload (VMP Part 5).
-    let effective_retain = opts
-        .retain_override
-        .unwrap_or(read_retain_content(conn, pd_id)?);
-    let resolved_opts = WriteOptions {
-        force_replace: opts.force_replace,
-        retain_override: Some(effective_retain),
-    };
-    let key = ValueKey {
-        entity_id,
-        parameter_definition_id: pd_id,
-        alternative_id: alt_id,
-    };
-    let outcome = delete_value(conn, commit_id, key, &resolved_opts)?;
-    report.absorb_delete(&outcome);
-    if outcome.rows_closed == 0 {
-        report.warnings.push(Warning {
-            kind: WarningKind::NothingToDelete { key_index },
-            object_type: "value".into(),
-            name: format!(
-                "{}:{}/{}/{}",
-                dk.class, dk.parameter, dk.alternative, dk.entity
-            ),
-            id: 0,
+    // --- Entities: one lookup per class over its distinct spellings. ---
+    let mut by_class: HashMap<i64, Vec<&str>> = HashMap::new();
+    let mut class_order: Vec<i64> = Vec::new();
+    for ((_, dk), p) in deletes.iter().zip(&partial) {
+        if let Ok((class_id, _, _)) = p {
+            let names = by_class.entry(*class_id).or_insert_with(|| {
+                class_order.push(*class_id);
+                Vec::new()
+            });
+            if !names.contains(&dk.entity.as_str()) {
+                names.push(&dk.entity);
+            }
+        }
+    }
+    let mut entities: HashMap<(i64, &str), Option<i64>> = HashMap::new();
+    for class_id in class_order {
+        let names = &by_class[&class_id];
+        for (name, (_, id)) in names.iter().zip(lookup_entities(conn, class_id, names)?) {
+            entities.insert((class_id, name), id);
+        }
+    }
+
+    // --- Resolve, in key order; retention per parameter definition. ---
+    let mut retain: HashMap<i64, bool> = HashMap::new();
+    let mut seen: HashSet<(i64, i64, i64)> = HashSet::new();
+    let mut round: Vec<DeleteWrite> = Vec::new();
+    let mut resolved: Vec<DeleteResolution> = Vec::with_capacity(deletes.len());
+    for ((_, dk), p) in deletes.iter().zip(partial) {
+        let (class_id, pd_id, alt_id) = match p {
+            Ok(ids) => ids,
+            Err((level, name)) => {
+                resolved.push(DeleteResolution::Unknown(level, name));
+                continue;
+            }
+        };
+        let Some(entity_id) = entities[&(class_id, dk.entity.as_str())] else {
+            resolved.push(DeleteResolution::Unknown("entity", dk.entity.clone()));
+            continue;
+        };
+        if !seen.insert((entity_id, pd_id, alt_id)) {
+            resolved.push(DeleteResolution::Repeat);
+            continue;
+        }
+        // Fold the definition's retain_content into retain_override unless
+        // the caller already overrode it: else a delete on a
+        // retain_content=FALSE definition would silently keep the
+        // closed-out payload (VMP Part 5).
+        let effective_retain = match opts.retain_override {
+            Some(r) => r,
+            None => match retain.get(&pd_id) {
+                Some(&r) => r,
+                None => {
+                    let r = read_retain_content(conn, pd_id)?;
+                    retain.insert(pd_id, r);
+                    r
+                }
+            },
+        };
+        let resolved_opts = WriteOptions {
+            force_replace: opts.force_replace,
+            retain_override: Some(effective_retain),
+        };
+        resolved.push(DeleteResolution::Key(round.len()));
+        round.push(DeleteWrite {
+            key: ValueKey {
+                entity_id,
+                parameter_definition_id: pd_id,
+                alternative_id: alt_id,
+            },
+            retained: keeps_content(&resolved_opts),
         });
+    }
+
+    let outcomes = history::delete_values(conn, commit_id, &round)?;
+
+    // --- Report and warnings, in key order. ---
+    for ((key_index, dk), r) in deletes.iter().zip(resolved) {
+        let rows_closed = match r {
+            DeleteResolution::Unknown(level, name) => {
+                unknown(report, *key_index, level, &name);
+                continue;
+            }
+            DeleteResolution::Key(i) => {
+                report.absorb_delete(&outcomes[i]);
+                outcomes[i].rows_closed
+            }
+            DeleteResolution::Repeat => 0,
+        };
+        if rows_closed == 0 {
+            report.warnings.push(Warning {
+                kind: WarningKind::NothingToDelete {
+                    key_index: *key_index,
+                },
+                object_type: "value".into(),
+                name: format!(
+                    "{}:{}/{}/{}",
+                    dk.class, dk.parameter, dk.alternative, dk.entity
+                ),
+                id: 0,
+            });
+        }
     }
     Ok(())
 }
@@ -1216,6 +1325,58 @@ const ENTITY_LOOKUP_SQL: &str = "WITH k AS (SELECT unnest(?::VARCHAR[]) AS n, \
 const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), (SELECT id FROM entity \
        WHERE entity_class_id = ?2 AND valid_to_commit IS NULL AND lower(name) = lower(?1))";
 
+/// Look up `names` among the current entities of `class_id`: per name, in
+/// input order, DuckDB's `lower()` fold of it and the id of the current
+/// entity holding that folded name (`None` when missing). One statement:
+/// [`ENTITY_LOOKUP_ONE_SQL`] for one name, [`ENTITY_LOOKUP_SQL`] with an
+/// explicit ordinal list otherwise; every ordinal must come back exactly
+/// once (hard check). The one entity lookup of the write path's
+/// [`resolve_entities`] and of the delete channel.
+fn lookup_entities(
+    conn: &Connection,
+    class_id: i64,
+    names: &[&str],
+) -> Result<Vec<(String, Option<i64>)>, DbError> {
+    use duckdb::types::Value;
+
+    if let [name] = names {
+        let row: (String, Option<i64>) = conn
+            .prepare_cached(ENTITY_LOOKUP_ONE_SQL)?
+            .query_row(params![name, class_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        return Ok(vec![row]);
+    }
+    let n = names.len();
+    let mut out: Vec<Option<(String, Option<i64>)>> = vec![None; n];
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let names_list = Value::List(names.iter().map(|s| Value::Text(s.to_string())).collect());
+    let ord_list = Value::List((0..n).map(|i| Value::BigInt(i as i64)).collect());
+    let mut stmt = conn.prepare_cached(ENTITY_LOOKUP_SQL)?;
+    let rows = stmt.query_map(params![names_list, ord_list, class_id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (i, fold, id) = row?;
+        let i = usize::try_from(i)
+            .ok()
+            .filter(|&i| i < n && out[i].is_none())
+            .ok_or_else(|| DbError::Internal(format!("entity lookup: unexpected ordinal {i}")))?;
+        out[i] = Some((fold, id));
+    }
+    out.into_iter()
+        .map(|r| {
+            r.ok_or_else(|| {
+                DbError::Internal("entity lookup: a name came back without its row".into())
+            })
+        })
+        .collect()
+}
+
 /// One entity name already resolved by an earlier segment of this commit.
 pub(crate) struct CachedEntity {
     id: i64,
@@ -1280,44 +1441,13 @@ fn resolve_entities(
             None => lookup.push(i),
         }
     }
-    if let [i] = lookup[..] {
-        let (fold, id): (String, Option<i64>) = conn
-            .prepare_cached(ENTITY_LOOKUP_ONE_SQL)?
-            .query_row(params![names[i], class_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let looked_up: Vec<&str> = lookup.iter().map(|&i| names[i].as_str()).collect();
+    for (&i, (fold, id)) in lookup
+        .iter()
+        .zip(lookup_entities(conn, class_id, &looked_up)?)
+    {
         folds[i] = Some(fold);
         ids[i] = id;
-    } else if !lookup.is_empty() {
-        let names_list = Value::List(
-            lookup
-                .iter()
-                .map(|&i| Value::Text(names[i].clone()))
-                .collect(),
-        );
-        let ord_list = Value::List(lookup.iter().map(|&i| Value::BigInt(i as i64)).collect());
-        let mut stmt = conn.prepare_cached(ENTITY_LOOKUP_SQL)?;
-        let rows = stmt.query_map(params![names_list, ord_list, class_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<i64>>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (i, fold, id) = row?;
-            let i = usize::try_from(i)
-                .ok()
-                .filter(|&i| i < n && folds[i].is_none())
-                .ok_or_else(|| {
-                    DbError::Internal(format!("entity lookup: unexpected ordinal {i}"))
-                })?;
-            folds[i] = Some(fold);
-            ids[i] = id;
-        }
-    }
-    if folds.iter().any(Option::is_none) {
-        return Err(DbError::Internal(
-            "entity lookup: a name came back without its row".into(),
-        ));
     }
 
     // Fold collisions (critique C2), in input order.

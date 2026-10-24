@@ -271,7 +271,8 @@ impl WriteReport {
         }
     }
 
-    /// Fold one `history::delete_value` [`WriteOutcome`] into the aggregate.
+    /// Fold one delete's [`WriteOutcome`] (`history::delete_values`) into the
+    /// aggregate.
     /// A delete writes no new current row and touches no tier, so this only
     /// folds `rows_closed` and — because a no-op delete (no live value) closes
     /// nothing — counts a "value deleted" in `values_written` **only** when it

@@ -64,6 +64,14 @@
 //! sequential scan rather than the compound indexes, so a set-based round is
 //! what makes a scalar batch cost O(keys + table) per commit.
 //!
+//! **Set-based delete (set_based_long_and_delete_PLAN §3.4)**: deletes have
+//! one implementation, [`delete_values`]: per round, the three live probes
+//! (scalar; long with its current-cell count; array with its `array_id`)
+//! under the per-key precedence, then per tier and retention mode one
+//! close-out (the scalar and long UPDATEs; the array pre-image copy plus
+//! DELETE by `array_id`). [`delete_value`] delegates with N = 1, which uses
+//! the point statements.
+//!
 //! **Retention**: the superseded row (scalar/long close-out, array `_hist` copy)
 //! keeps its content by default (`content_retained = TRUE`). `force_replace`
 //! (or an explicit `retain_override = Some(false)`) writes a stub instead —
@@ -197,19 +205,225 @@ pub fn delete_value(
     key: ValueKey,
     opts: &WriteOptions,
 ) -> Result<WriteOutcome, DbError> {
-    let retained = keeps_content(opts);
-    let rows_closed = match live_tier(conn, &key)? {
-        Some(cur) => close_out_tier(conn, &key, commit_id, cur, retained)?,
-        None => 0,
+    let w = DeleteWrite {
+        key,
+        retained: keeps_content(opts),
     };
-    Ok(WriteOutcome {
-        tier: None,
-        version: 0,
-        rows_written: 0,
-        rows_closed,
-        axes_created: 0,
-        axes_reused: 0,
-    })
+    Ok(delete_values(conn, commit_id, std::slice::from_ref(&w))?[0])
+}
+
+/// One key of a set-based delete and whether its closed rows keep their
+/// content (`keeps_content`, resolved per key by the caller).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeleteWrite {
+    pub(crate) key: ValueKey,
+    pub(crate) retained: bool,
+}
+
+/// Delete the live value of every key of `w` at `commit_id` in set-based
+/// rounds of ≤ [`LONG_INSERT_CHUNK`] keys (set_based_long_and_delete_PLAN
+/// §3.4): the one delete implementation (`delete_value` delegates here with
+/// N = 1). Per round: the live probes of the three tiers (scalar; long, for
+/// the keys not live in scalar; array, for the keys live in neither), then
+/// per tier and retention mode one close-out: the scalar and long UPDATEs,
+/// and for the array tier the pre-image copy to `value_array_hist` plus the
+/// DELETE, keyed by `array_id`. A round of one key uses the point
+/// statements (`live_tier`, `close_out_tier`).
+///
+/// Semantics are those of one per-key `delete_value` per key: the live tier
+/// by the per-key precedence (scalar, then long, then array), the same SET
+/// lists and retention. A key with no live value closes nothing. Keys must
+/// be distinct (the caller guarantees it); a repeated key or an affected-row
+/// count that differs from the probes fails as [`DbError::Internal`].
+/// Returns one [`WriteOutcome`] per input, in input order.
+pub(crate) fn delete_values(
+    conn: &Connection,
+    commit_id: i64,
+    w: &[DeleteWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    check_distinct_keys("delete batch", w.iter().map(|d| &d.key))?;
+    let mut out = Vec::with_capacity(w.len());
+    for chunk in w.chunks(LONG_INSERT_CHUNK) {
+        out.extend(delete_round(conn, commit_id, chunk)?);
+    }
+    Ok(out)
+}
+
+/// One round of [`delete_values`] over ≤ [`LONG_INSERT_CHUNK`] distinct keys.
+fn delete_round(
+    conn: &Connection,
+    c: i64,
+    w: &[DeleteWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    let closed = if let [d] = w {
+        // The point form of a one-key round (an editor's single delete):
+        // today's statements, same rows.
+        vec![match live_tier(conn, &d.key)? {
+            Some(cur) => close_out_tier(conn, &d.key, c, cur, d.retained)?,
+            None => 0,
+        }]
+    } else {
+        let keys: Vec<&ValueKey> = w.iter().map(|d| &d.key).collect();
+        let live = probe_live(conn, &keys)?;
+        let targets: Vec<(&ValueKey, bool)> = w.iter().map(|d| (&d.key, d.retained)).collect();
+        close_out_live(conn, c, &targets, &live)?
+    };
+    Ok(closed
+        .into_iter()
+        .map(|rows_closed| WriteOutcome {
+            tier: None,
+            version: 0,
+            rows_written: 0,
+            rows_closed,
+            axes_created: 0,
+            axes_reused: 0,
+        })
+        .collect())
+}
+
+/// Fail as [`DbError::Internal`] when a batch names one key twice: the
+/// set-based writers rely on distinct keys (a repeated key would be probed
+/// once and written twice).
+fn check_distinct_keys<'a>(
+    what: &str,
+    keys: impl Iterator<Item = &'a ValueKey>,
+) -> Result<(), DbError> {
+    let mut seen: std::collections::HashSet<Triple> = std::collections::HashSet::new();
+    for k in keys {
+        if !seen.insert(triple(k)) {
+            return Err(DbError::Internal(format!("{what}: duplicate key {k:?}")));
+        }
+    }
+    Ok(())
+}
+
+/// The live state of each key of `keys` that has one, by the per-key
+/// precedence of [`live_tier`] (scalar, then long, then array), with the
+/// number of its current rows (1 for scalar and array; the current cells
+/// for long). The long probe reads only the keys not live in scalar, the
+/// array probe only the keys live in neither.
+fn probe_live(
+    conn: &Connection,
+    keys: &[&ValueKey],
+) -> Result<HashMap<Triple, (Live, usize)>, DbError> {
+    let mut live: HashMap<Triple, (Live, usize)> = HashMap::new();
+    for (t, _, _) in probe_keys(conn, SCALAR_LIVE_SQL, keys.iter().copied(), false)? {
+        live.insert(t, (Live::Scalar, 1));
+    }
+    let rest: Vec<&ValueKey> = keys
+        .iter()
+        .copied()
+        .filter(|k| !live.contains_key(&triple(k)))
+        .collect();
+    if rest.is_empty() {
+        return Ok(live);
+    }
+    for (t, cells, _) in probe_keys(conn, LONG_CURRENT_SQL, rest.iter().copied(), false)? {
+        live.insert(t, (Live::Long, cells as usize));
+    }
+    let rest: Vec<&ValueKey> = rest
+        .into_iter()
+        .filter(|k| !live.contains_key(&triple(k)))
+        .collect();
+    if !rest.is_empty() {
+        for (t, array_id, _) in probe_keys(conn, ARRAY_LIVE_SQL, rest.iter().copied(), false)? {
+            live.insert(t, (Live::Array(array_id), 1));
+        }
+    }
+    Ok(live)
+}
+
+/// Close out the live rows of every key of `targets` (`(key, retained)`)
+/// found in `live`: per tier and retention mode one statement (the scalar
+/// and long UPDATEs; the array pre-image copy plus DELETE), each hard
+/// checked against the probed row counts. Returns the rows closed per key,
+/// in input order.
+fn close_out_live(
+    conn: &Connection,
+    c: i64,
+    targets: &[(&ValueKey, bool)],
+    live: &HashMap<Triple, (Live, usize)>,
+) -> Result<Vec<usize>, DbError> {
+    let mut closed = vec![0usize; targets.len()];
+    for retained in [true, false] {
+        let mut scalar: Vec<usize> = Vec::new();
+        let mut long: Vec<usize> = Vec::new();
+        let mut array: Vec<usize> = Vec::new();
+        for (i, (k, r)) in targets.iter().enumerate() {
+            if *r != retained {
+                continue;
+            }
+            match live.get(&triple(k)) {
+                Some((Live::Scalar, _)) => scalar.push(i),
+                Some((Live::Long, _)) => long.push(i),
+                Some((Live::Array(_), _)) => array.push(i),
+                None => {}
+            }
+        }
+        let rows =
+            |idx: &[usize]| -> usize { idx.iter().map(|&i| live[&triple(targets[i].0)].1).sum() };
+        let lists = |idx: &[usize]| key_lists(idx.iter().map(|&i| targets[i].0));
+        if !scalar.is_empty() {
+            let sql = if retained {
+                SCALAR_CLOSE_SQL
+            } else {
+                SCALAR_CLOSE_STUB_SQL
+            };
+            let [e, p, a] = lists(&scalar);
+            let affected = conn
+                .prepare_cached(sql)?
+                .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
+            check_affected("scalar close-out", affected, rows(&scalar))?;
+        }
+        if !long.is_empty() {
+            let sql = if retained {
+                LONG_CLOSE_SQL
+            } else {
+                LONG_CLOSE_STUB_SQL
+            };
+            let [e, p, a] = lists(&long);
+            let affected = conn
+                .prepare_cached(sql)?
+                .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
+            check_affected("long close-out", affected, rows(&long))?;
+        }
+        if !array.is_empty() {
+            let ids = Value::List(
+                array
+                    .iter()
+                    .map(|&i| match live[&triple(targets[i].0)].0 {
+                        Live::Array(id) => Value::BigInt(id),
+                        _ => unreachable!("array index of a non-array key"),
+                    })
+                    .collect(),
+            );
+            let sql = if retained {
+                ARRAY_PREIMAGE_SET_SQL
+            } else {
+                ARRAY_PREIMAGE_STUB_SET_SQL
+            };
+            let copied = conn.prepare_cached(sql)?.execute(params![c, ids.clone()])?;
+            check_affected("array pre-image copy", copied, array.len())?;
+            let deleted = conn
+                .prepare_cached(ARRAY_DELETE_SET_SQL)?
+                .execute(params![ids])?;
+            check_affected("array delete", deleted, array.len())?;
+        }
+        for i in scalar.into_iter().chain(long).chain(array) {
+            closed[i] = live[&triple(targets[i].0)].1;
+        }
+    }
+    Ok(closed)
+}
+
+/// The hard check (plan D12) of one set-based statement's affected rows.
+fn check_affected(what: &str, affected: usize, expected: usize) -> Result<(), DbError> {
+    if affected != expected {
+        return Err(DbError::Internal(format!(
+            "{what}: touched {affected} rows, expected {expected}"
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +751,59 @@ const LONG_LIVE_SQL: &str = "SELECT DISTINCT l.entity_id, l.parameter_definition
      FROM value_long l JOIN k ON l.entity_id = k.e \
           AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
      WHERE l.valid_to_commit IS NULL";
+
+/// The keys with a current `value_scalar` row.
+const SCALAR_LIVE_SQL: &str = "SELECT s.entity_id, s.parameter_definition_id, s.alternative_id, \
+            0::BIGINT \
+     FROM value_scalar s JOIN k ON s.entity_id = k.e \
+          AND s.parameter_definition_id = k.p AND s.alternative_id = k.a \
+     WHERE s.valid_to_commit IS NULL";
+
+/// The keys with current `value_long` cells and the number of those cells.
+const LONG_CURRENT_SQL: &str = "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
+            count(*) \
+     FROM value_long l JOIN k ON l.entity_id = k.e \
+          AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
+     WHERE l.valid_to_commit IS NULL \
+     GROUP BY ALL";
+
+/// The set form of the retained `close_out_long`: every current cell of the
+/// bound keys.
+const LONG_CLOSE_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
+     FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
+                  unnest(?::BIGINT[]) AS a) k \
+     WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
+       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL";
+
+/// The stub form of [`LONG_CLOSE_SQL`]: the SET list of the stub
+/// `close_out_long`.
+const LONG_CLOSE_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit = ?, \
+       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
+       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+     FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
+                  unnest(?::BIGINT[]) AS a) k \
+     WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
+       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL";
+
+/// The set form of the retained `copy_array_preimage`, keyed by the bound
+/// `array_id`s.
+const ARRAY_PREIMAGE_SET_SQL: &str = "INSERT INTO value_array_hist \
+     SELECT *, ?, TRUE FROM value_array WHERE array_id IN (SELECT unnest(?::BIGINT[]))";
+
+/// The set form of the stub `copy_array_preimage` (the same column list).
+const ARRAY_PREIMAGE_STUB_SET_SQL: &str = "INSERT INTO value_array_hist \
+       (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+        valid_from_commit, version, \
+        axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
+        valid_to_commit, content_retained) \
+     SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+        valid_from_commit, version, \
+        axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, ?, FALSE \
+     FROM value_array WHERE array_id IN (SELECT unnest(?::BIGINT[]))";
+
+/// The set form of the array arm of `close_out_tier`'s DELETE.
+const ARRAY_DELETE_SET_SQL: &str =
+    "DELETE FROM value_array WHERE array_id IN (SELECT unnest(?::BIGINT[]))";
 
 /// The keys with a `value_array` row (the live table holds only current
 /// rows) and its `array_id`; never the payload.
@@ -1855,6 +2122,149 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Plant a current row for `KEY` in `table` by direct SQL (a damaged,
+    /// doubly-live key, which the writers never produce).
+    fn plant(db: &Path, table: &str) {
+        let conn = Connection::open(db).unwrap();
+        let c = "(SELECT max(id) FROM \"commit\")";
+        let sql = match table {
+            "value_scalar" => format!(
+                "INSERT INTO value_scalar (entity_id, parameter_definition_id, alternative_id, \
+                   valid_from_commit, version, value_kind, v_float) \
+                 VALUES (1, 2, 3, {c}, 1, 'float', 7.0)"
+            ),
+            "value_array" => format!(
+                "INSERT INTO value_array (entity_id, parameter_definition_id, alternative_id, \
+                   valid_from_commit, version, axis1_id, values, v_min, v_max) \
+                 VALUES (1, 2, 3, {c}, 1, (SELECT min(id) FROM axis), [1.0], 1.0, 1.0)"
+            ),
+            other => panic!("plant: {other}"),
+        };
+        conn.execute(&sql, []).unwrap();
+        conn.close().unwrap();
+    }
+
+    /// The point statements of a one-key delete round and the set
+    /// statements of a larger round give the same rows and outcome for the
+    /// same key, over every prior state of the key (none, each tier live,
+    /// closed, replaced, and the two doubly-live damaged states, where the
+    /// per-key precedence decides), in both retention modes.
+    #[test]
+    fn single_key_delete_round_matches_the_set_round() {
+        const OTHER: ValueKey = ValueKey {
+            entity_id: 9,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        let scalar = |x: f64| CanonicalValue {
+            tier: Tier::Scalar,
+            value_kind: ValueKind::Float,
+            axes: vec![],
+            shape: ShapedData::Scalar(ScalarValue::Float(x)),
+        };
+        let array = CanonicalValue {
+            tier: Tier::Array,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(3)],
+            shape: ShapedData::Array(vec![1.0, 2.0, 3.0]),
+        };
+        let opts = WriteOptions::default();
+        // Each prior state of KEY: per-commit steps (Some writes, None
+        // deletes), then an optional planted row.
+        type State = (
+            &'static str,
+            Vec<Option<CanonicalValue>>,
+            Option<&'static str>,
+        );
+        let states: Vec<State> = vec![
+            ("none", vec![], None),
+            (
+                "scalar live",
+                vec![Some(scalar(1.0)), Some(scalar(2.0))],
+                None,
+            ),
+            ("scalar closed", vec![Some(scalar(1.0)), None], None),
+            (
+                "long live",
+                vec![Some(long_value(2)), Some(long_value(3))],
+                None,
+            ),
+            ("long closed", vec![Some(long_value(3)), None], None),
+            ("array live", vec![Some(array.clone())], None),
+            (
+                "array replaced",
+                vec![Some(array.clone()), Some(array.clone())],
+                None,
+            ),
+            (
+                "scalar+long",
+                vec![Some(long_value(3))],
+                Some("value_scalar"),
+            ),
+            ("long+array", vec![Some(long_value(3))], Some("value_array")),
+        ];
+        let setup = |db: &Path, steps: &[Option<CanonicalValue>], planted: Option<&str>| {
+            for step in steps {
+                with_write_txn(db, "t", "setup", |conn, c| match step {
+                    Some(v) => write_value(conn, c, KEY, v, &mut AxisCache::new(), &opts, None),
+                    None => delete_value(conn, c, KEY, &opts),
+                })
+                .unwrap();
+            }
+            with_write_txn(db, "t", "other", |conn, c| {
+                write_value(conn, c, OTHER, &array, &mut AxisCache::new(), &opts, None)
+            })
+            .unwrap();
+            if let Some(t) = planted {
+                plant(db, t);
+            }
+        };
+        for (name, steps, planted) in &states {
+            for retained in [true, false] {
+                let w = DeleteWrite { key: KEY, retained };
+                let other = DeleteWrite {
+                    key: OTHER,
+                    retained: !retained,
+                };
+                let (_da, a) = fresh();
+                let (_db, b) = fresh();
+                setup(&a, steps, *planted);
+                setup(&b, steps, *planted);
+                let oa = with_write_txn(&a, "t", "d", |conn, c| {
+                    delete_values(conn, c, std::slice::from_ref(&w))
+                })
+                .unwrap();
+                let ob =
+                    with_write_txn(&b, "t", "d", |conn, c| delete_values(conn, c, &[other, w]))
+                        .unwrap();
+                let case = format!("{name}, retained={retained}");
+                assert_eq!(oa.len(), 1, "{case}");
+                assert_eq!(format!("{:?}", oa[0]), format!("{:?}", ob[1]), "{case}");
+                assert_eq!(ob[0].rows_closed, 1, "{case}");
+                assert_eq!(key_rows(&a), key_rows(&b), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn delete_batch_with_a_duplicate_key_is_an_internal_error() {
+        let (_d, db) = fresh();
+        let before = counts(&db);
+        let w = DeleteWrite {
+            key: KEY,
+            retained: true,
+        };
+        let err = with_write_txn(&db, "t", "dup", |conn, c| {
+            delete_values(conn, c, &[w, w]).map(|_| ())
+        })
+        .expect_err("a duplicate key must be rejected");
+        assert!(
+            matches!(&err, DbError::Internal(m) if m.contains("duplicate key")),
+            "got {err:?}"
+        );
+        assert_eq!(counts(&db), before);
     }
 
     #[test]

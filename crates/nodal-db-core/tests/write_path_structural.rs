@@ -1012,6 +1012,55 @@ fn delete_key(parameter: &str, entity: &str) -> nodal_db_core::api::DeleteKey {
     }
 }
 
+/// One delete commit of 16 385 keys crosses the 16 384-key delete round by
+/// one (one set lookup of all the names, two close-out rounds); an unknown
+/// entity among them is reported at its index.
+#[test]
+fn delete_batch_one_key_past_the_round() {
+    const N: usize = 16_385;
+    let (_d, db) = fresh_db();
+    let names: Vec<String> = (0..N).map(|i| format!("e{i:05}")).collect();
+    let vals: Vec<f64> = (0..N).map(|i| i as f64).collect();
+    commit_changes(
+        &db,
+        vec![seg("p", "Base", scalar_names_batch(&names, &vals))],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "fresh",
+        WriteOptions::default(),
+    )
+    .expect("write");
+    let mut keys: Vec<_> = names.iter().map(|n| delete_key("p", n)).collect();
+    keys.insert(7, delete_key("p", "nobody"));
+    let r = commit_changes(
+        &db,
+        vec![],
+        vec![],
+        keys,
+        vec![],
+        "t",
+        "delete",
+        WriteOptions::default(),
+    )
+    .expect("delete");
+    assert_eq!((r.values_written, r.rows_closed), (N, N));
+    assert_eq!(r.warnings.len(), 1);
+    assert_eq!(
+        format!("{:?}", r.warnings[0].kind),
+        "UnknownReferent { key_index: 7, level: \"entity\" }"
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NULL"
+        ),
+        0
+    );
+    assert_audits_clean(&db);
+}
+
 /// A commit that writes a key and deletes the same key fails in every tier
 /// on the span CHECK (the delete closes a row at its own valid_from), as a
 /// DuckDB error, with nothing written. Only the error class is pinned: the

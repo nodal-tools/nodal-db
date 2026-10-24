@@ -514,6 +514,43 @@ Reading, honestly scoped:
 `-- --quick` for a smaller source); `test = false` keeps it out of
 `cargo test --workspace`.
 
+## Compaction size (2026-10-24, `benches/compaction_size.rs`)
+
+History-heavy long table, the shape of `specs/compaction_growth_FINDINGS.md`:
+500 000 rank-1 long cells (500 series) fully rewritten 21 times, one commit
+per round, appended round by round with a checkpoint after each
+(10.5 M `value_long` rows, 0.5 M current). Built with raw SQL (compaction
+copies rows verbatim). "Used" = `used_blocks` × block size. Release build,
+DuckDB 2.0.0, shared machine (load average about 15); the sizes are
+deterministic, the times indicative. "Before" is the first clustering order
+(closed rows by key), measured by reverting the one `cluster_order` line
+locally; "after" is the closed-rows-by-close-commit order.
+
+| closed-row order | source file / used | compacted file / used | compaction |
+|---|---|---|---|
+| before: `(valid_to IS NULL) DESC, <keys>, valid_from` | 127.3 / 126.0 MiB | **166.3 / 165.0 MiB** (+31 %) | 14.1 s |
+| after: `(valid_to IS NULL) DESC, valid_to, <keys>, valid_from` | 127.3 / 126.0 MiB | **123.3 / 122.0 MiB** (−3 %) | 14.3 s |
+
+At the `-- --quick` / test-fixture size (50 k cells × 21, 1.05 M rows;
+`tests/compaction.rs::compact_shrinks_history_heavy_long_table`): file
+18.0 MiB → 21.5 MiB before, → 17.0 MiB after.
+
+Reading:
+
+- This raw-SQL source is already nearly dense (its append order is close to
+  the close-commit order, and it has few dead blocks), so the "after" gain is
+  small here. The point is the sign: the old order made compaction **grow**
+  the file by 31 %. On sources written through the core write path, the
+  findings measured larger shrinks (e.g. 431 → 312 MiB at 50 M rows, and
+  1.81 → 1.38 GB at 228 M rows, against 2.94 GB with the old order).
+- The size guard: the bench's second, automatic run on the freshly
+  compacted file rebuilt it to the same size and kept the original
+  (`kept_original: true`), in both orders.
+
+`cargo bench -p nodal-db-core --bench compaction_size` runs it (about a
+minute; `-- --quick` for the test-fixture size); `test = false` keeps it out
+of `cargo test --workspace`.
+
 ## Not covered here (unchanged scope)
 
 - Scenario-resolved slice (unbudgeted; in the plan's bench list, not in this

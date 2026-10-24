@@ -161,9 +161,10 @@ pub struct DeleteKey {
 /// single `commit` row (delete design MAJOR-2). This is the primary write-path
 /// entry: [`ingest_segments`] is the writes-only wrapper and [`delete_values`]
 /// the deletes-only wrapper. The combined entry exists because
-/// `history::write_value` is non-idempotent — splitting an editor save into two
-/// core calls means a failed second call re-inflates versions on the whole-save
-/// retry. Running both halves in one closure makes the save atomic.
+/// splitting an editor save into two core calls would let a failed second call
+/// leave the first half committed on its own (identical re-writes are skipped,
+/// but a changed first half would still land without its deletes). Running both
+/// halves in one closure makes the save atomic.
 ///
 /// Segments are prepared (validated, deduped) up front, purely; deletes are
 /// validated + deduped up front too. Then, inside one retried closure and under

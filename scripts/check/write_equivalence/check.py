@@ -18,9 +18,9 @@ extracted with `git archive` and this directory (the workload of the
 current checkout, not of the revision) is copied into it, so both arms
 run the same workload. Both build in release mode in one shared target
 directory (`--work`/target), so the bundled DuckDB compiles once; the
-binaries are cached per commit id. Exit status 0 when every seed matches,
-1 otherwise (the first differing lines are printed; the full outputs stay
-in the work directory).
+binaries are cached per commit id and workload hash. Exit status 0 when
+every seed matches, 1 otherwise (the first differing lines are printed;
+the full outputs stay in the work directory).
 
 `--big` adds large rounds now and then (a 700-entity long segment,
 31 x 8 760-element arrays, a 16 385-key delete): slower, but it crosses
@@ -82,8 +82,24 @@ def extract(rev, dest):
     return tool
 
 
+def workload_id():
+    """A hash of the workload crate (this directory), which is built into
+    every binary: a cached binary is reused only for the same workload."""
+    h = hashlib.sha1()
+    for root, dirs, files in os.walk(HERE):
+        dirs[:] = sorted(d for d in dirs if d not in ("target", "__pycache__"))
+        for name in sorted(files):
+            if name == "Cargo.lock":
+                continue
+            path = os.path.join(root, name)
+            h.update(os.path.relpath(path, HERE).encode() + b"\0")
+            with open(path, "rb") as f:
+                h.update(f.read() + b"\0")
+    return h.hexdigest()[:8]
+
+
 def build(rev, work):
-    tid = tree_id(rev)
+    tid = tree_id(rev) + "-w" + workload_id()
     binary = os.path.join(work, "bin", f"write_equivalence-{tid}")
     if rev != "WORKTREE" and os.path.exists(binary):
         print(f"{rev} ({tid}): cached binary", flush=True)

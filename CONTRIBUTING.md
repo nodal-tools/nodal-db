@@ -42,7 +42,7 @@ python3 scripts/check/write_equivalence/check.py OLD_REV [NEW_REV|WORKTREE] \
 
 It builds the workload crate next to it against the core of each
 revision (release, one shared target directory, binaries cached per
-commit), runs the same seeded random API workload with both (segments of
+commit and workload), runs the same seeded random API workload with both (segments of
 every tier and value kind under several class and alternative spellings,
 structural creates, value deletes with misses and duplicates, erasure,
 direct `history` writes) and compares every commit's report or error and

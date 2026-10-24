@@ -506,3 +506,45 @@ fn a_write_to_an_unrelated_key_alongside_an_object_delete_commits() {
         .unwrap();
     assert_eq!(live_flow, 0, "alternative A's flow cells are closed");
 }
+
+/// No false positives across classes: a parameter delete of `cap` in
+/// `link` beside a write of `cap` in `node`, and an entity delete of
+/// `node_2` (cascading into link_ab) beside a write to `node_1`, commit.
+#[test]
+fn same_names_in_another_class_or_a_sibling_entity_are_not_covered() {
+    let (_d, db) = seeded();
+    let r = commit_changes(
+        &db,
+        vec![
+            seg("node", "cap", "Base", scalar_batch("node_1", 3.0)),
+            seg("node", "demand", "Base", scalar_batch("node_1", 4.0)),
+        ],
+        vec![],
+        vec![],
+        vec![
+            (
+                okey(ObjectKind::Parameter, Some("link"), "cap"),
+                cascade(true),
+            ),
+            (
+                okey(ObjectKind::Entity, Some("node"), "node_2"),
+                cascade(true),
+            ),
+            (
+                okey(ObjectKind::Entity, Some("link"), "node_1"),
+                cascade(true),
+            ),
+        ],
+        "t",
+        "same names elsewhere",
+        WriteOptions::default(),
+    )
+    .expect("writes outside every object delete's closure commit");
+    assert_eq!(r.values_written, 2);
+    let results: Vec<bool> = r
+        .object_deletes
+        .iter()
+        .map(|o| matches!(o.result, ObjectDeleteResult::Deleted { .. }))
+        .collect();
+    assert_eq!(results, vec![true, true, false], "{:?}", r.object_deletes);
+}

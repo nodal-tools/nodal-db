@@ -50,7 +50,7 @@ use crate::history::{
 };
 use crate::object_delete::{
     apply_object_delete, prepare_object_deletes, preview_one, written_value_covered,
-    PreparedObjectDelete,
+    PreparedObjectDelete, WrittenIds,
 };
 use crate::structural::{apply_structural, prepare_structural};
 use crate::types::{
@@ -396,8 +396,9 @@ pub fn commit_changes(
         // D10 on the resolved ids, before any object closes: no object
         // delete may cover a value this call wrote (the up-front check
         // folds names in Rust and cannot see cascade containers).
+        let written_ids = WrittenIds::new(&buffers.keys);
         for p in &prepared_object_deletes {
-            if let Some(k) = written_value_covered(conn, &p.key, &buffers.keys)? {
+            if let Some(k) = written_value_covered(conn, &p.key, &written_ids)? {
                 return Err(object_delete_covers_write_error(
                     p.key_index,
                     &p.key,
@@ -548,6 +549,21 @@ fn reject_write_and_object_delete(
     if prepared.is_empty() || object_deletes.is_empty() {
         return Ok(());
     }
+    // Fold every written name once (sets, not a scan per object delete: a
+    // call may carry many entity deletes beside many written entities).
+    let mut alts: HashSet<String> = HashSet::new();
+    let mut classes: HashSet<String> = HashSet::new();
+    let mut params: HashSet<(String, String)> = HashSet::new();
+    let mut entities: HashSet<(String, String)> = HashSet::new();
+    for p in prepared {
+        let c = p.class.to_lowercase();
+        alts.insert(p.alternative.to_lowercase());
+        params.insert((c.clone(), p.parameter.to_lowercase()));
+        for n in &p.names {
+            entities.insert((c.clone(), n.to_lowercase()));
+        }
+        classes.insert(c);
+    }
     for od in object_deletes {
         let name = match &od.key.target {
             ObjectRef::Name(n) => n.to_lowercase(),
@@ -555,19 +571,14 @@ fn reject_write_and_object_delete(
             ObjectRef::Elements(_) => continue,
         };
         let class = od.key.class.as_deref().map(str::to_lowercase);
-        let covers = |p: &PreparedSegment| -> bool {
-            let same_class = || class.as_deref() == Some(p.class.to_lowercase().as_str());
-            match od.key.kind {
-                ObjectKind::Alternative => p.alternative.to_lowercase() == name,
-                ObjectKind::Class => p.class.to_lowercase() == name,
-                ObjectKind::Parameter => same_class() && p.parameter.to_lowercase() == name,
-                ObjectKind::Entity => {
-                    same_class() && p.names.iter().any(|n| n.to_lowercase() == name)
-                }
-                ObjectKind::Scenario => false,
-            }
+        let covered = match (od.key.kind, class) {
+            (ObjectKind::Alternative, _) => alts.contains(&name),
+            (ObjectKind::Class, _) => classes.contains(&name),
+            (ObjectKind::Parameter, Some(c)) => params.contains(&(c, name)),
+            (ObjectKind::Entity, Some(c)) => entities.contains(&(c, name)),
+            _ => false,
         };
-        if prepared.iter().any(covers) {
+        if covered {
             return Err(object_delete_covers_write_error(
                 od.key_index,
                 &od.key,

@@ -27,6 +27,8 @@
 //! report. The 2-line `audit_dangling_ref` fix (schema/120) keeps such a `run`
 //! off the dangling-ref list.
 
+use std::collections::HashSet;
+
 use duckdb::{params, Connection};
 
 use crate::error::DbError;
@@ -1437,32 +1439,56 @@ fn apply_one(
 pub(crate) fn written_value_covered(
     conn: &Connection,
     key: &ObjectDeleteKey,
-    written: &std::collections::HashSet<(i64, i64, i64)>,
+    written: &WrittenIds<'_>,
 ) -> Result<Option<(i64, i64, i64)>, DbError> {
-    use std::collections::HashSet;
-    if written.is_empty() || object_legs(key.kind).is_none() {
+    if written.keys.is_empty() || object_legs(key.kind).is_none() {
         return Ok(None);
     }
     let Some(target) = resolve_target(conn, key)? else {
         return Ok(None);
     };
-    let mut entities: HashSet<i64> = HashSet::new();
-    let mut params: HashSet<i64> = HashSet::new();
-    let mut alts: HashSet<i64> = HashSet::new();
+    // Probe the closure against the written ids (O(closure), not
+    // O(written) per object delete); the covered key is looked up only on
+    // a hit, for the refusal message.
+    let mut hit = (HashSet::new(), HashSet::new(), HashSet::new());
     for (k, id) in cascade_closure(conn, key.kind, target.id)? {
         match k {
-            ObjectKind::Entity => entities.insert(id),
-            ObjectKind::Parameter => params.insert(id),
-            ObjectKind::Alternative => alts.insert(id),
+            ObjectKind::Entity if written.entities.contains(&id) => hit.0.insert(id),
+            ObjectKind::Parameter if written.params.contains(&id) => hit.1.insert(id),
+            ObjectKind::Alternative if written.alts.contains(&id) => hit.2.insert(id),
             // A class reaches its values only through its child entities
             // and parameters (both in the closure); a scenario has none.
-            ObjectKind::Class | ObjectKind::Scenario => false,
+            _ => false,
         };
     }
+    if hit.0.is_empty() && hit.1.is_empty() && hit.2.is_empty() {
+        return Ok(None);
+    }
     Ok(written
+        .keys
         .iter()
-        .find(|(e, p, a)| entities.contains(e) || params.contains(p) || alts.contains(a))
+        .find(|(e, p, a)| hit.0.contains(e) || hit.1.contains(p) || hit.2.contains(a))
         .copied())
+}
+
+/// The value keys a call wrote, indexed by each id column, for the D10
+/// commit-time check ([`written_value_covered`]).
+pub(crate) struct WrittenIds<'a> {
+    keys: &'a HashSet<(i64, i64, i64)>,
+    entities: HashSet<i64>,
+    params: HashSet<i64>,
+    alts: HashSet<i64>,
+}
+
+impl<'a> WrittenIds<'a> {
+    pub(crate) fn new(keys: &'a HashSet<(i64, i64, i64)>) -> Self {
+        WrittenIds {
+            keys,
+            entities: keys.iter().map(|k| k.0).collect(),
+            params: keys.iter().map(|k| k.1).collect(),
+            alts: keys.iter().map(|k| k.2).collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -711,7 +711,7 @@ fn api_script(db: &Path, log: &mut String) {
     let o = WriteOptions::default();
     // a1: multi-segment fresh writes (array with -0.0, which canon
     // normalizes; scalars; a sparse int long; a 600-cell long; a second
-    // alternative for the object delete below).
+    // and a third alternative for the object deletes below).
     let r = commit_changes(
         db,
         vec![
@@ -744,6 +744,7 @@ fn api_script(db: &Path, log: &mut String) {
                 ),
             ),
             seg("demand", "altV", batch(&["n1"], &[], f64s(&[8.0]))),
+            seg("demand", "altW", batch(&["n2"], &[], f64s(&[6.0]))),
         ],
         vec![],
         vec![],
@@ -755,8 +756,10 @@ fn api_script(db: &Path, log: &mut String) {
     .expect("a1");
     writeln!(log, "## report a1\n{}", report_text(&r)).unwrap();
 
-    // a2: writes, then deletes of OTHER keys, then an object delete — all in
-    // one commit (the read-after-write order of the plan's §4.1).
+    // a2: writes, then deletes of OTHER keys, then a RESTRICT object delete
+    // of an alternative the call does not write — all in one commit (the
+    // order of the plan's §4.1; an object delete covering a value the call
+    // writes is refused, skip_unchanged_writes_PLAN D10).
     let r = commit_changes(
         db,
         vec![
@@ -786,7 +789,7 @@ fn api_script(db: &Path, log: &mut String) {
             dk("flow", "Base", "n1"),
             dk("demand", "Base", "nobody"),
         ],
-        vec![oalt("altV", false)],
+        vec![oalt("altW", false)],
         "golden",
         "a2 writes+deletes",
         o,

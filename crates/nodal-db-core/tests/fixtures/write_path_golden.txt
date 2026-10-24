@@ -61,9 +61,9 @@ WriteOutcome { tier: Some(Scalar), version: 2, rows_written: 1, rows_closed: 1, 
 WriteOutcome { tier: Some(Long), version: 1, rows_written: 1, rows_closed: 1, axes_created: 0, axes_reused: 1 }
 WriteOutcome { tier: Some(Array), version: 3, rows_written: 1, rows_closed: 1, axes_created: 0, axes_reused: 1 }
 ## report a1
-WriteReport { commit_id: 6, values_written: 6, rows_written: 607, rows_closed: 0, axes_created: 2, axes_reused: 1, tiers: [Array, Scalar, Long], warnings: [Warning { kind: AutoCreated, object_type: "entity_class", name: "node", id: 1 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "profile", id: 1 }, Warning { kind: AutoCreated, object_type: "entity", name: "n1", id: 1 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "demand", id: 2 }, Warning { kind: AutoCreated, object_type: "entity", name: "n2", id: 2 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "flow", id: 3 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "big", id: 4 }, Warning { kind: AutoCreated, object_type: "entity", name: "n3", id: 3 }, Warning { kind: AutoCreated, object_type: "alternative", name: "altV", id: 2 }], object_deletes: [], structural: [] }
+WriteReport { commit_id: 6, values_written: 7, rows_written: 608, rows_closed: 0, axes_created: 2, axes_reused: 1, tiers: [Array, Scalar, Long], warnings: [Warning { kind: AutoCreated, object_type: "entity_class", name: "node", id: 1 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "profile", id: 1 }, Warning { kind: AutoCreated, object_type: "entity", name: "n1", id: 1 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "demand", id: 2 }, Warning { kind: AutoCreated, object_type: "entity", name: "n2", id: 2 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "flow", id: 3 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "big", id: 4 }, Warning { kind: AutoCreated, object_type: "entity", name: "n3", id: 3 }, Warning { kind: AutoCreated, object_type: "alternative", name: "altV", id: 2 }, Warning { kind: AutoCreated, object_type: "alternative", name: "altW", id: 3 }], object_deletes: [], structural: [] }
 ## report a2
-WriteReport { commit_id: 7, values_written: 5, rows_written: 303, rows_closed: 605, axes_created: 2, axes_reused: 1, tiers: [Array, Long], warnings: [Warning { kind: UnknownReferent { key_index: 2, level: "entity" }, object_type: "entity", name: "nobody", id: 0 }], object_deletes: [ObjectDeleteOutcome { key_index: 0, kind: Alternative, result: Restricted { blockers: [Blocker { table: "value_scalar", column: "alternative_id", count: 1, sample: ["entity=1,pd=2"] }, Blocker { table: "value_long", column: "alternative_id", count: 2, sample: ["entity=1,pd=3", "entity=1,pd=3"] }] } }], structural: [] }
+WriteReport { commit_id: 7, values_written: 5, rows_written: 303, rows_closed: 605, axes_created: 2, axes_reused: 1, tiers: [Array, Long], warnings: [Warning { kind: UnknownReferent { key_index: 2, level: "entity" }, object_type: "entity", name: "nobody", id: 0 }], object_deletes: [ObjectDeleteOutcome { key_index: 0, kind: Alternative, result: Restricted { blockers: [Blocker { table: "value_scalar", column: "alternative_id", count: 1, sample: ["entity=2,pd=2"] }] } }], structural: [] }
 ## report a3
 WriteReport { commit_id: 8, values_written: 0, rows_written: 0, rows_closed: 0, axes_created: 0, axes_reused: 0, tiers: [], warnings: [], object_deletes: [ObjectDeleteOutcome { key_index: 0, kind: Alternative, result: Deleted { closed_out: CascadeCounts { object_rows: 1, per_table: [TableCount { table: "value_scalar", rows: 1 }, TableCount { table: "value_long", rows: 2 }], total_rows: 4 } } }], structural: [] }
 ## report a4 scalar batch
@@ -101,7 +101,7 @@ WriteReport { commit_id: 24, values_written: 2, rows_written: 4, rows_closed: 0,
 ## report b2 unretained v2
 WriteReport { commit_id: 25, values_written: 3, rows_written: 5, rows_closed: 4, axes_created: 0, axes_reused: 3, tiers: [Long], warnings: [], object_deletes: [], structural: [] }
 ## report b3 prep a
-WriteReport { commit_id: 26, values_written: 3, rows_written: 5, rows_closed: 0, axes_created: 2, axes_reused: 1, tiers: [Array, Long], warnings: [Warning { kind: AutoCreated, object_type: "entity", name: "n9", id: 9 }, Warning { kind: AutoCreated, object_type: "alternative", name: "Alt3", id: 3 }, Warning { kind: AutoCreated, object_type: "alternative", name: "Alt4", id: 4 }], object_deletes: [], structural: [] }
+WriteReport { commit_id: 26, values_written: 3, rows_written: 5, rows_closed: 0, axes_created: 2, axes_reused: 1, tiers: [Array, Long], warnings: [Warning { kind: AutoCreated, object_type: "entity", name: "n9", id: 9 }, Warning { kind: AutoCreated, object_type: "alternative", name: "Alt3", id: 4 }, Warning { kind: AutoCreated, object_type: "alternative", name: "Alt4", id: 5 }], object_deletes: [], structural: [] }
 ## report b3 prep b
 WriteReport { commit_id: 27, values_written: 1, rows_written: 1, rows_closed: 0, axes_created: 0, axes_reused: 0, tiers: [Scalar], warnings: [], object_deletes: [], structural: [] }
 ## report b3 transitions
@@ -862,9 +862,10 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 1|9|1|10|17|NULL|2|true|"int"|NULL|1|NULL|NULL|NULL|NULL|NULL|1|9|1
 1|10|1|11|16|NULL|1|true|"date_time"|NULL|NULL|NULL|NULL|ts:-9223372022400000000|NULL|NULL|1|10|1
 2|2|1|2|6|7|1|true|"float"|f:0000000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|2|3|2|6|NULL|1|true|"float"|f:4018000000000000|NULL|NULL|NULL|NULL|NULL|NULL|2|2|3
 2|6|1|6|9|NULL|1|true|"string"|NULL|NULL|NULL|"it's \"q\" ÄÖ"|NULL|NULL|NULL|2|6|1
 2|8|1|8|13|28|1|true|"float"|f:3fd0000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
-2|8|4|8|28|NULL|1|true|"float"|f:4022800000000000|NULL|NULL|NULL|NULL|NULL|NULL|2|8|4
+2|8|5|8|28|NULL|1|true|"float"|f:4022800000000000|NULL|NULL|NULL|NULL|NULL|NULL|2|8|5
 2|9|1|10|16|NULL|1|true|"int"|NULL|0|NULL|NULL|NULL|NULL|NULL|2|9|1
 4|2|1|2|9|10|1|false|"float"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|2|1|2|10|15|2|true|"float"|f:4020000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
@@ -873,7 +874,7 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 4|5|1|5|10|NULL|2|true|"float"|f:4000000000000000|NULL|NULL|NULL|NULL|NULL|NULL|4|5|1
 4|7|1|7|9|10|1|false|"bool"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|7|1|7|10|NULL|2|true|"bool"|NULL|NULL|false|NULL|NULL|NULL|NULL|4|7|1
-4|8|3|8|27|28|1|true|"float"|f:3fe8000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+4|8|4|8|27|28|1|true|"float"|f:3fe8000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|9|1|10|16|NULL|1|true|"int"|NULL|9223372036854775807|NULL|NULL|NULL|NULL|NULL|4|9|1
 5|2|1|2|9|10|1|false|"float"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 5|2|1|2|10|NULL|2|true|"float"|f:4022000000000000|NULL|NULL|NULL|NULL|NULL|NULL|5|2|1
@@ -913,8 +914,8 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 1|8|1|9|14|28|2|true|30|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|21|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|8|1|9|14|28|2|true|30|NULL|NULL|NULL|1|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|22|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|8|1|9|28|NULL|3|true|40|NULL|NULL|NULL|0|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|54|NULL|NULL|NULL|NULL|NULL|1|8|1|0|0|0|0
-1|8|3|9|26|28|1|true|38|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|31|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
-1|8|3|9|26|28|1|true|38|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|32|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|8|4|9|26|28|1|true|38|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|31|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|8|4|9|26|28|1|true|38|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|32|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|11|1|12|19|20|1|false|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|11|1|12|19|20|1|false|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|11|1|12|20|21|2|true|33|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|6|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
@@ -938,8 +939,8 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 1|13|1|14|25|33|2|false|36|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 2|8|1|9|28|NULL|1|true|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|51|NULL|NULL|NULL|NULL|NULL|2|8|1|0|0|0|0
 2|8|1|9|28|NULL|1|true|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|52|NULL|NULL|NULL|NULL|NULL|2|8|1|1|0|0|0
-2|8|4|9|26|28|1|true|39|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|41|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
-2|8|4|9|26|28|1|true|39|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|42|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|8|5|9|26|28|1|true|39|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|41|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|8|5|9|26|28|1|true|39|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|42|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 2|11|1|12|19|20|1|false|22|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 2|11|1|12|19|20|1|false|22|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 2|11|1|12|19|20|1|false|22|NULL|NULL|NULL|2|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
@@ -2982,8 +2983,8 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 23|1030|1001|1001|0|5|2|17|NULL|NULL|NULL|[f:4022000000000000]|NULL|f:4022000000000000|f:4022000000000000
 25|1|1|1|1|31|4|36|NULL|NULL|NULL|[f:3ff4000000000000]|NULL|f:3ff4000000000000|f:3ff4000000000000
 29|4|1|1|1|30|2|37|NULL|NULL|NULL|[f:4004000000000000]|NULL|f:4004000000000000|f:4004000000000000
-35|4|8|3|9|28|1|19|NULL|NULL|NULL|[f:401c000000000000,f:401e000000000000]|NULL|f:401c000000000000|f:401e000000000000
-37|6|8|3|9|28|1|19|NULL|NULL|NULL|[f:4020000000000000,f:4021000000000000]|NULL|f:4020000000000000|f:4021000000000000
+35|4|8|4|9|28|1|19|NULL|NULL|NULL|[f:401c000000000000,f:401e000000000000]|NULL|f:401c000000000000|f:401e000000000000
+37|6|8|4|9|28|1|19|NULL|NULL|NULL|[f:4020000000000000,f:4021000000000000]|NULL|f:4020000000000000|f:4021000000000000
 41|5|1|1|1|34|2|19|NULL|NULL|NULL|[f:401a000000000000,f:401e000000000000]|NULL|f:401a000000000000|f:401e000000000000
 43|1|14|1|15|29|1|22|NULL|NULL|NULL|[f:3fe0000000000000,f:3ff8000000000000,f:4004000000000000]|NULL|f:3fe0000000000000|f:4004000000000000
 45|3|14|1|15|29|1|22|NULL|NULL|NULL|[f:400c000000000000,f:4012000000000000,f:4016000000000000]|NULL|f:400c000000000000|f:4016000000000000
@@ -3004,7 +3005,7 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 27|2|8|1|9|12|1|22|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000,f:4008000000000000]|NULL|f:3ff0000000000000|f:4008000000000000|13|true
 29|4|1|1|1|18|1|19|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000]|NULL|f:3ff0000000000000|f:4000000000000000|30|true
 31|9|8|1|9|26|1|19|NULL|NULL|NULL|[f:3ff8000000000000,f:4004000000000000]|NULL|f:3ff8000000000000|f:4004000000000000|28|true
-33|1|8|3|9|28|1|19|NULL|NULL|NULL|[f:4018000000000000,f:401a000000000000]|NULL|f:4018000000000000|f:401a000000000000|33|true
+33|1|8|4|9|28|1|19|NULL|NULL|NULL|[f:4018000000000000,f:401a000000000000]|NULL|f:4018000000000000|f:401a000000000000|33|true
 39|2|1|1|1|29|1|19|NULL|NULL|NULL|NULL|NULL|f:3ff0000000000000|f:4000000000000000|31|false
 39|2|1|1|1|31|2|19|NULL|NULL|NULL|[f:7ff8000000000000,f:4002000000000000]|NULL|f:4002000000000000|f:7ff8000000000000|34|true
 41|5|1|1|1|29|1|19|NULL|NULL|NULL|[f:4008000000000000,f:4010000000000000]|NULL|f:4008000000000000|f:4010000000000000|34|true
@@ -3015,7 +3016,7 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 ## definition_value_long (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,axis1_id,axis2_id,axis3_id,axis4_id,i1_pos,i2_pos,i3_pos,i4_pos,i1_dt,i1_num,i2_dt,i2_num,i3_dt,i3_num,i4_dt,i4_num,value_kind,v_float,v_int,v_bool,v_str,v_datetime,v_dur_months,v_dur_micros,cp,cs,c1,c2,c3,c4)
 ## definition_value_array (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,axis1_id,axis2_id,axis3_id,axis4_id,values,values_int,v_min,v_max,cp,cs)
 ## sequences (sequence_name,last_value)
-"seq_alternative"|4
+"seq_alternative"|5
 "seq_axis"|43
 "seq_axis_label"|12
 "seq_class_set"|NULL

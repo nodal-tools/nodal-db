@@ -87,6 +87,16 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    Stale,
+    ApiError,
+    "The write's `expect_commit` precondition failed: the database's head \
+     commit is not the one the caller expected (DbError::Stale). Nothing was \
+     written. Attributes: `expected` and `found` (commit ids). Re-read, \
+     re-apply, and retry with the new head. A subclass of ApiError, so \
+     `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
     VersionTooOld,
     NodalDbError,
     "The bundled DuckDB is older than the verified line (DbError::VersionTooOld)."
@@ -165,6 +175,14 @@ impl Database {
         py.detach(move || api::db_identity(&path)).map_err(db_err)
     }
 
+    /// The database's head commit id (`max(commit.id)`, 0 on an empty log).
+    /// One per-operation read. Quote it to `expect_commit=` on a later write
+    /// to commit only if nobody else committed in between.
+    fn head_commit(&self, py: Python<'_>) -> PyResult<i64> {
+        let path = self.path.clone();
+        py.detach(move || api::head_commit(&path)).map_err(db_err)
+    }
+
     /// Run one read-only SQL query and return the result as a
     /// `pyarrow.RecordBatchReader` (zero-copy across the Arrow C data
     /// interface; call `.read_all()` for a `pyarrow.Table`).
@@ -221,8 +239,14 @@ impl Database {
     ///
     /// `domains`: optional `{position: [label, ...]}` ordinal domains for
     /// label dimensions (position is 1-based).
+    ///
+    /// `expect_commit`: commit only if the database's head commit is exactly
+    /// this id (see `head_commit()`), else raise `Stale` with nothing
+    /// written. Checked inside the write transaction, so read → compute →
+    /// write is atomic against other writers.
     #[pyo3(signature = (class_name, parameter, alternative, batch, *, user, message = String::new(),
-                        domains = None, force_replace = false, retain_override = None))]
+                        domains = None, force_replace = false, retain_override = None,
+                        expect_commit = None))]
     #[allow(clippy::too_many_arguments)]
     fn write_parameter<'py>(
         &self,
@@ -236,12 +260,14 @@ impl Database {
         domains: Option<HashMap<u8, Vec<String>>>,
         force_replace: bool,
         retain_override: Option<bool>,
+        expect_commit: Option<i64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let batches = batches_from_py(batch)?;
         let path = self.path.clone();
         let opts = WriteOptions {
             force_replace,
             retain_override,
+            expect_commit,
         };
         let seg = api::Segment {
             class: class_name,
@@ -273,9 +299,11 @@ impl Database {
     ///   [...]}`). Applied FIRST, so a same-save value write can target a
     ///   referent a structural item just created. Per-item outcomes land in the
     ///   report's `"structural"` list.
+    /// * `expect_commit`: commit only if the head commit is exactly this id,
+    ///   else raise `Stale` with nothing written (see `write_parameter`).
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
                         object_deletes = None, user, message = String::new(),
-                        force_replace = false, retain_override = None))]
+                        force_replace = false, retain_override = None, expect_commit = None))]
     #[allow(clippy::too_many_arguments)]
     fn commit_changes<'py>(
         &self,
@@ -288,6 +316,7 @@ impl Database {
         message: String,
         force_replace: bool,
         retain_override: Option<bool>,
+        expect_commit: Option<i64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let mut segs = Vec::new();
         if let Some(s) = segments {
@@ -312,6 +341,7 @@ impl Database {
         let opts = WriteOptions {
             force_replace,
             retain_override,
+            expect_commit,
         };
         let report = py
             .detach(move || {
@@ -325,20 +355,23 @@ impl Database {
     /// in one atomic commit — the structural-only convenience over
     /// `commit_changes`. `changes` is a list of
     /// `"op"`-keyed dicts.
-    #[pyo3(signature = (changes, *, user, message = String::new()))]
+    #[pyo3(signature = (changes, *, user, message = String::new(), expect_commit = None))]
     fn commit_structural<'py>(
         &self,
         py: Python<'py>,
         changes: &Bound<'py, PyAny>,
         user: String,
         message: String,
+        expect_commit: Option<i64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let structs = structural_changes_from_py(Some(changes))?;
         let path = self.path.clone();
+        let opts = WriteOptions {
+            expect_commit,
+            ..Default::default()
+        };
         let report = py
-            .detach(move || {
-                api::commit_structural(&path, structs, &user, &message, WriteOptions::default())
-            })
+            .detach(move || api::commit_structural(&path, structs, &user, &message, opts))
             .map_err(db_err)?;
         report_to_py(py, &report)
     }
@@ -346,23 +379,26 @@ impl Database {
     /// Delete (append-only close-out) named values in one atomic commit —
     /// the deletes-only convenience over `commit_changes`. `keys` is a list
     /// of `(class, parameter, alternative, entity)` tuples.
-    #[pyo3(signature = (keys, *, user, message = String::new()))]
+    #[pyo3(signature = (keys, *, user, message = String::new(), expect_commit = None))]
     fn delete_values<'py>(
         &self,
         py: Python<'py>,
         keys: &Bound<'py, PyAny>,
         user: String,
         message: String,
+        expect_commit: Option<i64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let mut dels = Vec::new();
         for item in keys.try_iter()? {
             dels.push(delete_key_from_py(&item?)?);
         }
         let path = self.path.clone();
+        let opts = WriteOptions {
+            expect_commit,
+            ..Default::default()
+        };
         let report = py
-            .detach(move || {
-                api::delete_values(&path, dels, &user, &message, WriteOptions::default())
-            })
+            .detach(move || api::delete_values(&path, dels, &user, &message, opts))
             .map_err(db_err)?;
         report_to_py(py, &report)
     }
@@ -877,6 +913,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("Busy", py.get_type::<Busy>())?;
     m.add("Conflict", py.get_type::<Conflict>())?;
     m.add("ApiError", py.get_type::<ApiError>())?;
+    m.add("Stale", py.get_type::<Stale>())?;
     m.add("VersionTooOld", py.get_type::<VersionTooOld>())?;
     m.add("SchemaError", py.get_type::<SchemaError>())?;
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;

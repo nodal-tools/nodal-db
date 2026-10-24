@@ -42,7 +42,11 @@ answer will be a served API, not a protocol document.
   tab) blocks every writer commit until it closes. See
   [connection discipline](../usage.md#connection-discipline).
 - To detect new commits, poll the newest commit id with a short read
-  rather than holding a connection open to watch.
+  rather than holding a connection open to watch. To write only if
+  nobody committed since you read, pass that commit id as
+  `expect_commit` on the write: the check runs inside the write
+  transaction and fails with `Stale` (`DbError::Stale`,
+  `nodal_db.Stale`) without writing anything.
 - Expect busy and conflict outcomes. The core reports writer contention
   as a defined error (`DbError::Busy` in Rust, `nodal_db.Busy` in
   Python) after a bounded retry, not as a hang. Readers may briefly fail

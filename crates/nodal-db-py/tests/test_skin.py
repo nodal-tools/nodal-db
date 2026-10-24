@@ -383,8 +383,56 @@ def test_template_apply_stale_plan_refused(db, tmp_path):
     v1 = write_template(tmp_path, "v1.yaml", TEMPLATE_V1)
     plan = db.template_plan(v1)
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u9"], [9.0]), user="t")
-    with pytest.raises(nodal_db.ApiError, match="stale plan"):
+    # `Stale` is an ApiError subclass, so `except ApiError` code keeps working.
+    with pytest.raises(nodal_db.ApiError, match="stale") as ei:
         db.template_apply(v1, user="tester", expect_commit=plan["db_commit"])
+    assert isinstance(ei.value, nodal_db.Stale)
+    assert ei.value.expected == plan["db_commit"]
+    assert ei.value.found == db.head_commit()
+
+
+# ---------------------------------------------------------------------------
+# expect_commit / Stale / head_commit
+# ---------------------------------------------------------------------------
+
+
+def test_expect_commit_at_head_commits(db):
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    head = db.head_commit()
+    rep = db.write_parameter(
+        "unit", "capacity", "Base", scalar_batch(["u1"], [2.0]), user="t", expect_commit=head
+    )
+    assert rep["commit_id"] > head
+    assert db.head_commit() == rep["commit_id"]
+
+
+def test_expect_commit_stale_raises_and_writes_nothing(db):
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    loaded = db.head_commit()
+    other = db.write_parameter("unit", "capacity", "Base", scalar_batch(["u2"], [5.0]), user="x")
+    with pytest.raises(nodal_db.Stale) as ei:
+        db.write_parameter(
+            "unit", "capacity", "Base", scalar_batch(["u1"], [2.0]), user="t", expect_commit=loaded
+        )
+    assert isinstance(ei.value, nodal_db.ApiError)
+    assert (ei.value.expected, ei.value.found) == (loaded, other["commit_id"])
+    assert db.head_commit() == other["commit_id"]
+    for call in (
+        lambda: db.commit_changes(
+            deletes=[("unit", "capacity", "Base", "u1")], user="t", expect_commit=loaded
+        ),
+        lambda: db.delete_values([("unit", "capacity", "Base", "u1")], user="t", expect_commit=loaded),
+        lambda: db.commit_structural(
+            [{"op": "create_alternative", "name": "A2"}], user="t", expect_commit=loaded
+        ),
+    ):
+        with pytest.raises(nodal_db.Stale):
+            call()
+    assert db.head_commit() == other["commit_id"]
+    rep = db.delete_values(
+        [("unit", "capacity", "Base", "u1")], user="t", expect_commit=other["commit_id"]
+    )
+    assert rep["commit_id"] == other["commit_id"] + 1
 
 
 # ---------------------------------------------------------------------------

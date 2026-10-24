@@ -143,14 +143,56 @@ pub fn with_write_txn<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> 
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
-    run_txn_once(db_path, user, message, f)
+    run_txn_once(db_path, user, message, TxnOptions::default(), f)
+}
+
+/// Transaction-level options of one write cycle (save_path_open_reduction
+/// plan §2.1): checks the transaction layer runs itself, so any writer can
+/// use them, not only the `api` entry points.
+///
+/// `expect_commit = Some(c)`: an optimistic-concurrency precondition. Right
+/// after `BEGIN` and **before** the `commit` row is inserted, the head
+/// (`COALESCE(max(commit.id), 0)`) is read; if it is not exactly `c` the
+/// transaction is rolled back and the call returns [`DbError::Stale`]. The
+/// rule is `!=`, not `>`: a head *below* `c` means the file was replaced or
+/// restored under the caller, which is also "not what I loaded". A `Stale`
+/// writes nothing, inserts no commit row and uses no sequence value, and it
+/// is never retried (it is not a `Conflict`).
+///
+/// Atomicity: the check and the write share one transaction under DuckDB's
+/// exclusive file lock (cross-process) and the core's per-path lock
+/// (in-process), so no commit can land between them. The guarantee holds
+/// for **core-routed access only**: a second DuckDB instance opened in the
+/// same process outside the core is invisible to both locks (fcntl locks are
+/// per process; api critique F1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TxnOptions {
+    pub expect_commit: Option<i64>,
+}
+
+/// The head commit id on an open connection: `COALESCE(max(id), 0)` over the
+/// `commit` log (0 on an empty log). The one SQL spelling shared by
+/// [`TxnOptions::expect_commit`], `api::head_commit`, the template's
+/// staleness cursor and the compaction commit gate.
+pub(crate) fn head_on(conn: &Connection) -> Result<i64, DbError> {
+    Ok(
+        conn.query_row("SELECT COALESCE(max(id), 0) FROM \"commit\"", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 /// One open → BEGIN → `commit` row → closure → COMMIT → close cycle. Shared by
 /// [`with_write_txn`] (once) and [`with_write_txn_retrying`] (per attempt); a
 /// fresh RW connection and a fresh `commit` row are used every call, so a
 /// rolled-back attempt leaves no orphan commit (VMP Part 5).
-fn run_txn_once<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> Result<T, DbError>
+fn run_txn_once<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    f: F,
+) -> Result<T, DbError>
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
@@ -182,6 +224,16 @@ where
     // the rollback) whether the file is a nodal-db database at all.
     let mut commit_insert_failed = false;
     let result = (|| {
+        // The staleness precondition (TxnOptions docs): after BEGIN, before
+        // the commit row, so a refusal leaves no orphan commit and uses no
+        // sequence value. A failing probe marks the commit-table check too:
+        // on a non-nodal-db file it is the first statement to hit `commit`.
+        if let Some(expected) = txn.expect_commit {
+            let found = head_on(&conn).inspect_err(|_| commit_insert_failed = true)?;
+            if found != expected {
+                return Err(DbError::Stale { expected, found });
+            }
+        }
         let commit_id: i64 = conn
             .query_row(
                 "INSERT INTO commit (user, message) VALUES (?, ?) RETURNING id",
@@ -305,8 +357,25 @@ pub fn with_write_txn_retrying<T, F>(
 where
     F: Fn(&Connection, i64) -> Result<T, DbError>,
 {
+    with_write_txn_retrying_opts(db_path, user, message, TxnOptions::default(), f)
+}
+
+/// [`with_write_txn_retrying`] with transaction-level options ([`TxnOptions`]).
+/// Every attempt re-runs the checks, so a conflict retry re-checks
+/// `expect_commit` against the head inside its own fresh transaction. A
+/// [`DbError::Stale`] is returned on the attempt that sees it, never retried.
+pub fn with_write_txn_retrying_opts<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
     for attempt in 1..=MAX_CONFLICT_ATTEMPTS {
-        match run_txn_once(db_path, user, message, &f) {
+        match run_txn_once(db_path, user, message, txn, &f) {
             Ok(value) => return Ok(value),
             Err(e) if is_conflict(&e) => {
                 if attempt == MAX_CONFLICT_ATTEMPTS {

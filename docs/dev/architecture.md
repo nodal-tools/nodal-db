@@ -317,6 +317,21 @@ much, starving every commit. So everything is open → work → close:
 - Change detection is **commit polling**: a poller makes a short
   read-only query of the newest commit id between writer commits. There
   is no notification channel and no long-lived watcher connection.
+- **Optimistic concurrency is a write option, not a poll.** A writer that
+  read the database at commit `c` and wants to write only if nobody
+  committed since passes `WriteOptions::expect_commit = Some(c)` (the
+  `api` entry points; `conn::TxnOptions` for a raw transaction). The check
+  runs inside the write transaction, right after `BEGIN` and before the
+  `commit` row: if the head (`COALESCE(max(id), 0)`) is not exactly `c`,
+  the transaction rolls back and the call fails with `DbError::Stale
+  { expected, found }`, with nothing written, no commit row and no
+  sequence value used. The rule is `!=`, so a file replaced or restored
+  under the caller (head below `c`) is stale too; compaction preserves
+  commit ids and never is. The check and the write share one transaction
+  under the exclusive file lock and the per-path mutex, so no commit can
+  land between them; a separate pre-commit poll could not give that.
+  `Stale` is never retried. The template apply's plan→apply guard
+  (`ApplyOptions::expect_commit`) uses the same check.
 - Contention is *defined behavior*: bounded-backoff retry, surfacing as
   `DbError::Busy` rather than a panic or hang. The write-conflict retry
   matches on the `Conflict` substring, because DuckDB's exact message

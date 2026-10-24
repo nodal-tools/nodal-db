@@ -585,6 +585,48 @@ To detect new commits, poll the newest commit id with a short read:
 SELECT max(id) FROM "commit";
 ```
 
+To write only if nobody else has committed since you read, pass the
+commit id you read as `expect_commit`. The core checks it inside the
+write transaction, so no other commit can slip in between the check and
+the write. If the database has moved on, nothing is written and the call
+fails with `Stale`:
+
+=== "Python"
+
+    ```python
+    head = db.head_commit()
+    # ... read, compute ...
+    try:
+        db.write_parameter("unit", "capacity", "Base", batch, user="alice",
+                           expect_commit=head)
+    except nodal_db.Stale as e:
+        print(f"someone committed: expected {e.expected}, found {e.found}")
+    ```
+
+    `write_parameter`, `commit_changes`, `commit_structural` and
+    `delete_values` take `expect_commit`. `Stale` is a subclass of
+    `ApiError`.
+
+=== "Rust"
+
+    ```rust
+    let head = api::head_commit(db_path)?;
+    let opts = WriteOptions { expect_commit: Some(head), ..Default::default() };
+    match api::commit_changes(db_path, segments, vec![], vec![], vec![],
+                              "alice", "", opts) {
+        Err(DbError::Stale { expected, found }) => { /* reload, re-apply */ }
+        other => { other?; }
+    }
+    ```
+
+    Every `api` write entry point honors `WriteOptions::expect_commit`.
+    `history::write_value` ignores it; inside a raw
+    `conn::with_write_txn_retrying_opts`, pass `TxnOptions`.
+
+The check is an exact match: a head *below* the expected id (the file was
+replaced or restored from a backup) is also `Stale`. Compaction keeps
+commit ids, so it never makes a write stale.
+
 Expect contention. A writer that cannot get the lock fails with a
 defined error (`DbError::Busy` in Rust, `nodal_db.Busy` in Python) after
 a bounded retry; a reader may briefly fail to open while a commit is in

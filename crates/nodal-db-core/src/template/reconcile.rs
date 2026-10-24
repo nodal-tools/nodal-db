@@ -86,7 +86,9 @@ use crate::api::{
     create_parameter_type, lookup_class_set, lookup_entity, lookup_entity_class, lookup_parameter,
     lookup_unit, lookup_value_list, parse_index_kind,
 };
-use crate::conn::{with_read, with_write_txn_retrying};
+use crate::conn::{
+    head_on, with_read, with_write_txn_retrying, with_write_txn_retrying_opts, TxnOptions,
+};
 use crate::error::DbError;
 use crate::history::{
     close_definition_default, drop_scalar_values_not_matching, literal_cols,
@@ -156,7 +158,9 @@ pub struct ApplyOptions {
     pub allow_downgrade: bool,
     /// Refuse unless the DB is exactly at this commit id (the id `plan`
     /// printed) — the plan→apply staleness guard. Re-verified inside the
-    /// final write transaction against the commits this apply itself made.
+    /// final write transaction against the commits this apply itself made
+    /// (`conn::TxnOptions`). A mismatch, outside or inside, is
+    /// `DbError::Stale`.
     pub expect_commit: Option<i64>,
 }
 
@@ -645,8 +649,9 @@ impl Drop for ApplyInFlight {
     }
 }
 
+/// The head commit id (`conn::head_on`: `COALESCE(max(id), 0)`).
 fn max_commit(conn: &Connection) -> Result<i64, DbError> {
-    Ok(conn.query_row("SELECT max(id) FROM commit", [], |r| r.get(0))?)
+    head_on(conn)
 }
 
 /// Read-only dry run: validate, snapshot the DB vocabulary, simulate any
@@ -835,13 +840,14 @@ pub fn apply(
     })?;
 
     // Staleness (review item 16): the caller pinned the plan's commit.
+    // A `DbError::Stale` (save_path_open_reduction plan D2): the same
+    // structural error a stale `WriteOptions::expect_commit` gives.
     if let Some(exp) = opts.expect_commit {
         if pre.commit != exp {
-            return Err(DbError::Api(format!(
-                "stale plan: the database is at commit {} but the plan was made at commit \
-                 {exp} — re-plan and re-apply",
-                pre.commit
-            )));
+            return Err(DbError::Stale {
+                expected: exp,
+                found: pre.commit,
+            });
         }
     }
 
@@ -1093,23 +1099,15 @@ pub fn apply(
     } else {
         message.to_string()
     };
-    let expect_inside = opts.expect_commit.map(|_| cursor);
-    let applied = with_write_txn_retrying(db, user, &msg, |conn, c| {
-        // Staleness re-check INSIDE the transaction (review item 16): the
-        // world outside our own commits must not have moved.
-        if let Some(expected) = expect_inside {
-            let outside: i64 = conn.query_row(
-                "SELECT max(id) FROM commit WHERE id <> ?",
-                params![c],
-                |r| r.get(0),
-            )?;
-            if outside != expected {
-                return Err(DbError::Api(format!(
-                    "stale plan: a concurrent commit ({outside}) appeared after the \
-                     expected commit {expected} — re-plan and re-apply"
-                )));
-            }
-        }
+    // Staleness re-check INSIDE the transaction (review item 16): the world
+    // outside our own commits must not have moved. `TxnOptions` checks the
+    // head after BEGIN and before this commit's row, so it must equal the
+    // cursor (our latest commit, or the pinned base); a mismatch is
+    // `DbError::Stale` (plan C6).
+    let txn = TxnOptions {
+        expect_commit: opts.expect_commit.map(|_| cursor),
+    };
+    let applied = with_write_txn_retrying_opts(db, user, &msg, txn, |conn, c| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
         let mut p = diff(&vocab, &chk)?;

@@ -74,6 +74,19 @@ impl DeclaredType {
 pub struct WriteOptions {
     pub force_replace: bool,
     pub retain_override: Option<bool>,
+    /// Optimistic-concurrency precondition: commit only if the database's
+    /// head commit is exactly this id (`conn::TxnOptions::expect_commit`),
+    /// else [`crate::error::DbError::Stale`] with nothing written. Honored
+    /// **only by the `api` entry points** (`commit_changes` and its
+    /// wrappers `write_parameter`, `ingest_segments`, `delete_values`,
+    /// `commit_structural`, `delete_objects`), which map it into the
+    /// transaction. This struct is also passed per value to
+    /// `history::write_value` / `delete_value`, where the field means
+    /// nothing: a caller that drives `conn::with_write_txn` + `write_value`
+    /// directly gets it silently ignored (use
+    /// `conn::with_write_txn_retrying_opts` there). `None` (the default):
+    /// no check.
+    pub expect_commit: Option<i64>,
 }
 
 /// A value's identity key. OPEN-7 (jkiviluo, 2026-08-17) folds this into the

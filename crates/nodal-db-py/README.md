@@ -132,8 +132,11 @@ Contract (the core's Layer-3 rules, surfaced verbatim):
 One hierarchy, mapped 1:1 from the core's `DbError` (message text is the
 core's own): `NodalDbError` (base) with `Busy`, `Conflict`, `ApiError`,
 `VersionTooOld`, `SchemaError`, `DatabaseError`, `CanonError`,
-`ArrowError`, `InternalError`. `Busy` and `Conflict` are defined,
-retryable outcomes, never hangs.
+`ArrowError`, `InternalError`, and `Stale` (a subclass of `ApiError`).
+`Busy` and `Conflict` are defined, retryable outcomes, never hangs.
+`Stale` is raised when a write's `expect_commit=` precondition fails
+(someone committed since the caller read `head_commit()`); nothing was
+written, and it carries `expected` and `found` as attributes.
 
 ## Arrow interop and version coupling
 

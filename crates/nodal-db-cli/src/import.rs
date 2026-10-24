@@ -165,6 +165,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     let opts = WriteOptions {
         force_replace: args.force_replace,
         retain_override: None,
+        expect_commit: None,
     };
     let n_segments = segments.len();
     let report =

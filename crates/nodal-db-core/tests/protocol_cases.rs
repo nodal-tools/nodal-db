@@ -188,6 +188,7 @@ fn run_case(path: &std::path::Path) {
         let opts = WriteOptions {
             force_replace: step.force_replace,
             retain_override: None,
+            expect_commit: None,
         };
         let value = build_value(&step.op);
         let commit_id = with_write_txn(&db, "tester", "protocol step", |conn, c| {

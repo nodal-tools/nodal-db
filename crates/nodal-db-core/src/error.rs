@@ -56,6 +56,19 @@ pub enum DbError {
     #[error("write conflict: transaction still lost the race after {attempts} retries")]
     Conflict { attempts: u32 },
 
+    /// The caller's base-version precondition failed: the write was made
+    /// with `expect_commit = Some(expected)` (`WriteOptions` /
+    /// `conn::TxnOptions`, or the template's `ApplyOptions`), but the
+    /// database's head commit is `found`. Checked inside the write
+    /// transaction, before the commit row, so nothing was written. Its own
+    /// variant so callers can match it structurally: it is neither a
+    /// `Conflict` (never retried) nor an `Api` contract error.
+    #[error(
+        "stale: the database is at commit {found}, expected {expected} \
+         — reload and re-apply"
+    )]
+    Stale { expected: i64, found: i64 },
+
     /// The public write API (`api::write_parameter` / `api::ingest_segments`)
     /// was handed a batch it cannot interpret — wrong column count, a
     /// non-string entity column, an unsupported Arrow type for a dimension or

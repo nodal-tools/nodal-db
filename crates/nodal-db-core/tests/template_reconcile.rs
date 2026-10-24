@@ -1166,7 +1166,10 @@ fn stale_plan_is_refused_via_expect_commit() {
         ..Default::default()
     };
     let err = apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts).unwrap_err();
-    assert!(err.to_string().contains("stale plan"), "{err}");
+    assert!(
+        matches!(err, nodal_db_core::error::DbError::Stale { expected, .. } if expected == p.db_commit),
+        "{err:?}"
+    );
 
     // Re-plan → apply with the fresh commit id succeeds.
     let p2 = plan(&db, &t).unwrap();

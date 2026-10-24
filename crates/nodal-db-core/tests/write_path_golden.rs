@@ -268,6 +268,7 @@ fn key(e: i64) -> ValueKey {
 const FORCE: WriteOptions = WriteOptions {
     force_replace: true,
     retain_override: None,
+    expect_commit: None,
 };
 
 /// One commit of direct `write_value` / `delete_value` steps.
@@ -860,6 +861,7 @@ fn api_scalar_batches(db: &Path, log: &mut String) {
         WriteOptions {
             force_replace: true,
             retain_override: None,
+            expect_commit: None,
         },
         log,
     );

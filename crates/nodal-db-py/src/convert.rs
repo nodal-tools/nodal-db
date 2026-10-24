@@ -27,7 +27,7 @@ use nodal_db_core::types::{
 
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, DatabaseError, InternalError, SchemaError,
-    VersionTooOld,
+    Stale, VersionTooOld,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -38,6 +38,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::Busy { .. } => Busy::new_err(msg),
         DbError::Conflict { .. } => Conflict::new_err(msg),
         DbError::Api(_) => ApiError::new_err(msg),
+        DbError::Stale { expected, found } => stale_err(msg, expected, found),
         DbError::VersionTooOld { .. } => VersionTooOld::new_err(msg),
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::Duckdb(_) => DatabaseError::new_err(msg),
@@ -47,6 +48,18 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
             InternalError::new_err(msg)
         }
     }
+}
+
+/// A `Stale` exception carrying `expected` / `found` as attributes.
+fn stale_err(msg: String, expected: i64, found: i64) -> PyErr {
+    let err = Stale::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message carries both ids in any case.
+        let _ = v.setattr("expected", expected);
+        let _ = v.setattr("found", found);
+    });
+    err
 }
 
 // ---------------------------------------------------------------------------

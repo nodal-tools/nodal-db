@@ -42,7 +42,7 @@ use duckdb::{params, Connection};
 
 use crate::axis::AxisCache;
 use crate::canon::{canonicalize, LabelDomain};
-use crate::conn::{with_read, with_write_txn_retrying};
+use crate::conn::{head_on, with_read, with_write_txn_retrying_opts, TxnOptions};
 use crate::error::DbError;
 use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
@@ -280,7 +280,13 @@ pub fn commit_changes(
     // --- The atomic, retried commit. Everything below re-reads/re-creates DB
     // state inside a fresh transaction on each retry (VMP Part 5), so the axis
     // cache is built HERE, not outside (a rollback must not leave stale ids). ---
-    with_write_txn_retrying(db, user, message, |conn, commit_id| {
+    // `opts.expect_commit` is the transaction's staleness precondition: the
+    // head is checked after BEGIN and before the commit row, on every
+    // conflict-retry attempt (save_path_open_reduction plan §2.1).
+    let txn = TxnOptions {
+        expect_commit: opts.expect_commit,
+    };
+    with_write_txn_retrying_opts(db, user, message, txn, |conn, commit_id| {
         // One axis cache across all segments: axes are immutable and
         // content-verified, so cross-segment reuse within one txn is sound.
         let mut cache = AxisCache::new();
@@ -648,8 +654,8 @@ fn apply_deletes(
             },
         };
         let resolved_opts = WriteOptions {
-            force_replace: opts.force_replace,
             retain_override: Some(effective_retain),
+            ..opts
         };
         resolved.push(DeleteResolution::Key(round.len()));
         round.push(DeleteWrite {
@@ -990,8 +996,8 @@ fn write_prepared(
     // write to a retain_content=FALSE definition would silently keep payloads.
     let effective_retain = opts.retain_override.unwrap_or(retain_content);
     let resolved_opts = WriteOptions {
-        force_replace: opts.force_replace,
         retain_override: Some(effective_retain),
+        ..opts
     };
 
     // Every entity of the segment is resolved up front in one set-based
@@ -1224,6 +1230,16 @@ pub fn read_parameter(
         let batches: Vec<RecordBatch> = arrow.collect();
         Ok(concat_batches(&schema, &batches)?)
     })
+}
+
+/// The database's head commit id: `COALESCE(max(commit.id), 0)`, read on one
+/// per-operation RO connection (CLAUDE.md invariant 1). Quote it to
+/// [`WriteOptions::expect_commit`] for an atomic read → compute → write-only-
+/// if-nobody-committed cycle. Compaction preserves commit ids, so a repack
+/// never moves the head; every commit (any writer, any process) and an
+/// erasure (its marker commit) do.
+pub fn head_commit(db: &Path) -> Result<i64, DbError> {
+    with_read(db, head_on)
 }
 
 /// The database's stable identity UUID — the `db_identity` reserved metadata

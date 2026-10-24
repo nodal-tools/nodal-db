@@ -1441,6 +1441,7 @@ fn t9_asof_refusals() {
         WriteOptions {
             force_replace: true,
             retain_override: None,
+            expect_commit: None,
         },
         "t",
         "replace without keeping content",

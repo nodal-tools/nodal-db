@@ -1369,3 +1369,47 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
     }
     assert_audits_clean(&db);
 }
+
+/// The D9 refusal on the resolved ids (`apply_deletes`), not only on the
+/// Rust name fold: Rust folds `"ΑΣ"` to `"ας"` (final sigma) and keeps it
+/// apart from `"ασ"`, but DuckDB's `lower()` resolves both to one entity.
+/// The pure check misses the pair, so the in-transaction check must refuse
+/// it, for a changed and for an identical write alike, with nothing
+/// written.
+#[test]
+fn a_write_and_delete_resolving_to_one_key_are_refused() {
+    let (_d, db) = fresh_db();
+    commit_changes(
+        &db,
+        vec![seg("s", "Base", scalar_batch("ΑΣ", 1.0))],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "seed",
+        WriteOptions::default(),
+    )
+    .expect("seed");
+    for v in [2.0, 1.0] {
+        let before = table_counts(&db);
+        let head = head_commit(&db).unwrap();
+        let err = commit_changes(
+            &db,
+            vec![seg("s", "Base", scalar_batch("ΑΣ", v))],
+            vec![],
+            vec![delete_key("s", "ασ")],
+            vec![],
+            "t",
+            "write+delete",
+            WriteOptions::default(),
+        )
+        .expect_err("a write and a delete resolving to one key");
+        assert!(
+            matches!(&err, DbError::Api(m) if m.contains("written and deleted in one call")),
+            "{v}: {err:?}"
+        );
+        assert_eq!(table_counts(&db), before, "{v}");
+        assert_eq!(head_commit(&db).unwrap(), head, "{v}: no commit");
+    }
+    assert_audits_clean(&db);
+}

@@ -244,7 +244,7 @@ re-profiled here.
 ## Columnar-bind write path (2026-10-23, DuckDB 2.0.0)
 
 `history` now binds each bulk column as ONE list parameter instead of one
-placeholder per cell (`specs/appender_write_path_PLAN.md`): the long
+placeholder per cell (`specs/Done/appender_write_path_PLAN.md`): the long
 insert is `INSERT … SELECT ?, unnest(?::T[]), …` per ≤ 16 384 cells, the
 array INSERT / replace UPDATE bind one `?::DOUBLE[]`, axis child rows
 are one statement per kind, and every hot-path write statement is
@@ -323,7 +323,7 @@ close ~20 ms) that the set-based write does not touch.
 
 `history::write_longs`, `write_arrays` and `delete_values` write a
 commit's long values, arrays and deletes in set-based rounds on the
-scalar skeleton (`specs/set_based_long_and_delete_PLAN.md`): one probe
+scalar skeleton (`specs/Done/set_based_long_and_delete_PLAN.md`): one probe
 per tier for the live state and the versions, one close-out per tier and
 retention mode, one insert (the long insert in the key-ordinal form,
 with every `unnest` in a FROM subquery; the array insert with

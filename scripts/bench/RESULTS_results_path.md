@@ -295,7 +295,7 @@ several times slower than 1.5.5.)
 The core now binds each bulk column as ONE list parameter: a long value
 is `INSERT … SELECT ?, unnest(?::T[]), …` per ≤ 16 384 cells, an array
 payload one `?::DOUBLE[]`, a materialized axis's child rows one such
-statement per kind (`specs/appender_write_path_PLAN.md`; the stored
+statement per kind (`specs/Done/appender_write_path_PLAN.md`; the stored
 rows are byte-identical, pinned by `tests/write_path_golden.rs`).
 Measured with `results_path.rs` (`dense10k-ipc long bindprobe`, full
 scale, one run) on 2026-10-23: the AMD Ryzen 9 5900XT host, shared, load
@@ -586,7 +586,7 @@ by these end-to-end figures.
 `cargo bench -p nodal-db-cli --bench results_path -- long`, full scale,
 two runs per arm, run back to back on the same host (load average
 4.6-5.3): old = `ee3f369` (per-key long writer), new = the set-based
-long write (`specs/set_based_long_and_delete_PLAN.md`; the long insert
+long write (`specs/Done/set_based_long_and_delete_PLAN.md`; the long insert
 moved its `unnest`s into a FROM subquery).
 
 | Shape / lane | old | new | ratio |

@@ -29,6 +29,30 @@ Adopted from flextool-engine's hard-won lessons:
    (e.g. a faster path replacing a reference path), keep the reference as an
    oracle and gate the new path with equality/tolerance parity tests.
 
+## Write-path equivalence check
+A change to the write path that is meant to leave the stored data alone
+(a refactor, a performance change) is checked against the code before it
+with `scripts/check/write_equivalence/check.py`, the randomized
+counterpart of the write-path golden (`tests/write_path_golden.rs`):
+
+```
+python3 scripts/check/write_equivalence/check.py OLD_REV [NEW_REV|WORKTREE] \
+    [--seeds 1,2,3] [--commits 100] [--big]
+```
+
+It builds the workload crate next to it against the core of each
+revision (release, one shared target directory, binaries cached per
+commit), runs the same seeded random API workload with both (segments of
+every tier and value kind under several class and alternative spellings,
+structural creates, value deletes with misses and duplicates, erasure,
+direct `history` writes) and compares every commit's report or error and
+every row of every table, apart from the commit timestamps and the
+`db_identity` row. It exits non-zero on the first difference and prints
+it. The first build compiles the bundled DuckDB (minutes); a run of three
+seeds at the default 100 commits takes a few minutes more. `--big` adds
+rounds that cross the write path's chunk and round thresholds (slower).
+The workload uses API present since `73e70d6`.
+
 ## PR checklist
 To be defined with the first release process.
 

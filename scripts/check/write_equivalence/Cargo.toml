@@ -1,0 +1,16 @@
+# Randomized write-path equivalence workload: built against two cores and
+# driven by check.py, which diffs the two outputs. Not a workspace member.
+[package]
+name = "write_equivalence"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: keeps it out of the repository workspace.
+[workspace]
+
+[dependencies]
+# check.py copies this directory into an extracted tree of each revision
+# (`git archive <rev>`) at the same relative place, so this path points at
+# that revision's core.
+nodal-db-core = { path = "../../../crates/nodal-db-core" }

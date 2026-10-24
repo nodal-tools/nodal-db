@@ -37,7 +37,7 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace
 
-      # Quick gate, half 2: schema smoke (expects 212/212), on the venv's
+      # Quick gate, half 2: schema smoke (expects 223/223), on the venv's
       # DuckDB pinned to the line the schema is verified on (2.0.0).
       - name: schema smoke test
         run: .venv/bin/python schema/smoke_test.py

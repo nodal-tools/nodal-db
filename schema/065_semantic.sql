@@ -30,4 +30,3 @@ CREATE TABLE semantic_annotation (
   cur_id BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL
 );
 CREATE UNIQUE INDEX one_current_semantic_annotation ON semantic_annotation (cur_id);
-CREATE INDEX ix_semantic_annotation_obj ON semantic_annotation (object_type, object_id);

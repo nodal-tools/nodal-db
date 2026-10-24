@@ -97,6 +97,13 @@ CREATE TABLE entity (
 CREATE UNIQUE INDEX one_current_entity ON entity (cur_id);
 -- Base/base collisions impossible within a class (#1302):
 CREATE UNIQUE INDEX uq_entity_name ON entity (cur_cls, cur_name);
+-- Access path for single-name entity lookups (not integrity: uq_entity_name
+-- is). DuckDB 2.0 scans through an index only when the scan carries no
+-- other filter, so lookups query it behind a fence:
+--   SELECT … FROM (SELECT … FROM entity WHERE lower(name) = lower(?) OFFSET 0)
+--   WHERE entity_class_id = ? AND valid_to_commit IS NULL
+-- Guard: crates/nodal-db-core/tests/entity_name_index_scan.rs.
+CREATE INDEX ix_entity_lname ON entity (lower(name));
 
 -- N-D entity membership (SDP Part 1 `entity_element`, carried as-is).
 -- Plan intent: FK-enforced so importing over missing members fails (#1015).

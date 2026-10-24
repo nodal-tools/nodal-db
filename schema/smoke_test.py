@@ -61,6 +61,24 @@ def payload_scans(plan):
     return out
 
 
+def table_scan_types(plan, table):
+    """Scan types of every TABLE_SCAN of `table` in an EXPLAIN (ANALYZE,
+    FORMAT json) plan."""
+    out = []
+
+    def walk(node):
+        info = node.get("extra_info") or {}
+        if node.get("type") == "TABLE_SCAN" and \
+                str(info.get("Table", "")).split(".")[-1] == table:
+            out.append(info.get("Type"))
+        for ch in node.get("children", []):
+            walk(ch)
+
+    for root in (plan.get("operator", [plan]) if isinstance(plan, dict) else plan):
+        walk(root)
+    return out
+
+
 def nextval(con, seq):
     return con.execute(f"SELECT nextval('{seq}')").fetchone()[0]
 
@@ -401,6 +419,50 @@ def main():
         " WHERE database_name = current_database()").fetchone()[0]
     check("storage format: built file is native DuckDB 2.0 (v2.0.0+)",
           tag == "v2.0.0+", str(tag))
+
+    # ---- plain (non-unique) indexes: access paths, not integrity. DuckDB 2.0
+    # scans through an index only for a lone filter on a single-key index
+    # (name_index_and_unused_indexes_PLAN.md §1), so every plain index must be
+    # a deliberate, guarded choice: a new one needs an edit here.
+    plain = {r[0] for r in con.execute(
+        "SELECT index_name FROM duckdb_indexes() WHERE NOT is_unique").fetchall()}
+    check("index census: plain indexes are exactly axis_hash, ix_entity_lname,"
+          " ix_run_result_alt",
+          plain == {"axis_hash", "ix_entity_lname", "ix_run_result_alt"},
+          str(sorted(plain)))
+
+    # ---- ix_entity_lname is used only behind the OFFSET 0 fence. A realistic
+    # fixture (2 classes, a closed-out row) so statistics cannot drop the
+    # class/current filters; the unfenced form is the negative control. The
+    # Rust guard (tests/entity_name_index_scan.rs) checks the production SQL.
+    lpath = workdir / "smoke_lname.duckdb"
+    schema_build.build(str(lpath), force=True)
+    lc = duckdb.connect(str(lpath))
+    lc.execute("""INSERT INTO commit ("user", message) VALUES ('smoke', 'a'), ('smoke', 'b')""")
+    c_a, c_b = [r[0] for r in lc.execute(
+        "SELECT id FROM commit ORDER BY id DESC LIMIT 2").fetchall()][::-1]
+    lc.execute("INSERT INTO entity_class (name, valid_from_commit) VALUES ('ca', ?), ('cb', ?)",
+               [c_a, c_a])
+    k1, k2 = [r[0] for r in lc.execute(
+        "SELECT id FROM entity_class WHERE name IN ('ca', 'cb') ORDER BY name").fetchall()]
+    lc.execute("INSERT INTO entity (entity_class_id, name, valid_from_commit)"
+               " SELECT CASE WHEN i % 2 = 0 THEN ? ELSE ? END, 'E' || i, ? FROM range(200) t(i)",
+               [k1, k2, c_a])
+    lc.execute("UPDATE entity SET valid_to_commit = ? WHERE name = 'E10'", [c_b])
+    fenced = ("SELECT id FROM (SELECT id, entity_class_id, valid_to_commit FROM entity"
+              " WHERE lower(name) = lower(?) OFFSET 0)"
+              " WHERE entity_class_id = ? AND valid_to_commit IS NULL")
+    unfenced = ("SELECT id FROM entity WHERE lower(name) = lower(?)"
+                " AND entity_class_id = ? AND valid_to_commit IS NULL")
+    f_scans = table_scan_types(json.loads(lc.execute(
+        f"EXPLAIN (ANALYZE, FORMAT json) {fenced}", ["e42", k1]).fetchall()[0][1]), "entity")
+    u_scans = table_scan_types(json.loads(lc.execute(
+        f"EXPLAIN (ANALYZE, FORMAT json) {unfenced}", ["e42", k1]).fetchall()[0][1]), "entity")
+    lc.close()
+    check("ix_entity_lname: fenced name lookup is an Index Scan, unfenced is not"
+          " (2 classes, closed-out row)",
+          f_scans == ["Index Scan"] and bool(u_scans) and "Index Scan" not in u_scans,
+          f"fenced={f_scans} unfenced={u_scans}")
 
     # ---- DB-identity UUID (schema_interop.md §9): minted once at init by
     # 900_bootstrap.sql. Captured BEFORE any writes; asserted well-formed here,

@@ -87,7 +87,7 @@ Design points:
 
 The [schema page](../schema.md) shows the generated table diagram.
 
-The schema is verified by `schema/smoke_test.py` (221 checks), which
+The schema is verified by `schema/smoke_test.py` (223 checks), which
 includes hostile-data regressions: it plants corruptions and asserts
 that the right constraint or audit fires. Run it with the project-local
 `.venv/bin/python`; its DuckDB version must match the engine bundled in
@@ -458,7 +458,7 @@ make a compaction on the commit path fail on it.
 Three legs, run through `just` (`just` is the quick gate, `just full`
 the release gate that adds the `#[ignore]`d slow tests and benchmarks):
 
-1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 221
+1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 223
    checks): builds a demo model, exercises resolution, membership,
    history and audits, then plants hostile-data corruptions and asserts
    that the right constraint or audit fires.

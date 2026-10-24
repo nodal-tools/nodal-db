@@ -34,9 +34,9 @@ CREATE TABLE value_scalar (
   ca BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL
 );
 CREATE UNIQUE INDEX one_current_scalar ON value_scalar (ce, cp, ca);
--- ART index on the key triple — required for the point-read budget (VMP Part 6):
-CREATE INDEX ix_value_scalar_triple
-  ON value_scalar (entity_id, parameter_definition_id, alternative_id);
+-- No key-triple access index: DuckDB 2.0 never scans through a multi-column
+-- index; point probes are zone-map-pruned sequential scans (VMP Part 6 as
+-- amended 2026-10-24).
 
 -- Tier L, rank 1–4: long indexed. Many rows per value; axis-grounded
 -- (critique #6): every dimension binds an axis, index identity is the
@@ -86,8 +86,6 @@ CREATE TABLE value_long (
   c4 INTEGER GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN i4_pos END) VIRTUAL
 );
 CREATE UNIQUE INDEX one_current_long ON value_long (ce, cp, ca, c1, c2, c3, c4);
-CREATE INDEX ix_value_long_triple
-  ON value_long (entity_id, parameter_definition_id, alternative_id);
 
 -- Tier A: dense float arrays. Current table holds ONLY live rows (the
 -- hottest scan surface physically cannot degrade — VMP Part 5); history in
@@ -157,8 +155,6 @@ CREATE TABLE value_array_hist (
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
   CHECK (valid_to_commit > valid_from_commit)   -- span coherence (critique F2)
 );
-CREATE INDEX ix_value_array_hist_triple
-  ON value_array_hist (entity_id, parameter_definition_id, alternative_id);
 
 -- ---------------------------------------------------------------------------
 -- default_value / prefill_value mirrors (#1598; VMP Part 3 end): same three

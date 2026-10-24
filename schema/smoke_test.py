@@ -725,6 +725,10 @@ def main():
     except duckdb.ConstraintException:
         con.execute("ROLLBACK")
         check("one-current index rejects duplicate current row", True)
+    # key order is a size decision (see the one_current_long order check)
+    order = unique_index_order(con, "one_current_scalar")
+    check("index key order: one_current_scalar is (ca, cp, ce)",
+          order == "[ca, cp, ce]", str(order))
 
     # one_current_long enforces the same tuple set in any column order: a
     # second current cell with the same (e, p, a, i1..i4) is rejected; a cell

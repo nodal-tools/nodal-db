@@ -33,7 +33,9 @@ CREATE TABLE value_scalar (
   cp BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_definition_id END) VIRTUAL,
   ca BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL
 );
-CREATE UNIQUE INDEX one_current_scalar ON value_scalar (ce, cp, ca);
+-- Column order is a size decision (see one_current_long): the alternative
+-- (few distinct values) leads, the entity (highest fan-out) trails.
+CREATE UNIQUE INDEX one_current_scalar ON value_scalar (ca, cp, ce);
 -- No key-triple access index: DuckDB 2.0 never scans through a multi-column
 -- index; point probes are zone-map-pruned sequential scans (VMP Part 6 as
 -- amended 2026-10-24).

@@ -121,7 +121,7 @@ fn spike_bundled_duckdb_matches_144_semantics() {
     )
     .expect("first current scalar row");
     // Second *current* row (valid_to_commit NULL) for the same key triple must
-    // violate one_current_scalar (ce, cp, ca).
+    // violate one_current_scalar (ca, cp, ce).
     let dup = conn.execute(
         "INSERT INTO value_scalar
            (entity_id, parameter_definition_id, alternative_id,

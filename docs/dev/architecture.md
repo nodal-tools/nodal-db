@@ -402,7 +402,7 @@ as they are, and `audit_history_tiling` is horizon-aware per key.
 DuckDB's single-file storage never shrinks the file, so
 `compaction::compact` rebuilds it: create a fresh temporary database
 with the schema, attach the original read-only, copy every base table in
-foreign-key order (clustered with current rows first), restore sequence
+foreign-key order (clustered with current rows first, see below), restore sequence
 state, run a full-content self-check, fsync, and atomically rename over
 the original. It is non-destructive (all history, commits and axes
 survive at the query level) and crash-safe by construction: the original
@@ -448,6 +448,43 @@ per-save caller holds a `compaction::CompactionBackoff`, which skips the
 gate for `max(5, N/5)` commits after a failure instead of retrying a
 1-9 s repack on every save. `compact_if_needed` is the byte gate alone,
 kept for compatibility.
+
+**Clustering order.** The copy sorts every versioned table by
+`(valid_to_commit IS NULL) DESC, valid_to_commit, <keys>,
+valid_from_commit` (`rebuild::cluster_order`): the current rows form one
+contiguous prefix in key order (they all tie on a NULL `valid_to_commit`),
+and the closed rows follow, grouped by the commit that closed them. The
+first cut sorted the closed rows by key, which interleaves the versions of
+every cell. On a history-heavy long table that made compaction *grow* the
+file (1.81 → 2.94 GB at 228 M rows), for two reasons. DuckDB keeps a
+hidden persistent index (an ART) for every `REFERENCES` constraint, not
+listed in `duckdb_indexes()`, and with one commit's row ids scattered the
+two commit-FK indexes of `value_long` grew about 9×. And the commit
+columns and `version` lost their run-length encoding. By close commit,
+the same file compacts to 1.38 GB. The trade: a closed row no longer sits
+next to the other versions of its cell, so key-filtered history reads
+prune less, and the closed rows gain min/max pruning on
+`valid_to_commit`. The size is pinned by
+`tests/compaction.rs::compact_shrinks_history_heavy_long_table` and
+measured by `benches/compaction_size.rs`.
+
+**Size guard.** Before the swap, the rebuilt file's on-disk size (after
+its checkpoint and close, so its WAL is empty) is compared with the
+source's. If it is not smaller, an automatic trigger (`compact_if_due`,
+`compact_if_needed`) keeps the original, deletes the temporary file, and
+still resets the baseline to the original's size and the head, so the
+commit backstop waits another `N` commits instead of repeating the
+repack on every save. The report says `swapped: false`,
+`kept_original: true`, with the discarded size in `bytes_rebuilt` and a
+`warning`. Keeping the original is the same path as a failed
+self-check: the original is never written. An explicit
+`compaction::compact` (the CLI's `maintain compact` without
+`--if-needed`, Python's `compact()`) swaps anyway and sets `warning`.
+
+A full compaction of a very large history-heavy file takes minutes
+(about 6 minutes at 1.4 GB, 228 M long rows), most of it the per-row
+foreign-key checks of the copy. A per-save caller must not run
+`compact_if_due` on its UI thread.
 
 The history-free extract (`extract::extract`, CLI `nodal-db extract`)
 uses the same rebuild machinery (the crate-private `rebuild` module) to

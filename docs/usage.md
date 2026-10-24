@@ -506,6 +506,22 @@ $ nodal-db maintain compact demo.duckdb --if-needed
 demo.duckdb: no compaction needed (10.8 MiB; below the growth and commit thresholds)
 ```
 
+A compaction usually makes the file smaller, but it does not have to: a
+file that was compacted recently and has had few commits since is already
+densely packed. With `--if-needed`, if the rebuilt file is not smaller,
+nodal-db keeps the original file, prints a warning, and still records the
+size and commit, so it does not try again until the next threshold. The
+Python report then has `kept_original: True` and the rebuilt size in
+`bytes_rebuilt`. A plain `nodal-db maintain compact` (or `db.compact()`)
+always replaces the file, because you asked for it, and prints a warning
+when the result is not smaller. That is rare; the warning is there so
+that you notice it.
+
+On a very large database with a long history, a compaction takes minutes
+(about six minutes for a 1.4 GB file with 228 million long-table rows).
+It holds the database lock for that time, so run it when nobody needs to
+write.
+
 !!! note "Identity after swapping files"
     An extract is a new database with its own identity. If you replace
     your working file with its extract (extract, check the result, then

@@ -24,9 +24,11 @@
 //!     payload is keyed by the row's `array_id` (resolved narrowly by the key
 //!     triple in `live_tier`), so DuckDB serves it with an index scan instead
 //!     of scanning the payload of the whole table. `array_id` is a physical row
-//!     handle, never canonical content: minted by the column DEFAULT on INSERT,
-//!     never updated, copied verbatim into `_hist`; a delete or tier
-//!     transition followed by a re-insert mints a new one.
+//!     handle, never canonical content: minted by its sequence
+//!     (`seq_value_array`, through the column DEFAULT for a one-key write,
+//!     pre-minted and assigned in input order for a set-based round), never
+//!     updated, copied verbatim into `_hist`; a delete or tier transition
+//!     followed by a re-insert mints a new one.
 //!
 //! **Version counter (VMP Part 5, `audit_history_tiling`)**: the new version is
 //! `max(existing versions for the key) + 1`, scoped to the tier-partition the
@@ -77,6 +79,19 @@
 //! API defers a commit's long values into one such call, with their axes
 //! resolved at buffer time; [`write_value`] delegates a long value with
 //! N = 1, which keeps the point probe and close-out statements.
+//!
+//! **Set-based array write (set_based_long_and_delete_PLAN §3.3)**: the array
+//! tier has one writer, [`write_arrays`], on the same skeleton: per round
+//! (≤ `LONG_INSERT_CHUNK` keys and ≤ `ARRAY_ROUND_ELEMENTS` payload
+//! elements, or one larger value) the three live probes and one version
+//! probe over `value_array` ∪ `value_array_hist`; for the keys whose
+//! precedence tier is array, the pre-image copy by `array_id` and one
+//! UPDATE in place with a nested `?::DOUBLE[][]` payload; for the others
+//! one INSERT whose `array_id`s are pre-minted from the sequence, sorted
+//! and assigned in input order (so they are exactly the ids sequential
+//! inserts mint, with no reliance on insert or RETURNING order). The API
+//! defers a commit's arrays like its long values; [`write_value`]
+//! delegates with N = 1, which keeps today's per-key statements.
 //!
 //! **Set-based delete (set_based_long_and_delete_PLAN §3.4)**: deletes have
 //! one implementation, [`delete_values`]: per round, the three live probes
@@ -147,8 +162,8 @@ pub fn write_value(
     // the caller's cache (plan D8: dedup reports created vs reused). ---
     let (axis_ids, axes_created, axes_reused) = resolve_axes(conn, cache, &value.axes)?;
 
-    // --- 2. A long value goes through the one set-based long writer with
-    // N = 1 (set_based_long_and_delete_PLAN §3.2). ---
+    // --- 2. A long or array value goes through the one set-based writer
+    // of its tier with N = 1 (set_based_long_and_delete_PLAN §3.2-3.3). ---
     if value.tier == Tier::Long {
         let w = LongWrite {
             key,
@@ -162,44 +177,17 @@ pub fn write_value(
         };
         return Ok(write_longs(conn, commit_id, std::slice::from_ref(&w))?[0]);
     }
-
-    // --- 3. Current state: which tier (if any) holds a live row for the key. ---
-    let current = live_tier(conn, &key)?;
-    let target = value.tier;
-
-    // --- 4. Tier transition: close out / move the OLD tier's current row. ---
-    let mut rows_closed = 0usize;
-    if let Some(cur) = current {
-        if cur.tier() != target {
-            rows_closed += close_out_tier(conn, &key, commit_id, cur, retained)?;
-        }
-    }
-
-    // --- 5. Write into the target tier. ---
-    let (version, rows_written, closed_same) = match (&value.shape, target) {
-        (ShapedData::Array(vals), Tier::Array) => write_array(
-            conn,
-            &key,
-            commit_id,
-            &axis_ids,
-            vals,
-            current.and_then(Live::array_id),
-            retained,
-            parameter_type_id,
-        )?,
-        // canon guarantees the shape matches the tier.
-        _ => unreachable!("shape/tier mismatch from canon"),
-    };
-    rows_closed += closed_same;
-
-    Ok(WriteOutcome {
-        tier: Some(target),
-        version,
-        rows_written,
-        rows_closed,
+    let w = ArrayWrite {
+        key,
+        value: Cow::Borrowed(value),
+        axis_ids,
         axes_created,
         axes_reused,
-    })
+        parameter_type_id,
+        retained,
+        entity_minted: false,
+    };
+    Ok(write_arrays(conn, commit_id, std::slice::from_ref(&w))?[0])
 }
 
 /// Delete the value currently live for `key` at `commit_id`: close-out on the
@@ -646,14 +634,6 @@ enum Live {
 }
 
 impl Live {
-    fn tier(self) -> Tier {
-        match self {
-            Live::Scalar => Tier::Scalar,
-            Live::Long => Tier::Long,
-            Live::Array(_) => Tier::Array,
-        }
-    }
-
     fn array_id(self) -> Option<i64> {
         match self {
             Live::Array(id) => Some(id),
@@ -1293,6 +1273,326 @@ fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u16, DbError>
             |r| r.get(0),
         )?;
     Ok(v as u16)
+}
+
+/// One key of a set-based array write (the array counterpart of
+/// [`LongWrite`]; see there for the fields).
+#[derive(Clone, Debug)]
+pub(crate) struct ArrayWrite<'a> {
+    pub(crate) key: ValueKey,
+    pub(crate) value: Cow<'a, CanonicalValue>,
+    pub(crate) axis_ids: Vec<i64>,
+    pub(crate) axes_created: usize,
+    pub(crate) axes_reused: usize,
+    pub(crate) parameter_type_id: Option<i64>,
+    pub(crate) retained: bool,
+    pub(crate) entity_minted: bool,
+}
+
+impl ArrayWrite<'_> {
+    fn vals(&self) -> &[f64] {
+        match &self.value.shape {
+            ShapedData::Array(vals) => vals,
+            // canon guarantees the shape matches the tier.
+            _ => unreachable!("array write of a non-array shape"),
+        }
+    }
+}
+
+/// Payload elements per set-based array round (plan D3): ~30 x 8 760, about
+/// 2 MB of f64 plus the bind's transient `Value`s. A larger value is a round
+/// of its own.
+pub(crate) const ARRAY_ROUND_ELEMENTS: usize = 262_144;
+
+/// Per key: the max version over its `value_array` and `value_array_hist`
+/// rows (the set form of `next_version_array`).
+const ARRAY_VERSION_SQL: &str = "SELECT v.entity_id, v.parameter_definition_id, v.alternative_id, \
+            max(v.version)::BIGINT \
+     FROM (SELECT entity_id, parameter_definition_id, alternative_id, version FROM value_array \
+           UNION ALL \
+           SELECT entity_id, parameter_definition_id, alternative_id, version \
+           FROM value_array_hist) v \
+     JOIN k ON v.entity_id = k.e AND v.parameter_definition_id = k.p \
+          AND v.alternative_id = k.a \
+     GROUP BY ALL";
+
+/// The replace-in-place of a round's live array rows, keyed by their
+/// `array_id` (which is never updated): the set form of `write_array`'s
+/// UPDATE, the payload bound as one nested `?::DOUBLE[][]` (one `DOUBLE[]`
+/// per key). Both payload columns are set, so a stale `values_int` cannot
+/// break the XOR.
+const ARRAY_UPDATE_SQL: &str =
+    "UPDATE value_array SET valid_from_commit = ?, version = u.version, \
+       parameter_type_id = u.pt, axis1_id = u.a1, axis2_id = u.a2, axis3_id = u.a3, \
+       axis4_id = u.a4, values = u.vals, values_int = NULL, v_min = u.mn, v_max = u.mx \
+     FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::SMALLINT[]) AS version, \
+             unnest(?::BIGINT[]) AS pt, unnest(?::BIGINT[]) AS a1, unnest(?::BIGINT[]) AS a2, \
+             unnest(?::BIGINT[]) AS a3, unnest(?::BIGINT[]) AS a4, \
+             unnest(?::DOUBLE[][]) AS vals, unnest(?::DOUBLE[]) AS mn, \
+             unnest(?::DOUBLE[]) AS mx) u \
+     WHERE value_array.array_id = u.id";
+
+/// The insert of a round's new array rows with their pre-minted `array_id`s
+/// (critique C3): the set form of `write_array`'s INSERT.
+const ARRAY_INSERT_SQL: &str = "INSERT INTO value_array \
+       (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+        valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id, \
+        values, values_int, v_min, v_max) \
+     SELECT u.id, u.e, u.p, u.a, u.pt, ?, u.version, u.a1, u.a2, u.a3, u.a4, \
+       u.vals, NULL, u.mn, u.mx \
+     FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::BIGINT[]) AS e, \
+             unnest(?::BIGINT[]) AS p, unnest(?::BIGINT[]) AS a, unnest(?::BIGINT[]) AS pt, \
+             unnest(?::SMALLINT[]) AS version, unnest(?::BIGINT[]) AS a1, \
+             unnest(?::BIGINT[]) AS a2, unnest(?::BIGINT[]) AS a3, unnest(?::BIGINT[]) AS a4, \
+             unnest(?::DOUBLE[][]) AS vals, unnest(?::DOUBLE[]) AS mn, \
+             unnest(?::DOUBLE[]) AS mx) u";
+
+/// `n` fresh `array_id`s from the column's own sequence (its only minter),
+/// sorted: assigned to the new keys in input order they are exactly the ids
+/// `n` sequential inserts would mint, and the sequence ends where they
+/// would leave it. Hard check: `n` distinct ids.
+const ARRAY_MINT_SQL: &str = "SELECT nextval('seq_value_array') FROM range(?)";
+
+fn mint_array_ids(conn: &Connection, n: usize) -> Result<Vec<i64>, DbError> {
+    let mut ids: Vec<i64> = conn
+        .prepare_cached(ARRAY_MINT_SQL)?
+        .query_map([n as i64], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() != n {
+        return Err(DbError::Internal(format!(
+            "array batch: minted {} distinct array_ids for {n} new keys",
+            ids.len()
+        )));
+    }
+    Ok(ids)
+}
+
+/// Write every array value of `w` at `commit_id` in set-based rounds
+/// (set_based_long_and_delete_PLAN §3.3): the one array history
+/// implementation (`write_value` delegates here with N = 1). A round holds
+/// ≤ [`LONG_INSERT_CHUNK`] keys and ≤ [`ARRAY_ROUND_ELEMENTS`] payload
+/// elements, except a single larger value, which forms its own round (D3).
+///
+/// Per round: the scalar, long and array live probes under the per-key
+/// precedence and the version probe over `value_array` ∪
+/// `value_array_hist`; the per-key `close_out_tier` for each tier
+/// transition (D6); for the keys whose PRECEDENCE tier is array (critique
+/// C3: a damaged key live in long and array takes the INSERT and fails on
+/// the UNIQUE triple, as before), the pre-image copy to `value_array_hist`
+/// (one statement per retention mode, entirely in SQL) and one UPDATE in
+/// place by `array_id`; for every other key one INSERT with `array_id`s
+/// pre-minted from the sequence and assigned in input order. A round of one
+/// key uses today's point statements (`live_tier`, `close_out_tier`, the
+/// per-key array write).
+///
+/// Semantics are those of one per-key write per key in input order:
+/// `version = max(value_array ∪ value_array_hist rows of the key) + 1`,
+/// the same SET lists and retention, `array_id` minted by the sequence in
+/// write order. Keys must be distinct (the callers guarantee it); a
+/// repeated key, an affected-row count that differs from the probes or a
+/// list of the wrong length fails as [`DbError::Internal`]. Returns one
+/// [`WriteOutcome`] per input, in input order.
+pub(crate) fn write_arrays(
+    conn: &Connection,
+    commit_id: i64,
+    w: &[ArrayWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    check_distinct_keys("array batch", w.iter().map(|a| &a.key))?;
+    let mut out = Vec::with_capacity(w.len());
+    let (mut lo, mut elems) = (0usize, 0usize);
+    for (i, a) in w.iter().enumerate() {
+        debug_assert_value_floats_canonical(&a.value);
+        let n = a.vals().len();
+        if i > lo && (elems + n > ARRAY_ROUND_ELEMENTS || i - lo == LONG_INSERT_CHUNK) {
+            out.extend(write_array_round(conn, commit_id, &w[lo..i])?);
+            (lo, elems) = (i, 0);
+        }
+        elems += n;
+    }
+    if lo < w.len() {
+        out.extend(write_array_round(conn, commit_id, &w[lo..])?);
+    }
+    Ok(out)
+}
+
+/// One round of [`write_arrays`] (see there for the bounds).
+fn write_array_round(
+    conn: &Connection,
+    c: i64,
+    w: &[ArrayWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    if let [a] = w {
+        return Ok(vec![write_array_one(conn, c, a)?]);
+    }
+    let n = w.len();
+    // --- Probes (only for keys whose entity existed before this commit). ---
+    let probed: Vec<&ValueKey> = w
+        .iter()
+        .filter(|a| !a.entity_minted)
+        .map(|a| &a.key)
+        .collect();
+    let (live, max_version) = if probed.is_empty() {
+        (HashMap::new(), HashMap::new())
+    } else {
+        let live = probe_live(conn, &probed)?;
+        let versions: HashMap<Triple, i64> =
+            probe_keys(conn, ARRAY_VERSION_SQL, probed.iter().copied(), false)?
+                .into_iter()
+                .map(|(t, v, _)| (t, v))
+                .collect();
+        (live, versions)
+    };
+
+    // --- Tier transitions: the per-key close-out of the other tier, in
+    // input order (plan D6). ---
+    let mut closed = vec![0usize; n];
+    for (i, a) in w.iter().enumerate() {
+        if let Some(&(cur @ (Live::Scalar | Live::Long), _)) = live.get(&triple(&a.key)) {
+            closed[i] = close_out_tier(conn, &a.key, c, cur, a.retained)?;
+        }
+    }
+
+    // --- Versions and the UPDATE / INSERT split by the precedence tier. ---
+    let mut versions: Vec<i16> = Vec::with_capacity(n);
+    for a in w {
+        let v = max_version.get(&triple(&a.key)).copied().unwrap_or(0) + 1;
+        versions
+            .push(i16::try_from(v).map_err(|_| {
+                DbError::Internal(format!("array batch: version {v} out of range"))
+            })?);
+    }
+    let live_id = |i: usize| match live.get(&triple(&w[i].key)) {
+        Some(&(Live::Array(id), _)) => Some(id),
+        _ => None,
+    };
+    let replaced: Vec<usize> = (0..n).filter(|&i| live_id(i).is_some()).collect();
+    let fresh: Vec<usize> = (0..n).filter(|&i| live_id(i).is_none()).collect();
+
+    // --- Replace in place: the pre-image copy (per retention mode), then
+    // one UPDATE keyed by array_id. ---
+    if !replaced.is_empty() {
+        for retained in [true, false] {
+            let ids: Vec<i64> = replaced
+                .iter()
+                .filter(|&&i| w[i].retained == retained)
+                .filter_map(|&i| live_id(i))
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let sql = if retained {
+                ARRAY_PREIMAGE_SET_SQL
+            } else {
+                ARRAY_PREIMAGE_STUB_SET_SQL
+            };
+            let copied = conn
+                .prepare_cached(sql)?
+                .execute(params![c, list(&ids, |&v| Value::BigInt(v))])?;
+            check_affected("array pre-image copy", copied, ids.len())?;
+        }
+        let ids: Vec<i64> = replaced.iter().filter_map(|&i| live_id(i)).collect();
+        let mut p = vec![Value::BigInt(c), list(&ids, |&v| Value::BigInt(v))];
+        p.extend(array_cols(w, &replaced, &versions, false));
+        check_list_lengths(&p, replaced.len())?;
+        let updated = conn
+            .prepare_cached(ARRAY_UPDATE_SQL)?
+            .execute(duckdb::params_from_iter(p))?;
+        check_affected("array update", updated, replaced.len())?;
+        for &i in &replaced {
+            closed[i] += 1;
+        }
+    }
+
+    // --- Insert the new rows with pre-minted ids, in input order. ---
+    if !fresh.is_empty() {
+        let ids = mint_array_ids(conn, fresh.len())?;
+        let mut p = vec![Value::BigInt(c), list(&ids, |&v| Value::BigInt(v))];
+        p.extend(array_cols(w, &fresh, &versions, true));
+        check_list_lengths(&p, fresh.len())?;
+        let inserted = conn
+            .prepare_cached(ARRAY_INSERT_SQL)?
+            .execute(duckdb::params_from_iter(p))?;
+        check_affected("array insert", inserted, fresh.len())?;
+    }
+
+    Ok(w.iter()
+        .zip(versions)
+        .zip(closed)
+        .map(|((a, version), rows_closed)| WriteOutcome {
+            tier: Some(Tier::Array),
+            version: version as u16,
+            rows_written: 1,
+            rows_closed,
+            axes_created: a.axes_created,
+            axes_reused: a.axes_reused,
+        })
+        .collect())
+}
+
+/// The per-key bind lists of the keys `idx` of an array round, in the
+/// column order of [`ARRAY_UPDATE_SQL`] after `id` (or, with `key`, of
+/// [`ARRAY_INSERT_SQL`] after `id`: the key triple first). The payload is
+/// the canonical floats verbatim as one nested list; `v_min` / `v_max` come
+/// from [`min_max`].
+fn array_cols(w: &[ArrayWrite], idx: &[usize], versions: &[i16], key: bool) -> Vec<Value> {
+    let col = |f: &dyn Fn(&ArrayWrite) -> Option<i64>| -> Value {
+        let v: Vec<Option<i64>> = idx.iter().map(|&i| f(&w[i])).collect();
+        opt_list(&v, |&x| Value::BigInt(x))
+    };
+    let mut p: Vec<Value> = Vec::with_capacity(12);
+    if key {
+        p.push(col(&|a| Some(a.key.entity_id)));
+        p.push(col(&|a| Some(a.key.parameter_definition_id)));
+        p.push(col(&|a| Some(a.key.alternative_id)));
+        p.push(col(&|a| a.parameter_type_id));
+        p.push(list(idx, |&i| Value::SmallInt(versions[i])));
+    } else {
+        p.push(list(idx, |&i| Value::SmallInt(versions[i])));
+        p.push(col(&|a| a.parameter_type_id));
+    }
+    for d in 0..4 {
+        p.push(col(&|a| a.axis_ids.get(d).copied()));
+    }
+    p.push(list(idx, |&i| {
+        Value::List(w[i].vals().iter().map(|&x| Value::Double(x)).collect())
+    }));
+    let mm: Vec<(f64, f64)> = idx.iter().map(|&i| min_max(w[i].vals())).collect();
+    p.push(list(&mm, |&(lo, _)| Value::Double(lo)));
+    p.push(list(&mm, |&(_, hi)| Value::Double(hi)));
+    p
+}
+
+/// The single-key form of an array round: today's point statements.
+fn write_array_one(conn: &Connection, c: i64, a: &ArrayWrite) -> Result<WriteOutcome, DbError> {
+    let current = if a.entity_minted {
+        None
+    } else {
+        live_tier(conn, &a.key)?
+    };
+    let mut rows_closed = 0usize;
+    if let Some(cur @ (Live::Scalar | Live::Long)) = current {
+        rows_closed += close_out_tier(conn, &a.key, c, cur, a.retained)?;
+    }
+    let (version, rows_written, closed_same) = write_array(
+        conn,
+        &a.key,
+        c,
+        &a.axis_ids,
+        a.vals(),
+        current.and_then(Live::array_id),
+        a.retained,
+        a.parameter_type_id,
+    )?;
+    Ok(WriteOutcome {
+        tier: Some(Tier::Array),
+        version,
+        rows_written,
+        rows_closed: rows_closed + closed_same,
+        axes_created: a.axes_created,
+        axes_reused: a.axes_reused,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2804,6 +3104,181 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn float_array(vals: Vec<f64>) -> CanonicalValue {
+        CanonicalValue {
+            tier: Tier::Array,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(vals.len().max(1) as i32)],
+            shape: ShapedData::Array(vals),
+        }
+    }
+
+    /// An [`ArrayWrite`] of `v` for `key`, its axes resolved on `conn`.
+    fn array_write<'a>(
+        conn: &Connection,
+        cache: &mut AxisCache,
+        key: ValueKey,
+        v: &'a CanonicalValue,
+        retained: bool,
+        minted: bool,
+    ) -> Result<ArrayWrite<'a>, DbError> {
+        let (ids, cr, re) = resolve_axes(conn, cache, &v.axes)?;
+        Ok(ArrayWrite {
+            key,
+            value: Cow::Borrowed(v),
+            axis_ids: ids,
+            axes_created: cr,
+            axes_reused: re,
+            parameter_type_id: Some(4),
+            retained,
+            entity_minted: minted,
+        })
+    }
+
+    /// The array counterpart of `single_key_long_round_matches_the_set_round`:
+    /// a damaged key live in long and array (or scalar and array) takes the
+    /// INSERT by its precedence tier and fails on the UNIQUE triple, in both
+    /// forms (critique C3).
+    #[test]
+    fn single_key_array_round_matches_the_set_round() {
+        let nan = f64::from_bits(crate::encoding::CANONICAL_NAN_BITS);
+        let target = float_array(vec![nan, 0.0, 2.5]);
+        let other = float_array(vec![1.0, 2.0]);
+        for (name, steps, planted) in &prior_states() {
+            for retained in [true, false] {
+                for minted in [false, true] {
+                    if minted && !steps.is_empty() {
+                        continue;
+                    }
+                    let (_da, a) = fresh();
+                    let (_db, b) = fresh();
+                    setup_prior(&a, steps, *planted, &other);
+                    setup_prior(&b, steps, *planted, &other);
+                    let run = |db: &Path, with_other: bool| {
+                        with_write_txn(db, "t", "w", |conn, c| {
+                            let mut cache = AxisCache::new();
+                            let mut w = Vec::new();
+                            if with_other {
+                                w.push(array_write(
+                                    conn, &mut cache, OTHER, &other, !retained, false,
+                                )?);
+                            }
+                            w.push(array_write(
+                                conn, &mut cache, KEY, &target, retained, minted,
+                            )?);
+                            write_arrays(conn, c, &w)
+                        })
+                    };
+                    let oa = run(&a, false);
+                    let ob = run(&b, true);
+                    let case = format!("{name}, retained={retained}, minted={minted}");
+                    assert_eq!(outcome_text(&oa, 0), outcome_text(&ob, 1), "{case}");
+                    let fails = matches!(*name, "long+array" | "scalar+array");
+                    assert_eq!(oa.is_err(), fails, "{case}");
+                    assert_eq!(key_rows(&a), key_rows(&b), "{case}");
+                }
+            }
+        }
+    }
+
+    /// Every row of every value table (array ids included) and the
+    /// sequences, as text.
+    fn all_rows(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut out = Vec::new();
+        for sql in [
+            "SELECT CAST(t AS VARCHAR) FROM (SELECT * FROM value_array ORDER BY ALL) t",
+            "SELECT CAST(t AS VARCHAR) FROM (SELECT * FROM value_array_hist ORDER BY ALL) t",
+            "SELECT CAST(t AS VARCHAR) FROM (SELECT sequence_name, last_value \
+             FROM duckdb_sequences() ORDER BY ALL) t",
+        ] {
+            let mut stmt = conn.prepare(sql).unwrap();
+            out.extend(
+                stmt.query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            );
+        }
+        conn.close().unwrap();
+        out
+    }
+
+    /// A nested-list round with an empty array, a one-element array, a NaN
+    /// and new and replaced keys writes the same rows, `array_id`s and
+    /// sequence state as one per-key write per key in the same order: the
+    /// pre-minted ids are those sequential inserts mint (critique C3, C8).
+    #[test]
+    fn array_round_matches_per_key_writes() {
+        let nan = f64::from_bits(crate::encoding::CANONICAL_NAN_BITS);
+        let vals = [
+            float_array(vec![]),
+            float_array(vec![1.5]),
+            float_array(vec![nan, 0.0, -1.0]),
+            float_array(vec![4.0, 5.0]),
+            float_array(vec![]),
+        ];
+        let key = |e: i64| ValueKey {
+            entity_id: e,
+            parameter_definition_id: 2,
+            alternative_id: 3,
+        };
+        let (_da, a) = fresh();
+        let (_db, b) = fresh();
+        for db in [&a, &b] {
+            // Keys 2 and 4 already hold arrays (replaced below); key 7 holds
+            // an unrelated array that bumps the sequence.
+            with_write_txn(db, "t", "seed", |conn, c| {
+                let mut cache = AxisCache::new();
+                let o = WriteOptions::default();
+                for e in [7, 2, 4] {
+                    write_value(conn, c, key(e), &vals[3], &mut cache, &o, None)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        let order = [5, 2, 1, 4, 3];
+        with_write_txn(&a, "t", "set", |conn, c| {
+            let mut cache = AxisCache::new();
+            let w = order
+                .iter()
+                .zip(&vals)
+                .map(|(&e, v)| array_write(conn, &mut cache, key(e), v, e != 4, e == 5))
+                .collect::<Result<Vec<_>, _>>()?;
+            write_arrays(conn, c, &w)
+        })
+        .unwrap();
+        with_write_txn(&b, "t", "per key", |conn, c| {
+            let mut cache = AxisCache::new();
+            let mut out = Vec::new();
+            for (&e, v) in order.iter().zip(&vals) {
+                let w = array_write(conn, &mut cache, key(e), v, e != 4, e == 5)?;
+                out.extend(write_arrays(conn, c, &[w])?);
+            }
+            Ok(out)
+        })
+        .unwrap();
+        assert_eq!(all_rows(&a), all_rows(&b));
+    }
+
+    #[test]
+    fn array_batch_with_a_duplicate_key_is_an_internal_error() {
+        let (_d, db) = fresh();
+        let before = counts(&db);
+        let v = float_array(vec![1.0]);
+        let err = with_write_txn(&db, "t", "dup", |conn, c| {
+            let w = array_write(conn, &mut AxisCache::new(), KEY, &v, true, false)?;
+            write_arrays(conn, c, &[w.clone(), w]).map(|_| ())
+        })
+        .expect_err("a duplicate key must be rejected");
+        assert!(
+            matches!(&err, DbError::Internal(m) if m.contains("duplicate key")),
+            "got {err:?}"
+        );
+        assert_eq!(counts(&db), before);
     }
 
     #[test]

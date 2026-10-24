@@ -45,8 +45,8 @@ use crate::canon::{canonicalize, LabelDomain};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::history::{
-    self as history, keeps_content, resolve_axes, write_longs, write_scalars, write_value,
-    DeleteWrite, LongWrite, ScalarWrite, LONG_INSERT_CHUNK,
+    self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
+    ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
 };
 use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
 use crate::structural::{apply_structural, prepare_structural};
@@ -288,7 +288,7 @@ pub fn commit_changes(
             commit_id,
             ..Default::default()
         };
-        // The commit's scalar and long writes, deferred to set-based writes
+        // The commit's value writes, deferred to set-based writes per tier
         // (set_based_scalar_write_PLAN D1, set_based_long_and_delete_PLAN
         // D2): each buffer is flushed whenever it reaches one round and after
         // the last segment. A closure local, so a conflict retry rebuilds it
@@ -299,7 +299,7 @@ pub fn commit_changes(
         // so far: the up-front duplicate-target check folds names in Rust,
         // which can disagree with DuckDB's `lower()` (final sigma, dotted
         // capital I), so two targets it keeps apart may resolve to one key
-        // set. The deferred scalar write relies on distinct targets.
+        // set. The deferred writes rely on distinct targets.
         let mut targets: HashSet<(i64, i64)> = HashSet::new();
         // Structural changes run FIRST (§4.1): a value write / rank / activation
         // later in this same commit may target a referent an earlier structural
@@ -972,7 +972,7 @@ fn write_prepared(
     // the same value keys twice in one commit. The up-front check compares a
     // Rust fold; this one compares the ids DuckDB resolved, so a spelling
     // pair the two folds disagree on cannot reach the writers (with the
-    // deferred scalar write, a minted entity skips its probes and would
+    // deferred writes, a minted entity skips its probes and would
     // otherwise end up live in two tiers).
     if !targets.insert((pd_id, alt_id)) {
         return Err(DbError::Api(format!(
@@ -1086,16 +1086,30 @@ fn write_prepared(
                 }
             }
             Tier::Array => {
-                let outcome = write_value(
-                    conn,
-                    commit_id,
+                // Deferred to the commit's set-based array write (plan
+                // §3.3), axes resolved now, as for a long value.
+                report.note_tier(Tier::Array);
+                let (axis_ids, axes_created, axes_reused) = resolve_axes(conn, cache, &value.axes)?;
+                let elems = match &value.shape {
+                    ShapedData::Array(vals) => vals.len(),
+                    _ => unreachable!("shape/tier mismatch from canon"),
+                };
+                buffers.arrays.push(ArrayWrite {
                     key,
-                    &value,
-                    cache,
-                    &resolved_opts,
-                    Some(pt_id),
-                )?;
-                report.absorb(&outcome);
+                    value: Cow::Owned(value),
+                    axis_ids,
+                    axes_created,
+                    axes_reused,
+                    parameter_type_id: Some(pt_id),
+                    retained,
+                    entity_minted: minted,
+                });
+                buffers.array_elems += elems;
+                if buffers.array_elems >= ARRAY_ROUND_ELEMENTS
+                    || buffers.arrays.len() >= LONG_INSERT_CHUNK
+                {
+                    buffers.flush_arrays(conn, commit_id, report)?;
+                }
             }
         }
     }
@@ -1113,6 +1127,9 @@ struct WriteBuffers {
     longs: Vec<LongWrite<'static>>,
     /// The cells buffered in `longs` (plan D3 flush threshold).
     long_cells: usize,
+    arrays: Vec<ArrayWrite<'static>>,
+    /// The payload elements buffered in `arrays` (plan D3).
+    array_elems: usize,
 }
 
 impl WriteBuffers {
@@ -1153,6 +1170,24 @@ impl WriteBuffers {
         Ok(())
     }
 
+    /// The array counterpart of [`Self::flush_scalars`].
+    fn flush_arrays(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        report: &mut WriteReport,
+    ) -> Result<(), DbError> {
+        if self.arrays.is_empty() {
+            return Ok(());
+        }
+        for o in write_arrays(conn, commit_id, &self.arrays)? {
+            report.absorb(&o);
+        }
+        self.arrays.clear();
+        self.array_elems = 0;
+        Ok(())
+    }
+
     /// Flush every buffer.
     fn flush(
         &mut self,
@@ -1161,7 +1196,8 @@ impl WriteBuffers {
         report: &mut WriteReport,
     ) -> Result<(), DbError> {
         self.flush_scalars(conn, commit_id, report)?;
-        self.flush_longs(conn, commit_id, report)
+        self.flush_longs(conn, commit_id, report)?;
+        self.flush_arrays(conn, commit_id, report)
     }
 }
 

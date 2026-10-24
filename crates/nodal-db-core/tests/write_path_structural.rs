@@ -1228,6 +1228,82 @@ fn long_and_array_rewritten_after_erasure_restart_at_version_one() {
     assert_audits_clean(&db);
 }
 
+/// One commit of 31 dense 8 760-element float arrays (271 560 payload
+/// elements, past the 262 144-element array round: a mid-segment flush and
+/// a round split), then a replace of all of them: one row per key at the
+/// right version, every pre-image in `_hist`, `array_id`s minted in batch
+/// order, audits empty.
+#[test]
+fn array_batch_across_the_element_threshold_writes_and_replaces() {
+    const N: usize = 31;
+    const LEN: i64 = 8760;
+    let (_d, db) = fresh_db();
+    let names: Vec<String> = (0..N).map(|i| format!("a{i:02}")).collect();
+    let batch = |seed: f64| {
+        let ent: Vec<&str> = names
+            .iter()
+            .flat_map(|n| std::iter::repeat_n(n.as_str(), LEN as usize))
+            .collect();
+        let t: Vec<i64> = names.iter().flat_map(|_| 0..LEN).collect();
+        let v: Vec<f64> = (0..ent.len()).map(|i| seed + i as f64 * 0.5).collect();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("entity", DataType::Utf8, false),
+                Field::new("t", DataType::Int64, false),
+                Field::new("value", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(ent)) as ArrayRef,
+                Arc::new(Int64Array::from(t)) as ArrayRef,
+                Arc::new(Float64Array::from(v)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    };
+    for (msg, seed) in [("write", 0.0), ("replace", 1.0)] {
+        let r = commit_changes(
+            &db,
+            vec![seg("p", "Base", batch(seed))],
+            vec![],
+            vec![],
+            vec![],
+            "t",
+            msg,
+            WriteOptions::default(),
+        )
+        .expect(msg);
+        assert_eq!(r.values_written, N, "{msg}");
+    }
+    assert_eq!(
+        q_i64(&db, "SELECT count(*) FROM value_array WHERE version = 2"),
+        N as i64
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_array_hist WHERE version = 1"
+        ),
+        N as i64
+    );
+    // array_id order follows entity (batch) order.
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM (SELECT entity_id, lag(entity_id) OVER (ORDER BY array_id) \
+             AS pe FROM value_array) WHERE entity_id <= pe"
+        ),
+        0
+    );
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_array WHERE values[1] <> (entity_id - 1) * 4380 + 1.0"
+        ),
+        0
+    );
+    assert_audits_clean(&db);
+}
+
 /// A commit that writes a key and deletes the same key fails in every tier
 /// on the span CHECK (the delete closes a row at its own valid_from), as a
 /// DuckDB error, with nothing written. Only the error class is pinned: the

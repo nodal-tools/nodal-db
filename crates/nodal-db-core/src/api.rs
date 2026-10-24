@@ -301,6 +301,11 @@ pub fn commit_changes(
         // from scratch.
         let mut buffers = WriteBuffers::default();
         let mut entities = EntityCache::new();
+        // The class / parameter / alternative resolutions of this attempt,
+        // keyed by exact spelling (set_based_long_and_delete_PLAN §10 C11).
+        // A closure local like the buffers: a conflict retry rebuilds it,
+        // so no id read or minted in a rolled-back attempt is reused.
+        let mut resolved_names = ResolveCache::new();
         // The resolved (parameter definition, alternative) of every segment
         // so far: the up-front duplicate-target check folds names in Rust,
         // which can disagree with DuckDB's `lower()` (final sigma, dotted
@@ -325,6 +330,7 @@ pub fn commit_changes(
                 &mut buffers,
                 &mut entities,
                 &mut targets,
+                &mut resolved_names,
             )
             .map_err(|e| {
                 // Name the failing segment (spec §9.1) — but never rewrap a raw
@@ -347,6 +353,11 @@ pub fn commit_changes(
         // The remaining deferred writes, before any delete reads value rows
         // (deletes and object deletes run after every write, as before).
         buffers.flush(conn, commit_id, &mut report)?;
+        if test_hooks::take_injected_conflict() {
+            // A DuckDB error carrying the `Conflict` substring the retry
+            // loop keys on (`conn::is_conflict`).
+            conn.execute_batch("SELECT error('Conflict (test-injected)')")?;
+        }
         // Deletes resolve + close out AFTER the writes, under the same commit —
         // one atomic invocation (delete design MAJOR-2).
         apply_deletes(conn, commit_id, &prepared_deletes, opts, &mut report)?;
@@ -962,11 +973,17 @@ fn write_prepared(
     buffers: &mut WriteBuffers,
     entities: &mut EntityCache,
     targets: &mut HashSet<(i64, i64)>,
+    names: &mut ResolveCache,
 ) -> Result<(), DbError> {
     report.warnings.extend(p.tz_warnings.iter().cloned());
 
-    let class_id = resolve_entity_class(conn, commit_id, &p.class, &mut report.warnings)?;
-    let (pd_id, pt_id, declared) = resolve_parameter(
+    let class_id = names.entity_class(conn, commit_id, &p.class, &mut report.warnings)?;
+    let ResolvedParameter {
+        pd_id,
+        pt_id,
+        shape: declared,
+        retain_content,
+    } = names.parameter(
         conn,
         commit_id,
         class_id,
@@ -975,8 +992,7 @@ fn write_prepared(
         p.value_kind,
         &mut report.warnings,
     )?;
-    let retain_content = read_retain_content(conn, pd_id)?;
-    let alt_id = resolve_alternative(conn, commit_id, &p.alternative, &mut report.warnings)?;
+    let alt_id = names.alternative(conn, commit_id, &p.alternative, &mut report.warnings)?;
     // Two segments that resolve to one (parameter, alternative) would write
     // the same value keys twice in one commit. The up-front check compares a
     // Rust fold; this one compares the ids DuckDB resolved, so a spelling
@@ -1123,6 +1139,198 @@ fn write_prepared(
         }
     }
     Ok(())
+}
+
+/// A segment's resolved parameter: the definition, the declared member the
+/// batch binds to, its shape, and the definition's `retain_content`.
+struct ResolvedParameter {
+    pd_id: i64,
+    pt_id: i64,
+    shape: DeclaredType,
+    retain_content: bool,
+}
+
+/// An existing definition as an earlier segment of the commit read it: its
+/// non-empty declared-type set and its `retain_content`.
+struct CachedParameter {
+    pd_id: i64,
+    declared: Vec<DbDeclared>,
+    retain_content: bool,
+}
+
+/// The per-attempt class / parameter / alternative resolution cache of the
+/// segment phase (set_based_long_and_delete_PLAN §10 C11). An editor save
+/// carries many segments of one class and alternative; without the cache
+/// every segment re-runs the same lookups.
+///
+/// Keys are the caller's exact spellings (a parameter's within its class
+/// id), so a hit returns what the uncached resolver returns for the same
+/// string; two spellings DuckDB folds together are two entries resolving to
+/// one id, as before. Soundness rests on the segment phase not changing
+/// what it reads: structural changes run before the first segment, deletes
+/// and object deletes after the last, and the segments themselves only
+/// (a) auto-create classes, definitions and alternatives, which the cache
+/// records as it creates them (a later hit emits no second `AutoCreated`
+/// warning, just as the uncached lookup finds the new row), and (b)
+/// auto-create the `parameter_type` of a definition that has none, which is
+/// never cached: only a set read non-empty from the DB is, and nothing in
+/// the segment phase closes or adds members of a declared set. Lives in one
+/// transaction attempt (a closure local of `commit_changes`), never across
+/// attempts or commits.
+struct ResolveCache {
+    enabled: bool,
+    classes: HashMap<String, i64>,
+    alternatives: HashMap<String, i64>,
+    parameters: HashMap<(i64, String), CachedParameter>,
+}
+
+impl ResolveCache {
+    fn new() -> Self {
+        ResolveCache {
+            enabled: test_hooks::resolve_cache_enabled(),
+            classes: HashMap::new(),
+            alternatives: HashMap::new(),
+            parameters: HashMap::new(),
+        }
+    }
+
+    fn entity_class(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        name: &str,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<i64, DbError> {
+        if let Some(&id) = self.classes.get(name) {
+            return Ok(id);
+        }
+        let id = resolve_entity_class(conn, commit_id, name, warnings)?;
+        if self.enabled {
+            self.classes.insert(name.to_string(), id);
+        }
+        Ok(id)
+    }
+
+    fn alternative(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        name: &str,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<i64, DbError> {
+        if let Some(&id) = self.alternatives.get(name) {
+            return Ok(id);
+        }
+        let id = resolve_alternative(conn, commit_id, name, warnings)?;
+        if self.enabled {
+            self.alternatives.insert(name.to_string(), id);
+        }
+        Ok(id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parameter(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        class_id: i64,
+        name: &str,
+        inferred: &[(String, IndexKind)],
+        value_kind: ValueKind,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<ResolvedParameter, DbError> {
+        let key = (class_id, name.to_string());
+        if let Some(c) = self.parameters.get(&key) {
+            // The match the uncached path runs, on the same set.
+            let matched = validate_declared(name, c.pd_id, &c.declared, inferred, value_kind)?;
+            return Ok(ResolvedParameter {
+                pd_id: c.pd_id,
+                pt_id: matched.pt_id,
+                shape: matched.shape,
+                retain_content: c.retain_content,
+            });
+        }
+        let (pd_id, pt_id, shape, set) = resolve_parameter(
+            conn, commit_id, class_id, name, inferred, value_kind, warnings,
+        )?;
+        let retain_content = read_retain_content(conn, pd_id)?;
+        if let (true, Some(declared)) = (self.enabled, set) {
+            self.parameters.insert(
+                key,
+                CachedParameter {
+                    pd_id,
+                    declared,
+                    retain_content,
+                },
+            );
+        }
+        Ok(ResolvedParameter {
+            pd_id,
+            pt_id,
+            shape,
+            retain_content,
+        })
+    }
+}
+
+/// Test-only switches. They exist in debug builds only; in a release build
+/// the write path compiles to the production behaviour. Thread-local, so
+/// parallel tests do not interfere (the write closure runs on the calling
+/// thread).
+#[doc(hidden)]
+pub mod test_hooks {
+    #[cfg(debug_assertions)]
+    thread_local! {
+        static RESOLVE_CACHE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+        static INJECT_CONFLICTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Run `f` with the segment phase's name-resolution cache disabled (the
+    /// reference arm of the cache equivalence test).
+    #[cfg(debug_assertions)]
+    pub fn without_resolve_cache<R>(f: impl FnOnce() -> R) -> R {
+        RESOLVE_CACHE_ENABLED.with(|c| c.set(false));
+        let out = f();
+        RESOLVE_CACHE_ENABLED.with(|c| c.set(true));
+        out
+    }
+
+    /// Make the next `n` `commit_changes` attempts on this thread fail with
+    /// a synthetic write-write conflict after their segment phase, so the
+    /// retry loop re-runs them.
+    #[cfg(debug_assertions)]
+    pub fn inject_conflicts(n: u32) {
+        INJECT_CONFLICTS.with(|c| c.set(n));
+    }
+
+    pub(crate) fn resolve_cache_enabled() -> bool {
+        #[cfg(debug_assertions)]
+        {
+            RESOLVE_CACHE_ENABLED.with(|c| c.get())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            true
+        }
+    }
+
+    /// Consume one pending injected conflict, if any.
+    pub(crate) fn take_injected_conflict() -> bool {
+        #[cfg(debug_assertions)]
+        {
+            INJECT_CONFLICTS.with(|c| {
+                let n = c.get();
+                if n > 0 {
+                    c.set(n - 1);
+                }
+                n > 0
+            })
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
 }
 
 /// The deferred writes of one commit (closure locals of the retried
@@ -1686,6 +1894,10 @@ fn resolve_entities(
     })
 }
 
+/// What [`resolve_parameter`] returns: `(pd_id, parameter_type_id, shape,
+/// declared set as read)`.
+type ParameterResolution = (i64, i64, DeclaredType, Option<Vec<DbDeclared>>);
+
 /// Resolve the parameter definition within `class_id`, auto-creating it (and its
 /// `parameter_type` + `parameter_type_dimension` declaration) when absent. The
 /// declared type SET is READ FROM THE DB for an existing definition (critique
@@ -1693,7 +1905,9 @@ fn resolve_entities(
 /// declared type from the batch's inferred dimensions. Returns
 /// `(pd_id, parameter_type_id, shape)` — the member id is the exactly-one
 /// binding persisted on every value row (D11, 2026-09-18); auto-created /
-/// auto-materialized declarations bind their freshly created row.
+/// auto-materialized declarations bind their freshly created row. The fourth
+/// element is the declared set as read from the DB, `None` when this call
+/// created it (what [`ResolveCache`] may keep).
 fn resolve_parameter(
     conn: &Connection,
     commit_id: i64,
@@ -1702,7 +1916,7 @@ fn resolve_parameter(
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
     warnings: &mut Vec<Warning>,
-) -> Result<(i64, i64, DeclaredType), DbError> {
+) -> Result<ParameterResolution, DbError> {
     if let Some(pd_id) = opt_id(
         conn,
         "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
@@ -1726,10 +1940,10 @@ fn resolve_parameter(
                 name: name.into(),
                 id: pt_id,
             });
-            Ok((pd_id, pt_id, inferred_declared(inferred)))
+            Ok((pd_id, pt_id, inferred_declared(inferred), None))
         } else {
-            let matched = validate_declared(name, pd_id, set, inferred, value_kind)?;
-            Ok((pd_id, matched.pt_id, matched.shape))
+            let matched = validate_declared(name, pd_id, &set, inferred, value_kind)?;
+            Ok((pd_id, matched.pt_id, matched.shape, Some(set)))
         }
     } else {
         let pd_id: i64 = conn.query_row(
@@ -1745,7 +1959,7 @@ fn resolve_parameter(
             name: name.into(),
             id: pd_id,
         });
-        Ok((pd_id, pt_id, inferred_declared(inferred)))
+        Ok((pd_id, pt_id, inferred_declared(inferred), None))
     }
 }
 
@@ -1765,6 +1979,7 @@ fn inferred_declared(inferred: &[(String, IndexKind)]) -> DeclaredType {
 /// `(position, kind)` shape canon consumes. `pub(crate)`: the template
 /// module's DB snapshot reads declared sets through the SAME reader/validation
 /// as the write path (review item: no raw-string shadow readers).
+#[derive(Clone)]
 pub(crate) struct DbDeclared {
     pub(crate) pt_id: i64,
     pub(crate) value_kind: String,
@@ -1860,7 +2075,7 @@ fn batch_key(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> MatchKe
 fn validate_declared(
     parameter: &str,
     pd_id: i64,
-    mut set: Vec<DbDeclared>,
+    set: &[DbDeclared],
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
 ) -> Result<DbDeclared, DbError> {
@@ -1881,7 +2096,7 @@ fn validate_declared(
     }
     let bkey = batch_key(inferred, value_kind);
     if let Some(ix) = keys.iter().position(|k| *k == bkey) {
-        return Ok(set.swap_remove(ix));
+        return Ok(set[ix].clone());
     }
     // Probable-damage hint: a stored tag that differs from the batch's only by
     // case, or sits outside the known tag vocabulary, points at import/hand

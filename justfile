@@ -60,6 +60,8 @@ bench-raw-layout python=py *ARGS:
 
 # Opt-in, ~15 s; results: scripts/bench/RESULTS_results_path.md §7.1. Optional
 # cross-check on a core-written file: `just bench-long-size --core-db <file>`.
+# Other shapes (default rank1): `just bench-long-size --shape sparse2d` (one
+# 4.56 M-cell rank-2 value, ~1 min) or `--shape rank3`.
 # Long-tier size breakdown (value_long from schema/*.sql, one part removed per variant).
 bench-long-size *ARGS:
     {{py}} scripts/bench/long_tier_size_breakdown.py {{ARGS}}

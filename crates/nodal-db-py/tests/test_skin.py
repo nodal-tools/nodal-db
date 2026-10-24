@@ -539,6 +539,10 @@ def test_compact(db):
         db.compact(if_needed=True, max_commits=-1)
     with pytest.raises(nodal_db.ApiError):
         db.compact(if_needed=True, max_commits="sometimes")
+    # A bool is an int to Python; it is refused, not read as N = 1 / 0.
+    for flag in (True, False):
+        with pytest.raises(TypeError, match="not a bool"):
+            db.compact(if_needed=True, max_commits=flag)
 
 
 def test_compact_if_needed_fires_on_commit_count(db):

@@ -417,7 +417,10 @@ head)` gates on both, cheapest first:
    √(2·C/g) with the repack cost C estimated from the size), so huge
    files, whose repack takes seconds, compact less often. A head below
    the recorded commit means the baseline belongs to another file
-   (restored or replaced) ⇒ compact.
+   (restored or replaced) ⇒ compact. The backstop works around a DuckDB
+   catalog growth issue
+   ([duckdb/duckdb#27808](https://github.com/duckdb/duckdb/issues/27808)),
+   the source of the per-open cost above.
 
 The baseline lives in a sidecar file `<db>.compaction-baseline` (two
 lines, `bytes=` and `commit=`), never in the database: a `metadata` row

@@ -127,7 +127,10 @@ fn template_verbs_end_to_end() {
             .arg(&db1)
             .args(["--expect-commit", "1"]),
     );
-    assert!(err.contains("stale: the database is at commit"), "{err}");
+    assert!(
+        err.contains("stale plan: the database is at commit") && err.contains("re-plan"),
+        "{err}"
+    );
 
     // JSON input parses through the same loader (D1).
     let json_tpl = dir.path().join("mini.json");

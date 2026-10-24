@@ -34,9 +34,9 @@ use arrow::array::{RecordBatchIterator, RecordBatchReader};
 use arrow::record_batch::RecordBatch;
 use arrow_pyarrow::{IntoPyArrow, ToPyArrow};
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBool, PyDict, PyList};
 
 use nodal_db_core::api;
 use nodal_db_core::compaction;
@@ -884,6 +884,13 @@ impl<'a, 'py> FromPyObject<'a, 'py> for MaxCommits {
     fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         if obj.is_none() {
             return Ok(MaxCommits::Off);
+        }
+        // A bool is an int to Python (`True == 1`), so `max_commits=True`
+        // would silently mean N = 1: refuse it.
+        if obj.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err(
+                "compact: max_commits must be \"auto\", an int >= 0, or None, not a bool",
+            ));
         }
         if let Ok(s) = obj.extract::<String>() {
             if s == "auto" {

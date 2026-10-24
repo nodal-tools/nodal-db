@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
+use nodal_db_core::error::DbError;
 use nodal_db_core::template as tpl;
 
 use crate::import::{require_db, resolve_user_from};
@@ -153,8 +154,15 @@ fn apply_file(
         expect_commit,
         ..Default::default()
     };
-    let outcome =
-        tpl::apply(db, &t, &registry, &user, message, &opts).map_err(anyhow::Error::from)?;
+    let outcome = tpl::apply(db, &t, &registry, &user, message, &opts).map_err(|e| match e {
+        // The core's Stale text says "reload and re-apply"; for a pinned
+        // template apply the reload is a new plan.
+        DbError::Stale { expected, found } => anyhow::anyhow!(
+            "stale plan: the database is at commit {found} but the plan was made at \
+             commit {expected} — re-plan and re-apply"
+        ),
+        other => anyhow::Error::from(other),
+    })?;
     if outcome.no_op {
         println!(
             "template {} version {}: already applied (content hash match) — no-op",

@@ -109,7 +109,9 @@ pub enum CompactionTrigger {
 /// constant cost to every later open of the file (engine-FK catalog growth,
 /// `commit_fixed_cost_FINDINGS.md`: ≈0.85-0.9 ms per commit per open), and
 /// that growth barely moves the byte size, so the 3× byte gate almost never
-/// trips on it. A repack resets it.
+/// trips on it. A repack resets it. The backstop works around a DuckDB
+/// catalog growth issue, <https://github.com/duckdb/duckdb/issues/27808>;
+/// revisit it when that is fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitBackstop {
     /// Byte gate only (the pre-backstop behavior of [`compact_if_needed`]).

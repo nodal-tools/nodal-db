@@ -15,7 +15,7 @@ Every variant starts from the real schema, built by `schema/build.py` from
   B  A without `one_current_long`
   C  B without `ix_value_long_triple`. The schema has not had that index
      since 2026-10-24 (DuckDB 2.0 never scans through a multi-column index;
-     specs/name_index_and_unused_indexes_PLAN.md), so C is B and its row in
+     specs/Done/name_index_and_unused_indexes_PLAN.md), so C is B and its row in
      the attribution reads 0.00; the letter stays because RESULTS §7.1 and
      the long-tier findings cite A-E by letter. `--core-db` on a file
      written before that date still measures it.

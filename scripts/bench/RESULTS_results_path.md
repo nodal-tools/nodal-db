@@ -664,7 +664,7 @@ the first and last ten saves.
 
 ## 10. Entity name index, unused indexes dropped (2026-10-24, DuckDB 2.0.0)
 
-`specs/name_index_and_unused_indexes_PLAN.md`: `ix_entity_lname ON entity
+`specs/Done/name_index_and_unused_indexes_PLAN.md`: `ix_entity_lname ON entity
 (lower(name))`, queried behind an `OFFSET 0` fence by the single-name
 entity lookups (`lookup_entity`, `ENTITY_LOOKUP_ONE_SQL`), and the four
 never-used multi-column indexes dropped (`ix_value_scalar_triple`,

@@ -20,15 +20,31 @@
 //! and api_20x1_scalars_100k (20 segments x 1 replaced value, per commit).
 //! Build the base once with `ab_write_path build_100k <path>` (prints the
 //! build time; build it with the faster arm, the file format is the same).
+//!
+//! Set-based long, array and delete modes (set_based_long_and_delete_PLAN
+//! §6), all through the API and timed per whole commit (open, write,
+//! commit, close), in ms per commit. The `_big` modes run on a COPY of the
+//! file named by `NODAL_AB_BIG`, built once with `ab_write_path build_big
+//! <path>` (plan §1.1: 10^5 scalar entities with parameter `p`; `bg24` =
+//! 10 000 x 24-cell int long values; `bg8760` = 100 x 8 760-cell int long
+//! values; `arr24` = 2 000 x 24-element float arrays; `lq00..lq19` = one
+//! 24-cell int long value each on `s000000`). Modes:
+//! api_delete_1000_scalar_big, api_delete_1000_long_big,
+//! api_delete_500_array_big, api_long_1000x24_replace_big,
+//! api_array_1000x24_replace_big, api_20x1_long24_big, api_1_long24_big,
+//! api_1_delete_big and api_1_array24_big (the editor shapes: mean of 3
+//! commits); on a fresh file: api_long_1000x24_new, api_array_1000x24_new
+//! and api_long_10x8760_replace (10 keys seeded, then replaced in one
+//! commit; only the replace is timed).
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use duckdb::arrow::array::{ArrayRef, Float64Array, StringArray};
+use duckdb::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
-use nodal_db_core::api::{commit_changes, write_parameter, Segment};
+use nodal_db_core::api::{commit_changes, write_parameter, DeleteKey, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
 use nodal_db_core::conn::{with_read, with_write_txn};
@@ -204,11 +220,146 @@ fn copy_base(dir: &Path) -> std::path::PathBuf {
     db
 }
 
+/// A private copy of the `NODAL_AB_BIG` file in `dir` (never timed).
+fn copy_big(dir: &Path) -> std::path::PathBuf {
+    let base = std::env::var("NODAL_AB_BIG").expect("set NODAL_AB_BIG to a build_big file");
+    let db = dir.join("big.duckdb");
+    std::fs::copy(base, &db).expect("copy big");
+    db
+}
+
+/// The name of scalar entity `i` of the big and 10^5 files.
+fn sname(i: usize) -> String {
+    format!("s{i:06}")
+}
+
+fn names(range: std::ops::Range<usize>) -> Vec<String> {
+    range.map(sname).collect()
+}
+
+/// A rank-1 batch `(entity, t: Int64, value)`: `cells` cells (t = 0..cells)
+/// per entity of `names`; `int` picks an Int64 measure (long tier) over a
+/// Float64 one (array tier, the grid being dense). `seed` varies values.
+fn series_batch(names: &[String], cells: usize, int: bool, seed: i64) -> RecordBatch {
+    let n = names.len() * cells;
+    let mut ent: Vec<&str> = Vec::with_capacity(n);
+    let mut t: Vec<i64> = Vec::with_capacity(n);
+    let mut v: Vec<i64> = Vec::with_capacity(n);
+    for (k, name) in names.iter().enumerate() {
+        for c in 0..cells {
+            ent.push(name);
+            t.push(c as i64);
+            v.push(seed + (k * cells + c) as i64);
+        }
+    }
+    let value: ArrayRef = if int {
+        Arc::new(Int64Array::from(v))
+    } else {
+        Arc::new(Float64Array::from(
+            v.iter().map(|&x| x as f64 * 0.5).collect::<Vec<_>>(),
+        ))
+    };
+    let vtype = value.data_type().clone();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("t", DataType::Int64, false),
+            Field::new("value", vtype, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(ent)) as ArrayRef,
+            Arc::new(Int64Array::from(t)) as ArrayRef,
+            value,
+        ],
+    )
+    .unwrap()
+}
+
+fn series_seg(parameter: &str, names: &[String], cells: usize, int: bool, seed: i64) -> Segment {
+    Segment {
+        class: "node".into(),
+        parameter: parameter.into(),
+        alternative: "Base".into(),
+        batches: vec![series_batch(names, cells, int, seed)],
+        domains: vec![],
+    }
+}
+
+/// One `commit_changes` of `segments` and `deletes`; returns elapsed ms.
+fn api_commit(db: &Path, segments: Vec<Segment>, deletes: Vec<DeleteKey>) -> f64 {
+    let t = Instant::now();
+    commit_changes(
+        db,
+        segments,
+        vec![],
+        deletes,
+        vec![],
+        "ab",
+        "ab",
+        WriteOptions::default(),
+    )
+    .unwrap();
+    t.elapsed().as_secs_f64() * 1e3
+}
+
+fn del_keys(parameter: &str, entities: impl Iterator<Item = String>) -> Vec<DeleteKey> {
+    entities
+        .map(|entity| DeleteKey {
+            class: "node".into(),
+            parameter: parameter.into(),
+            alternative: "Base".into(),
+            entity,
+        })
+        .collect()
+}
+
+/// Build the big base file (plan §1.1): `p` over 10^5 scalar entities (10
+/// commits of 10 000), `bg24` over the first 10 000 (10 commits of 1 000),
+/// `bg8760` over the first 100 (10 commits of 10), `arr24` over the first
+/// 2 000 (one commit) and `lq00..lq19` on `s000000` (one commit).
+fn build_big(path: &Path) {
+    let t = Instant::now();
+    init_schema_with_default(path, Some("Base")).unwrap();
+    for chunk in 0..10 {
+        let ns = names(chunk * 10_000..(chunk + 1) * 10_000);
+        let vals: Vec<f64> = (0..10_000)
+            .map(|i| (chunk * 10_000 + i) as f64 * 0.5)
+            .collect();
+        api_scalars(path, "p", &ns, &vals);
+    }
+    for chunk in 0..10 {
+        let ns = names(chunk * 1_000..(chunk + 1) * 1_000);
+        api_commit(path, vec![series_seg("bg24", &ns, 24, true, 0)], vec![]);
+    }
+    for chunk in 0..10 {
+        let ns = names(chunk * 10..(chunk + 1) * 10);
+        api_commit(path, vec![series_seg("bg8760", &ns, 8760, true, 0)], vec![]);
+    }
+    api_commit(
+        path,
+        vec![series_seg("arr24", &names(0..2_000), 24, false, 0)],
+        vec![],
+    );
+    let segs: Vec<Segment> = (0..20)
+        .map(|i| series_seg(&format!("lq{i:02}"), &names(0..1), 24, true, i))
+        .collect();
+    api_commit(path, segs, vec![]);
+    eprintln!(
+        "built {} in {:.1} s",
+        path.display(),
+        t.elapsed().as_secs_f64()
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args[1].as_str();
     if mode == "build_100k" {
         build_100k(Path::new(&args[2]));
+        return;
+    }
+    if mode == "build_big" {
+        build_big(Path::new(&args[2]));
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -369,6 +520,98 @@ fn main() {
             })
             .unwrap();
             t.elapsed().as_secs_f64() * 1e3 / 500.0
+        }
+        // --- set_based_long_and_delete_PLAN §6 (ms per commit) ---
+        "api_delete_1000_scalar_big" => {
+            let db = copy_big(dir.path());
+            api_commit(&db, vec![], del_keys("p", (10_000..11_000).map(sname)))
+        }
+        "api_delete_1000_long_big" => {
+            let db = copy_big(dir.path());
+            api_commit(&db, vec![], del_keys("bg24", (0..1_000).map(sname)))
+        }
+        "api_delete_500_array_big" => {
+            let db = copy_big(dir.path());
+            api_commit(&db, vec![], del_keys("arr24", (0..500).map(sname)))
+        }
+        "api_long_1000x24_new" => api_commit(
+            &db,
+            vec![series_seg("l24", &names(0..1_000), 24, true, 0)],
+            vec![],
+        ),
+        "api_long_1000x24_replace_big" => {
+            let db = copy_big(dir.path());
+            api_commit(
+                &db,
+                vec![series_seg("bg24", &names(1_000..2_000), 24, true, 7)],
+                vec![],
+            )
+        }
+        "api_array_1000x24_new" => api_commit(
+            &db,
+            vec![series_seg("a24", &names(0..1_000), 24, false, 0)],
+            vec![],
+        ),
+        "api_array_1000x24_replace_big" => {
+            let db = copy_big(dir.path());
+            api_commit(
+                &db,
+                vec![series_seg("arr24", &names(0..1_000), 24, false, 7)],
+                vec![],
+            )
+        }
+        "api_20x1_long24_big" => {
+            let db = copy_big(dir.path());
+            let mut tot = 0.0;
+            for run in 0..3 {
+                let segs: Vec<Segment> = (0..20)
+                    .map(|i| {
+                        series_seg(&format!("lq{i:02}"), &names(0..1), 24, true, 100 * run + i)
+                    })
+                    .collect();
+                tot += api_commit(&db, segs, vec![]);
+            }
+            tot / 3.0
+        }
+        "api_1_long24_big" => {
+            let db = copy_big(dir.path());
+            let mut tot = 0.0;
+            for run in 0..3 {
+                let ns = names(5_000 + run..5_001 + run);
+                tot += api_commit(
+                    &db,
+                    vec![series_seg("bg24", &ns, 24, true, run as i64 + 3)],
+                    vec![],
+                );
+            }
+            tot / 3.0
+        }
+        "api_1_delete_big" => {
+            let db = copy_big(dir.path());
+            let mut tot = 0.0;
+            for run in 0..3 {
+                let keys = del_keys("p", std::iter::once(sname(50_000 + run)));
+                tot += api_commit(&db, vec![], keys);
+            }
+            tot / 3.0
+        }
+        "api_1_array24_big" => {
+            let db = copy_big(dir.path());
+            let mut tot = 0.0;
+            for run in 0..3 {
+                let ns = names(500 + run..501 + run);
+                tot += api_commit(
+                    &db,
+                    vec![series_seg("arr24", &ns, 24, false, run as i64 + 3)],
+                    vec![],
+                );
+            }
+            tot / 3.0
+        }
+        "api_long_10x8760_replace" => {
+            let ns = names(0..10);
+            api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 0)], vec![]);
+            api_commit(&db, vec![series_seg("l8760", &ns, 8760, true, 5)], vec![])
         }
         other => panic!("unknown mode {other}"),
     };

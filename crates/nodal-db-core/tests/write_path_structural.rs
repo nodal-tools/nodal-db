@@ -979,3 +979,88 @@ fn segments_resolving_to_one_target_are_rejected() {
     assert_eq!(q_i64(&db, "SELECT count(*) FROM value_array"), 0);
     assert_audits_clean(&db);
 }
+
+// ---------------------------------------------------------------------------
+// Set-based long, array and delete writes (set_based_long_and_delete_PLAN
+// §5.2)
+// ---------------------------------------------------------------------------
+
+fn float_series_batch(entity: &str, coords: &[i64], vals: &[f64]) -> RecordBatch {
+    let n = coords.len();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("t", DataType::Int64, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![entity; n])) as ArrayRef,
+            Arc::new(Int64Array::from(coords.to_vec())) as ArrayRef,
+            Arc::new(Float64Array::from(vals.to_vec())) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+fn delete_key(parameter: &str, entity: &str) -> nodal_db_core::api::DeleteKey {
+    nodal_db_core::api::DeleteKey {
+        class: "node".into(),
+        parameter: parameter.into(),
+        alternative: "Base".into(),
+        entity: entity.into(),
+    }
+}
+
+/// A commit that writes a key and deletes the same key fails in every tier
+/// on the span CHECK (the delete closes a row at its own valid_from), as a
+/// DuckDB error, with nothing written. Only the error class is pinned: the
+/// message may name a different row once the writes are deferred.
+#[test]
+fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
+    let (_d, db) = fresh_db();
+    let seed = vec![
+        seg("s", "Base", scalar_batch("e", 1.0)),
+        seg("l", "Base", long_batch("e", &[0, 1], &[1, 2])),
+        seg("a", "Base", float_series_batch("e", &[0, 1], &[1.0, 2.0])),
+    ];
+    commit_changes(
+        &db,
+        seed,
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "seed",
+        WriteOptions::default(),
+    )
+    .expect("seed");
+    let cases: Vec<(&str, Segment)> = vec![
+        ("s", seg("s", "Base", scalar_batch("e", 2.0))),
+        ("l", seg("l", "Base", long_batch("e", &[0, 2], &[3, 4]))),
+        (
+            "a",
+            seg("a", "Base", float_series_batch("e", &[0, 1], &[3.0, 4.0])),
+        ),
+    ];
+    for (parameter, s) in cases {
+        let before = table_counts(&db);
+        let err = commit_changes(
+            &db,
+            vec![s],
+            vec![],
+            vec![delete_key(parameter, "e")],
+            vec![],
+            "t",
+            "write+delete",
+            WriteOptions::default(),
+        )
+        .expect_err("a write and a delete of one key in one commit");
+        assert!(
+            matches!(err, DbError::Duckdb(_)) && err.to_string().contains("CHECK constraint"),
+            "{parameter}: {err:?}"
+        );
+        assert_eq!(table_counts(&db), before, "{parameter}");
+    }
+    assert_audits_clean(&db);
+}

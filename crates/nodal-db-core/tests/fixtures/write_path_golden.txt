@@ -86,6 +86,44 @@ WriteReport { commit_id: 16, values_written: 5, rows_written: 5, rows_closed: 0,
 WriteReport { commit_id: 17, values_written: 2, rows_written: 2, rows_closed: 2, axes_created: 0, axes_reused: 0, tiers: [Scalar], warnings: [], object_deletes: [], structural: [] }
 ## report a8 tier order
 WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0, axes_created: 1, axes_reused: 1, tiers: [Scalar, Long, Array], warnings: [Warning { kind: AutoCreated, object_type: "entity", name: "n7", id: 7 }], object_deletes: [], structural: [] }
+## report b1 prep v1
+WriteReport { commit_id: 19, values_written: 2, rows_written: 5, rows_closed: 0, axes_created: 0, axes_reused: 2, tiers: [Long], warnings: [Warning { kind: AutoCreated, object_type: "parameter_definition", name: "lp", id: 11 }], object_deletes: [], structural: [] }
+## report b1 prep v2 force
+WriteReport { commit_id: 20, values_written: 2, rows_written: 2, rows_closed: 5, axes_created: 1, axes_reused: 1, tiers: [Long], warnings: [], object_deletes: [], structural: [] }
+## report b1 prep v3
+WriteReport { commit_id: 21, values_written: 1, rows_written: 3, rows_closed: 1, axes_created: 0, axes_reused: 1, tiers: [Long], warnings: [], object_deletes: [], structural: [] }
+## report b1 long batch
+WriteReport { commit_id: 22, values_written: 6, rows_written: 11, rows_closed: 4, axes_created: 3, axes_reused: 5, tiers: [Long], warnings: [Warning { kind: AutoCreated, object_type: "entity", name: "n8", id: 8 }, Warning { kind: AutoCreated, object_type: "parameter_definition", name: "grid", id: 12 }], object_deletes: [], structural: [] }
+## report b2 force
+WriteReport { commit_id: 23, values_written: 4, rows_written: 9, rows_closed: 9, axes_created: 1, axes_reused: 4, tiers: [Long], warnings: [], object_deletes: [], structural: [] }
+## report b2 unretained v1
+WriteReport { commit_id: 24, values_written: 2, rows_written: 4, rows_closed: 0, axes_created: 0, axes_reused: 2, tiers: [Long], warnings: [Warning { kind: AutoCreated, object_type: "parameter_type", name: "lres", id: 14 }], object_deletes: [], structural: [] }
+## report b2 unretained v2
+WriteReport { commit_id: 25, values_written: 3, rows_written: 5, rows_closed: 4, axes_created: 0, axes_reused: 3, tiers: [Long], warnings: [], object_deletes: [], structural: [] }
+## report b3 prep a
+WriteReport { commit_id: 26, values_written: 3, rows_written: 5, rows_closed: 0, axes_created: 2, axes_reused: 1, tiers: [Array, Long], warnings: [Warning { kind: AutoCreated, object_type: "entity", name: "n9", id: 9 }, Warning { kind: AutoCreated, object_type: "alternative", name: "Alt3", id: 3 }, Warning { kind: AutoCreated, object_type: "alternative", name: "Alt4", id: 4 }], object_deletes: [], structural: [] }
+## report b3 prep b
+WriteReport { commit_id: 27, values_written: 1, rows_written: 1, rows_closed: 0, axes_created: 0, axes_reused: 0, tiers: [Scalar], warnings: [], object_deletes: [], structural: [] }
+## report b3 transitions
+WriteReport { commit_id: 28, values_written: 7, rows_written: 8, rows_closed: 9, axes_created: 1, axes_reused: 5, tiers: [Long, Array, Scalar], warnings: [], object_deletes: [], structural: [] }
+## report b4 cross-segment
+WriteReport { commit_id: 29, values_written: 8, rows_written: 12, rows_closed: 1, axes_created: 2, axes_reused: 5, tiers: [Scalar, Long, Array], warnings: [Warning { kind: AutoCreated, object_type: "parameter_definition", name: "prof2", id: 14 }], object_deletes: [], structural: [] }
+## report b5 arrays
+WriteReport { commit_id: 30, values_written: 4, rows_written: 4, rows_closed: 2, axes_created: 0, axes_reused: 4, tiers: [Array], warnings: [], object_deletes: [], structural: [] }
+## report b5 arrays force
+WriteReport { commit_id: 31, values_written: 3, rows_written: 3, rows_closed: 2, axes_created: 0, axes_reused: 3, tiers: [Array], warnings: [], object_deletes: [], structural: [] }
+## report b6 prep
+WriteReport { commit_id: 32, values_written: 1, rows_written: 1, rows_closed: 0, axes_created: 0, axes_reused: 0, tiers: [Scalar], warnings: [Warning { kind: AutoCreated, object_type: "entity", name: "ασ", id: 10 }], object_deletes: [], structural: [] }
+## report b6 deletes
+WriteReport { commit_id: 33, values_written: 7, rows_written: 0, rows_closed: 11, axes_created: 0, axes_reused: 0, tiers: [], warnings: [Warning { kind: UnknownReferent { key_index: 3, level: "parameter_definition" }, object_type: "parameter_definition", name: "no_such_param", id: 0 }, Warning { kind: UnknownReferent { key_index: 4, level: "entity_class" }, object_type: "entity_class", name: "no_such_class", id: 0 }, Warning { kind: UnknownReferent { key_index: 5, level: "alternative" }, object_type: "alternative", name: "NoSuchAlt", id: 0 }, Warning { kind: UnknownReferent { key_index: 6, level: "entity" }, object_type: "entity", name: "nobody2", id: 0 }, Warning { kind: NothingToDelete { key_index: 7 }, object_type: "value", name: "node:cap/Base/n1", id: 0 }, Warning { kind: NothingToDelete { key_index: 10 }, object_type: "value", name: "node:demand/Base/ασ", id: 0 }], object_deletes: [], structural: [] }
+## report b7 writes+deletes
+WriteReport { commit_id: 34, values_written: 5, rows_written: 3, rows_closed: 8, axes_created: 0, axes_reused: 2, tiers: [Long, Array], warnings: [], object_deletes: [], structural: [] }
+## outcomes c5 empty array
+WriteOutcome { tier: Some(Array), version: 1, rows_written: 1, rows_closed: 0, axes_created: 0, axes_reused: 1 }
+## outcomes c5 empty array replace
+WriteOutcome { tier: Some(Array), version: 2, rows_written: 1, rows_closed: 1, axes_created: 0, axes_reused: 1 }
+## outcomes c5 empty array delete
+WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_created: 0, axes_reused: 0 }
 ## commit (id,user,message)
 1|"nodal_db"|"bootstrap: schema creation"
 2|"golden"|"c1 fresh"
@@ -105,6 +143,25 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 16|"golden"|"a7 int+datetime"
 17|"golden"|"a7 replace"
 18|"golden"|"a8 tier order"
+19|"golden"|"b1 prep v1"
+20|"golden"|"b1 prep v2 force"
+21|"golden"|"b1 prep v3"
+22|"golden"|"b1 long batch"
+23|"golden"|"b2 force"
+24|"golden"|"b2 unretained v1"
+25|"golden"|"b2 unretained v2"
+26|"golden"|"b3 prep a"
+27|"golden"|"b3 prep b"
+28|"golden"|"b3 transitions"
+29|"golden"|"b4 cross-segment"
+30|"golden"|"b5 arrays"
+31|"golden"|"b5 arrays force"
+32|"golden"|"b6 prep"
+33|"golden"|"b6 deletes"
+34|"golden"|"b7 writes+deletes"
+35|"golden"|"c5 empty array"
+36|"golden"|"c5 empty array replace"
+37|"golden"|"c5 empty array delete"
 ## axis (id,kind,length,content_hash,p_start_ts,p_step_months,p_step_micros,p_start_int,p_step_int,p_start_dbl,p_step_dbl,calendar,timezone,crs)
 1|"integer"|10|17668259604090084400|NULL|NULL|NULL|0|1|NULL|NULL|NULL|NULL|NULL
 2|"integer"|3|14034139464538168296|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
@@ -138,6 +195,16 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 30|"integer"|2|17640632234215931229|NULL|NULL|NULL|1|3|NULL|NULL|NULL|NULL|NULL
 31|"integer"|2|10395115554352696979|NULL|NULL|NULL|0|3|NULL|NULL|NULL|NULL|NULL
 32|"integer"|2|4178574997695306583|NULL|NULL|NULL|0|9|NULL|NULL|NULL|NULL|NULL
+33|"integer"|1|6449306911132453264|NULL|NULL|NULL|1|0|NULL|NULL|NULL|NULL|NULL
+34|"integer"|2|11686016078129426694|NULL|NULL|NULL|3|1|NULL|NULL|NULL|NULL|NULL
+35|"integer"|1|12218059162274670568|NULL|NULL|NULL|7|0|NULL|NULL|NULL|NULL|NULL
+36|"integer"|1|447759842541635022|NULL|NULL|NULL|0|0|NULL|NULL|NULL|NULL|NULL
+37|"integer"|1|9877905272996710252|NULL|NULL|NULL|5|0|NULL|NULL|NULL|NULL|NULL
+38|"integer"|2|8235707261515889608|NULL|NULL|NULL|0|2|NULL|NULL|NULL|NULL|NULL
+39|"integer"|2|2392645432080508838|NULL|NULL|NULL|1|1|NULL|NULL|NULL|NULL|NULL
+40|"integer"|1|4403148322668063625|NULL|NULL|NULL|4|0|NULL|NULL|NULL|NULL|NULL
+41|"integer"|2|5399690306421051090|NULL|NULL|NULL|2|1|NULL|NULL|NULL|NULL|NULL
+42|"integer"|3|10805691140112450646|NULL|NULL|NULL|1|1|NULL|NULL|NULL|NULL|NULL
 ## axis_datetime (axis_id,pos,ts)
 5|0|ts:-9223372022400000000
 5|1|ts:-1
@@ -795,15 +862,17 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 1|10|1|11|16|NULL|1|true|"date_time"|NULL|NULL|NULL|NULL|ts:-9223372022400000000|NULL|NULL|1|10|1
 2|2|1|2|6|7|1|true|"float"|f:0000000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 2|6|1|6|9|NULL|1|true|"string"|NULL|NULL|NULL|"it's \"q\" ÄÖ"|NULL|NULL|NULL|2|6|1
-2|8|1|8|13|NULL|1|true|"float"|f:3fd0000000000000|NULL|NULL|NULL|NULL|NULL|NULL|2|8|1
+2|8|1|8|13|28|1|true|"float"|f:3fd0000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|8|4|8|28|NULL|1|true|"float"|f:4022800000000000|NULL|NULL|NULL|NULL|NULL|NULL|2|8|4
 2|9|1|10|16|NULL|1|true|"int"|NULL|0|NULL|NULL|NULL|NULL|NULL|2|9|1
 4|2|1|2|9|10|1|false|"float"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|2|1|2|10|15|2|true|"float"|f:4020000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
-4|2|1|2|15|NULL|3|true|"float"|f:4044000000000000|NULL|NULL|NULL|NULL|NULL|NULL|4|2|1
+4|2|1|2|15|33|3|true|"float"|f:4044000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|5|1|5|9|10|1|false|"float"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|5|1|5|10|NULL|2|true|"float"|f:4000000000000000|NULL|NULL|NULL|NULL|NULL|NULL|4|5|1
 4|7|1|7|9|10|1|false|"bool"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|7|1|7|10|NULL|2|true|"bool"|NULL|NULL|false|NULL|NULL|NULL|NULL|4|7|1
+4|8|3|8|27|28|1|true|"float"|f:3fe8000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 4|9|1|10|16|NULL|1|true|"int"|NULL|9223372036854775807|NULL|NULL|NULL|NULL|NULL|4|9|1
 5|2|1|2|9|10|1|false|"float"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 5|2|1|2|10|NULL|2|true|"float"|f:4022000000000000|NULL|NULL|NULL|NULL|NULL|NULL|5|2|1
@@ -811,7 +880,9 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 5|10|1|11|17|NULL|2|true|"date_time"|NULL|NULL|NULL|NULL|ts:9223372036854775806|NULL|NULL|5|10|1
 6|2|1|2|15|NULL|1|true|"float"|f:404e000000000000|NULL|NULL|NULL|NULL|NULL|NULL|6|2|1
 6|8|1|8|13|NULL|1|true|"float"|f:3fc0000000000000|NULL|NULL|NULL|NULL|NULL|NULL|6|8|1
-7|2|1|2|18|NULL|1|true|"float"|f:4051800000000000|NULL|NULL|NULL|NULL|NULL|NULL|7|2|1
+7|2|1|2|18|29|1|true|"float"|f:4051800000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+7|2|1|2|29|NULL|2|true|"float"|f:4051c00000000000|NULL|NULL|NULL|NULL|NULL|NULL|7|2|1
+10|2|1|2|32|33|1|true|"float"|f:3ff0000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1000|1006|1001|0|2|NULL|1|true|"float"|f:3ff8000000000000|NULL|NULL|NULL|NULL|NULL|NULL|1000|1006|1001
 1001|1000|1002|1|2|NULL|1|true|"float"|f:7ff8000000000000|NULL|NULL|NULL|NULL|NULL|NULL|1001|1000|1002
 1002|1001|1000|2|2|NULL|1|true|"int"|NULL|-7|NULL|NULL|NULL|NULL|NULL|1002|1001|1000
@@ -838,8 +909,50 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 1|3|2|3|7|8|1|true|30|NULL|NULL|NULL|1|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|20|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|8|1|9|11|13|1|true|31|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|11|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|8|1|9|11|13|1|true|31|NULL|NULL|NULL|1|0|0|0|NULL|3|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|12|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
-1|8|1|9|14|NULL|2|true|30|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|21|NULL|NULL|NULL|NULL|NULL|1|8|1|0|0|0|0
-1|8|1|9|14|NULL|2|true|30|NULL|NULL|NULL|1|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|22|NULL|NULL|NULL|NULL|NULL|1|8|1|1|0|0|0
+1|8|1|9|14|28|2|true|30|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|21|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|8|1|9|14|28|2|true|30|NULL|NULL|NULL|1|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|22|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|8|1|9|28|NULL|3|true|40|NULL|NULL|NULL|0|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|54|NULL|NULL|NULL|NULL|NULL|1|8|1|0|0|0|0
+1|8|3|9|26|28|1|true|38|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|31|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|8|3|9|26|28|1|true|38|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|32|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|19|20|1|false|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|19|20|1|false|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|20|21|2|true|33|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|6|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|21|22|1|true|22|NULL|NULL|NULL|2|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|10|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|21|22|2|true|22|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|9|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|21|22|3|true|22|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|8|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|22|23|3|false|34|NULL|NULL|NULL|1|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|22|23|4|false|34|NULL|NULL|NULL|0|0|0|0|NULL|3|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|23|34|2|true|22|NULL|NULL|NULL|2|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|23|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|23|34|4|true|22|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|22|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|23|34|5|true|22|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|21|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|11|1|12|34|NULL|5|true|38|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|62|NULL|NULL|NULL|NULL|NULL|1|11|1|1|0|0|0
+1|11|1|12|34|NULL|6|true|38|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|61|NULL|NULL|NULL|NULL|NULL|1|11|1|0|0|0|0
+1|12|1|13|22|23|1|false|19|19|NULL|NULL|0|0|0|0|NULL|0|NULL|0|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|12|1|13|22|23|1|false|19|19|NULL|NULL|1|1|0|0|NULL|1|NULL|1|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|12|1|13|23|33|1|true|19|19|NULL|NULL|0|1|0|0|NULL|0|NULL|1|NULL|NULL|NULL|NULL|"int"|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|12|1|13|23|33|1|true|19|19|NULL|NULL|1|0|0|0|NULL|1|NULL|0|NULL|NULL|NULL|NULL|"int"|NULL|5|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|12|1|13|23|33|2|true|19|19|NULL|NULL|1|1|0|0|NULL|1|NULL|1|NULL|NULL|NULL|NULL|"int"|NULL|6|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|13|1|14|24|25|1|false|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|13|1|14|24|25|1|false|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+1|13|1|14|25|33|2|false|36|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|8|1|9|28|NULL|1|true|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|51|NULL|NULL|NULL|NULL|NULL|2|8|1|0|0|0|0
+2|8|1|9|28|NULL|1|true|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|52|NULL|NULL|NULL|NULL|NULL|2|8|1|1|0|0|0
+2|8|4|9|26|28|1|true|39|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|41|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|8|4|9|26|28|1|true|39|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|42|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|19|20|1|false|22|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|19|20|1|false|22|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|19|20|1|false|22|NULL|NULL|NULL|2|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|20|22|2|true|33|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|7|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|22|23|2|false|22|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|22|23|2|false|22|NULL|NULL|NULL|2|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|22|23|3|false|22|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|11|1|12|23|34|4|true|37|NULL|NULL|NULL|0|0|0|0|NULL|5|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|24|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|12|1|13|22|NULL|1|true|36|33|NULL|NULL|0|0|0|0|NULL|0|NULL|1|NULL|NULL|NULL|NULL|"int"|NULL|3|NULL|NULL|NULL|NULL|NULL|2|12|1|0|0|0|0
+2|13|1|14|24|25|1|false|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|13|1|14|24|25|1|false|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|13|1|14|25|33|1|false|22|NULL|NULL|NULL|2|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|13|1|14|25|33|2|false|22|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+2|13|1|14|25|33|2|false|22|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 3|4|1|4|6|7|1|true|28|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 3|4|1|4|6|7|1|true|28|NULL|NULL|NULL|1|0|0|0|NULL|4|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 3|4|1|4|6|7|1|true|28|NULL|NULL|NULL|2|0|0|0|NULL|6|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
@@ -1740,8 +1853,22 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 3|4|1|4|7|15|2|true|29|NULL|NULL|NULL|297|0|0|0|NULL|1485|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|-297|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 3|4|1|4|7|15|2|true|29|NULL|NULL|NULL|298|0|0|0|NULL|1490|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|-298|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 3|4|1|4|7|15|2|true|29|NULL|NULL|NULL|299|0|0|0|NULL|1495|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|-299|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+3|11|1|12|29|NULL|1|true|32|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|7|NULL|NULL|NULL|NULL|NULL|3|11|1|0|0|0|0
+3|11|1|12|29|NULL|1|true|32|NULL|NULL|NULL|1|0|0|0|NULL|9|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|8|NULL|NULL|NULL|NULL|NULL|3|11|1|1|0|0|0
+3|13|1|14|25|NULL|1|true|36|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|9|NULL|NULL|NULL|NULL|NULL|3|13|1|0|0|0|0
 4|3|1|3|18|NULL|1|true|32|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|3|NULL|NULL|NULL|NULL|NULL|4|3|1|0|0|0|0
 4|3|1|3|18|NULL|1|true|32|NULL|NULL|NULL|1|0|0|0|NULL|9|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|4|NULL|NULL|NULL|NULL|NULL|4|3|1|1|0|0|0
+4|4|1|4|29|NULL|1|true|42|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|9|NULL|NULL|NULL|NULL|NULL|4|4|1|0|0|0|0
+4|4|1|4|29|NULL|1|true|42|NULL|NULL|NULL|1|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|10|NULL|NULL|NULL|NULL|NULL|4|4|1|1|0|0|0
+4|4|1|4|29|NULL|1|true|42|NULL|NULL|NULL|2|0|0|0|NULL|3|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|11|NULL|NULL|NULL|NULL|NULL|4|4|1|2|0|0|0
+5|3|1|3|29|34|1|true|41|NULL|NULL|NULL|0|0|0|0|NULL|2|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|5|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+5|3|1|3|29|34|1|true|41|NULL|NULL|NULL|1|0|0|0|NULL|3|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|6|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+5|11|1|12|22|NULL|1|true|35|NULL|NULL|NULL|0|0|0|0|NULL|7|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|18|NULL|NULL|NULL|NULL|NULL|5|11|1|0|0|0|0
+8|11|1|12|22|23|1|false|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+8|11|1|12|22|23|1|false|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+8|11|1|12|23|NULL|2|true|19|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|25|NULL|NULL|NULL|NULL|NULL|8|11|1|0|0|0|0
+8|11|1|12|23|NULL|2|true|19|NULL|NULL|NULL|1|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|26|NULL|NULL|NULL|NULL|NULL|8|11|1|1|0|0|0
+9|8|1|9|28|NULL|1|true|33|NULL|NULL|NULL|0|0|0|0|NULL|1|NULL|NULL|NULL|NULL|NULL|NULL|"int"|NULL|53|NULL|NULL|NULL|NULL|NULL|9|8|1|0|0|0|0
 1010|1002|1002|0|2|NULL|1|true|1|NULL|NULL|NULL|0|0|0|0|NULL|0|NULL|NULL|NULL|NULL|NULL|NULL|"float"|f:bff4000000000000|NULL|NULL|NULL|NULL|NULL|NULL|1010|1002|1002|0|0|0|0
 1010|1002|1002|0|2|NULL|1|true|1|NULL|NULL|NULL|3|0|0|0|NULL|3|NULL|NULL|NULL|NULL|NULL|NULL|"float"|f:7ff8000000000000|NULL|NULL|NULL|NULL|NULL|NULL|1010|1002|1002|3|0|0|0
 1010|1002|1002|0|2|NULL|1|true|1|NULL|NULL|NULL|7|0|0|0|NULL|7|NULL|NULL|NULL|NULL|NULL|NULL|"float"|f:7ff0000000000000|NULL|NULL|NULL|NULL|NULL|NULL|1010|1002|1002|7|0|0|0
@@ -2852,8 +2979,15 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 13|1045|1002|1001|NULL|3|2|19|NULL|NULL|NULL|[f:7ff8000000000000,f:3ff0000000000000]|NULL|f:3ff0000000000000|f:7ff8000000000000
 21|1050|1000|1000|NULL|5|3|17|NULL|NULL|NULL|[f:3ff0000000000000]|NULL|f:3ff0000000000000|f:3ff0000000000000
 23|1030|1001|1001|0|5|2|17|NULL|NULL|NULL|[f:4022000000000000]|NULL|f:4022000000000000|f:4022000000000000
-25|1|1|1|1|7|2|22|NULL|NULL|NULL|[f:4022000000000000,f:4020000000000000,f:401c000000000000]|NULL|f:401c000000000000|f:4022000000000000
-29|4|1|1|1|18|1|19|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000]|NULL|f:3ff0000000000000|f:4000000000000000
+25|1|1|1|1|31|4|36|NULL|NULL|NULL|[f:3ff4000000000000]|NULL|f:3ff4000000000000|f:3ff4000000000000
+29|4|1|1|1|30|2|37|NULL|NULL|NULL|[f:4004000000000000]|NULL|f:4004000000000000|f:4004000000000000
+35|4|8|3|9|28|1|19|NULL|NULL|NULL|[f:401c000000000000,f:401e000000000000]|NULL|f:401c000000000000|f:401e000000000000
+37|6|8|3|9|28|1|19|NULL|NULL|NULL|[f:4020000000000000,f:4021000000000000]|NULL|f:4020000000000000|f:4021000000000000
+41|5|1|1|1|34|2|19|NULL|NULL|NULL|[f:401a000000000000,f:401e000000000000]|NULL|f:401a000000000000|f:401e000000000000
+43|1|14|1|15|29|1|22|NULL|NULL|NULL|[f:3fe0000000000000,f:3ff8000000000000,f:4004000000000000]|NULL|f:3fe0000000000000|f:4004000000000000
+45|3|14|1|15|29|1|22|NULL|NULL|NULL|[f:400c000000000000,f:4012000000000000,f:4016000000000000]|NULL|f:400c000000000000|f:4016000000000000
+49|6|1|1|1|30|1|22|NULL|NULL|NULL|[f:4008000000000000,f:4010000000000000,f:4014000000000000]|NULL|f:4008000000000000|f:4014000000000000
+51|8|1|1|1|31|1|36|NULL|NULL|NULL|[f:0000000000000000]|NULL|f:0000000000000000|f:0000000000000000
 ## value_array_hist (array_id,entity_id,parameter_definition_id,alternative_id,parameter_type_id,valid_from_commit,version,axis1_id,axis2_id,axis3_id,axis4_id,values,values_int,v_min,v_max,valid_to_commit,content_retained)
 9|1030|1001|1001|0|2|1|22|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000,f:4008000000000000]|NULL|f:3ff0000000000000|f:4008000000000000|3|true
 11|1042|1006|1001|2|2|1|19|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000]|NULL|f:3ff0000000000000|f:4000000000000000|3|true
@@ -2864,27 +2998,38 @@ WriteReport { commit_id: 18, values_written: 3, rows_written: 4, rows_closed: 0,
 19|1031|1002|1002|1|4|1|22|NULL|NULL|NULL|[f:4010000000000000,f:4014000000000000,f:4018000000000000]|NULL|f:4010000000000000|f:4018000000000000|5|true
 21|1050|1000|1000|0|4|2|22|NULL|NULL|NULL|NULL|NULL|f:4014000000000000|f:401c000000000000|5|false
 25|1|1|1|1|6|1|25|NULL|NULL|NULL|[f:0000000000000000,f:3ff0000000000000,f:4000000000000000,f:4008000000000000]|NULL|f:0000000000000000|f:4008000000000000|7|true
+25|1|1|1|1|7|2|22|NULL|NULL|NULL|[f:4022000000000000,f:4020000000000000,f:401c000000000000]|NULL|f:401c000000000000|f:4022000000000000|30|true
+25|1|1|1|1|30|3|22|NULL|NULL|NULL|NULL|NULL|f:0000000000000000|f:7ff8000000000000|31|false
 27|2|8|1|9|12|1|22|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000,f:4008000000000000]|NULL|f:3ff0000000000000|f:4008000000000000|13|true
+29|4|1|1|1|18|1|19|NULL|NULL|NULL|[f:3ff0000000000000,f:4000000000000000]|NULL|f:3ff0000000000000|f:4000000000000000|30|true
+31|9|8|1|9|26|1|19|NULL|NULL|NULL|[f:3ff8000000000000,f:4004000000000000]|NULL|f:3ff8000000000000|f:4004000000000000|28|true
+33|1|8|3|9|28|1|19|NULL|NULL|NULL|[f:4018000000000000,f:401a000000000000]|NULL|f:4018000000000000|f:401a000000000000|33|true
+39|2|1|1|1|29|1|19|NULL|NULL|NULL|NULL|NULL|f:3ff0000000000000|f:4000000000000000|31|false
+39|2|1|1|1|31|2|19|NULL|NULL|NULL|[f:7ff8000000000000,f:4002000000000000]|NULL|f:4002000000000000|f:7ff8000000000000|34|true
+41|5|1|1|1|29|1|19|NULL|NULL|NULL|[f:4008000000000000,f:4010000000000000]|NULL|f:4008000000000000|f:4010000000000000|34|true
+47|7|1|1|1|30|1|19|NULL|NULL|NULL|[f:0000000000000000,f:7ff8000000000000]|NULL|f:0000000000000000|f:7ff8000000000000|33|true
+53|1060|1003|1001|0|35|1|17|NULL|NULL|NULL|[]|NULL|f:7ff8000000000000|f:fff0000000000000|36|true
+53|1060|1003|1001|0|36|2|17|NULL|NULL|NULL|[]|NULL|f:7ff8000000000000|f:fff0000000000000|37|true
 ## definition_value_scalar (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,value_kind,v_float,v_int,v_bool,v_str,v_datetime,v_dur_months,v_dur_micros,cp,cs)
 ## definition_value_long (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,axis1_id,axis2_id,axis3_id,axis4_id,i1_pos,i2_pos,i3_pos,i4_pos,i1_dt,i1_num,i2_dt,i2_num,i3_dt,i3_num,i4_dt,i4_num,value_kind,v_float,v_int,v_bool,v_str,v_datetime,v_dur_months,v_dur_micros,cp,cs,c1,c2,c3,c4)
 ## definition_value_array (parameter_definition_id,slot,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,axis1_id,axis2_id,axis3_id,axis4_id,values,values_int,v_min,v_max,cp,cs)
 ## sequences (sequence_name,last_value)
-"seq_alternative"|2
-"seq_axis"|32
+"seq_alternative"|4
+"seq_axis"|42
 "seq_axis_label"|12
 "seq_class_set"|NULL
-"seq_commit"|18
+"seq_commit"|37
 "seq_display_mode"|NULL
-"seq_entity"|7
+"seq_entity"|10
 "seq_entity_class"|1
 "seq_erasure_marker"|NULL
 "seq_list_value"|NULL
 "seq_metadata"|2
-"seq_parameter_definition"|10
-"seq_parameter_type"|11
+"seq_parameter_definition"|14
+"seq_parameter_type"|15
 "seq_parameter_value_list"|NULL
 "seq_run"|NULL
 "seq_scenario"|NULL
 "seq_semantic_annotation"|NULL
 "seq_units_of_measure"|NULL
-"seq_value_array"|29
+"seq_value_array"|53

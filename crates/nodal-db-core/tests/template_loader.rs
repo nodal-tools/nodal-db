@@ -82,6 +82,7 @@ const MUST_BE_EMPTY: &[&str] = &[
     "audit_realizes_cycle",
     "audit_history_tiling",
     "audit_array_id_coherence",
+    "audit_long_value_coherence",
 ];
 
 fn assert_audits_empty(db: &Path) {

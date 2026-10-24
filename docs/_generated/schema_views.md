@@ -124,7 +124,7 @@ From `schema/110_views_history.sql`.
 | `value_array_asof(c)` | macro | Rows of `value_array` as of commit `c` |
 | `value_long_asof(c)` | macro | Rows of `value_long` as of commit `c` |
 | `value_scalar_asof(c)` | macro | Rows of `value_scalar` as of commit `c` |
-| `value_timeline` | view | Cross-tier value timeline for the history viewer |
+| `value_timeline` | view | The long leg is VALUE-level |
 
 ### Validation and health views
 
@@ -147,6 +147,7 @@ From `schema/120_views_audit.sql`.
 | `audit_health` | view | Maintenance-health audit |
 | `audit_history_tiling` | view | Version-tiling + span coherence |
 | `audit_index_accelerator` | view | Index-accelerator audit |
+| `audit_long_value_coherence` | view | Long-value coherence audit |
 | `audit_membership_cycle` | view | Membership cycles (an accepted residual risk, surfaced) |
 | `audit_metadata_reserved_dup` | view | Reserved single-valued metadata keys must not fork |
 | `audit_position_range` | view | Long-tier positions must fall inside the bound axis (otherwise an out-of-range iN_pos would escape every audit and render a NULL index) |

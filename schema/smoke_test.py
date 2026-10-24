@@ -883,6 +883,28 @@ def main():
                  " WHERE entity_id = ? ORDER BY version", coal)
     check("value_timeline: one logical timeline across current + hist",
           tl == [("array", 1, c3), ("array", 2, None)], str(tl))
+    # The long leg is value-level change spans (a cell diff at c3 closes and
+    # re-opens one gas cell; the others stay open from c2): two spans, one
+    # coherent current value.
+    tl = allrows("SELECT version, valid_from_commit, valid_to_commit FROM value_timeline"
+                 " WHERE tier = 'long' AND entity_id = ?", gas)
+    check("value_timeline: a whole long value written once is one span",
+          tl == [(1, c2, None)], str(tl))
+    con.execute("BEGIN")
+    con.execute("UPDATE value_long SET valid_to_commit = ? WHERE entity_id = ?"
+                " AND i1_pos = 0 AND i2_pos = 0 AND i3_pos = 0", [c3, gas])
+    write_long_cell(con, c3, gas, ladder, base, [ax_field, ax_p, ax_tier], [0, 0, 0],
+                    "float", "v_float", 999.0, accels={"i2_dt": p_starts[0], "i3_num": 1})
+    con.execute("UPDATE value_long SET version = 2 WHERE entity_id = ? AND valid_from_commit = ?",
+                [gas, c3])
+    tl = allrows("SELECT version, valid_from_commit, valid_to_commit, content_retained"
+                 " FROM value_timeline WHERE tier = 'long' AND entity_id = ? ORDER BY version", gas)
+    n_coh = one("SELECT count(*) FROM audit_long_value_coherence")[0]
+    n_til = one("SELECT count(*) FROM audit_history_tiling")[0]
+    con.execute("ROLLBACK")
+    check("value_timeline: a one-cell diff of a long value is one new value-level span",
+          tl == [(1, c2, c3, True), (2, c3, None, True)] and n_coh == 0 and n_til == 0,
+          f"{tl} coherence={n_coh} tiling={n_til}")
 
     # ---- array_id: the physical row handle on value_array -------------------
     cons = allrows("SELECT constraint_type, constraint_column_names FROM duckdb_constraints()"
@@ -915,7 +937,7 @@ def main():
                  "audit_value_class_mismatch", "audit_value_list_membership",
                  "audit_scenario_empty", "audit_required_class_empty",
                  "audit_realizes_cycle", "audit_dangling_semantic_ref",
-                 "audit_array_id_coherence"]:
+                 "audit_array_id_coherence", "audit_long_value_coherence"]:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"{view} clean", n == 0, f"n={n}")
 
@@ -1083,6 +1105,16 @@ def main():
     con.execute("ROLLBACK")
     check("array_id: audit_array_id_coherence flags an id mapped to two triples",
           bad == [(coal_aid, 2)], str(bad))
+    # audit_long_value_coherence fires when one current long value's cells
+    # carry two (axes, kind, binding) sets (a cell diff gone wrong)
+    con.execute("BEGIN")
+    con.execute("UPDATE value_long SET parameter_type_id = 424242 WHERE rowid ="
+                " (SELECT min(rowid) FROM value_long WHERE entity_id = ?"
+                "  AND valid_to_commit IS NULL)", [gas])
+    bad = allrows("SELECT entity_id, n_variants FROM audit_long_value_coherence")
+    con.execute("ROLLBACK")
+    check("audit_long_value_coherence flags a long value with two bindings",
+          bad == [(gas, 2)], str(bad))
 
     # ---- F2: overlapping dead spans with clean version tiling -> audit fires
     con.execute("BEGIN")
@@ -1803,7 +1835,7 @@ def main():
                  "audit_array_payload_xor", "audit_position_range",
                  "audit_metadata_reserved_dup",
                  "audit_realizes_cycle", "audit_dangling_semantic_ref",
-                 "audit_array_id_coherence"]
+                 "audit_array_id_coherence", "audit_long_value_coherence"]
     for view in final_sweep:
         n = one(f"SELECT count(*) FROM {view}")[0]
         check(f"final: {view} clean after hostile section", n == 0, f"n={n}")

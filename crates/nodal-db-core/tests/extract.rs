@@ -544,20 +544,32 @@ fn t1_head_extract_reads_identically() {
     );
     let md = "SELECT * FROM metadata_current WHERE lower(name) <> 'db_identity'";
     assert_eq!(fingerprint(&fx.db, md), fingerprint(&dest, md));
-    assert_eq!(
-        fingerprint(
-            &fx.db,
-            "SELECT * FROM value_timeline WHERE valid_to_commit IS NULL"
-        ),
-        fingerprint(&dest, "SELECT * FROM value_timeline")
-    );
-    assert_eq!(
-        fingerprint(
-            &fx.db,
-            "SELECT * FROM history_untrusted_span WHERE valid_to_commit IS NULL"
-        ),
-        fingerprint(&dest, "SELECT * FROM history_untrusted_span")
-    );
+    // value_timeline: the scalar and array legs carry the surviving
+    // versions verbatim. The long leg is value-level change spans derived
+    // from the cells (skip_unchanged_writes_PLAN §4.3): a value whose
+    // current cells were written by different commits (a cell diff) has
+    // one span per such commit in the extract, cut from the carried cells
+    // alone, so its span numbering and start are not the source's; the
+    // current span per key and its retention are.
+    for view in ["value_timeline", "history_untrusted_span"] {
+        assert_eq!(
+            fingerprint(
+                &fx.db,
+                &format!("SELECT * FROM {view} WHERE valid_to_commit IS NULL AND tier <> 'long'")
+            ),
+            fingerprint(&dest, &format!("SELECT * FROM {view} WHERE tier <> 'long'")),
+            "{view}"
+        );
+        let long_now = format!(
+            "SELECT entity_id, parameter_definition_id, alternative_id, content_retained \
+             FROM {view} WHERE tier = 'long' AND valid_to_commit IS NULL"
+        );
+        assert_eq!(
+            fingerprint(&fx.db, &long_now),
+            fingerprint(&dest, &long_now),
+            "{view} long"
+        );
+    }
     // The cell-exploding views (kept out of the runtime self-check) were
     // covered above; make sure they are non-trivial here.
     assert!(scalar(&dest, "SELECT count(*) FROM value_array_cells") > 40);

@@ -275,14 +275,58 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 -- it takes no as-of commit and reports what physically exists — an erased
 -- alternative simply contributes no rows (the marker + audit_erasure carry
 -- the "content erased" annotation for the viewer).
+--
+-- The long leg is VALUE-level: long
+-- versions are per cell, and a cell-diff write closes and opens only the
+-- changed cells, so a value's current cells carry different valid_from
+-- commits. A value's change spans are cut at every commit where any of its
+-- cells opened or closed: span i runs from boundary b_i to b_(i+1) (NULL:
+-- open). A span in which no cell is valid (a deletion gap) is dropped;
+-- `version` numbers the kept spans from 1; `content_retained` is FALSE when
+-- any cell valid in the span is a stub. Computed as an event sweep
+-- (+1 per cell at valid_from, -1 at valid_to, running sums over the
+-- distinct boundaries), so it is O(rows), not rows x spans.
 CREATE VIEW value_timeline AS
+WITH long_events AS (
+  SELECT entity_id, parameter_definition_id, alternative_id,
+         valid_from_commit AS c, count(*) AS d_live,
+         count(*) FILTER (WHERE NOT content_retained) AS d_stub
+  FROM value_long
+  GROUP BY entity_id, parameter_definition_id, alternative_id, valid_from_commit
+  UNION ALL
+  SELECT entity_id, parameter_definition_id, alternative_id,
+         valid_to_commit, -count(*),
+         -count(*) FILTER (WHERE NOT content_retained)
+  FROM value_long
+  WHERE valid_to_commit IS NOT NULL
+  GROUP BY entity_id, parameter_definition_id, alternative_id, valid_to_commit
+),
+long_bounds AS (
+  SELECT entity_id, parameter_definition_id, alternative_id, c,
+         sum(d_live) AS d_live, sum(d_stub) AS d_stub
+  FROM long_events
+  GROUP BY entity_id, parameter_definition_id, alternative_id, c
+),
+long_spans AS (
+  SELECT entity_id, parameter_definition_id, alternative_id,
+         c AS valid_from_commit,
+         lead(c) OVER w AS valid_to_commit,
+         sum(d_live) OVER w AS live,
+         sum(d_stub) OVER w AS stubs
+  FROM long_bounds
+  WINDOW w AS (PARTITION BY entity_id, parameter_definition_id, alternative_id
+               ORDER BY c)
+)
 SELECT entity_id, parameter_definition_id, alternative_id, 'scalar' AS tier,
        version, valid_from_commit, valid_to_commit, content_retained
 FROM value_scalar
 UNION ALL
-SELECT DISTINCT entity_id, parameter_definition_id, alternative_id, 'long',
-       version, valid_from_commit, valid_to_commit, content_retained
-FROM value_long
+SELECT entity_id, parameter_definition_id, alternative_id, 'long',
+       row_number() OVER (PARTITION BY entity_id, parameter_definition_id, alternative_id
+                          ORDER BY valid_from_commit),
+       valid_from_commit, valid_to_commit, stubs = 0
+FROM long_spans
+WHERE live > 0
 UNION ALL
 SELECT entity_id, parameter_definition_id, alternative_id, 'array',
        version, valid_from_commit, NULL, TRUE

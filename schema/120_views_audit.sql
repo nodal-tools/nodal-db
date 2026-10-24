@@ -604,6 +604,23 @@ FROM value_keys
 GROUP BY entity_id, parameter_definition_id, alternative_id
 HAVING count(DISTINCT tier) > 1;
 
+-- Long-value coherence audit: the current
+-- cells of one long value share ONE set of axis ids, ONE value_kind and ONE
+-- binding. The long cell diff is the first writer that leaves cells of
+-- different commits current together; a bug that mixed axes, kinds or
+-- bindings would be silent elsewhere (audit_position_range checks each row
+-- against its own axis). definition_value_long is written whole and is not
+-- covered.
+CREATE VIEW audit_long_value_coherence AS
+SELECT entity_id, parameter_definition_id, alternative_id,
+       count(DISTINCT (axis1_id, axis2_id, axis3_id, axis4_id,
+                       value_kind, parameter_type_id)) AS n_variants
+FROM value_long
+WHERE valid_to_commit IS NULL
+GROUP BY entity_id, parameter_definition_id, alternative_id
+HAVING count(DISTINCT (axis1_id, axis2_id, axis3_id, axis4_id,
+                       value_kind, parameter_type_id)) > 1;
+
 -- Tier-intent audit: actual tier differs from the type's
 -- expected_tier — surfaces raggedness at write time, never enforces.
 -- Set-aware (D2(a), template_ir_plan §3.3): fires only when the actual tier

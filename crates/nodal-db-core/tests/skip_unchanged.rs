@@ -187,6 +187,7 @@ fn assert_audits_clean(db: &Path) {
         "audit_array_integrity",
         "audit_index_accelerator",
         "audit_array_id_coherence",
+        "audit_long_value_coherence",
         "audit_array_payload_xor",
         "audit_position_range",
     ] {

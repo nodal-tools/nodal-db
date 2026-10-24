@@ -34,7 +34,7 @@
 //!
 //! A benign DuckDB patch would have to move (b) by 3-4 blocks (50 % or more)
 //! to trip it: that is an ART layout change worth a look anyway. Why the order
-//! and how it was chosen: `specs/long_index_reorder_PLAN.md` §1.
+//! and how it was chosen: `specs/Done/long_index_reorder_PLAN.md` §1.
 
 use std::path::{Path, PathBuf};
 

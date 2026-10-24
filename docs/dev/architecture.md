@@ -87,7 +87,7 @@ Design points:
 
 The [schema page](../schema.md) shows the generated table diagram.
 
-The schema is verified by `schema/smoke_test.py` (223 checks), which
+The schema is verified by `schema/smoke_test.py` (228 checks), which
 includes hostile-data regressions: it plants corruptions and asserts
 that the right constraint or audit fires. Run it with the project-local
 `.venv/bin/python`; its DuckDB version must match the engine bundled in
@@ -137,7 +137,10 @@ Engine facts the code relies on (DuckDB 2.0):
 - **Point lookups are sequential scans; value writes and deletes are
   set-based.** DuckDB 2.0 never scans through a multi-column index (so the
   value tables carry no key-triple index; their one-current unique indexes
-  are integrity, not access paths) nor through any index on a VIRTUAL
+  are integrity, not access paths, and their column order is chosen for
+  size: the columns that are constant within a value first, the
+  highest-fan-out column last, guarded by `tests/long_index_size.rs`)
+  nor through any index on a VIRTUAL
   generated column (`cur_name`, `cur_cls`): each per-key value statement
   scans the table, zone-map pruned, at a floor of roughly 0.5–1 ms. So a commit buffers
   its values per tier and writes each buffer in set-based rounds, one
@@ -530,7 +533,7 @@ make a compaction on the commit path fail on it.
 Three legs, run through `just` (`just` is the quick gate, `just full`
 the release gate that adds the `#[ignore]`d slow tests and benchmarks):
 
-1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 223
+1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 228
    checks): builds a demo model, exercises resolution, membership,
    history and audits, then plants hostile-data corruptions and asserts
    that the right constraint or audit fires.

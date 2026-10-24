@@ -549,6 +549,12 @@ always replaces the file, because you asked for it, and prints a warning
 when the result is not smaller. That is rare; the warning is there so
 that you notice it.
 
+A database written before 2026-10-24 gets the smaller long-tier
+index (in a benchmark, about 30 instead of about 80 bytes per long
+cell) on its next compaction, automatic or `nodal-db maintain compact`,
+or on an extract. Nothing else changes: the old index enforces exactly
+the same rule.
+
 On a very large database with a long history, a compaction takes minutes
 (about six minutes for a 1.4 GB file with 228 million long-table rows).
 It holds the database lock for that time, so run it when nobody needs to

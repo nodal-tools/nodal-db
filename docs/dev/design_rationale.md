@@ -41,24 +41,26 @@ a measurement, the text says so.
     - *Writes* favour dense arrays: about 1 µs per value against about
       14 µs per cell for a new long value.
     - *Storage* favours dense arrays in nodal-db: about 8 bytes per value
-      against about 80 bytes per long cell. That gap is mostly nodal-db's
-      own long-tier overhead, not the long format: a lean long table in
-      plain DuckDB stores about 4–8 bytes per cell.
+      against about 30–34 bytes per long cell. The long table itself
+      takes about 20 of those (a lean long table in plain DuckDB stores
+      about 4–8 bytes per cell); about half of the 20 is the unique index
+      that guarantees one current row per cell, and most of the rest is
+      a copy of the time coordinate. The other tables the import fills
+      add the remainder.
 - **Where long wins or ties:** point and slice reads of one series or a
   few (somewhat faster or level), filtered reads through the canonical
   `read_parameter` (much faster), and whole-table aggregates (much
   faster, measured only in plain DuckDB). Long is also the only tier for
   sparse grids and non-float values.
 - **The tier cliff:** from two dimensions up, one missing cell moves a
-  whole value to the long tier, which today costs about ten times the
+  whole value to the long tier, which today costs about four times the
   storage.
 - **Writes are whole-value in every tier.** Changing one cell writes a
   complete new version of the value, and the old version is kept as
   history unless retention is switched off. For long histories, a
   [history-free extract](../features.md#history-free-extract) writes a
   smaller file with the current content only.
-- **Not implemented yet:** a leaner long tier is under consideration; chunked
-  storage of dense arrays is parked. See
+- **Not implemented yet:** chunked storage of dense arrays is parked. See
   [Known limitations and open directions](#known-limitations-and-open-directions).
 
 ## The problem
@@ -126,10 +128,10 @@ Every cell is a row carrying its keys, its coordinates and its value.
       to the 7.1–10 bytes of the same data as lists, and answered point
       and slice reads in under 1 ms (see
       [Raw formats](#raw-formats-without-the-nodal-db-schema)).
-    - nodal-db's *own* long tier costs much more: about 80 bytes per cell
+    - nodal-db's *own* long tier costs more: about 30–34 bytes per cell
       and about 14 µs per written cell, against about 8 bytes and 1 µs
-      per dense-array value. Most of the size is one unique index that
-      guarantees at most one current row per cell (see
+      per dense-array value. The biggest single part of the size is one
+      unique index that guarantees at most one current row per cell (see
       [Storage](#storage)); the write cost was not broken down further.
       Returning a whole parameter in long form also takes seconds where
       list form takes a fraction of a second, because the read views
@@ -364,9 +366,10 @@ Notes on the table:
   before compression and no per-cell keys. A long row carries keys,
   positions and typed value columns (empty columns compress to almost
   nothing), and the long table carries a unique index that guarantees
-  at most one current row per cell. That index is most of the long
-  tier's size (see [Storage](#storage)). Many small commits leave the
-  file fragmented; [compaction](../features.md#compaction) repacks it.
+  at most one current row per cell. That index costs about 9–13 bytes
+  per current row on large values, about half of the long table's size
+  (see [Storage](#storage)); closed rows are not in it. Many small
+  commits leave the file fragmented; [compaction](../features.md#compaction) repacks it.
 - **Memory on read.** A read returns whole values. Through
   `read_parameter_dense`, a dense array arrives as one list of `n`
   eight-byte floats plus a few ids, and the client holds the whole list
@@ -441,7 +444,8 @@ The sources:
   ([`scripts/bench/long_tier_size_breakdown.py`](https://github.com/nodal-tools/nodal-db/blob/main/scripts/bench/long_tier_size_breakdown.py),
   `just bench-long-size`; results in the results-scale file above).
   Python DuckDB 2.0.0, one thread, the long data of the results-scale
-  benchmark. Storage sizes do not depend on load; three runs gave
+  benchmark (and, with `--shape`, a large sparse value and rank-3
+  values). Storage sizes do not depend on load; repeated runs gave
   identical figures.
 
 ### Dense array against long, by operation
@@ -474,8 +478,8 @@ The two data sets differ, so read the rows with care:
 | Replace an 8 760-cell value | 16.2 ms (about 1.8 µs per value) | 216 ms (about 25 µs per cell) | write-path comparison |
 | Bulk ingest, one commit (Arrow-IPC import) | 875 000–1.01 million values/s | 190 000–200 000 values/s | results-scale |
 | Bulk ingest, core API, 100 series per commit | 689 000–774 000 values/s | 154 000–157 000 values/s | results-scale |
-| Storage, one commit, net of the empty schema | 8.1–8.4 bytes per value | 78 bytes per cell | results-scale |
-| Storage, many commits, before compaction | 11.4–14.9 bytes per value | 83 bytes per cell | results-scale |
+| Storage, one commit, net of the empty schema | 8.1–8.4 bytes per value | 29.6 bytes per cell | results-scale |
+| Storage, many commits, before compaction | 11.4–14.9 bytes per value | 34.1 bytes per cell | results-scale |
 
 Reading the table:
 
@@ -498,14 +502,16 @@ Reading the table:
   parameter costs about 27 ns per value. Writes are about 15–18 times
   cheaper per value than long-tier writes, and bulk ingest about 10–14
   times faster.
-- **Dense wins storage, by about ten times.** The gap is nodal-db's own
-  long-tier overhead, not the long format; see the next two sections.
+- **Dense wins storage, by about four times.** The gap is mostly
+  nodal-db's own long-tier overhead, not the long format; see the next
+  two sections.
 
 ### Storage
 
-nodal-db's long tier costs about 78 bytes per cell (one commit, net of
-the empty schema), against about 4.2 bytes for the same integer cells in
-a lean long table in plain DuckDB (next section): about 19 times more.
+nodal-db's long tier costs about 30 bytes per cell (29.6 in one commit,
+34.1 over ten commits; net of the empty schema), against about 4.2 bytes
+for the same integer cells in a lean long table in plain DuckDB (next
+section): about seven times more.
 
 A size breakdown attributes this to parts of the schema
 ([`scripts/bench/long_tier_size_breakdown.py`](https://github.com/nodal-tools/nodal-db/blob/main/scripts/bench/long_tier_size_breakdown.py),
@@ -517,40 +523,68 @@ is the resolution):
 
 | Part | Bytes per cell |
 |---|---|
-| The 7-column unique index that guarantees at most one current row per cell | 57.5 |
+| The 7-column unique index that guarantees at most one current row per cell | 9.3 |
 | The copy of the time coordinate that long rows carry for time dimensions | 6.3 |
 | Keys, positions, values and all other columns | 4.2 |
-| The index on entity, parameter and alternative | 0.6 |
-| Foreign keys | 0.6 |
-| **The long table and its indexes** | **69.1** |
+| Foreign keys (DuckDB keeps a hidden index for each) | 0.6 |
+| **The long table and its indexes** | **20.4** |
 
-- Without the indexes, the foreign keys and the time copy, the long
+- Without the index, the foreign keys and the time copy, the long
   table stores these cells in the same 4.2 bytes as the lean table. The
   history columns and the empty typed value columns cost nothing
   measurable: DuckDB stores a column segment that is entirely empty or
   constant as a constant.
 - The same breakdown on a file written by the core gives the same
-  69.1 bytes per cell for the long table and its indexes. The other
-  8.4 bytes of the 78 are the other tables the benchmark fills (1 000
-  entities, the commit, the axis and so on) and their indexes, about
-  7 MiB in that file; they grow with the number of entities, not with
-  the number of cells per series.
+  9.3 bytes per cell for the index. The other 8.4 bytes per cell in
+  that file are the other tables the benchmark fills (1 000 entities,
+  the commit, the axis and so on) and their indexes, about 7 MiB; they
+  grow with the number of entities, not with the number of cells per
+  series.
+- Closed rows cost nothing in the unique index: all its columns are
+  empty (NULL) on a closed row, and DuckDB does not index such keys.
+
+**Key order.** The unique index covers seven columns: entity, parameter
+and alternative, and the four positions. The same seven columns cost
+57.8 or 9.3 bytes per cell depending only on their order. DuckDB's
+index (an adaptive radix tree) shares the key bytes that rows have in
+common and stores the rest per row, so every column that is constant
+within a value (positions beyond the value's rank, the key triple, the
+high zero bytes of each position) costs bytes on every row when it
+comes last. The index therefore puts those columns first and the first
+position, which varies most within a large value, last. Uniqueness does
+not depend on the order, so the rule it enforces is the same. Measured
+with the same script:
+
+| Shape | Old order | Current order |
+|---|---|---|
+| 1 000 series × 876 cells (the table above) | 57.8 | 9.3 |
+| One sparse 8 760 × 840 map at 62 % fill (4.56 million cells) | 61.5 | 13.2 |
+| 1 000 rank-3 values of 5 × 8 × 24 at 90 % fill | 81.8 | 38.2 |
+
+The rank-3 case is the order's weak spot: with only five values of the
+last column per subtree, each row also pays for a half-empty node. No
+single order is best for every shape; this one is best for the large
+values where the bytes add up. A test (`tests/long_index_size.rs`) fails
+if the order or a DuckDB upgrade makes the index grow again; write
+times did not change.
 
 The dense-array tier, by contrast, adds little on top of its format:
 8.4 bytes per value at 10 000 series, within the 7.1–10.0 bytes of the
 same lists in plain DuckDB (next section).
 
-So the tier choice today reflects nodal-db's long-tier overhead as much
-as the formats themselves. A leaner long tier is under consideration
-(see [Known limitations and open directions](#known-limitations-and-open-directions)).
+A separate current-row table for the long tier (as for dense arrays)
+was measured as an alternative to the unique index. It came out no
+smaller than the reordered index and gave reads nothing, so it was not
+adopted.
 
 **The tier cliff, measured.** From two dimensions up, one missing cell
 moves the whole value to the long tier. A 3 × 8 760 float grid with one
-hole becomes 26 279 long rows: at 78–83 bytes per cell about 2.0–2.2 MB,
-against about 0.22 MB as a complete dense array at 8.4 bytes per value,
-nine to ten times more. (The long figure was measured on integer cells;
-float cells were not measured in the harness.) It also costs the
-long-tier write rate, about 14 µs per cell instead of about 1 µs.
+hole becomes 26 279 long rows: at 29.6–34.1 bytes per cell about
+0.78–0.90 MB, against about 0.22 MB as a complete dense array at 8.4
+bytes per value, about four times more. (The long figure was measured
+on integer cells; float cells were not measured in the harness.) It
+also costs the long-tier write rate, about 14 µs per cell instead of
+about 1 µs.
 
 ### Raw formats without the nodal-db schema
 
@@ -789,13 +823,13 @@ once and report the second as nothing to delete.
   `value_array_asof` (not measured separately). A fast path for those is planned. The index
   lookup depends on DuckDB's planner heuristics, so a test checks the
   plan shape on every build.
-- **Long-tier size.** The long tier costs about 78 bytes per cell,
-  mostly one wide unique index; a lean long table costs 4–8. A leaner
-  long tier is under consideration: it would keep the guarantee of at
-  most one current row per cell by other means, for example a narrower
-  key, a check in the writer, or a separate history table as for dense
-  arrays. Which of these to adopt is an open design decision; nothing
-  is implemented yet. It would also shrink the tier cliff below.
+- **Long-tier size.** Done: the unique index that guarantees at most
+  one current row per cell was reordered (same columns, same rule), and
+  the long tier went from about 78 to about 30 bytes per cell (see
+  [Storage](#storage)); a lean long table costs 4–8. The index still
+  costs about 38 bytes per cell on values of rank 3–4 whose first
+  dimension is short. A database written before the change gets the
+  smaller index on its next compaction or extract.
 - **Long-tier write speed.** Done: a commit writes its long values,
   arrays and deletes set-based (see
   [the set-based long, array and delete write](#the-set-based-long-array-and-delete-write-before-and-after)).
@@ -814,7 +848,7 @@ once and report the second as nothing to delete.
   version, in either tier. There is no per-cell history.
 - **The multi-dimensional tier cliff.** One missing cell in a
   multi-dimensional float value moves the whole value to the long tier,
-  at about ten times the storage today.
+  at about four times the storage today.
 - **Chunked storage of dense arrays is parked.** Storing very long
   series in chunks could help reads and writes of series much longer
   than a year of hours; it is not planned until such a need appears.

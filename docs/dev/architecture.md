@@ -111,38 +111,56 @@ Engine facts the code relies on (DuckDB 2.0):
   errors). Probe-and-continue inside a write transaction is not allowed:
   any "try this statement, fall back on error" step must run before
   `BEGIN` or in its own transaction.
-- **Bulk inserts bind one list per column.** A long value is written as
-  `INSERT … SELECT ?, unnest(?::T[]), …` (per-key constants as scalars,
-  per-cell columns as lists, up to 16 384 cells per execution); an
-  array payload is one bound `?::DOUBLE[]`; a materialized axis's child
-  rows are one such statement per kind. The statement text does not
+- **Bulk inserts bind one list per column.** Long cells are written as
+  `INSERT … SELECT (?::BIGINT[])[u.k], …, u.v_float, … FROM (SELECT
+  unnest(?::T[]) …) u`: each per-cell column is one list, and the per-key
+  columns (key triple, member binding, axis ids) are short per-key lists
+  indexed by a per-cell key ordinal `k`, up to 16 384 cells per
+  execution. With the `unnest`s in a FROM subquery rather than in the
+  outer select list, a large value inserts about twice as fast. An array
+  payload is one bound `?::DOUBLE[]` (a set of arrays, one nested
+  `?::DOUBLE[][]`); a materialized axis's child rows are one columnar
+  statement per kind. The statement text does not
   depend on the number of cells, so it is prepared once per transaction
   (through the write connection's statement cache, capacity 64). DuckDB
   2.0 parses a statement with thousands of placeholders slowly, which is
   why one placeholder per cell is avoided. Two engine behaviours the code
   relies on: several `unnest`s in one select list zip by position and
   pad a shorter list with NULL **silently**, so every execution first
-  checks that each bound list has the chunk's length (in every build,
-  failing with `DbError::Internal`); and with the default
+  checks that each bound list has the chunk's length, and that every key
+  ordinal is in range, since an out-of-range `list[k]` also reads NULL
+  silently (in every build, failing with `DbError::Internal`); and with
+  the default
   `preserve_insertion_order` the rows land in list order, which keeps a
   long value's rows in canonical cell order. The write connection never
   changes that setting.
-- **Point lookups are sequential scans; scalar writes are set-based.**
-  DuckDB 2.0 uses neither the compound key indexes on the value tables
-  nor any index on a VIRTUAL generated column (`cur_name`, `cur_cls`) for
-  a point lookup: each per-key statement scans the table, zone-map
-  pruned, at a floor of roughly 0.5–1 ms. So a commit writes all of its
-  scalars in one set-based round (`history::write_scalars`, per ≤ 16 384
-  keys): one grouped live + version probe, a long/array live probe only
-  for keys not live as scalars, one close-out `UPDATE` per retention
-  mode, one columnar `INSERT`; the keys bind as zipped lists. A tier
-  transition still uses the per-key close-out. A round of one key binds
-  the same steps as point filters, which are cheaper at that size. A
-  segment's entity names are resolved the same way: one lookup per
-  segment (none for names an earlier segment of the commit resolved), one
-  columnar `INSERT … RETURNING` for the missing ones. The writer defers a
-  commit's scalars until after its last segment and before its deletes;
-  long and array values are still written key by key as they come.
+- **Point lookups are sequential scans; value writes and deletes are
+  set-based.** DuckDB 2.0 uses neither the compound key indexes on the
+  value tables nor any index on a VIRTUAL generated column (`cur_name`,
+  `cur_cls`) for a point lookup: each per-key statement scans the table,
+  zone-map pruned, at a floor of roughly 0.5–1 ms. So a commit buffers
+  its values per tier and writes each buffer in set-based rounds, one
+  writer per tier: `history::write_scalars`, `write_longs` and
+  `write_arrays`. A round is one probe per tier for the live state
+  (scalar first, then long, then array, the per-key precedence) and the
+  versions, the per-key close-out for a tier transition, one close-out
+  `UPDATE` per retention mode (for arrays: the pre-image copy and one
+  `UPDATE` in place, keyed by `array_id`), and one columnar `INSERT`;
+  the keys bind as zipped lists. Rounds are bounded at 16 384 keys and,
+  for long values, 16 384 cells (262 144 elements for arrays); a larger
+  value is a round of its own. A round of one key binds the probes and
+  close-outs as point filters, which are cheaper at that size; the long
+  insert has one form for every size. A value's axes are deduplicated
+  when it is buffered, in value order, so axis ids are minted exactly as
+  a key-by-key writer would. A segment's entity names are resolved the
+  same way: one lookup per segment (none for names an earlier segment of
+  the commit resolved), one columnar `INSERT … RETURNING` for the
+  missing ones. All buffers are flushed after the last segment and
+  before the deletes, which run as one set-based round too
+  (`history::delete_values`): the class, parameter and alternative
+  names resolve once per spelling, each class's entity names in one
+  lookup, then the three live probes and one close-out per tier and
+  retention mode.
 
 ## 3. Workspace map
 
@@ -160,7 +178,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `schema_init` | Apply `schema/*.sql` in numbered order (`build.py` in Rust) and the embedded schema list. |
 | `conn` | Connection discipline: open-work-close, a per-path in-process lock, bounded-backoff retry, write transactions that stamp the commit row. |
 | `axis` | Content-verified axis deduplication (the hash narrows, byte equality decides). |
-| `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; the set-based scalar write (one round per commit). |
+| `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; one set-based writer per tier and the set-based delete (rounds per commit). |
 | `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
 | `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, and entity / class / parameter creation. |
@@ -266,7 +284,10 @@ and
   statement that touches the list payload (the pre-image copy, the
   in-place update, the delete) by it; the read macros do the same with a
   self-join. `array_id` is a physical handle, never canonical content: it
-  is minted only by the column default, never updated, copied verbatim
+  is minted only by its sequence (through the column default for a
+  one-key write; a set-based round draws its ids from the sequence first,
+  sorts them and assigns them in input order, so they are the ids
+  key-by-key inserts would mint), never updated, copied verbatim
   into `_hist` and by compaction, and checked by
   `audit_array_id_coherence` (one id, one key triple). Its sequence steps
   by 2, which keeps id sets non-contiguous so lookups use the index.

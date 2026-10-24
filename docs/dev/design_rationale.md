@@ -39,7 +39,7 @@ a measurement, the text says so.
       both are cheap on that path.
     - *Bulk reads* favour dense arrays: list form avoids one row per cell.
     - *Writes* favour dense arrays: about 1 µs per value against about
-      16 µs per cell for a new long value.
+      14 µs per cell for a new long value.
     - *Storage* favours dense arrays in nodal-db: about 8 bytes per value
       against about 80 bytes per long cell. That gap is mostly nodal-db's
       own long-tier overhead, not the long format: a lean long table in
@@ -57,9 +57,7 @@ a measurement, the text says so.
   history unless retention is switched off. For long histories, a
   [history-free extract](../features.md#history-free-extract) writes a
   smaller file with the current content only.
-- **Not implemented yet:** set-based writes of long values are planned
-  (scalars are written set-based since the
-  [change below](#the-set-based-scalar-write-before-and-after)); a leaner long tier is under consideration; chunked
+- **Not implemented yet:** a leaner long tier is under consideration; chunked
   storage of dense arrays is parked. See
   [Known limitations and open directions](#known-limitations-and-open-directions).
 
@@ -129,7 +127,7 @@ Every cell is a row carrying its keys, its coordinates and its value.
       and slice reads in under 1 ms (see
       [Raw formats](#raw-formats-without-the-nodal-db-schema)).
     - nodal-db's *own* long tier costs much more: about 80 bytes per cell
-      and about 16 µs per written cell, against about 8 bytes and 1 µs
+      and about 14 µs per written cell, against about 8 bytes and 1 µs
       per dense-array value. Most of the size is one unique index that
       guarantees at most one current row per cell (see
       [Storage](#storage)); the write cost was not broken down further.
@@ -472,10 +470,10 @@ The two data sets differ, so read the rows with care:
 | The same through `read_parameter` with a timestamp filter | 3 010 ms | 50.4 ms | results-scale |
 | Whole parameter, list form (`read_parameter_dense`) | 240 ms for 8.76 million values (about 27 ns per value) | — | gate |
 | Whole parameter, long form (`read_parameter`) | 3 151 ms for 8.76 million cells (about 0.36 µs per cell) | 1 065 ms for 1.23 million rows (about 0.87 µs per cell) | gate |
-| Write a new 8 760-cell value | 8.0 ms (about 0.9 µs per value; 20 values per commit) | 143 ms (about 16 µs per cell) | write-path comparison |
-| Replace an 8 760-cell value | 16.1 ms (about 1.8 µs per value) | 239 ms (about 27 µs per cell) | write-path comparison |
-| Bulk ingest, one commit (Arrow-IPC import) | 875 000–1.01 million values/s | 73 300 values/s | results-scale |
-| Bulk ingest, core API, 100 series per commit | 689 000–774 000 values/s | 65 500 values/s | results-scale |
+| Write a new 8 760-cell value | 7.7 ms (about 0.9 µs per value; 20 values per commit) | 125 ms (about 14 µs per cell) | write-path comparison |
+| Replace an 8 760-cell value | 16.2 ms (about 1.8 µs per value) | 216 ms (about 25 µs per cell) | write-path comparison |
+| Bulk ingest, one commit (Arrow-IPC import) | 875 000–1.01 million values/s | 190 000–200 000 values/s | results-scale |
+| Bulk ingest, core API, 100 series per commit | 689 000–774 000 values/s | 154 000–157 000 values/s | results-scale |
 | Storage, one commit, net of the empty schema | 8.1–8.4 bytes per value | 78 bytes per cell | results-scale |
 | Storage, many commits, before compaction | 11.4–14.9 bytes per value | 83 bytes per cell | results-scale |
 
@@ -552,7 +550,7 @@ hole becomes 26 279 long rows: at 78–83 bytes per cell about 2.0–2.2 MB,
 against about 0.22 MB as a complete dense array at 8.4 bytes per value,
 nine to ten times more. (The long figure was measured on integer cells;
 float cells were not measured in the harness.) It also costs the
-long-tier write rate, about 16 µs per cell instead of about 1 µs.
+long-tier write rate, about 14 µs per cell instead of about 1 µs.
 
 ### Raw formats without the nodal-db schema
 
@@ -712,6 +710,72 @@ database are rejected as a duplicate target even when the up-front name
 comparison keeps them apart (it folds case in Rust, which differs from
 DuckDB on a few letters); this too used to fail on a raw constraint error.
 
+### The set-based long, array and delete write, before and after
+
+The same per-statement floor made long values, arrays and deletes cost
+5–11 ms per key: a 24-cell long value spent almost nothing encoding its
+cells and the rest on five to seven statements (live tier, version scan,
+close-out, insert), and a delete paid four name lookups, the entity
+lookup being a 4–5 ms scan on a file with 100 000 entities. A commit now
+buffers its long values and arrays next to its scalars, with their axes
+deduplicated as they arrive, and writes each tier in rounds of up to
+16 384 keys (and 16 384 long cells or 262 144 array elements; a larger
+value is a round of its own): one probe per tier for the live state and
+the versions, one close-out per retention mode, one insert. An array
+replace is one `UPDATE` in place, keyed by `array_id`, after a pre-image
+copy to the history table; new arrays get their `array_id`s from the
+sequence before the insert, assigned in input order, so they are the
+ids a key-by-key writer would mint. A commit's deletes are one round
+too, with each class's entity names resolved in one statement. A round
+of one key keeps the point statements, so single-value saves are
+unchanged. The long insert also changed form: its per-cell lists are
+unnested in a subquery and the per-key columns are short lists indexed
+per cell, which halves the insert of a large value.
+
+Measured with the write-path comparison (whole commits, opening and
+closing the file included; the "big" file is 101 MiB, with 100 000
+scalar entities, 10 000 24-cell and 100 8 760-cell integer long values
+and 2 000 24-element arrays, copied per sample; 15 pairs per row, 21 for
+the `write_value` and scalar rows; load average 3.5–16.5, the two single-value rows
+re-run with 31 pairs at 3.5–6.8 after the load moved by more than 2×):
+
+| Write | Before | After | Ratio (95 % interval) |
+|---|---|---|---|
+| Delete 1 000 scalar values, big file | 8 386 ms | 147 ms | 0.018 (0.017–0.019) |
+| Delete 1 000 24-cell long values, big file | 10 837 ms | 482 ms | 0.045 (0.044–0.046) |
+| Delete 500 arrays, big file | 4 662 ms | 155 ms | 0.033 (0.032–0.036) |
+| 1 000 new 24-cell long values, empty file | 3 986 ms | 217 ms | 0.056 (0.054–0.060) |
+| Replace 1 000 24-cell long values, big file | 7 398 ms | 621 ms | 0.086 (0.082–0.092) |
+| 1 000 new 24-element arrays, empty file | 3 417 ms | 122 ms | 0.036 (0.036–0.037) |
+| Replace 1 000 24-element arrays, big file | 4 304 ms | 194 ms | 0.045 (0.045–0.046) |
+| Editor-shaped save: 20 parameters × 1 long value, big file | 350 ms | 231 ms | 0.67 (0.65–0.67) |
+| Replace 10 8 760-cell long values, one commit | 1 313 ms | 1 038 ms | 0.79 (0.78–0.80) |
+| New 8 760-cell long value through `write_value` | 149 ms | 125 ms | 0.84 (0.83–0.85) |
+| Single long value save, big file | 137.6 ms | 138.9 ms | 1.00 (0.98–1.02) |
+| Single value delete, big file | 115.7 ms | 115.6 ms | 0.99 (0.97–1.01) |
+| Single array save, big file | 132.1 ms | 129.2 ms | 0.98 (0.90–1.04) |
+| Scalar writes; read of one long value | | | 0.99–1.01, unchanged |
+
+The factors include opening and closing the file, about 100–130 ms per
+commit on the big file, which this change does not touch: the delete
+statements themselves gained more than the end-to-end ratios show, and
+a single-value save or delete stays at that floor. The bulk ingest of
+876 000 long cells (results-scale harness, 1 000 series in 10 commits)
+went from 11.6 s to 5.6 s through the core API and from 10.3 s to 4.4 s
+through `nodal-db import`, with byte-identical file sizes.
+
+The stored rows are byte-identical: the physical-write golden was
+extended with long, array and delete commits (diverged per-cell
+versions, retention stubs, transitions between all three tiers, new and
+replaced arrays with NaN and −0.0, every delete warning) generated by
+the key-by-key writers, and passes unchanged; a randomized script of
+120–250 commits per seed (6 seeds, ranks 1–4, every value kind,
+retention, erasure, deletes with misses, duplicates and final-sigma
+pairs, rounds above 16 384 cells) gave identical rows, reports and
+sequences on both writers. Behaviour kept on purpose: two delete keys
+whose spellings only DuckDB's `lower()` folds together still delete
+once and report the second as nothing to delete.
+
 ## Known limitations and open directions
 
 - **Point and slice reads of dense arrays.** Through
@@ -732,18 +796,20 @@ DuckDB on a few letters); this too used to fail on a raw constraint error.
   key, a check in the writer, or a separate history table as for dense
   arrays. Which of these to adopt is an open design decision; nothing
   is implemented yet. It would also shrink the tier cliff below.
-- **Long-tier write speed.** Long-tier writes are still much slower
-  per value than dense-array writes (about 16 µs per cell against about
-  1 µs per array value). Large result sets are best kept dense:
-  complete grids of float values. Closing out and versioning a whole
-  segment's keys in one statement, instead of key by key, is planned.
+- **Long-tier write speed.** Done: a commit writes its long values,
+  arrays and deletes set-based (see
+  [the set-based long, array and delete write](#the-set-based-long-array-and-delete-write-before-and-after)).
+  Long-tier writes are still slower per value than dense-array writes
+  (about 14 µs per cell written alone, about 5–6 µs in a bulk ingest,
+  against about 1 µs per array value). Large result sets are best kept
+  dense: complete grids of float values.
 - **Scalar write speed.** Done: a commit writes its scalars set-based
   (see [the set-based scalar write](#the-set-based-scalar-write-before-and-after)),
   about 0.02 ms per value in a 10 000-value commit. What remains per
   commit is a fixed cost: opening and closing the file (about 60 ms of
   a one-value save on a 100 000-scalar file) and resolving each
   segment's class, parameter and alternative (a few statements per
-  segment). Deleting values is still key by key.
+  segment).
 - **Edits rewrite whole values.** Changing one cell creates a full new
   version, in either tier. There is no per-cell history.
 - **The multi-dimensional tier cliff.** One missing cell in a

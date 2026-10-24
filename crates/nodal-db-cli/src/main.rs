@@ -168,14 +168,22 @@ enum MaintainCommand {
     Compact {
         /// Target DuckDB file.
         db: PathBuf,
-        /// Only compact when the file has grown past the growth factor
-        /// times its size right after the last compaction (always compacts
-        /// the first time, to record that size).
+        /// Only compact when due: the file has grown past the growth factor
+        /// times its size right after the last compaction, or enough commits
+        /// have landed since then (see --max-commits). Always compacts the
+        /// first time, to record the size and commit. Reading the head
+        /// commit for the commit count opens the database read-only once.
         #[arg(long)]
         if_needed: bool,
         /// Growth factor for --if-needed (default 3.0).
         #[arg(long, requires = "if_needed")]
         growth: Option<f64>,
+        /// Commit count for --if-needed: compact once this many commits have
+        /// landed since the last compaction, even if the file has not grown.
+        /// Default: 50, scaled up to 200 for large files. 0 disables the
+        /// commit count (growth only).
+        #[arg(long, requires = "if_needed")]
+        max_commits: Option<u64>,
     },
 }
 
@@ -431,28 +439,39 @@ fn main() -> anyhow::Result<()> {
                     db,
                     if_needed,
                     growth,
+                    max_commits,
                 },
         } => {
             import::require_db(&db)?;
-            use nodal_db_core::compaction;
+            use nodal_db_core::compaction::{self, CommitBackstop, CompactionPolicy};
             let r = if if_needed {
-                compaction::compact_if_needed(
-                    &db,
-                    growth.unwrap_or(compaction::DEFAULT_GROWTH_FACTOR),
-                )?
+                let policy = CompactionPolicy {
+                    growth_factor: growth.unwrap_or(compaction::DEFAULT_GROWTH_FACTOR),
+                    max_commits: match max_commits {
+                        None => CommitBackstop::SizeScaled,
+                        Some(n) => CommitBackstop::Fixed(n),
+                    },
+                };
+                compaction::compact_if_due(&db, policy, None)?
             } else {
                 compaction::compact(&db)?
             };
             if r.swapped {
+                let why = match r.trigger {
+                    Some(compaction::CompactionTrigger::NoBaseline) => " (no baseline recorded)",
+                    Some(compaction::CompactionTrigger::Growth) => " (file growth)",
+                    Some(compaction::CompactionTrigger::Commits) => " (commit count)",
+                    Some(compaction::CompactionTrigger::Requested) | None => "",
+                };
                 println!(
-                    "compacted {}: {} -> {}",
+                    "compacted {}: {} -> {}{why}",
                     db.display(),
                     mib(r.bytes_before),
                     mib(r.bytes_after)
                 );
             } else {
                 println!(
-                    "{}: no compaction needed ({}; below the growth threshold)",
+                    "{}: no compaction needed ({}; below the growth and commit thresholds)",
                     db.display(),
                     mib(r.bytes_before)
                 );

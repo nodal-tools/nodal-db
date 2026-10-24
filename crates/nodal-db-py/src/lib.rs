@@ -810,35 +810,94 @@ impl Database {
     }
 
     /// Rewrite the database file densely packed (keeps every row, history
-    /// included, and the identity). `if_needed=True` compacts only when the
-    /// file has grown past `growth` (default 3.0) times its size after the
-    /// last compaction. Returns the report dict (`swapped` False = skipped).
-    #[pyo3(signature = (*, if_needed = false, growth = None))]
+    /// included, and the identity). Returns the report dict (`swapped`
+    /// False = skipped; `trigger` names why it ran).
+    ///
+    /// `if_needed=True` compacts only when due: the file has grown past
+    /// `growth` (default 3.0) times its size after the last compaction, OR
+    /// `max_commits` commits have landed since then (the commit-count
+    /// backstop; every writer's commits count). **This means
+    /// `compact(if_needed=True)` can now fire on the commit count even when
+    /// the file has not grown**, and, when the growth gate does not fire,
+    /// it opens the database read-only once to read the head commit.
+    /// `max_commits`: `"auto"` (default: 50, scaled up to 200 for large
+    /// files), an int N, or `None` / `0` to disable the commit count.
+    #[pyo3(signature = (*, if_needed = false, growth = None, max_commits = MaxCommits::Auto))]
     fn compact<'py>(
         &self,
         py: Python<'py>,
         if_needed: bool,
         growth: Option<f64>,
+        max_commits: MaxCommits,
     ) -> PyResult<Bound<'py, PyDict>> {
         if growth.is_some() && !if_needed {
             return Err(ApiError::new_err(
                 "compact: growth applies only with if_needed=True",
             ));
         }
+        if !if_needed && !matches!(max_commits, MaxCommits::Auto) {
+            return Err(ApiError::new_err(
+                "compact: max_commits applies only with if_needed=True",
+            ));
+        }
+        let backstop = max_commits.backstop()?;
         let path = self.path.clone();
         let report = py
             .detach(move || {
                 if if_needed {
-                    compaction::compact_if_needed(
-                        &path,
-                        growth.unwrap_or(compaction::DEFAULT_GROWTH_FACTOR),
-                    )
+                    let policy = compaction::CompactionPolicy {
+                        growth_factor: growth.unwrap_or(compaction::DEFAULT_GROWTH_FACTOR),
+                        max_commits: backstop,
+                    };
+                    compaction::compact_if_due(&path, policy, None)
                 } else {
                     compaction::compact(&path)
                 }
             })
             .map_err(db_err)?;
         compaction_report_to_py(py, &report)
+    }
+}
+
+/// `compact(max_commits=...)`: `"auto"` (the size-scaled default), an int,
+/// or `None` (disabled).
+enum MaxCommits {
+    Auto,
+    Fixed(i64),
+    Off,
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for MaxCommits {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_none() {
+            return Ok(MaxCommits::Off);
+        }
+        if let Ok(s) = obj.extract::<String>() {
+            if s == "auto" {
+                return Ok(MaxCommits::Auto);
+            }
+            return Err(ApiError::new_err(format!(
+                "compact: max_commits must be \"auto\", an int >= 0, or None (got {s:?})"
+            )));
+        }
+        Ok(MaxCommits::Fixed(obj.extract::<i64>()?))
+    }
+}
+
+impl MaxCommits {
+    fn backstop(&self) -> PyResult<compaction::CommitBackstop> {
+        Ok(match *self {
+            MaxCommits::Auto => compaction::CommitBackstop::SizeScaled,
+            MaxCommits::Off => compaction::CommitBackstop::Off,
+            MaxCommits::Fixed(n) if n < 0 => {
+                return Err(ApiError::new_err(format!(
+                    "compact: max_commits must be >= 0 (got {n})"
+                )))
+            }
+            MaxCommits::Fixed(n) => compaction::CommitBackstop::Fixed(n as u64),
+        })
     }
 }
 

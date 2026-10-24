@@ -226,8 +226,9 @@ pub fn extract(src: &Path, dest: &Path, opts: &ExtractOpts) -> Result<ExtractRep
 
     report.bytes_source = bytes_source;
     report.bytes_extract = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-    // The extract is freshly packed: its size is the compaction baseline.
-    write_baseline(dest, report.bytes_extract);
+    // The extract is freshly packed: its size and its head (the extract's
+    // own commit E) are the compaction baseline (save-path plan C8 ii).
+    write_baseline(dest, report.bytes_extract, report.extract_commit);
     Ok(report)
 }
 

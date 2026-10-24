@@ -16,9 +16,14 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
+use nodal_db_core::api::head_commit;
 use nodal_db_core::api::{db_identity, write_parameter};
-use nodal_db_core::compaction::{baseline_path, compact, compact_if_needed, sweep_orphan_temps};
+use nodal_db_core::compaction::{
+    baseline_path, compact, compact_if_due, compact_if_needed, read_baseline, sweep_orphan_temps,
+    CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionTrigger,
+};
 use nodal_db_core::error::DbError;
+use nodal_db_core::extract::{extract, ExtractOpts};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::WriteOptions;
 
@@ -667,15 +672,13 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
         sidecar.exists(),
         "baseline sidecar must be written after compaction"
     );
-    let baseline: u64 = std::fs::read_to_string(&sidecar)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let baseline = read_baseline(&db).expect("v2 sidecar parses");
     assert_eq!(
-        baseline, compacted,
+        baseline.bytes, compacted,
         "sidecar must equal the post-compaction size"
     );
+    assert_eq!(baseline.commit, Some(head_commit(&db).unwrap()));
+    assert_eq!(r1.trigger, Some(CompactionTrigger::NoBaseline));
 
     // (2) Immediately again ⇒ NO-OP: the file has not tripled since the
     // baseline, and the cheap gate must not touch it.
@@ -696,16 +699,14 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
         "must fire once current bytes exceed 3x the baseline"
     );
     // Firing refreshes the baseline to the fresh size (no longer the tiny "1").
-    let refreshed: u64 = std::fs::read_to_string(&sidecar)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert_eq!(refreshed, std::fs::metadata(&db).unwrap().len());
+    assert_eq!(r3.trigger, Some(CompactionTrigger::Growth));
+    let refreshed = read_baseline(&db).unwrap();
+    assert_eq!(refreshed.bytes, std::fs::metadata(&db).unwrap().len());
 
     // (4) The sidecar is NOT an orphan temp: neither an unconditional compact()
     // nor the orphan sweep may remove it.
-    compact(&db).expect("unconditional compact leaves the sidecar");
+    let r4 = compact(&db).expect("unconditional compact leaves the sidecar");
+    assert_eq!(r4.trigger, Some(CompactionTrigger::Requested));
     assert!(
         baseline_path(&db).exists(),
         "compact() must not sweep the baseline sidecar"
@@ -855,4 +856,260 @@ fn compact_a_file_named_src() {
     compact(&db).expect("compaction of src.duckdb");
     assert_eq!(db_identity(&db).unwrap(), id);
     write_scalar(&db, "Widget", "size", "Base", "w1", 2.0);
+}
+
+// --- compact_if_due: the commit-count backstop (save-path plan §5) ----------
+
+/// Byte gate effectively off, so only the commit count can fire.
+fn commits_only(n: u64) -> CompactionPolicy {
+    CompactionPolicy {
+        growth_factor: 1.0e9,
+        max_commits: CommitBackstop::Fixed(n),
+    }
+}
+
+/// A fresh small DB, compacted once so a v2 baseline records its head.
+fn baselined(dir: &Path) -> std::path::PathBuf {
+    let db = dir.join("due.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    write_scalar(&db, "Widget", "size", "Base", "w1", 0.0);
+    compact(&db).expect("establish baseline");
+    db
+}
+
+fn write_sidecar(db: &Path, text: &str) {
+    std::fs::write(baseline_path(db), text).unwrap();
+}
+
+/// Plan test 15: The commit gate fires at exactly N commits after the baseline, not
+/// before; `trigger == Commits`; the sidecar records the new head.
+#[test]
+fn commit_gate_fires_at_exactly_n() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    let base = read_baseline(&db).unwrap().commit.unwrap();
+    for i in 1..3 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", i as f64);
+        let head = head_commit(&db).unwrap();
+        assert_eq!(head, base + i);
+        let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+        assert!(!r.swapped, "{i} commits < 3");
+        assert_eq!(r.trigger, None);
+    }
+    write_scalar(&db, "Widget", "size", "Base", "w1", 3.0);
+    let head = head_commit(&db).unwrap();
+    let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+    assert!(r.swapped, "3 commits = N");
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+    let b = read_baseline(&db).unwrap();
+    assert_eq!(b.commit, Some(head));
+    assert_eq!(b.bytes, std::fs::metadata(&db).unwrap().len());
+    // Reset: the next call is a no-op again.
+    let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+    assert!(!r.swapped);
+}
+
+/// Plan test 16: The byte gate still fires through `compact_if_due` (`Growth`), and a
+/// missing sidecar compacts (`NoBaseline`).
+#[test]
+fn byte_gate_and_missing_baseline_through_compact_if_due() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    let head = head_commit(&db).unwrap();
+    write_sidecar(&db, &format!("bytes=1\ncommit={head}\n"));
+    let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
+    assert!(r.swapped);
+    assert_eq!(r.trigger, Some(CompactionTrigger::Growth));
+
+    std::fs::remove_file(baseline_path(&db)).unwrap();
+    let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::NoBaseline));
+    assert_eq!(read_baseline(&db).unwrap().commit, Some(head));
+
+    // A torn sidecar is treated as missing.
+    write_sidecar(&db, "bytes=12\n");
+    let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::NoBaseline));
+}
+
+/// Plan test 17: An old-format (bytes-only) sidecar is adopted: no compaction, and the
+/// sidecar gains `commit = head` with the same bytes.
+#[test]
+fn old_format_sidecar_is_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    for i in 0..5 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", 10.0 + i as f64);
+    }
+    let head = head_commit(&db).unwrap();
+    let bytes = std::fs::metadata(&db).unwrap().len();
+    write_sidecar(&db, &format!("{bytes}\n"));
+    let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+    assert!(!r.swapped, "adopt, never compact on an upgrade");
+    let b = read_baseline(&db).unwrap();
+    assert_eq!(b.bytes, bytes);
+    assert_eq!(b.commit, Some(head));
+    // Counting starts at the adopted head.
+    for i in 0..3 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", 20.0 + i as f64);
+    }
+    let r = compact_if_due(&db, commits_only(3), None).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+}
+
+/// Plan test 18: `head = None` reads the head itself (one RO open) and gates the same.
+#[test]
+fn head_none_reads_the_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    write_scalar(&db, "Widget", "size", "Base", "w1", 1.0);
+    let r = compact_if_due(&db, commits_only(2), None).unwrap();
+    assert!(!r.swapped);
+    write_scalar(&db, "Widget", "size", "Base", "w1", 2.0);
+    let r = compact_if_due(&db, commits_only(2), None).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+}
+
+/// Plan test 19: Backstop off ⇒ byte gate only, however many commits landed.
+#[test]
+fn backstop_off_is_byte_gate_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    for i in 0..6 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", i as f64);
+    }
+    for backstop in [CommitBackstop::Off, CommitBackstop::Fixed(0)] {
+        let policy = CompactionPolicy {
+            growth_factor: 1.0e9,
+            max_commits: backstop,
+        };
+        let r = compact_if_due(&db, policy, None).unwrap();
+        assert!(!r.swapped, "{backstop:?}");
+    }
+    // The default (size-scaled, N = 50 here) is not due after 6 commits.
+    let r = compact_if_due(&db, CompactionPolicy::default(), None).unwrap();
+    assert!(!r.swapped);
+}
+
+/// Plan test 20: A head below the baseline's commit (a file restored or replaced under
+/// its old sidecar) is a broken baseline ⇒ compact (plan C8 i).
+#[test]
+fn head_below_baseline_commit_compacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    let head = head_commit(&db).unwrap();
+    let bytes = std::fs::metadata(&db).unwrap().len();
+    write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head + 100));
+    let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
+    assert!(r.swapped);
+    assert_eq!(r.trigger, Some(CompactionTrigger::NoBaseline));
+    assert_eq!(read_baseline(&db).unwrap().commit, Some(head));
+}
+
+/// Plan test 21: `extract` writes a v2 sidecar with `commit = E`; `compact_if_due` on
+/// the extract does not compact until N commits later (plan C8 ii).
+#[test]
+fn extract_writes_a_v2_baseline_with_its_own_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = build_bloated(dir.path(), 3);
+    let dest = dir.path().join("x.duckdb");
+    let r = extract(
+        &src,
+        &dest,
+        &ExtractOpts {
+            as_of: None,
+            user: "tester",
+            note: None,
+        },
+    )
+    .expect("extract");
+    let b = read_baseline(&dest).unwrap();
+    assert_eq!(b.commit, Some(r.extract_commit));
+    assert_eq!(b.bytes, std::fs::metadata(&dest).unwrap().len());
+    assert_eq!(head_commit(&dest).unwrap(), r.extract_commit);
+    for i in 0..2 {
+        write_scalar(&dest, "Widget", "size", "Base", "w1", 100.0 + i as f64);
+        let r = compact_if_due(&dest, commits_only(3), None).unwrap();
+        assert!(!r.swapped);
+    }
+    write_scalar(&dest, "Widget", "size", "Base", "w1", 200.0);
+    let r = compact_if_due(&dest, commits_only(3), None).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+}
+
+/// Plan test 23: The repack records the head it read on the fresh file, not the
+/// caller's `head` argument (plan C10).
+#[test]
+fn repack_records_the_true_head_not_the_callers() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    for i in 0..3 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", i as f64);
+    }
+    let head = head_commit(&db).unwrap();
+    let bytes = std::fs::metadata(&db).unwrap().len();
+    write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head - 2));
+    // A lagging caller value (head - 1) still trips N = 1 ...
+    let r = compact_if_due(&db, commits_only(1), Some(head - 1)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+    // ... and the sidecar records the true head.
+    assert_eq!(read_baseline(&db).unwrap().commit, Some(head));
+}
+
+/// C12: a failed repack arms the in-memory back-off; calls inside the window
+/// do not attempt the repack (no error, `backed_off`), the first call past it
+/// does, and a success clears it.
+#[test]
+fn failed_repack_backs_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    let head = head_commit(&db).unwrap();
+    let bytes = std::fs::metadata(&db).unwrap().len();
+    // Due under N = 3, and the repack will refuse (schema-version mismatch).
+    write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head - 3));
+    let set_version = |v: &str| {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE lower(name) = 'schema_version' \
+             AND valid_to_commit IS NULL",
+            [v],
+        )
+        .unwrap();
+        conn.close().unwrap();
+    };
+    let real = {
+        let conn = Connection::open(&db).unwrap();
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE lower(name) = 'schema_version' \
+                 AND valid_to_commit IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.close().unwrap();
+        v
+    };
+    set_version("9.9-bogus");
+
+    let mut b = CompactionBackoff::new();
+    let policy = commits_only(3);
+    let err = b.compact_if_due(&db, policy, head).unwrap_err();
+    assert!(err.to_string().contains("schema_version"), "{err}");
+    assert_eq!(b.failed_at(), Some(head));
+    // Inside the window (max(5, 3/5) = 5 commits): skipped, no attempt.
+    for h in [head, head + 1, head + 4] {
+        let r = b
+            .compact_if_due(&db, policy, h)
+            .expect("backed off, no attempt");
+        assert!(r.backed_off && !r.swapped, "head {h}");
+    }
+    // Past the window: attempted again (and fails again).
+    assert!(b.compact_if_due(&db, policy, head + 5).is_err());
+    assert_eq!(b.failed_at(), Some(head + 5));
+    // The cause clears; past the next window the repack runs and clears it.
+    set_version(&real);
+    let r = b.compact_if_due(&db, policy, head + 10).unwrap();
+    assert!(r.swapped && !r.backed_off);
+    assert_eq!(b.failed_at(), None);
 }

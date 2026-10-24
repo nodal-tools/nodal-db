@@ -396,10 +396,43 @@ the original. It is non-destructive (all history, commits and axes
 survive at the query level) and crash-safe by construction: the original
 is only read until the final rename. Compaction holds the per-path lock
 for the whole operation and runs outside any write transaction, so a
-failed compaction can never roll back a commit. `compact_if_needed`
-skips the rebuild below a growth threshold, and
-`erasure::erase_alternative_and_compact` chains the two operations. The
-CLI verb is `nodal-db maintain compact`; Python has `Database.compact()`.
+failed compaction can never roll back a commit.
+`erasure::erase_alternative_and_compact` chains an erase with a compaction.
+The CLI verb is `nodal-db maintain compact`; Python has
+`Database.compact()`.
+
+**When to compact: `compact_if_due`.** Two costs grow between
+compactions. The file accretes dead blocks (every commit's checkpoint
+strands some), and every read-write commit-checkpoint cycle adds a
+roughly constant cost (≈0.9 ms) to every *later* open of the file, while
+barely moving its byte size. `compaction::compact_if_due(db, policy,
+head)` gates on both, cheapest first:
+
+1. no usable baseline ⇒ compact (establishes it);
+2. the byte gate: the file is at least `growth_factor` (3.0) times its
+   size right after the last compaction ⇒ compact;
+3. the commit-count backstop: at least `N` commits since the last
+   compaction ⇒ compact. `N` is 50 for files up to ≈68 MiB and grows with
+   the size to 200 (`size_scaled_max_commits`: the amortized optimum
+   √(2·C/g) with the repack cost C estimated from the size), so huge
+   files, whose repack takes seconds, compact less often. A head below
+   the recorded commit means the baseline belongs to another file
+   (restored or replaced) ⇒ compact.
+
+The baseline lives in a sidecar file `<db>.compaction-baseline` (two
+lines, `bytes=` and `commit=`), never in the database: a `metadata` row
+would need a commit of its own. Every repack and every extract writes
+both values, the commit read on the new file itself. A sidecar written
+by an older build (bytes only) is adopted with the current head, not
+compacted. The no-op path is two `stat`s and a sidecar read when the
+caller passes the head (the editor passes the commit id of the save it
+just made); with `head = None` the gate opens the database read-only
+once to read it (the CLI's `--if-needed`, Python's
+`compact(if_needed=True)`). A failed repack updates nothing, so a
+per-save caller holds a `compaction::CompactionBackoff`, which skips the
+gate for `max(5, N/5)` commits after a failure instead of retrying a
+1-9 s repack on every save. `compact_if_needed` is the byte gate alone,
+kept for compatibility.
 
 The history-free extract (`extract::extract`, CLI `nodal-db extract`)
 uses the same rebuild machinery (the crate-private `rebuild` module) to

@@ -489,6 +489,22 @@ versions. The source file is only read.
 To compact a database in place instead (keeping all history), use
 `nodal-db maintain compact demo.duckdb` or `db.compact()`.
 
+`--if-needed` (Python: `db.compact(if_needed=True)`) compacts only when
+it is due: when the file has grown to three times its size after the
+last compaction (`--growth`), or when 50 commits have landed since then
+(`--max-commits`; scaled up to 200 for files of several hundred MiB, `0`
+in the CLI or `None` in Python disables it). The commit count matters
+even when the file does not grow: every commit makes each later open of
+the file slightly slower until the next compaction. The size and commit
+of the last compaction are kept in a `demo.duckdb.compaction-baseline`
+file next to the database; keep it with the database or delete it, never
+edit it.
+
+```text
+$ nodal-db maintain compact demo.duckdb --if-needed
+demo.duckdb: no compaction needed (10.8 MiB; below the growth and commit thresholds)
+```
+
 !!! note "Identity after swapping files"
     An extract is a new database with its own identity. If you replace
     your working file with its extract (extract, check the result, then

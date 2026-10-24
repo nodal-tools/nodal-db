@@ -77,6 +77,35 @@ fn source(dir: &Path) -> std::path::PathBuf {
     db
 }
 
+/// One more scalar write (one more commit).
+fn write_one_more(db: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let v = scalar(db, "SELECT max(id) FROM \"commit\"") as f64;
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![v])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    write_parameter(
+        db,
+        "Node",
+        "demand",
+        "Base",
+        batch,
+        &[],
+        WriteOptions::default(),
+        "cli_tester",
+        "one more",
+    )
+    .unwrap();
+}
+
 #[test]
 fn extract_head_and_as_of_through_the_cli() {
     let dir = tempfile::tempdir().unwrap();
@@ -178,6 +207,32 @@ fn maintain_compact_through_the_cli() {
             .arg(&db),
     );
     assert!(out.contains("compacted"), "{out}");
+    // The commit count fires: one commit after the compaction, N = 1.
+    write_one_more(&db);
+    let out = run_ok(
+        bin()
+            .args(["maintain", "compact", "--if-needed", "--max-commits", "1"])
+            .arg(&db),
+    );
+    assert!(
+        out.contains("compacted") && out.contains("commit count"),
+        "{out}"
+    );
+    // --max-commits 0 disables the count: nothing due.
+    write_one_more(&db);
+    let out = run_ok(
+        bin()
+            .args(["maintain", "compact", "--if-needed", "--max-commits", "0"])
+            .arg(&db),
+    );
+    assert!(out.contains("no compaction needed"), "{out}");
+    // --max-commits needs --if-needed.
+    let err = run_err(
+        bin()
+            .args(["maintain", "compact", "--max-commits", "2"])
+            .arg(&db),
+    );
+    assert!(err.contains("--if-needed"), "{err}");
     // --growth needs --if-needed.
     let err = run_err(
         bin()

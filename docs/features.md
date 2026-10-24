@@ -219,9 +219,10 @@ this point. The `audit_health` view reports dead-row fractions and
 advises when compaction is worthwhile.
 
 Compaction is available from the CLI (`nodal-db maintain compact`, with
-`--if-needed` to compact only when the file has grown past a threshold),
-from Python (`Database.compact()`) and from the Rust API
-(`compaction::compact`, `compaction::compact_if_needed`).
+`--if-needed` to compact only when the file has grown past a threshold or
+enough commits have landed since the last compaction), from Python
+(`Database.compact()`) and from the Rust API (`compaction::compact`,
+`compaction::compact_if_due`).
 
 ## History-free extract
 

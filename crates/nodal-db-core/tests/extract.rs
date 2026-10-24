@@ -1171,12 +1171,8 @@ fn t10_extract_is_native_2_0_storage() {
         "v2.0.0+"
     );
     // The extract is freshly packed: its size is the compaction baseline.
-    let baseline: u64 = std::fs::read_to_string(nodal_db_core::compaction::baseline_path(&dest))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert_eq!(baseline, std::fs::metadata(&dest).unwrap().len());
+    let baseline = nodal_db_core::compaction::read_baseline(&dest).expect("v2 sidecar");
+    assert_eq!(baseline.bytes, std::fs::metadata(&dest).unwrap().len());
 }
 
 // --- T11: the attached-catalog macro binding tripwire --------------------------------

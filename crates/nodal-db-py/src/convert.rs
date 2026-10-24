@@ -13,7 +13,7 @@ use pyo3::types::{PyDict, PyList};
 
 use nodal_db_core::api::{DeleteKey, Segment};
 use nodal_db_core::canon::LabelDomain;
-use nodal_db_core::compaction::CompactionReport;
+use nodal_db_core::compaction::{CompactionReport, CompactionTrigger};
 use nodal_db_core::erasure::{ErasePreview, EraseReport};
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract::ExtractReport;
@@ -631,6 +631,15 @@ pub(crate) fn compaction_report_to_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("swapped", r.swapped)?;
+    d.set_item(
+        "trigger",
+        r.trigger.map(|t| match t {
+            CompactionTrigger::Requested => "requested",
+            CompactionTrigger::NoBaseline => "no_baseline",
+            CompactionTrigger::Growth => "growth",
+            CompactionTrigger::Commits => "commits",
+        }),
+    )?;
     d.set_item("bytes_before", r.bytes_before)?;
     d.set_item("bytes_after", r.bytes_after)?;
     d.set_item("blocks_before", r.blocks_before)?;

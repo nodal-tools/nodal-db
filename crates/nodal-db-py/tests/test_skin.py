@@ -506,6 +506,28 @@ def test_compact(db):
     assert db.compact(if_needed=True, growth=0.5)["swapped"]
     with pytest.raises(nodal_db.ApiError):
         db.compact(growth=2.0)
+    with pytest.raises(nodal_db.ApiError):
+        db.compact(max_commits=2)
+    with pytest.raises(nodal_db.ApiError):
+        db.compact(if_needed=True, max_commits=-1)
+    with pytest.raises(nodal_db.ApiError):
+        db.compact(if_needed=True, max_commits="sometimes")
+
+
+def test_compact_if_needed_fires_on_commit_count(db):
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [0.0]), user="t")
+    assert db.compact()["trigger"] == "requested"
+    for v in (1.0, 2.0):
+        db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [v]), user="t")
+    # Two commits since the baseline: not due by default ("auto", N = 50) or
+    # with the count disabled ...
+    assert not db.compact(if_needed=True)["swapped"]
+    assert not db.compact(if_needed=True, max_commits=None)["swapped"]
+    assert not db.compact(if_needed=True, max_commits=0)["swapped"]
+    # ... but due at max_commits=2.
+    rep = db.compact(if_needed=True, max_commits=2)
+    assert rep["swapped"] and rep["trigger"] == "commits"
+    assert not db.compact(if_needed=True, max_commits=2)["swapped"]
 
 
 # ---------------------------------------------------------------------------

@@ -324,18 +324,20 @@ pub struct WriteOutcome {
     /// The tier now current for the key; `None` after a delete.
     pub tier: Option<Tier>,
     /// Version stamped on the new current row(s); `0` after a delete. For
-    /// an unchanged write, the version of the current row (long: the
-    /// highest version among the current cells).
+    /// an unchanged write, the version of the current row. Long: the
+    /// highest version among the value's current cells after the write
+    /// (versions are per cell; a cell diff leaves equal cells at theirs).
     pub version: u16,
     /// The stored value already equals the written one (same tier, binding,
     /// axes and stored payload), so nothing was written: `rows_written` and
     /// `rows_closed` are 0 (skip_unchanged_writes_PLAN §2).
     pub unchanged: bool,
     /// Long tier: the current cells left as they were. Every cell of an
-    /// unchanged long value; 0 for a long value that was rewritten and for
-    /// the other tiers.
+    /// unchanged long value; the equal cells of a cell diff; 0 for a long
+    /// value rewritten whole and for the other tiers.
     pub cells_unchanged: usize,
     /// Rows newly inserted (or, on the array tier, replaced) as current.
+    /// Long: the changed and added cells of a cell diff.
     pub rows_written: usize,
     /// Rows closed out (from/to tiers) or moved to the `_hist` twin (array).
     pub rows_closed: usize,

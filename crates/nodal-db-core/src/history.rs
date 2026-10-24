@@ -121,15 +121,39 @@
 //! statements as today (the scalar probe; the long tier's grouped
 //! per-position probe, which is also its version source; the array live
 //! probe's narrow columns as a prefilter, then the payload by `array_id`).
-//! A long value is compared whole (P1): equal cell for cell, or rewritten as
-//! before. Retention plays no part: an unchanged write supersedes nothing,
-//! so `force_replace` stubs nothing (D3). The no-commit rule (D1) lives in
+//!
+//! **Long cell diff (skip_unchanged_writes_PLAN P2, §4)**: a long value is
+//! merged with the key's current cells by position tuple. When every
+//! current cell shares one set of axis ids, one `value_kind` and one
+//! binding, equal to the new value's, a changed cell is closed out and
+//! re-inserted at its version + 1, a removed cell is closed out, an added
+//! cell is inserted at its position's max version + 1, and an equal cell is
+//! left as it is (open span, same version); no difference at all is an
+//! unchanged write. Any other key (other axes, kind or binding, or damaged
+//! cells) is rewritten whole: every current cell closes, every new cell is
+//! inserted, at the same per-position versions. Per-row spans keep as-of
+//! reads exact; a value's current cells may come from several commits
+//! (`value_timeline` reports value-level change spans,
+//! `audit_long_value_coherence` checks the shared meta), and a diff appends
+//! its inserted cells, so value rows have no physical-order contract.
+//! Retention plays no part in equality: an unchanged write supersedes
+//! nothing, so `force_replace` stubs nothing (D3), and a cell diff stubs
+//! only the cells it closes. The no-commit rule (D1) lives in
 //! `api::commit_changes`; a direct caller of these functions inside its own
 //! `conn::with_write_txn` still commits its (possibly empty) commit row.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use duckdb::arrow::array::{
+    Array, ArrayRef, AsArray, BooleanArray, Float64Array, Int32Array, Int64Array, LargeStringArray,
+    PrimitiveArray, StringArray, StringViewArray,
+};
+use duckdb::arrow::datatypes::{
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType,
+};
+use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::{TimeUnit, Value, ValueRef};
 use duckdb::{params, Connection, OptionalExt};
 
@@ -2069,20 +2093,25 @@ pub(crate) fn resolve_axes(
 /// ≤ [`LONG_INSERT_CHUNK`] keys and ≤ [`LONG_INSERT_CHUNK`] cells, except a
 /// single larger value, which forms its own round (plan D3).
 ///
-/// Per round: the scalar live probe; one grouped long probe returning the
-/// per-position max version over all rows of each key and its current-cell
-/// count (D5); the array live probe for the keys live in neither; the
-/// per-key `close_out_tier` for each tier transition (D6); one same-tier
-/// close-out UPDATE per retention mode; and one key-ordinal columnar INSERT
-/// (D7 as amended by critique C1-C2), chunked at [`LONG_INSERT_CHUNK`]
-/// cells. A round of one key binds its probes and close-out as today's
-/// point statements (D4); the insert has one form for every N.
+/// Per round: the scalar live probe; one grouped long probe returning, per
+/// position of each key, the max version over all its rows and its current
+/// cell (D5, skip_unchanged_writes_PLAN D7), streamed into a compact sorted
+/// vector; the array live probe for the keys live in neither; the cell diff
+/// per key ([`LongDiff`]); the per-key `close_out_tier` for each tier
+/// transition (D6); per retention mode one key-level close-out UPDATE for
+/// the keys rewritten whole and one position-joined UPDATE (chunked at
+/// [`LONG_INSERT_CHUNK`] cells) for the diffed keys' changed and removed
+/// cells; and one key-ordinal columnar INSERT of the changed and added
+/// cells (D7 as amended by critique C1-C2), chunked at
+/// [`LONG_INSERT_CHUNK`] cells. A round of one key binds its probes and
+/// whole close-out as today's point statements (D4); the insert and the
+/// cell close-out have one form for every N.
 ///
 /// Semantics are those of one per-key write per key in input order: the
 /// live tier by the per-key precedence (scalar, then long, then array), the
-/// per-cell `version = max(all rows of the (key, positions)) + 1`, every
-/// current cell closed (a cell absent from the new value stays dead), the
-/// same SET lists and retention. Keys must be distinct (the callers
+/// per-cell `version = max(all rows of the (key, positions)) + 1`, the cell
+/// diff (an equal cell keeps its row; a cell absent from the new value
+/// closes and stays dead), the same SET lists and retention. Keys must be distinct (the callers
 /// guarantee it); a repeated key, a close-out count that differs from the
 /// probe, or a list of the wrong length fails as [`DbError::Internal`].
 /// Returns one [`WriteOutcome`] per input, in input order.
@@ -2115,9 +2144,12 @@ pub(crate) fn write_longs(
 /// per position ([`LongCells::finish`]) they give the max version over
 /// every `value_long` row of the (key, positions), as `current_long_cells`
 /// reads it, plus the current cell: the version source of the write and
-/// the read of the unchanged check in one statement (critique C6, D7). The
+/// the read of the cell diff in one statement (critique C6, D7). The
 /// current leg reads plain columns, not one aggregate per column, which
-/// measured ~2x the planning and execution cost of today's probe.
+/// measured ~2x the planning and execution cost of today's probe. Read
+/// through a streamed Arrow result ([`read_long_probe`]), never
+/// materialized: a 4.6 M-cell value would otherwise hold ~0.7 GB in
+/// DuckDB's result buffer (critique C5).
 const LONG_PROBE_SQL: &str = concat!(
     "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
             l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, l.version::INTEGER, 1::BIGINT, ",
@@ -2151,14 +2183,34 @@ const LONG_PROBE_ONE_SQL: &str = concat!(
      GROUP BY l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos"
 );
 
-/// One position tuple of a key as the long probe read it: the max version
-/// over all its rows, and its current cell when there is exactly one.
-#[derive(Debug)]
+/// [`ProbeCell::cur`]: no current row at the position.
+const CUR_NONE: u8 = 0;
+/// [`ProbeCell::cur`]: exactly one current row, decoded and comparable.
+const CUR_CMP: u8 = 1;
+/// [`ProbeCell::cur`]: a current row that is not comparable (malformed, a
+/// stub, or one of two current rows at the position).
+const CUR_BAD: u8 = 2;
+
+/// One position tuple of a key as the long probe read it, in 32 bytes
+/// (critique C5: no `String` or heap cell per row): the max version over
+/// all its rows and its current cell.
+#[derive(Clone, Copy, Debug)]
 struct ProbeCell {
     pos: [i32; 4],
+    /// The current cell's payload ([`LongCells::pack`]), when `cur` is
+    /// [`CUR_CMP`].
+    payload: u64,
     version: u16,
-    /// The current row (`None`: no current row at this position).
-    current: Option<CurRow>,
+    cur: u8,
+}
+
+/// What every current cell of a coherent key shares: its axis ids (padded
+/// to 4), its binding and its value kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CellMeta {
+    axes: [Option<i64>; 4],
+    pt: Option<i64>,
+    kind: ValueKind,
 }
 
 /// A key's probed long cells, sorted by position tuple once the probe is
@@ -2166,101 +2218,470 @@ struct ProbeCell {
 #[derive(Debug, Default)]
 struct LongCells {
     cells: Vec<ProbeCell>,
-    /// The axis ids (padded to 4) shared by every current cell; `None`
-    /// once two current cells disagree (critique C3.3: compared per cell,
-    /// so a damaged mixed-axis key is never judged unchanged).
-    axes: Option<[Option<i64>; 4]>,
-    coherent: bool,
+    /// The payloads that do not fit a `u64` (strings, durations), indexed
+    /// by [`ProbeCell::payload`].
+    wide: Vec<StoredCell>,
+    /// The meta of the first current cell read.
+    meta: Option<CellMeta>,
+    /// A current cell disagreed with `meta` (axis ids, binding or kind;
+    /// critique C3.3: compared per cell) or was not comparable. Such a key
+    /// is never diffed or judged unchanged: it is rewritten whole.
+    incoherent: bool,
     /// Current rows over all positions.
     current: usize,
 }
 
+/// The kind of a decoded stored cell.
+fn cell_kind(c: &StoredCell) -> ValueKind {
+    match c {
+        StoredCell::Float(_) => ValueKind::Float,
+        StoredCell::Int(_) => ValueKind::Int,
+        StoredCell::Bool(_) => ValueKind::Bool,
+        StoredCell::Str(_) => ValueKind::String,
+        StoredCell::DateTime(_) => ValueKind::DateTime,
+        StoredCell::Duration(..) => ValueKind::Duration,
+    }
+}
+
 impl LongCells {
-    /// Fold one probe row (from column `o`: version, current flag, the
-    /// current cell's axis ids and comparison block). A position may come
-    /// in twice, once per leg; [`Self::finish`] merges.
-    fn push(&mut self, r: &duckdb::Row, pos: [i32; 4], o: usize) -> duckdb::Result<()> {
-        if self.cells.is_empty() {
-            self.coherent = true;
-        }
-        let version = r.get::<_, i32>(o)? as u16;
-        let cur: i64 = r.get(o + 1)?;
-        let current = if cur > 0 {
-            let axes: [Option<i64>; 4] =
-                [r.get(o + 2)?, r.get(o + 3)?, r.get(o + 4)?, r.get(o + 5)?];
-            match self.axes {
-                None if self.current == 0 => self.axes = Some(axes),
-                Some(a) if a == axes => {}
-                _ => self.coherent = false,
+    /// Pack a decoded cell into a `u64`: the bits of a fixed-width
+    /// payload, or an index into `wide`.
+    fn pack(&mut self, c: StoredCell) -> u64 {
+        match c {
+            StoredCell::Float(b) => b,
+            StoredCell::Int(i) | StoredCell::DateTime(i) => i as u64,
+            StoredCell::Bool(b) => u64::from(b),
+            StoredCell::Str(_) | StoredCell::Duration(..) => {
+                self.wide.push(c);
+                (self.wide.len() - 1) as u64
             }
-            self.current += cur as usize;
-            Some(CurRow::read(r, o + 6, cur)?)
-        } else {
-            None
+        }
+    }
+
+    /// Does the (comparable) current cell `c` of this coherent key hold
+    /// exactly `new`, the decoded encoder output of a new cell? The kind
+    /// is the key's shared kind, so it is compared once, then the payload
+    /// bits (or the wide payload) per cell.
+    fn holds(&self, c: &ProbeCell, new: &StoredCell) -> bool {
+        let kind = match self.meta {
+            Some(m) => m.kind,
+            None => return false,
+        };
+        c.cur == CUR_CMP
+            && kind == cell_kind(new)
+            && match new {
+                StoredCell::Float(b) => c.payload == *b,
+                StoredCell::Int(i) | StoredCell::DateTime(i) => c.payload == *i as u64,
+                StoredCell::Bool(b) => c.payload == u64::from(*b),
+                StoredCell::Str(_) | StoredCell::Duration(..) => {
+                    self.wide.get(c.payload as usize) == Some(new)
+                }
+            }
+    }
+
+    /// Fold one probe row: a closed-leg row (`current == None`: the
+    /// position's max closed version) or a current cell with its meta and
+    /// decoded payload (`None` when not comparable). A position may come
+    /// in twice, once per leg; [`Self::finish`] merges.
+    fn push(
+        &mut self,
+        pos: [i32; 4],
+        version: u16,
+        current: Option<(CellMeta, Option<StoredCell>)>,
+    ) {
+        let (cur, payload) = match current {
+            None => (CUR_NONE, 0),
+            Some((meta, cell)) => {
+                self.current += 1;
+                match self.meta {
+                    None => self.meta = Some(meta),
+                    Some(m) if m == meta => {}
+                    Some(_) => self.incoherent = true,
+                }
+                match cell {
+                    Some(c) => (CUR_CMP, self.pack(c)),
+                    None => {
+                        self.incoherent = true;
+                        (CUR_BAD, 0)
+                    }
+                }
+            }
         };
         self.cells.push(ProbeCell {
             pos,
+            payload,
             version,
-            current,
+            cur,
         });
-        Ok(())
     }
 
-    /// Sort by position tuple and merge the rows of one position: the max
-    /// version of both legs, and its current cell (none, or not comparable
-    /// when a damaged position has more than one).
+    /// Sort by position tuple (in place) and merge the rows of one
+    /// position in place: the max version of both legs, and its current
+    /// cell (none, or not comparable when a damaged position has more than
+    /// one, which also makes the key incoherent).
     fn finish(&mut self) {
         self.cells.sort_unstable_by_key(|c| c.pos);
-        let mut merged: Vec<ProbeCell> = Vec::with_capacity(self.cells.len());
-        for c in self.cells.drain(..) {
-            match merged.last_mut() {
-                Some(m) if m.pos == c.pos => {
-                    m.version = m.version.max(c.version);
-                    if let Some(cur) = c.current {
-                        m.current = match m.current.take() {
-                            None => Some(cur),
-                            Some(prev) => Some(CurRow {
-                                cell: None,
-                                pt: prev.pt,
-                            }),
-                        };
+        let mut w = 0usize;
+        for r in 0..self.cells.len() {
+            let c = self.cells[r];
+            if w > 0 && self.cells[w - 1].pos == c.pos {
+                let m = &mut self.cells[w - 1];
+                m.version = m.version.max(c.version);
+                if c.cur != CUR_NONE {
+                    if m.cur == CUR_NONE {
+                        m.cur = c.cur;
+                        m.payload = c.payload;
+                    } else {
+                        m.cur = CUR_BAD;
+                        self.incoherent = true;
                     }
                 }
-                _ => merged.push(c),
+            } else {
+                self.cells[w] = c;
+                w += 1;
             }
         }
-        self.cells = merged;
+        self.cells.truncate(w);
+        self.cells.shrink_to_fit();
+    }
+}
+
+/// The Arrow columns of one long probe batch, typed once per batch.
+struct ProbeCols<'a> {
+    key: Option<[&'a Int64Array; 3]>,
+    pos: [&'a Int32Array; 4],
+    version: &'a Int32Array,
+    flag: &'a Int64Array,
+    axes: [&'a Int64Array; 4],
+    kind: StrCol<'a>,
+    f: &'a Float64Array,
+    i: &'a Int64Array,
+    b: &'a BooleanArray,
+    s: StrCol<'a>,
+    dt: TsCol<'a>,
+    dm: &'a Int32Array,
+    du: &'a Int64Array,
+    pt: &'a Int64Array,
+    retained: &'a BooleanArray,
+}
+
+/// A string column of either Arrow layout DuckDB may export.
+enum StrCol<'a> {
+    Utf8(&'a StringArray),
+    Large(&'a LargeStringArray),
+    View(&'a StringViewArray),
+}
+
+impl<'a> StrCol<'a> {
+    fn of(a: &'a ArrayRef) -> Result<StrCol<'a>, DbError> {
+        if let Some(s) = a.as_string_opt::<i32>() {
+            Ok(StrCol::Utf8(s))
+        } else if let Some(s) = a.as_string_opt::<i64>() {
+            Ok(StrCol::Large(s))
+        } else if let Some(s) = a.as_string_view_opt() {
+            Ok(StrCol::View(s))
+        } else {
+            Err(probe_type_error(a))
+        }
     }
 
-    /// The probed cell at `pos` (binary search; the cells are sorted).
-    fn at(&self, pos: &[i32; 4]) -> Option<&ProbeCell> {
-        self.cells
-            .binary_search_by(|c| c.pos.cmp(pos))
-            .ok()
-            .map(|i| &self.cells[i])
+    fn get(&self, i: usize) -> Option<&'a str> {
+        match self {
+            StrCol::Utf8(s) => (!s.is_null(i)).then(|| s.value(i)),
+            StrCol::Large(s) => (!s.is_null(i)).then(|| s.value(i)),
+            StrCol::View(s) => (!s.is_null(i)).then(|| s.value(i)),
+        }
+    }
+}
+
+/// A timestamp column of any unit, read as exact epoch µs.
+enum TsCol<'a> {
+    S(&'a PrimitiveArray<TimestampSecondType>),
+    Ms(&'a PrimitiveArray<TimestampMillisecondType>),
+    Us(&'a PrimitiveArray<TimestampMicrosecondType>),
+    Ns(&'a PrimitiveArray<TimestampNanosecondType>),
+}
+
+impl<'a> TsCol<'a> {
+    fn of(a: &'a ArrayRef) -> Result<TsCol<'a>, DbError> {
+        use duckdb::arrow::datatypes::{DataType, TimeUnit as AU};
+        Ok(match a.data_type() {
+            DataType::Timestamp(AU::Second, _) => TsCol::S(a.as_primitive()),
+            DataType::Timestamp(AU::Millisecond, _) => TsCol::Ms(a.as_primitive()),
+            DataType::Timestamp(AU::Microsecond, _) => TsCol::Us(a.as_primitive()),
+            DataType::Timestamp(AU::Nanosecond, _) => TsCol::Ns(a.as_primitive()),
+            _ => return Err(probe_type_error(a)),
+        })
     }
 
-    /// The max version of every current cell, if `l` equals the key's
-    /// current value cell for cell: one coherent set of axis ids equal to
-    /// the new value's, as many current cells as new cells, and at every
-    /// new cell's position a current cell with the same kind, payload bits
-    /// and binding (content retained). Positions within one value are
-    /// distinct, so equal counts make the position sets equal.
-    fn unchanged(&self, l: &LongWrite) -> Option<u16> {
-        let axes: [Option<i64>; 4] = std::array::from_fn(|d| l.axis_ids.get(d).copied());
-        let rows = l.rows();
-        if !self.coherent || self.axes != Some(axes) || self.current != rows.len() {
+    /// `Ok(None)`: NULL; `Err(())`: not exact in µs (critique C3.5).
+    fn get(&self, i: usize) -> Result<Option<i64>, ()> {
+        let (unit, v) = match self {
+            TsCol::S(p) => (TimeUnit::Second, opt(*p, i)),
+            TsCol::Ms(p) => (TimeUnit::Millisecond, opt(*p, i)),
+            TsCol::Us(p) => (TimeUnit::Microsecond, opt(*p, i)),
+            TsCol::Ns(p) => (TimeUnit::Nanosecond, opt(*p, i)),
+        };
+        match v {
+            None => Ok(None),
+            Some(v) => timestamp_us(unit, v).map(Some).ok_or(()),
+        }
+    }
+}
+
+fn probe_type_error(a: &ArrayRef) -> DbError {
+    DbError::Internal(format!(
+        "long probe: unexpected Arrow type {:?}",
+        a.data_type()
+    ))
+}
+
+/// An optional primitive value.
+fn opt<T: duckdb::arrow::datatypes::ArrowPrimitiveType>(
+    a: &duckdb::arrow::array::PrimitiveArray<T>,
+    i: usize,
+) -> Option<T::Native> {
+    (!a.is_null(i)).then(|| a.value(i))
+}
+
+impl<'a> ProbeCols<'a> {
+    /// Type the columns of `b`: the key triple first when `keyed` (the set
+    /// form), then the four positions, version, current flag, the four
+    /// axis ids and the [`cur_value_cols!`] block.
+    fn of(b: &'a RecordBatch, keyed: bool) -> Result<ProbeCols<'a>, DbError> {
+        use duckdb::arrow::datatypes::{Float64Type, Int32Type, Int64Type};
+        let c = |i: usize| b.column(i);
+        let i64c = |i: usize| {
+            c(i).as_primitive_opt::<Int64Type>()
+                .ok_or_else(|| probe_type_error(c(i)))
+        };
+        let i32c = |i: usize| {
+            c(i).as_primitive_opt::<Int32Type>()
+                .ok_or_else(|| probe_type_error(c(i)))
+        };
+        let boolc = |i: usize| c(i).as_boolean_opt().ok_or_else(|| probe_type_error(c(i)));
+        let o = if keyed { 3 } else { 0 };
+        if b.num_columns() != o + 20 {
+            return Err(DbError::Internal(format!(
+                "long probe: {} columns, expected {}",
+                b.num_columns(),
+                o + 20
+            )));
+        }
+        Ok(ProbeCols {
+            key: if keyed {
+                Some([i64c(0)?, i64c(1)?, i64c(2)?])
+            } else {
+                None
+            },
+            pos: [i32c(o)?, i32c(o + 1)?, i32c(o + 2)?, i32c(o + 3)?],
+            version: i32c(o + 4)?,
+            flag: i64c(o + 5)?,
+            axes: [i64c(o + 6)?, i64c(o + 7)?, i64c(o + 8)?, i64c(o + 9)?],
+            kind: StrCol::of(c(o + 10))?,
+            f: c(o + 11)
+                .as_primitive_opt::<Float64Type>()
+                .ok_or_else(|| probe_type_error(c(o + 11)))?,
+            i: i64c(o + 12)?,
+            b: boolc(o + 13)?,
+            s: StrCol::of(c(o + 14))?,
+            dt: TsCol::of(c(o + 15))?,
+            dm: i32c(o + 16)?,
+            du: i64c(o + 17)?,
+            pt: i64c(o + 18)?,
+            retained: boolc(o + 19)?,
+        })
+    }
+
+    fn triple(&self, r: usize) -> Option<Triple> {
+        self.key
+            .map(|[e, p, a]| (e.value(r), p.value(r), a.value(r)))
+    }
+
+    /// Row `r` folded into `cells` (see [`LongCells::push`]): a current
+    /// cell's meta, and its payload decoded from the RAW stored columns by
+    /// the one decoder ([`StoredCell::decode`]; `None` for a malformed row
+    /// or a stub, critique C3.4).
+    fn push(&self, r: usize, cells: &mut LongCells) {
+        let pos = [
+            self.pos[0].value(r),
+            self.pos[1].value(r),
+            self.pos[2].value(r),
+            self.pos[3].value(r),
+        ];
+        let version = self.version.value(r) as u16;
+        if self.flag.value(r) == 0 {
+            cells.push(pos, version, None);
+            return;
+        }
+        let axes = [
+            opt(self.axes[0], r),
+            opt(self.axes[1], r),
+            opt(self.axes[2], r),
+            opt(self.axes[3], r),
+        ];
+        let pt = opt(self.pt, r);
+        let cell = self.cell(r);
+        let kind = cell.as_ref().map(cell_kind);
+        // A cell that does not decode has no kind; any kind marks the meta,
+        // the cell itself makes the key incoherent.
+        let meta = CellMeta {
+            axes,
+            pt,
+            kind: kind.unwrap_or(ValueKind::Float),
+        };
+        cells.push(pos, version, Some((meta, cell)));
+    }
+
+    fn cell(&self, r: usize) -> Option<StoredCell> {
+        if self.retained.is_null(r) || !self.retained.value(r) {
             return None;
         }
-        let mut version = 0u16;
-        for row in rows {
-            let cur = self.at(&pad4_pos(&row.positions))?.current.as_ref()?;
-            if !cur.equals(&row.value, l.parameter_type_id) {
-                return None;
-            }
-            version = version.max(self.at(&pad4_pos(&row.positions))?.version);
+        let kind = self.kind.get(r)?;
+        let dt = self.dt.get(r).ok()?;
+        StoredCell::decode(&RawCols {
+            kind: kind.as_bytes(),
+            f: opt(self.f, r),
+            i: opt(self.i, r),
+            b: (!self.b.is_null(r)).then(|| self.b.value(r)),
+            s: self.s.get(r),
+            dt,
+            dm: opt(self.dm, r),
+            du: opt(self.du, r),
+        })
+    }
+}
+
+/// Run a long probe statement (`sql` with `params`) as a streamed Arrow
+/// result, handing every row to `each`. The batches are fetched with
+/// [`duckdb::Statement::step`], which reports a failed fetch as an error
+/// (the Arrow iterator would panic).
+fn read_long_probe(
+    conn: &Connection,
+    sql: &str,
+    params: impl duckdb::Params,
+    keyed: bool,
+    mut each: impl FnMut(&ProbeCols, usize),
+) -> Result<(), DbError> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    drop(stmt.stream_arrow(params)?);
+    while let Some(sa) = stmt.step()? {
+        let batch = RecordBatch::from(&sa);
+        let cols = ProbeCols::of(&batch, keyed)?;
+        for r in 0..batch.num_rows() {
+            each(&cols, r);
         }
-        Some(version)
+    }
+    Ok(())
+}
+
+/// What one long write does to its key's cells (skip_unchanged_writes_PLAN
+/// §4.1): the merge of the new value's cells with the probed ones, by
+/// position tuple.
+#[derive(Debug, Default)]
+struct LongDiff {
+    /// Current cells to close out (changed or removed), in position order.
+    close: Vec<[i32; 4]>,
+    /// New cells to insert (changed or added): the row index into the
+    /// value's rows and the cell's version (its position's max + 1, or 1),
+    /// in position order.
+    insert: Vec<(u32, u16)>,
+    /// Current cells left as they are (equal to the new cell).
+    kept: usize,
+    /// Their positions while there are at most [`LONG_INSERT_CHUNK`]
+    /// (`None` beyond): the bound list of the "close all but these" form
+    /// of a one-key close-out ([`LONG_CLOSE_EXCEPT_SQL`]).
+    keep: Option<Vec<[i32; 4]>>,
+    /// The highest version among the kept cells.
+    kept_version: u16,
+    /// Every current cell is closed: the close-out is the key-level
+    /// statement (the whole-value path, or a diff that changed every cell;
+    /// the same rows either way).
+    whole: bool,
+}
+
+impl LongDiff {
+    /// Merge `l`'s cells with the key's probed `cells` (both sorted by
+    /// position tuple). With `whole`, no current cell is kept: every one
+    /// closes, every new cell is inserted (the whole-value rewrite, with
+    /// the same per-position versions). Otherwise a current cell equal to
+    /// the new one at its position (the key's shared kind, the payload
+    /// bits) is kept, a different one is closed and re-inserted at its
+    /// version + 1, a current cell with no new cell is closed (removed),
+    /// and a new cell with no current one is inserted at its position's
+    /// max version + 1 (added; 1 if the position has no rows).
+    fn of(cells: &LongCells, l: &LongWrite, whole: bool) -> LongDiff {
+        let rows = l.rows();
+        // Canon emits rows sorted by position tuple; a hand-built value
+        // need not be, so merge through a sorted index then.
+        let order: Option<Vec<u32>> = if rows
+            .windows(2)
+            .all(|w| pad4_pos(&w[0].positions) <= pad4_pos(&w[1].positions))
+        {
+            None
+        } else {
+            let mut o: Vec<u32> = (0..rows.len() as u32).collect();
+            o.sort_by_key(|&r| pad4_pos(&rows[r as usize].positions));
+            Some(o)
+        };
+        let row_at = |j: usize| order.as_ref().map_or(j as u32, |o| o[j]);
+        let mut d = LongDiff {
+            whole,
+            keep: Some(Vec::new()),
+            ..LongDiff::default()
+        };
+        let cs = &cells.cells;
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < cs.len() || j < rows.len() {
+            let r = (j < rows.len()).then(|| row_at(j));
+            let np = r.map(|r| pad4_pos(&rows[r as usize].positions));
+            match (cs.get(i), np) {
+                (Some(c), Some(p)) if c.pos == p => {
+                    let r = r.unwrap_or_default();
+                    let same = !whole
+                        && StoredCell::of_new(&rows[r as usize].value)
+                            .is_some_and(|new| cells.holds(c, &new));
+                    if same {
+                        d.kept += 1;
+                        d.kept_version = d.kept_version.max(c.version);
+                        if d.kept > LONG_INSERT_CHUNK {
+                            d.keep = None;
+                        } else if let Some(k) = &mut d.keep {
+                            k.push(c.pos);
+                        }
+                    } else {
+                        if c.cur != CUR_NONE {
+                            d.close.push(c.pos);
+                        }
+                        d.insert.push((r, c.version.saturating_add(1)));
+                    }
+                    i += 1;
+                    j += 1;
+                }
+                (Some(c), p) if p.is_none_or(|p| c.pos < p) => {
+                    if c.cur != CUR_NONE {
+                        d.close.push(c.pos);
+                    }
+                    i += 1;
+                }
+                _ => {
+                    d.insert.push((r.unwrap_or_default(), 1));
+                    j += 1;
+                }
+            }
+        }
+        d
+    }
+
+    /// The version a write of this diff reports: the highest version among
+    /// the key's current cells after it.
+    fn version(&self) -> u16 {
+        self.insert
+            .iter()
+            .map(|&(_, v)| v)
+            .max()
+            .unwrap_or(0)
+            .max(self.kept_version)
     }
 }
 
@@ -2279,11 +2700,13 @@ impl LongProbe {
     /// `current_long_cells`).
     fn point(conn: &Connection, k: &ValueKey) -> Result<LongProbe, DbError> {
         let mut p = LongProbe::default();
-        if let Some(l) = live_tier(conn, k)? {
-            // The point close-out reports its own count; 0 is not checked.
-            p.live.insert(triple(k), (l, 0));
+        let live = live_tier(conn, k)?;
+        let cells = current_long_cells(conn, k)?;
+        if let Some(l) = live {
+            let n = if l == Live::Long { cells.current } else { 0 };
+            p.live.insert(triple(k), (l, n));
         }
-        p.cells.insert(triple(k), current_long_cells(conn, k)?);
+        p.cells.insert(triple(k), cells);
         Ok(p)
     }
 
@@ -2296,13 +2719,18 @@ impl LongProbe {
             p.live.insert(t, (Live::Scalar, 1));
         }
         {
-            let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{LONG_PROBE_SQL}"))?;
-            let mut rows = stmt.query(duckdb::params_from_iter(key_lists(keys.iter().copied())))?;
-            while let Some(r) = rows.next()? {
-                let t: Triple = (r.get(0)?, r.get(1)?, r.get(2)?);
-                let pos = [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?];
-                p.cells.entry(t).or_default().push(r, pos, 7)?;
-            }
+            let cells = &mut p.cells;
+            read_long_probe(
+                conn,
+                &format!("{SCALAR_KEYS_CTE}{LONG_PROBE_SQL}"),
+                duckdb::params_from_iter(key_lists(keys.iter().copied())),
+                true,
+                |cols, r| {
+                    if let Some(t) = cols.triple(r) {
+                        cols.push(r, cells.entry(t).or_default());
+                    }
+                },
+            )?;
         }
         for (t, cells) in &mut p.cells {
             cells.finish();
@@ -2324,6 +2752,149 @@ impl LongProbe {
     }
 }
 
+/// The probed cells of one key: per position tuple the key already holds
+/// (live OR superseded — versioning spans both, as the former per-cell
+/// probe did: no `valid_to_commit` filter) its `MAX(version)` and its
+/// current cell. The single-key form of [`LONG_PROBE_SQL`].
+fn current_long_cells(conn: &Connection, key: &ValueKey) -> Result<LongCells, DbError> {
+    let [e, p, a] = point(key);
+    let mut cells = LongCells::default();
+    read_long_probe(
+        conn,
+        LONG_PROBE_ONE_SQL,
+        params![e, p, a, e, p, a],
+        false,
+        |cols, r| cols.push(r, &mut cells),
+    )?;
+    cells.finish();
+    Ok(cells)
+}
+
+/// The close-out of a long cell diff: the current rows at the bound
+/// (key, position tuple) rows, joined on the seven columns (one bound list
+/// per column, ≤ [`LONG_INSERT_CHUNK`] rows per execution), content
+/// retained.
+const LONG_CLOSE_CELLS_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
+     FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
+                  unnest(?::BIGINT[]) AS a, unnest(?::INTEGER[]) AS q1, \
+                  unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
+                  unnest(?::INTEGER[]) AS q4) k \
+     WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
+       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL \
+       AND value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
+       AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4";
+
+/// The stub form of [`LONG_CLOSE_CELLS_SQL`] (the SET list of the stub
+/// `close_out_long`).
+const LONG_CLOSE_CELLS_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit = ?, \
+       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
+       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+     FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
+                  unnest(?::BIGINT[]) AS a, unnest(?::INTEGER[]) AS q1, \
+                  unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
+                  unnest(?::INTEGER[]) AS q4) k \
+     WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
+       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL \
+       AND value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
+       AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4";
+
+/// The one-key close-out of a cell diff that closes most of the value's
+/// cells: every current cell of the key but the bound kept positions (an
+/// anti-join on ≤ [`LONG_INSERT_CHUNK`] positions), content retained. The
+/// same rows as [`LONG_CLOSE_CELLS_SQL`] over the closed positions, at the
+/// key-level UPDATE's per-row cost (critique C5: the position-joined form
+/// costs ~7 µs per closed cell against ~5 µs for the key-level one, so a
+/// re-import that changes all but a few cells of a large value would
+/// otherwise be slower than the whole rewrite it replaces).
+const LONG_CLOSE_EXCEPT_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
+     WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ? \
+       AND valid_to_commit IS NULL \
+       AND NOT EXISTS (SELECT 1 FROM (SELECT unnest(?::INTEGER[]) AS q1, \
+             unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
+             unnest(?::INTEGER[]) AS q4) k \
+           WHERE value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
+             AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4)";
+
+/// The stub form of [`LONG_CLOSE_EXCEPT_SQL`].
+const LONG_CLOSE_EXCEPT_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit = ?, \
+       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
+       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+     WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ? \
+       AND valid_to_commit IS NULL \
+       AND NOT EXISTS (SELECT 1 FROM (SELECT unnest(?::INTEGER[]) AS q1, \
+             unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
+             unnest(?::INTEGER[]) AS q4) k \
+           WHERE value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
+             AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4)";
+
+/// Close out every current cell of `key` but those at `keep` (one
+/// statement, ≤ [`LONG_INSERT_CHUNK`] kept positions), checked against
+/// `expected`, the number of cells the diff closes.
+fn close_long_except(
+    conn: &Connection,
+    c: i64,
+    retained: bool,
+    key: &ValueKey,
+    keep: &[[i32; 4]],
+    expected: usize,
+) -> Result<(), DbError> {
+    let sql = if retained {
+        LONG_CLOSE_EXCEPT_SQL
+    } else {
+        LONG_CLOSE_EXCEPT_STUB_SQL
+    };
+    let [e, p, a] = point(key);
+    let mut v: Vec<Value> = vec![
+        Value::BigInt(c),
+        Value::BigInt(e),
+        Value::BigInt(p),
+        Value::BigInt(a),
+    ];
+    for d in 0..4 {
+        v.push(list(keep, |p| Value::Int(p[d])));
+    }
+    check_list_lengths(&v[4..], keep.len())?;
+    let affected = conn
+        .prepare_cached(sql)?
+        .execute(duckdb::params_from_iter(v))?;
+    check_affected("long cell close-out", affected, expected)
+}
+
+/// Close out the current cells at `cells` ((key, positions) rows, each
+/// holding exactly one current row: the diffed keys are coherent) at
+/// commit `c`, in executions of ≤ [`LONG_INSERT_CHUNK`] rows, each checked
+/// against its row count.
+fn close_long_cells(
+    conn: &Connection,
+    c: i64,
+    retained: bool,
+    cells: &[(Triple, [i32; 4])],
+) -> Result<(), DbError> {
+    if cells.is_empty() {
+        return Ok(());
+    }
+    let sql = if retained {
+        LONG_CLOSE_CELLS_SQL
+    } else {
+        LONG_CLOSE_CELLS_STUB_SQL
+    };
+    let mut stmt = conn.prepare_cached(sql)?;
+    for chunk in cells.chunks(LONG_INSERT_CHUNK) {
+        let mut v: Vec<Value> = Vec::with_capacity(8);
+        v.push(Value::BigInt(c));
+        v.push(list(chunk, |(t, _)| Value::BigInt(t.0)));
+        v.push(list(chunk, |(t, _)| Value::BigInt(t.1)));
+        v.push(list(chunk, |(t, _)| Value::BigInt(t.2)));
+        for d in 0..4 {
+            v.push(list(chunk, |(_, p)| Value::Int(p[d])));
+        }
+        check_list_lengths(&v[1..], chunk.len())?;
+        let affected = stmt.execute(duckdb::params_from_iter(v))?;
+        check_affected("long cell close-out", affected, chunk.len())?;
+    }
+    Ok(())
+}
+
 /// One round of [`write_longs`] (see there for the bounds).
 fn write_long_round(
     conn: &Connection,
@@ -2338,23 +2909,54 @@ fn write_long_round(
         .filter(|l| !l.entity_minted)
         .map(|l| &l.key)
         .collect();
-    let probe = match probed[..] {
+    let mut probe = match probed[..] {
         [] => LongProbe::default(),
         [k] if single => LongProbe::point(conn, k)?,
         _ => LongProbe::set(conn, &probed)?,
     };
 
-    // --- Unchanged keys: live in long with current cells equal to the new
-    // value cell for cell (P1: whole value; skip_unchanged_writes_PLAN
-    // §2.1). They write nothing. ---
-    let unchanged: Vec<Option<u16>> = w
+    // --- The cell diff per key (skip_unchanged_writes_PLAN §4.1). A key
+    // live in long whose current cells share one meta (axis ids, binding,
+    // kind) equal to the new value's is merged cell by cell; any other key
+    // is rewritten whole (every current cell closes, every new cell is
+    // inserted). An empty diff is an unchanged write. Each key's probed
+    // cells are dropped once diffed (critique C5: memory). ---
+    let empty = LongCells::default();
+    let diffs: Vec<LongDiff> = w
         .iter()
         .map(|l| {
             let t = triple(&l.key);
-            match (probe.live.get(&t), probe.cells.get(&t)) {
-                (Some((Live::Long, _)), Some(cells)) => cells.unchanged(l),
-                _ => None,
+            let cells = probe.cells.remove(&t);
+            let cells = cells.as_ref().unwrap_or(&empty);
+            let live_long = matches!(probe.live.get(&t), Some((Live::Long, _)));
+            let axes: [Option<i64>; 4] = std::array::from_fn(|d| l.axis_ids.get(d).copied());
+            let whole = !live_long
+                || cells.incoherent
+                || cells.meta
+                    != Some(CellMeta {
+                        axes,
+                        pt: l.parameter_type_id,
+                        kind: l.value.value_kind,
+                    });
+            let mut d = LongDiff::of(cells, l, whole);
+            if !live_long {
+                // Not live in long: nothing of this tier closes (a damaged
+                // doubly-live key keeps today's outcome).
+                d.close.clear();
+            } else if d.close.len() == cells.current {
+                d.whole = true;
             }
+            d
+        })
+        .collect();
+    let unchanged: Vec<bool> = w
+        .iter()
+        .zip(&diffs)
+        .map(|(l, d)| {
+            matches!(probe.live.get(&triple(&l.key)), Some((Live::Long, _)))
+                && !d.whole
+                && d.close.is_empty()
+                && d.insert.is_empty()
         })
         .collect();
 
@@ -2367,96 +2969,96 @@ fn write_long_round(
         }
     }
 
-    // --- Same-tier close-out: every current cell, one UPDATE per retention
-    // mode. The close-out changes no version, so the probe's versions equal
-    // a snapshot taken after it. ---
+    // --- Same-tier close-out, per retention mode: the keys closing every
+    // current cell by the key-level UPDATE, the diffed keys' changed and
+    // removed cells by the position-joined one. The close-out changes no
+    // version, so the probe's versions equal a snapshot taken after it. ---
     for retained in [true, false] {
-        let idx: Vec<usize> = (0..n)
-            .filter(|&i| {
-                unchanged[i].is_none()
-                    && w[i].retained == retained
-                    && matches!(probe.live.get(&triple(&w[i].key)), Some((Live::Long, _)))
-            })
-            .collect();
-        if idx.is_empty() {
-            continue;
-        }
-        if single {
-            closed[0] += close_out_long(conn, &w[0].key, c, retained)?;
-            continue;
-        }
-        let sql = if retained {
-            LONG_CLOSE_SQL
-        } else {
-            LONG_CLOSE_STUB_SQL
+        let live_long = |i: usize| {
+            w[i].retained == retained
+                && matches!(probe.live.get(&triple(&w[i].key)), Some((Live::Long, _)))
         };
-        let [e, p, a] = key_lists(idx.iter().map(|&i| &w[i].key));
-        let affected = conn
-            .prepare_cached(sql)?
-            .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
-        let expected: usize = idx.iter().map(|&i| probe.live[&triple(&w[i].key)].1).sum();
-        check_affected("long close-out", affected, expected)?;
-        for i in idx {
-            closed[i] += probe.live[&triple(&w[i].key)].1;
+        let whole: Vec<usize> = (0..n).filter(|&i| live_long(i) && diffs[i].whole).collect();
+        if !whole.is_empty() {
+            if single {
+                closed[0] += close_out_long(conn, &w[0].key, c, retained)?;
+            } else {
+                let sql = if retained {
+                    LONG_CLOSE_SQL
+                } else {
+                    LONG_CLOSE_STUB_SQL
+                };
+                let [e, p, a] = key_lists(whole.iter().map(|&i| &w[i].key));
+                let affected = conn
+                    .prepare_cached(sql)?
+                    .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
+                let expected: usize = whole
+                    .iter()
+                    .map(|&i| probe.live[&triple(&w[i].key)].1)
+                    .sum();
+                check_affected("long close-out", affected, expected)?;
+                for i in whole {
+                    closed[i] += probe.live[&triple(&w[i].key)].1;
+                }
+            }
         }
+        let mut cells: Vec<(Triple, [i32; 4])> = Vec::new();
+        for i in (0..n).filter(|&i| live_long(i) && !diffs[i].whole) {
+            let d = &diffs[i];
+            closed[i] += d.close.len();
+            match &d.keep {
+                // One key closing more cells than it keeps (with at most a
+                // chunk kept): "all but the kept ones", one statement.
+                Some(keep) if single && keep.len() < d.close.len() => {
+                    close_long_except(conn, c, retained, &w[i].key, keep, d.close.len())?;
+                }
+                _ => {
+                    let t = triple(&w[i].key);
+                    cells.extend(d.close.iter().map(|&p| (t, p)));
+                }
+            }
+        }
+        close_long_cells(conn, c, retained, &cells)?;
     }
 
-    // --- Insert the changed keys: every column built in one pass through
-    // the one encoder. ---
-    let empty = LongCells::default();
+    // --- Insert the changed and added cells: every column built in one
+    // pass through the one encoder. ---
     let mut keys = LongKeys::default();
     let mut cols = LongColumns::default();
-    let mut max_version = Vec::with_capacity(n);
-    for (l, same) in w.iter().zip(&unchanged) {
-        if let Some(v) = same {
-            max_version.push(*v);
+    for ((l, d), &same) in w.iter().zip(&diffs).zip(&unchanged) {
+        if same || d.insert.is_empty() {
             continue;
         }
         let ordinal = keys.push(l)?;
-        let cells = probe.cells.get(&triple(&l.key)).unwrap_or(&empty);
-        max_version.push(cols.push_value(l.rows(), &l.value.axes, cells, ordinal)?);
+        cols.push_cells(l.rows(), &l.value.axes, &d.insert, ordinal)?;
     }
     insert_long_round(conn, c, &keys, &cols)?;
 
     Ok(w.iter()
-        .zip(max_version)
+        .zip(&diffs)
         .zip(closed)
         .zip(&unchanged)
-        .map(|(((l, version), rows_closed), same)| match same {
-            Some(_) => unchanged_outcome(
-                Tier::Long,
-                version,
-                (l.axes_created, l.axes_reused),
-                l.rows().len(),
-            ),
-            None => WriteOutcome {
+        .map(|(((l, d), rows_closed), &same)| {
+            if same {
+                return unchanged_outcome(
+                    Tier::Long,
+                    d.kept_version,
+                    (l.axes_created, l.axes_reused),
+                    d.kept,
+                );
+            }
+            WriteOutcome {
                 tier: Some(Tier::Long),
-                version,
-                rows_written: l.rows().len(),
+                version: d.version(),
+                cells_unchanged: d.kept,
+                rows_written: d.insert.len(),
                 rows_closed,
                 axes_created: l.axes_created,
                 axes_reused: l.axes_reused,
                 ..WriteOutcome::default()
-            },
+            }
         })
         .collect())
-}
-
-/// The probed cells of one key: per position tuple the key already holds
-/// (live OR superseded — versioning spans both, as the former per-cell
-/// probe did: no `valid_to_commit` filter) its `MAX(version)` and its
-/// current cell. The single-key form of [`LONG_PROBE_SQL`].
-fn current_long_cells(conn: &Connection, key: &ValueKey) -> Result<LongCells, DbError> {
-    let mut stmt = conn.prepare_cached(LONG_PROBE_ONE_SQL)?;
-    let [e, p, a] = point(key);
-    let mut rows = stmt.query(params![e, p, a, e, p, a])?;
-    let mut cells = LongCells::default();
-    while let Some(r) = rows.next()? {
-        let pos = [r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?];
-        cells.push(r, pos, 4)?;
-    }
-    cells.finish();
-    Ok(cells)
 }
 
 /// Rows per columnar-bind execution (plan D5, critique C7): the long insert
@@ -2559,19 +3161,20 @@ struct LongColumns {
 }
 
 impl LongColumns {
-    /// Append one value's cells (key ordinal `k`); each cell's version is
-    /// its position's max + 1 (or 1). Returns the max new version.
-    fn push_value(
+    /// Append the cells `inserts` of one value (key ordinal `k`): each a
+    /// row index into `rows` and the cell's version ([`LongDiff`]).
+    /// Returns the max version appended.
+    fn push_cells(
         &mut self,
         rows: &[crate::types::LongRow],
         axes: &[CanonicalAxis],
-        cur: &LongCells,
+        inserts: &[(u32, u16)],
         k: i32,
     ) -> Result<u16, DbError> {
         let mut max_version = 0u16;
-        for row in rows {
+        for &(r, version) in inserts {
+            let row = &rows[r as usize];
             let pos = pad4_pos(&row.positions);
-            let version = cur.at(&pos).map_or(0, |c| c.version) + 1;
             let v16 = i16::try_from(version).map_err(|_| {
                 DbError::Internal(format!("long batch: version {version} out of range"))
             })?;
@@ -3350,7 +3953,8 @@ mod tests {
         let mut keys = LongKeys::default();
         let mut cols = LongColumns::default();
         let k = keys.push(&w).unwrap();
-        cols.push_value(w.rows(), &w.value.axes, &LongCells::default(), k)
+        let inserts: Vec<(u32, u16)> = (0..n as u32).map(|r| (r, 1)).collect();
+        cols.push_cells(w.rows(), &w.value.axes, &inserts, k)
             .unwrap();
         (keys, cols)
     }
@@ -3723,6 +4327,24 @@ mod tests {
                 vec![Some(sparse_long(&[1, 2], 1.0)), None],
                 None,
             ),
+            // The long equivalence test's target is sparse_long(&[0, 2, 3],
+            // 10.0): equal to "long same", sharing cells 0 and 2 with "long
+            // partly same" (1 removed, 3 added), and on another axis in
+            // "long axis changed" (P2 cell diff).
+            ("long same", vec![Some(sparse_long(&[0, 2, 3], 10.0))], None),
+            (
+                "long partly same",
+                vec![Some(sparse_long(&[0, 1, 2], 10.0))],
+                None,
+            ),
+            (
+                "long axis changed",
+                vec![Some(CanonicalValue {
+                    axes: vec![int_axis(5)],
+                    ..sparse_long(&[0, 2, 3], 10.0)
+                })],
+                None,
+            ),
             ("array live", vec![Some(array(1.0))], None),
             (
                 "array replaced",
@@ -3789,13 +4411,20 @@ mod tests {
     /// over every prior state (each tier live, closed or replaced, per-cell
     /// versions diverged, and the doubly-live damaged states, where the
     /// per-key precedence decides, so a scalar+long key fails on the long
-    /// UNIQUE as before), both retention modes, plus a minted key.
+    /// UNIQUE as before), both retention modes, plus a minted key; and,
+    /// with the target bound as the priors were (no binding), the cell diff
+    /// of an equal, a partly equal and an other-axis prior (P2).
     #[test]
     fn single_key_long_round_matches_the_set_round() {
         let target = sparse_long(&[0, 2, 3], 10.0);
         let other = sparse_long(&[0, 1], 20.0);
         for (name, steps, planted) in &prior_states() {
-            for retained in [true, false] {
+            for (retained, pt) in [
+                (true, Some(4)),
+                (false, Some(4)),
+                (true, None),
+                (false, None),
+            ] {
                 for minted in [false, true] {
                     if minted && !steps.is_empty() {
                         continue;
@@ -3828,7 +4457,7 @@ mod tests {
                                 axis_ids: ids,
                                 axes_created: cr,
                                 axes_reused: re,
-                                parameter_type_id: Some(4),
+                                parameter_type_id: pt,
                                 retained,
                                 entity_minted: minted,
                             });
@@ -3837,10 +4466,32 @@ mod tests {
                     };
                     let oa = run(&a, false);
                     let ob = run(&b, true);
-                    let case = format!("{name}, retained={retained}, minted={minted}");
+                    let case = format!("{name}, retained={retained}, pt={pt:?}, minted={minted}");
                     assert_eq!(outcome_text(&oa, 0), outcome_text(&ob, 1), "{case}");
                     assert_eq!(oa.is_ok(), *name != "scalar+long", "{case}");
                     assert_eq!(key_rows(&a), key_rows(&b), "{case}");
+                    // The diff itself, on the unbound target.
+                    let o = oa.as_ref().ok().map(|o| &o[0]);
+                    let diff = |o: &WriteOutcome| {
+                        (
+                            o.unchanged,
+                            o.cells_unchanged,
+                            o.rows_written,
+                            o.rows_closed,
+                        )
+                    };
+                    match (*name, pt) {
+                        ("long same", None) => {
+                            assert_eq!(o.map(diff), Some((true, 3, 0, 0)), "{case}")
+                        }
+                        ("long partly same", None) => {
+                            assert_eq!(o.map(diff), Some((false, 2, 1, 1)), "{case}")
+                        }
+                        ("long same" | "long partly same" | "long axis changed", _) => {
+                            assert_eq!(o.map(diff), Some((false, 0, 3, 3)), "{case}")
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

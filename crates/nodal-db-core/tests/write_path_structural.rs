@@ -134,6 +134,7 @@ fn assert_audits_clean(db: &Path) {
         "audit_array_integrity",
         "audit_index_accelerator",
         "audit_array_id_coherence",
+        "audit_long_value_coherence",
     ] {
         let n: i64 = conn
             .query_row(&format!("SELECT count(*) FROM {a}"), [], |r| r.get(0))
@@ -160,9 +161,63 @@ fn live_long_versions(db: &Path, k: ValueKey) -> Vec<i16> {
     v
 }
 
-/// Write an `n`-cell long value, replace it by a sparser one (close-out +
-/// reinsert), and check both generations against the input in physical order,
-/// including the per-cell versions on both sides of every chunk boundary.
+/// The live long rows of `k` in POSITION order: (pos, i1_num, v_float
+/// bits, version).
+fn live_long_by_pos(db: &Path, k: ValueKey) -> Vec<(i32, i64, u64, i16)> {
+    let conn = Connection::open(db).unwrap();
+    let rows = conn
+        .prepare(
+            "SELECT i1_pos, i1_num, v_float, version FROM value_long \
+             WHERE entity_id = ? AND valid_to_commit IS NULL ORDER BY i1_pos",
+        )
+        .unwrap()
+        .query_map([k.entity_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, f64>(2)?.to_bits(),
+                r.get(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    rows
+}
+
+/// `expected_long(v)` with the version `ver(pos)` per cell.
+fn expected_with(v: &CanonicalValue, ver: impl Fn(i32) -> i16) -> Vec<(i32, i64, u64, i16)> {
+    expected_long(v)
+        .into_iter()
+        .map(|(p, n, b)| (p, n, b, ver(p)))
+        .collect()
+}
+
+/// `long_value(n, stride)` with every value moved by `delta`.
+fn shifted(v: &CanonicalValue, delta: f64) -> CanonicalValue {
+    let mut v = v.clone();
+    if let ShapedData::Long(rows) = &mut v.shape {
+        for r in rows {
+            if let ScalarValue::Float(x) = &mut r.value {
+                if !x.is_nan() {
+                    *x += delta;
+                }
+            }
+        }
+    }
+    v
+}
+
+/// Write an `n`-cell long value, then replace it: by a sparser one with
+/// the same values (a cell diff that only removes cells), by the dense one
+/// again (only adds), and by one whose every third cell changed (closes and
+/// re-inserts those). Each generation is read back against the input in
+/// position order, with the per-cell versions on both sides of every chunk
+/// boundary (the removed and added cells cross the 16 384-cell close-out
+/// and insert chunks). The physical order of the current rows is canonical
+/// cell order only for the fresh write (critique C7: a cell diff appends
+/// the cells it inserts; compaction restores the order).
 fn long_round_trip(n: i32) {
     let (_d, db) = fresh_db();
     let k = key(1);
@@ -175,28 +230,47 @@ fn long_round_trip(n: i32) {
         vers.iter().all(|&x| x == 1),
         "n={n}: fresh cells are version 1"
     );
+    // Sparser, same values: the kept cells stay version 1, the others close.
     let v2 = long_value(n, 3);
     write(&db, k, &v2);
     assert_eq!(
-        live_long_by_rowid(&db, k),
-        expected_long(&v2),
+        live_long_by_pos(&db, k),
+        expected_with(&v2, |_| 1),
         "n={n} replaced"
     );
-    assert!(
-        live_long_versions(&db, k).iter().all(|&x| x == 2),
-        "n={n}: every replaced cell is version 2"
-    );
-    // Back to dense: versions now differ cell by cell (3 where the sparse
-    // generation had a cell, else 2), so a chunk-misaligned version column
+    // Back to dense: the re-added cells are version 2 (their closed version
+    // 1 + 1), the kept ones still 1, so a chunk-misaligned version column
     // would show.
     write(&db, k, &v);
     assert_eq!(
-        live_long_by_rowid(&db, k),
-        expected_long(&v),
+        live_long_by_pos(&db, k),
+        expected_with(&v, |p| if p % 3 == 0 { 1 } else { 2 }),
         "n={n} dense again"
     );
-    let want: Vec<i16> = (0..n).map(|p| if p % 3 == 0 { 3 } else { 2 }).collect();
-    assert_eq!(live_long_versions(&db, k), want, "n={n}: per-cell versions");
+    // Every third cell changed: those close and re-insert at version 2.
+    let v3 = {
+        let mut v3 = v.clone();
+        let moved = shifted(&v, 0.125);
+        if let (ShapedData::Long(rows), ShapedData::Long(m)) = (&mut v3.shape, &moved.shape) {
+            for (r, mv) in rows.iter_mut().zip(m) {
+                if r.positions[0] % 3 == 1 {
+                    r.value = mv.value.clone();
+                }
+            }
+        }
+        v3
+    };
+    write(&db, k, &v3);
+    assert_eq!(
+        live_long_by_pos(&db, k),
+        expected_with(&v3, |p| match p % 3 {
+            0 => 1,
+            1 if cell(p as usize).is_nan() => 2,
+            1 => 3,
+            _ => 2,
+        }),
+        "n={n} every third changed"
+    );
     assert_audits_clean(&db);
 }
 

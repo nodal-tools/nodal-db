@@ -1,6 +1,5 @@
 {
   "name": "long 1-cell edit closes and re-inserts only the changed cell (per-cell spans)",
-  "pending": "P2 of skip_unchanged_writes_PLAN (long cell diff)",
   "key": [20, 30, 40],
   "steps": [
     {

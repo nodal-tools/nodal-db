@@ -343,6 +343,25 @@ fn array_payload_reads_and_writer_statements_use_the_array_id_index() {
     let c: i64 = conn
         .query_row("SELECT max(id) FROM commit", [], |r| r.get(0))
         .unwrap();
+    // q5a: the unchanged check's payload fetch (skip_unchanged_writes_PLAN
+    // §3.2), the production statement with the bound id list inlined: one
+    // id and two neighbouring ones (the stride's F1 tripwire).
+    let aid11: i64 = conn
+        .query_row(
+            "SELECT array_id FROM value_array va JOIN entity e ON e.id = va.entity_id \
+             WHERE e.name = 'e11'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for ids in [format!("[{aid}]"), format!("[{aid}, {aid11}]")] {
+        assert_payload_index_scan(
+            &conn,
+            "value_array",
+            &format!("q5a unchanged-check payload fetch {ids}"),
+            &nodal_db_core::history::ARRAY_PAYLOAD_SQL.replace('?', &ids),
+        );
+    }
     conn.execute_batch("BEGIN").unwrap();
     assert_payload_index_scan(
         &conn,

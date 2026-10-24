@@ -1,6 +1,5 @@
 {
   "name": "long identical re-write is unchanged (every cell keeps its open span), then a full change versions every cell",
-  "pending": "P1 of skip_unchanged_writes_PLAN (whole-value skip)",
   "key": [19, 29, 39],
   "steps": [
     {

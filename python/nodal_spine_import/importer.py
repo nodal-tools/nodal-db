@@ -191,6 +191,10 @@ class ImportReport:
     #: warnings surfaced by the write path (auto-creates here mean an
     #: importer bug — everything is pre-declared).
     write_warnings: list = field(default_factory=list)
+    #: ``(channel, commit_id)`` per write call. ``commit_id`` is 0 when the
+    #: call changed nothing (every item already in place, every value equal
+    #: to the stored one): the core then makes no commit. Nothing reads these
+    #: ids back; 0 is not an error.
     commits: list = field(default_factory=list)
 
     def summary(self) -> str:
@@ -577,17 +581,24 @@ class SpineImporter:
                     waves.append([seg])
                     wave_targets.append({target})
             total_written = 0
+            total_unchanged = 0
             for i, wave in enumerate(waves):
                 repd = db.commit_changes(
                     segments=wave, user=self.user,
                     message=f"spine import: values ({i + 1}/{len(waves)})",
                 )
+                # values_written counts changed values only; values equal to
+                # the stored ones are values_unchanged (and a wave with no
+                # change makes no commit: commit_id 0).
                 total_written += repd.get("values_written", 0)
+                total_unchanged += repd.get("values_unchanged", 0)
                 rep.commits.append(("values", repd.get("commit_id")))
                 for w in repd.get("warnings", []):
                     rep.write_warnings.append(w)
             rep.counts["value_batches"] = len(segments)
             rep.counts["values_written"] = total_written
+            if total_unchanged:
+                rep.counts["values_unchanged"] = total_unchanged
 
             # ---- the final, non-optional identity stamp ------------------
             # The bootstrap template already stamped this identity; the verb

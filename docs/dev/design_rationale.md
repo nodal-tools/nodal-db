@@ -352,8 +352,8 @@ Notes on the table:
   table itself.
 - **Every write replaces the whole value.** The write API takes whole
   values; there is no per-cell update. Writing a value identical to the
-  current one also creates a new version. Callers that want to avoid
-  this should compare before writing.
+  stored one creates no version: the core compares the stored columns
+  and skips it, and a call that changes nothing makes no commit.
 - **History can be kept without content.** When the parameter
   definition has `retain_content` set to false, or with the
   `force_replace` write option (or `retain_override` set to false), the

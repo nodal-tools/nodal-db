@@ -1,6 +1,5 @@
 {
   "name": "scalar identical re-write is unchanged (no close-out, no new row), then a change versions",
-  "pending": "P1 of skip_unchanged_writes_PLAN (whole-value skip)",
   "key": [17, 27, 37],
   "steps": [
     {

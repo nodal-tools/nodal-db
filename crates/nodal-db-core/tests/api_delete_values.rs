@@ -617,9 +617,11 @@ fn combined_error_rolls_back_whole_invocation() {
                 undomained_label_batch("node_1"),
             ),
         ],
-        vec![],                                       // no structural
-        vec![dk("node", "demand", "Base", "node_1")], // queued delete, never reached
-        vec![],                                       // no object deletes
+        vec![], // no structural
+        // queued delete, never reached (another key: a value written and
+        // deleted in one call is rejected up front, D9)
+        vec![dk("node", "demand", "Base", "node_2")],
+        vec![], // no object deletes
         "t",
         "must roll back",
         o(),

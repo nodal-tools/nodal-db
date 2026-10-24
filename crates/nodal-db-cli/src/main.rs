@@ -89,7 +89,9 @@ enum Command {
         /// Keep no content for the versions this import replaces: each
         /// replaced value's previous version stays in history only as a
         /// content-less stub (as if the parameter had retain_content = FALSE).
-        /// New versions are written either way. Applies to all segments.
+        /// New versions are written either way; values equal to the stored
+        /// ones are not rewritten (and so leave no stub). Applies to all
+        /// segments.
         #[arg(long)]
         force_replace: bool,
     },

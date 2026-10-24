@@ -130,6 +130,10 @@ out the same way. For dense-array values, the previous row is copied from
 `value_array` to a `value_array_hist` table in the same transaction,
 keeping its `array_id` row handle. History is never rewritten.
 
+Writing a value equal to the stored one changes nothing: no new version
+and no history row. A call that changes nothing at all creates no
+commit (its report has commit id 0).
+
 Audit views check that history is consistent, for example
 `audit_history_tiling` for version continuity.
 

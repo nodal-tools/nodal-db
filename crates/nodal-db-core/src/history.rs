@@ -106,18 +106,118 @@
 //! (or an explicit `retain_override = Some(false)`) writes a stub instead —
 //! `content_retained = FALSE` with the payload columns nulled — so the prior
 //! content is not preserved (VMP Part 5 retention).
+//!
+//! **Unchanged writes (skip_unchanged_writes_PLAN P1)**: a write whose stored
+//! form equals the key's current stored value writes nothing — no close-out,
+//! no insert, no `_hist` row — and reports [`WriteOutcome::unchanged`]. Equal
+//! means: live in the same tier, the same binding (`parameter_type_id`, NULL
+//! vs a member is a change), the same axis ids, and per row or cell the same
+//! encoder output, compared on the RAW stored columns (`value_kind` and the
+//! payload bits; arrays: `values` element bits and length, `values_int`
+//! NULL) with `content_retained = TRUE`. The stored side is never
+//! re-canonicalized and never compared by `content_hash`. Every doubt errs
+//! toward "changed" (an extra version costs history; a false "unchanged"
+//! would lose a write). The probes read the comparison columns in the same
+//! statements as today (the scalar probe; the long tier's grouped
+//! per-position probe, which is also its version source; the array live
+//! probe's narrow columns as a prefilter, then the payload by `array_id`).
+//! A long value is compared whole (P1): equal cell for cell, or rewritten as
+//! before. Retention plays no part: an unchanged write supersedes nothing,
+//! so `force_replace` stubs nothing (D3). The no-commit rule (D1) lives in
+//! `api::commit_changes`; a direct caller of these functions inside its own
+//! `conn::with_write_txn` still commits its (possibly empty) commit row.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use duckdb::types::Value;
+use duckdb::types::{TimeUnit, Value, ValueRef};
 use duckdb::{params, Connection, OptionalExt};
 
 use crate::axis::{dedup_or_insert_created, AxisCache};
 use crate::canon::CanonicalValue;
 use crate::encoding::{datetime_coord, AxisBody, CanonicalAxis};
 use crate::error::DbError;
-use crate::types::{ScalarValue, ShapedData, Tier, ValueKey, WriteOptions, WriteOutcome};
+use crate::types::{
+    ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions, WriteOutcome,
+};
+
+/// The comparison columns of a key's current row(s), appended to the
+/// grouped probes after the version and current-count columns: the 8 value
+/// columns of the current row (`any_value … FILTER` over the at most one
+/// current row of a scalar key, or of a long position; the probes only use
+/// them when that count is exactly 1, so `any_value` skipping NULLs cannot
+/// matter), then its binding and its `content_retained` (critique C3.4: a
+/// current stub never compares equal).
+macro_rules! cur_value_cols {
+    ($t:literal) => {
+        concat!(
+            "any_value(",
+            $t,
+            ".value_kind) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_float) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_int) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_bool) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_str) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_datetime) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_dur_months) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".v_dur_micros) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "any_value(",
+            $t,
+            ".parameter_type_id) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL), ",
+            "bool_and(",
+            $t,
+            ".content_retained) FILTER (WHERE ",
+            $t,
+            ".valid_to_commit IS NULL)"
+        )
+    };
+}
+
+/// The long probes' current-cell columns: the cell's 4 axis ids, then its
+/// [`cur_value_cols!`] block (table alias `l`).
+macro_rules! long_cur_cols {
+    () => {
+        concat!(
+            "any_value(l.axis1_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
+            "any_value(l.axis2_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
+            "any_value(l.axis3_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
+            "any_value(l.axis4_id) FILTER (WHERE l.valid_to_commit IS NULL), ",
+            cur_value_cols!("l")
+        )
+    };
+}
 
 /// Should the superseded / pre-image row keep its content? `force_replace`
 /// forces a stub; an explicit `retain_override` otherwise decides; default true.
@@ -266,12 +366,8 @@ fn delete_round(
     Ok(closed
         .into_iter()
         .map(|rows_closed| WriteOutcome {
-            tier: None,
-            version: 0,
-            rows_written: 0,
             rows_closed,
-            axes_created: 0,
-            axes_reused: 0,
+            ..WriteOutcome::default()
         })
         .collect())
 }
@@ -301,6 +397,17 @@ fn probe_live(
     conn: &Connection,
     keys: &[&ValueKey],
 ) -> Result<HashMap<Triple, (Live, usize)>, DbError> {
+    probe_live_meta(conn, keys, None)
+}
+
+/// [`probe_live`], and with `meta` the narrow comparison columns of every
+/// array-live key's row too ([`ArrayMeta`], by `array_id`), read by the
+/// same array probe (the array write's unchanged prefilter).
+fn probe_live_meta(
+    conn: &Connection,
+    keys: &[&ValueKey],
+    meta: Option<&mut HashMap<i64, ArrayMeta>>,
+) -> Result<HashMap<Triple, (Live, usize)>, DbError> {
     let mut live: HashMap<Triple, (Live, usize)> = HashMap::new();
     for (t, _, _) in probe_keys(conn, SCALAR_LIVE_SQL, keys.iter().copied(), false)? {
         live.insert(t, (Live::Scalar, 1));
@@ -320,9 +427,27 @@ fn probe_live(
         .into_iter()
         .filter(|k| !live.contains_key(&triple(k)))
         .collect();
-    if !rest.is_empty() {
-        for (t, array_id, _) in probe_keys(conn, ARRAY_LIVE_SQL, rest.iter().copied(), false)? {
-            live.insert(t, (Live::Array(array_id), 1));
+    if rest.is_empty() {
+        return Ok(live);
+    }
+    match meta {
+        None => {
+            for (t, array_id, _) in probe_keys(conn, ARRAY_LIVE_SQL, rest.iter().copied(), false)? {
+                live.insert(t, (Live::Array(array_id), 1));
+            }
+        }
+        Some(meta) => {
+            let mut stmt =
+                conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{ARRAY_LIVE_META_SQL}"))?;
+            let rows = stmt.query_map(
+                duckdb::params_from_iter(key_lists(rest.iter().copied())),
+                |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), ArrayMeta::read(r, 3)?)),
+            )?;
+            for row in rows {
+                let (t, m): (Triple, ArrayMeta) = row?;
+                live.insert(t, (Live::Array(m.array_id), 1));
+                meta.insert(m.array_id, m);
+            }
         }
     }
     Ok(live)
@@ -435,7 +560,8 @@ fn check_affected(what: &str, affected: usize, expected: usize) -> Result<(), Db
 /// this consumes the typed [`ScalarValue`] directly; `parameter_type_id` is
 /// the D11 binding to the rank-0 declared member the default instantiates.
 /// Returns `(rows_closed, rows_written)`; a no-change write still versions
-/// (callers diff first — the template reconcile only calls this on change).
+/// (callers diff first — the template reconcile only calls this on change;
+/// unlike the entity-scoped writers, which skip an unchanged value).
 pub(crate) fn write_definition_default(
     conn: &Connection,
     commit_id: i64,
@@ -665,6 +791,43 @@ fn live_tier(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError>
     live_below_scalar(conn, key)
 }
 
+/// [`live_tier`] for the single-key array write: the same precedence, and
+/// for an array-live key the narrow comparison columns of its row
+/// ([`ArrayMeta`]) from the same point read (never the payload).
+fn live_tier_array_meta(
+    conn: &Connection,
+    key: &ValueKey,
+) -> Result<Option<(Live, Option<ArrayMeta>)>, DbError> {
+    let triple = params![
+        key.entity_id,
+        key.parameter_definition_id,
+        key.alternative_id
+    ];
+    let scalar: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM value_scalar WHERE entity_id=? AND parameter_definition_id=? \
+             AND alternative_id=? AND valid_to_commit IS NULL",
+        )?
+        .query_row(triple, |r| r.get(0))?;
+    if scalar > 0 {
+        return Ok(Some((Live::Scalar, None)));
+    }
+    let long: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM value_long WHERE entity_id=? AND parameter_definition_id=? \
+             AND alternative_id=? AND valid_to_commit IS NULL",
+        )?
+        .query_row(triple, |r| r.get(0))?;
+    if long > 0 {
+        return Ok(Some((Live::Long, None)));
+    }
+    let m: Option<ArrayMeta> = conn
+        .prepare_cached(ARRAY_LIVE_META_ONE_SQL)?
+        .query_row(triple, |r| ArrayMeta::read(r, 0))
+        .optional()?;
+    Ok(m.map(|m| (Live::Array(m.array_id), Some(m))))
+}
+
 /// The long, then array, part of [`live_tier`] (for a key not live in
 /// scalar).
 fn live_below_scalar(conn: &Connection, key: &ValueKey) -> Result<Option<Live>, DbError> {
@@ -718,13 +881,18 @@ const SCALAR_KEYS_CTE: &str = "WITH k AS (SELECT unnest(?::BIGINT[]) AS e, \
      unnest(?::BIGINT[]) AS p, unnest(?::BIGINT[]) AS a) ";
 
 /// Per key: the max version over all `value_scalar` rows of the triple
-/// (current and closed: the `audit_history_tiling` partition) and the count
-/// of current rows.
-const SCALAR_PROBE_SQL: &str = "SELECT s.entity_id, s.parameter_definition_id, s.alternative_id, \
-            max(s.version)::INTEGER, count(*) FILTER (WHERE s.valid_to_commit IS NULL) \
-     FROM value_scalar s JOIN k ON s.entity_id = k.e \
+/// (current and closed: the `audit_history_tiling` partition), the count
+/// of current rows, the current row's version and its comparison columns
+/// ([`cur_value_cols!`], for the unchanged check).
+const SCALAR_PROBE_SQL: &str = concat!(
+    "SELECT s.entity_id, s.parameter_definition_id, s.alternative_id, \
+            max(s.version)::INTEGER, count(*) FILTER (WHERE s.valid_to_commit IS NULL), \
+            (any_value(s.version) FILTER (WHERE s.valid_to_commit IS NULL))::INTEGER, ",
+    cur_value_cols!("s"),
+    " FROM value_scalar s JOIN k ON s.entity_id = k.e \
           AND s.parameter_definition_id = k.p AND s.alternative_id = k.a \
-     GROUP BY ALL";
+     GROUP BY ALL"
+);
 
 /// The keys with a current `value_long` row.
 const LONG_LIVE_SQL: &str = "SELECT DISTINCT l.entity_id, l.parameter_definition_id, \
@@ -793,6 +961,131 @@ const ARRAY_LIVE_SQL: &str = "SELECT v.entity_id, v.parameter_definition_id, v.a
      FROM value_array v JOIN k ON v.entity_id = k.e \
           AND v.parameter_definition_id = k.p AND v.alternative_id = k.a";
 
+/// [`ARRAY_LIVE_SQL`] widened by the narrow comparison columns of the row
+/// ([`ArrayMeta`]): never a list column (CLAUDE.md invariant 5), so it
+/// stays a key-triple probe.
+const ARRAY_LIVE_META_SQL: &str =
+    "SELECT v.entity_id, v.parameter_definition_id, v.alternative_id, \
+            v.array_id, v.version::INTEGER, v.parameter_type_id, \
+            v.axis1_id, v.axis2_id, v.axis3_id, v.axis4_id, v.v_min, v.v_max \
+     FROM value_array v JOIN k ON v.entity_id = k.e \
+          AND v.parameter_definition_id = k.p AND v.alternative_id = k.a";
+
+/// The single-key form of [`ARRAY_LIVE_META_SQL`].
+const ARRAY_LIVE_META_ONE_SQL: &str = "SELECT array_id, version::INTEGER, parameter_type_id, \
+            axis1_id, axis2_id, axis3_id, axis4_id, v_min, v_max \
+     FROM value_array WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ?";
+
+/// The stored payloads of the bound `array_id`s, for the unchanged check:
+/// `(array_id, values, values_int IS NULL)`. Keyed by `array_id` alone
+/// behind the `OFFSET 0` fence, so the payload is read through the
+/// `array_id` index (CLAUDE.md invariants 5 and 6; guarded by
+/// `tests/array_id_index_scan.rs`).
+#[doc(hidden)]
+pub const ARRAY_PAYLOAD_SQL: &str = "SELECT array_id, values, values_int IS NULL FROM \
+       (SELECT array_id, values, values_int FROM value_array \
+        WHERE array_id IN (SELECT unnest(?::BIGINT[])) OFFSET 0)";
+
+/// The narrow columns of a live array row the unchanged prefilter compares:
+/// its handle, version, binding, axes and pruning bounds.
+#[derive(Clone, Copy, Debug)]
+struct ArrayMeta {
+    array_id: i64,
+    version: u16,
+    pt: Option<i64>,
+    axis: [Option<i64>; 4],
+    vmin: Option<f64>,
+    vmax: Option<f64>,
+}
+
+impl ArrayMeta {
+    /// Read `array_id, version, parameter_type_id, axis1..4_id, v_min,
+    /// v_max` starting at column `o`.
+    fn read(r: &duckdb::Row, o: usize) -> duckdb::Result<ArrayMeta> {
+        Ok(ArrayMeta {
+            array_id: r.get(o)?,
+            version: r.get::<_, i32>(o + 1)? as u16,
+            pt: r.get(o + 2)?,
+            axis: [r.get(o + 3)?, r.get(o + 4)?, r.get(o + 5)?, r.get(o + 6)?],
+            vmin: r.get(o + 7)?,
+            vmax: r.get(o + 8)?,
+        })
+    }
+
+    /// The prefilter: can the row hold the new value? A mismatch of the
+    /// binding, any axis id or a pruning bound proves a change; a match
+    /// proves nothing (the payload bytes decide).
+    fn may_equal(&self, a: &ArrayWrite) -> bool {
+        let (lo, hi) = min_max(a.vals());
+        let axis: [Option<i64>; 4] = std::array::from_fn(|d| a.axis_ids.get(d).copied());
+        self.pt == a.parameter_type_id
+            && self.axis == axis
+            && self.vmin.is_some_and(|x| same_bound(x, lo))
+            && self.vmax.is_some_and(|x| same_bound(x, hi))
+    }
+}
+
+/// The `array_id`s among `cands` (`(array_id, new payload)`) whose stored
+/// payload equals the new one: `values` set with the same length and the
+/// same bits per element (raw, no canonicalization; a NULL element never
+/// matches), `values_int` NULL. Read through Arrow (no per-element
+/// allocation), keyed by `array_id` ([`ARRAY_PAYLOAD_SQL`]).
+fn array_payloads_equal(
+    conn: &Connection,
+    cands: &[(i64, &[f64])],
+) -> Result<std::collections::HashSet<i64>, DbError> {
+    use duckdb::arrow::array::{Array, AsArray};
+    use duckdb::arrow::datatypes::Float64Type;
+    let mut equal = std::collections::HashSet::new();
+    if cands.is_empty() {
+        return Ok(equal);
+    }
+    let want: HashMap<i64, &[f64]> = cands.iter().copied().collect();
+    let ids = Value::List(cands.iter().map(|&(id, _)| Value::BigInt(id)).collect());
+    let mut stmt = conn.prepare_cached(ARRAY_PAYLOAD_SQL)?;
+    for batch in stmt.query_arrow(params![ids])? {
+        let id_col = batch
+            .column(0)
+            .as_primitive::<duckdb::arrow::datatypes::Int64Type>();
+        let no_int = batch.column(2).as_boolean();
+        let vals = batch.column(1);
+        for row in 0..batch.num_rows() {
+            if id_col.is_null(row) || no_int.is_null(row) || !no_int.value(row) || vals.is_null(row)
+            {
+                continue;
+            }
+            let id = id_col.value(row);
+            let Some(new) = want.get(&id) else {
+                continue;
+            };
+            let stored = if let Some(l) = vals.as_list_opt::<i32>() {
+                l.value(row)
+            } else if let Some(l) = vals.as_list_opt::<i64>() {
+                l.value(row)
+            } else {
+                return Err(DbError::Internal(format!(
+                    "array payload read: unexpected Arrow type {:?}",
+                    vals.data_type()
+                )));
+            };
+            let Some(stored) = stored.as_primitive_opt::<Float64Type>() else {
+                continue;
+            };
+            if stored.null_count() == 0
+                && stored.len() == new.len()
+                && stored
+                    .values()
+                    .iter()
+                    .zip(new.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            {
+                equal.insert(id);
+            }
+        }
+    }
+    Ok(equal)
+}
+
 /// Same-tier close-out of the current rows of the bound keys, content
 /// retained.
 const SCALAR_CLOSE_SQL: &str = "UPDATE value_scalar SET valid_to_commit = ? \
@@ -826,12 +1119,20 @@ const SCALAR_INSERT_SQL: &str = "INSERT INTO value_scalar \
 
 /// The single-key form of [`SCALAR_PROBE_SQL`] (one row; `max` is NULL when
 /// the triple has no rows).
-const SCALAR_PROBE_ONE_SQL: &str = "SELECT max(version)::INTEGER, \
-            count(*) FILTER (WHERE valid_to_commit IS NULL) \
-     FROM value_scalar \
-     WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ?";
+const SCALAR_PROBE_ONE_SQL: &str = concat!(
+    "SELECT max(s.version)::INTEGER, \
+            count(*) FILTER (WHERE s.valid_to_commit IS NULL), \
+            (any_value(s.version) FILTER (WHERE s.valid_to_commit IS NULL))::INTEGER, ",
+    cur_value_cols!("s"),
+    " FROM value_scalar s \
+     WHERE s.entity_id = ? AND s.parameter_definition_id = ? AND s.alternative_id = ?"
+);
 
 type Triple = (i64, i64, i64);
+
+/// A scalar key's current row as its probe read it: the row's version and
+/// comparison columns (`None` when the key has no current scalar row).
+type CurScalar = Option<(u16, CurRow)>;
 
 /// A key triple as three scalar binds (the point-filter statements).
 fn point(k: &ValueKey) -> [i64; 3] {
@@ -927,16 +1228,31 @@ fn write_scalar_round(
     // control flow, about half the per-statement cost at N = 1.
     let single = n == 1;
     // --- Probes (only for keys whose entity existed before this commit). ---
+    // The scalar probe also reads the current row (version and comparison
+    // columns) for the unchanged check (skip_unchanged_writes_PLAN §3.1).
     let mut max_version: HashMap<Triple, i64> = HashMap::new();
     let mut live: HashMap<Triple, Live> = HashMap::new();
+    let mut current: HashMap<Triple, (u16, CurRow)> = HashMap::new();
     let probed = w.iter().filter(|s| !s.entity_minted).map(|s| &s.key);
     if single && probed.clone().next().is_some() {
         let k = &w[0].key;
-        let (maxv, cur): (Option<i32>, i64) = conn
-            .prepare_cached(SCALAR_PROBE_ONE_SQL)?
-            .query_row(point(k), |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (maxv, cur, row) = conn.prepare_cached(SCALAR_PROBE_ONE_SQL)?.query_row(
+            point(k),
+            |r| -> duckdb::Result<(Option<i32>, i64, CurScalar)> {
+                let cur: i64 = r.get(1)?;
+                let version: Option<i32> = r.get(2)?;
+                let row = match version {
+                    Some(v) => Some((v as u16, CurRow::read(r, 3, cur)?)),
+                    None => None,
+                };
+                Ok((r.get(0)?, cur, row))
+            },
+        )?;
         if let Some(v) = maxv {
             max_version.insert(triple(k), i64::from(v));
+        }
+        if let Some(row) = row {
+            current.insert(triple(k), row);
         }
         let cur = if cur > 0 {
             Some(Live::Scalar)
@@ -947,12 +1263,30 @@ fn write_scalar_round(
             live.insert(triple(k), l);
         }
     } else if probed.clone().next().is_some() {
-        for (t, v, cur) in probe_keys(conn, SCALAR_PROBE_SQL, probed.clone(), true)? {
+        let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{SCALAR_PROBE_SQL}"))?;
+        let rows = stmt.query_map(
+            duckdb::params_from_iter(key_lists(probed.clone())),
+            |r| -> duckdb::Result<(Triple, i64, i64, CurScalar)> {
+                let cur: i64 = r.get(4)?;
+                let version: Option<i32> = r.get(5)?;
+                let row = match version {
+                    Some(v) => Some((v as u16, CurRow::read(r, 6, cur)?)),
+                    None => None,
+                };
+                Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?, cur, row))
+            },
+        )?;
+        for row in rows {
+            let (t, v, cur, row) = row?;
             max_version.insert(t, v);
             if cur > 0 {
                 live.insert(t, Live::Scalar);
             }
+            if let Some(row) = row {
+                current.insert(t, row);
+            }
         }
+        drop(stmt);
         // Long and array only for the keys not live in scalar (zero keys for a
         // pure replace batch, so both statements are skipped). Precedence as
         // in `live_tier`: scalar, then long, then array.
@@ -969,6 +1303,26 @@ fn write_scalar_round(
         }
     }
 
+    // --- Unchanged keys: live in scalar with a current row equal to the
+    // new one (kind, payload bits, binding; content retained). They write
+    // nothing: no close-out, no insert (skip_unchanged_writes_PLAN §2.1). A
+    // key live in another tier is always a change (the tier is a function
+    // of the content). ---
+    let unchanged: Vec<Option<u16>> = w
+        .iter()
+        .map(|s| {
+            let t = triple(&s.key);
+            match (live.get(&t), current.get(&t)) {
+                (Some(Live::Scalar), Some((version, row)))
+                    if row.equals(&s.value, s.parameter_type_id) =>
+                {
+                    Some(*version)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
     // --- Tier transitions: the per-key close-out of the other tier, in
     // input order (plan D4). ---
     let mut closed = vec![0usize; n];
@@ -982,7 +1336,9 @@ fn write_scalar_round(
     for retained in [true, false] {
         let idx: Vec<usize> = (0..n)
             .filter(|&i| {
-                w[i].retained == retained && live.get(&triple(&w[i].key)) == Some(&Live::Scalar)
+                unchanged[i].is_none()
+                    && w[i].retained == retained
+                    && live.get(&triple(&w[i].key)) == Some(&Live::Scalar)
             })
             .collect();
         if idx.is_empty() {
@@ -1014,10 +1370,15 @@ fn write_scalar_round(
         }
     }
 
-    // --- Insert: every column built in one pass through the one encoder. ---
+    // --- Insert the changed keys: every column built in one pass through
+    // the one encoder. ---
     let mut versions: Vec<i16> = Vec::with_capacity(n);
     let mut cols = ScalarColumns::default();
-    for s in w {
+    for (s, same) in w.iter().zip(&unchanged) {
+        if let Some(v) = same {
+            versions.push(*v as i16);
+            continue;
+        }
         let v = max_version.get(&triple(&s.key)).copied().unwrap_or(0) + 1;
         let v = i16::try_from(v)
             .map_err(|_| DbError::Internal(format!("scalar batch: version {v} out of range")))?;
@@ -1025,18 +1386,21 @@ fn write_scalar_round(
         cols.push(s, v);
     }
     cols.check_column_lengths()?;
-    exec_columnar(conn, SCALAR_INSERT_SQL, n, |r| cols.params(c, r))?;
+    exec_columnar(conn, SCALAR_INSERT_SQL, cols.e.len(), |r| cols.params(c, r))?;
 
     Ok(versions
         .iter()
         .zip(closed)
-        .map(|(&version, rows_closed)| WriteOutcome {
-            tier: Some(Tier::Scalar),
-            version: version as u16,
-            rows_written: 1,
-            rows_closed,
-            axes_created: 0,
-            axes_reused: 0,
+        .zip(&unchanged)
+        .map(|((&version, rows_closed), same)| match same {
+            Some(v) => unchanged_outcome(Tier::Scalar, *v, (0, 0), 0),
+            None => WriteOutcome {
+                tier: Some(Tier::Scalar),
+                version: version as u16,
+                rows_written: 1,
+                rows_closed,
+                ..WriteOutcome::default()
+            },
         })
         .collect())
 }
@@ -1433,10 +1797,11 @@ fn write_array_round(
         .filter(|a| !a.entity_minted)
         .map(|a| &a.key)
         .collect();
+    let mut meta: HashMap<i64, ArrayMeta> = HashMap::new();
     let (live, max_version) = if probed.is_empty() {
         (HashMap::new(), HashMap::new())
     } else {
-        let live = probe_live(conn, &probed)?;
+        let live = probe_live_meta(conn, &probed, Some(&mut meta))?;
         let versions: HashMap<Triple, i64> =
             probe_keys(conn, ARRAY_VERSION_SQL, probed.iter().copied(), false)?
                 .into_iter()
@@ -1444,6 +1809,27 @@ fn write_array_round(
                 .collect();
         (live, versions)
     };
+
+    // --- Unchanged keys: live in array, the narrow prefilter passes, and
+    // the stored payload (fetched by array_id) equals the new one bit for
+    // bit. They write nothing: no pre-image copy, no replace
+    // (skip_unchanged_writes_PLAN §3.2). ---
+    let mut cands: Vec<(i64, &[f64])> = Vec::new();
+    for a in w {
+        if let Some(&(Live::Array(id), _)) = live.get(&triple(&a.key)) {
+            if meta.get(&id).is_some_and(|m| m.may_equal(a)) {
+                cands.push((id, a.vals()));
+            }
+        }
+    }
+    let equal = array_payloads_equal(conn, &cands)?;
+    let unchanged: Vec<Option<u16>> = w
+        .iter()
+        .map(|a| match live.get(&triple(&a.key)) {
+            Some(&(Live::Array(id), _)) if equal.contains(&id) => meta.get(&id).map(|m| m.version),
+            _ => None,
+        })
+        .collect();
 
     // --- Tier transitions: the per-key close-out of the other tier, in
     // input order (plan D6). ---
@@ -1467,7 +1853,9 @@ fn write_array_round(
         Some(&(Live::Array(id), _)) => Some(id),
         _ => None,
     };
-    let replaced: Vec<usize> = (0..n).filter(|&i| live_id(i).is_some()).collect();
+    let replaced: Vec<usize> = (0..n)
+        .filter(|&i| unchanged[i].is_none() && live_id(i).is_some())
+        .collect();
     let fresh: Vec<usize> = (0..n).filter(|&i| live_id(i).is_none()).collect();
 
     // --- Replace in place: the pre-image copy (per retention mode), then
@@ -1520,13 +1908,18 @@ fn write_array_round(
     Ok(w.iter()
         .zip(versions)
         .zip(closed)
-        .map(|((a, version), rows_closed)| WriteOutcome {
-            tier: Some(Tier::Array),
-            version: version as u16,
-            rows_written: 1,
-            rows_closed,
-            axes_created: a.axes_created,
-            axes_reused: a.axes_reused,
+        .zip(&unchanged)
+        .map(|(((a, version), rows_closed), same)| match same {
+            Some(v) => unchanged_outcome(Tier::Array, *v, (a.axes_created, a.axes_reused), 0),
+            None => WriteOutcome {
+                tier: Some(Tier::Array),
+                version: version as u16,
+                rows_written: 1,
+                rows_closed,
+                axes_created: a.axes_created,
+                axes_reused: a.axes_reused,
+                ..WriteOutcome::default()
+            },
         })
         .collect())
 }
@@ -1569,8 +1962,21 @@ fn write_array_one(conn: &Connection, c: i64, a: &ArrayWrite) -> Result<WriteOut
     let current = if a.entity_minted {
         None
     } else {
-        live_tier(conn, &a.key)?
+        live_tier_array_meta(conn, &a.key)?
     };
+    // The unchanged check (as in the set form): the prefilter on the
+    // narrow columns, then the payload by array_id.
+    if let Some((Live::Array(id), Some(m))) = current {
+        if m.may_equal(a) && array_payloads_equal(conn, &[(id, a.vals())])?.contains(&id) {
+            return Ok(unchanged_outcome(
+                Tier::Array,
+                m.version,
+                (a.axes_created, a.axes_reused),
+                0,
+            ));
+        }
+    }
+    let current = current.map(|(l, _)| l);
     let mut rows_closed = 0usize;
     if let Some(cur @ (Live::Scalar | Live::Long)) = current {
         rows_closed += close_out_tier(conn, &a.key, c, cur, a.retained)?;
@@ -1592,6 +1998,7 @@ fn write_array_one(conn: &Connection, c: i64, a: &ArrayWrite) -> Result<WriteOut
         rows_closed: rows_closed + closed_same,
         axes_created: a.axes_created,
         axes_reused: a.axes_reused,
+        ..WriteOutcome::default()
     })
 }
 
@@ -1695,20 +2102,126 @@ pub(crate) fn write_longs(
 
 /// Per key: the max version of each position tuple over every
 /// `value_long` row of the key (current and closed, as
-/// `current_long_versions` reads it) and that tuple's current-cell count
-/// (0 or 1), grouped per (key, positions).
-const LONG_PROBE_SQL: &str = "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
+/// `current_long_cells` reads it), that tuple's current-cell count (0 or
+/// 1), the current cell's axis ids and its comparison columns
+/// ([`cur_value_cols!`]), grouped per (key, positions): the version source
+/// of the write and the read of the unchanged check in one scan (critique
+/// C6, D7).
+const LONG_PROBE_SQL: &str = concat!(
+    "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
             l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, \
-            count(*) FILTER (WHERE l.valid_to_commit IS NULL) \
-     FROM value_long l JOIN k ON l.entity_id = k.e \
+            count(*) FILTER (WHERE l.valid_to_commit IS NULL), ",
+    long_cur_cols!(),
+    " FROM value_long l JOIN k ON l.entity_id = k.e \
           AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
-     GROUP BY ALL";
+     GROUP BY ALL"
+);
+
+/// The single-key form of [`LONG_PROBE_SQL`].
+const LONG_PROBE_ONE_SQL: &str = concat!(
+    "SELECT l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, \
+            count(*) FILTER (WHERE l.valid_to_commit IS NULL), ",
+    long_cur_cols!(),
+    " FROM value_long l \
+     WHERE l.entity_id = ? AND l.parameter_definition_id = ? AND l.alternative_id = ? \
+     GROUP BY l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos"
+);
+
+/// One position tuple of a key as the long probe read it: the max version
+/// over all its rows, and its current cell when there is exactly one.
+#[derive(Debug)]
+struct ProbeCell {
+    pos: [i32; 4],
+    version: u16,
+    /// The current row (`None`: no current row at this position).
+    current: Option<CurRow>,
+}
+
+/// A key's probed long cells, sorted by position tuple once the probe is
+/// read ([`LongCells::finish`]).
+#[derive(Debug, Default)]
+struct LongCells {
+    cells: Vec<ProbeCell>,
+    /// The axis ids (padded to 4) shared by every current cell; `None`
+    /// once two current cells disagree (critique C3.3: compared per cell,
+    /// so a damaged mixed-axis key is never judged unchanged).
+    axes: Option<[Option<i64>; 4]>,
+    coherent: bool,
+    /// Current rows over all positions.
+    current: usize,
+}
+
+impl LongCells {
+    /// Fold one probe row: its position, max version, current count and
+    /// (from column `o`) the current cell's axis ids and comparison block.
+    fn push(&mut self, r: &duckdb::Row, pos: [i32; 4], o: usize) -> duckdb::Result<()> {
+        if self.cells.is_empty() {
+            self.coherent = true;
+        }
+        let version = r.get::<_, i32>(o)? as u16;
+        let cur: i64 = r.get(o + 1)?;
+        let current = if cur > 0 {
+            let axes: [Option<i64>; 4] =
+                [r.get(o + 2)?, r.get(o + 3)?, r.get(o + 4)?, r.get(o + 5)?];
+            match self.axes {
+                None if self.current == 0 => self.axes = Some(axes),
+                Some(a) if a == axes => {}
+                _ => self.coherent = false,
+            }
+            self.current += cur as usize;
+            Some(CurRow::read(r, o + 6, cur)?)
+        } else {
+            None
+        };
+        self.cells.push(ProbeCell {
+            pos,
+            version,
+            current,
+        });
+        Ok(())
+    }
+
+    fn finish(&mut self) {
+        self.cells.sort_unstable_by_key(|c| c.pos);
+    }
+
+    /// The probed cell at `pos` (binary search; the cells are sorted).
+    fn at(&self, pos: &[i32; 4]) -> Option<&ProbeCell> {
+        self.cells
+            .binary_search_by(|c| c.pos.cmp(pos))
+            .ok()
+            .map(|i| &self.cells[i])
+    }
+
+    /// The max version of every current cell, if `l` equals the key's
+    /// current value cell for cell: one coherent set of axis ids equal to
+    /// the new value's, as many current cells as new cells, and at every
+    /// new cell's position a current cell with the same kind, payload bits
+    /// and binding (content retained). Positions within one value are
+    /// distinct, so equal counts make the position sets equal.
+    fn unchanged(&self, l: &LongWrite) -> Option<u16> {
+        let axes: [Option<i64>; 4] = std::array::from_fn(|d| l.axis_ids.get(d).copied());
+        let rows = l.rows();
+        if !self.coherent || self.axes != Some(axes) || self.current != rows.len() {
+            return None;
+        }
+        let mut version = 0u16;
+        for row in rows {
+            let cur = self.at(&pad4_pos(&row.positions))?.current.as_ref()?;
+            if !cur.equals(&row.value, l.parameter_type_id) {
+                return None;
+            }
+            version = version.max(self.at(&pad4_pos(&row.positions))?.version);
+        }
+        Some(version)
+    }
+}
 
 /// The per-key state the probes of a long round collect.
 #[derive(Default)]
 struct LongProbe {
-    /// Per key, the max version per position tuple (all rows).
-    versions: HashMap<Triple, HashMap<[i32; 4], u16>>,
+    /// Per key, its probed cells (all positions it has rows at).
+    cells: HashMap<Triple, LongCells>,
     /// The live tier per key (per-key precedence), with its current-row
     /// count (the current cells for long).
     live: HashMap<Triple, (Live, usize)>,
@@ -1716,15 +2229,14 @@ struct LongProbe {
 
 impl LongProbe {
     /// The single-key form: today's point statements (`live_tier`, then
-    /// `current_long_versions`).
+    /// `current_long_cells`).
     fn point(conn: &Connection, k: &ValueKey) -> Result<LongProbe, DbError> {
         let mut p = LongProbe::default();
         if let Some(l) = live_tier(conn, k)? {
             // The point close-out reports its own count; 0 is not checked.
             p.live.insert(triple(k), (l, 0));
         }
-        p.versions
-            .insert(triple(k), current_long_versions(conn, k)?);
+        p.cells.insert(triple(k), current_long_cells(conn, k)?);
         Ok(p)
     }
 
@@ -1736,39 +2248,20 @@ impl LongProbe {
         for (t, _, _) in probe_keys(conn, SCALAR_LIVE_SQL, keys.iter().copied(), false)? {
             p.live.insert(t, (Live::Scalar, 1));
         }
-        let mut current: HashMap<Triple, usize> = HashMap::new();
         {
             let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{LONG_PROBE_SQL}"))?;
-            let rows = stmt.query_map(
-                duckdb::params_from_iter(key_lists(keys.iter().copied())),
-                |r| {
-                    Ok((
-                        (
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, i64>(2)?,
-                        ),
-                        [
-                            r.get::<_, i32>(3)?,
-                            r.get::<_, i32>(4)?,
-                            r.get::<_, i32>(5)?,
-                            r.get::<_, i32>(6)?,
-                        ],
-                        r.get::<_, i32>(7)?,
-                        r.get::<_, i64>(8)?,
-                    ))
-                },
-            )?;
-            for row in rows {
-                let (t, pos, v, cur) = row?;
-                p.versions.entry(t).or_default().insert(pos, v as u16);
-                if cur > 0 {
-                    *current.entry(t).or_default() += cur as usize;
-                }
+            let mut rows = stmt.query(duckdb::params_from_iter(key_lists(keys.iter().copied())))?;
+            while let Some(r) = rows.next()? {
+                let t: Triple = (r.get(0)?, r.get(1)?, r.get(2)?);
+                let pos = [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?];
+                p.cells.entry(t).or_default().push(r, pos, 7)?;
             }
         }
-        for (t, cells) in current {
-            p.live.entry(t).or_insert((Live::Long, cells));
+        for (t, cells) in &mut p.cells {
+            cells.finish();
+            if cells.current > 0 {
+                p.live.entry(*t).or_insert((Live::Long, cells.current));
+            }
         }
         let rest: Vec<&ValueKey> = keys
             .iter()
@@ -1804,6 +2297,20 @@ fn write_long_round(
         _ => LongProbe::set(conn, &probed)?,
     };
 
+    // --- Unchanged keys: live in long with current cells equal to the new
+    // value cell for cell (P1: whole value; skip_unchanged_writes_PLAN
+    // §2.1). They write nothing. ---
+    let unchanged: Vec<Option<u16>> = w
+        .iter()
+        .map(|l| {
+            let t = triple(&l.key);
+            match (probe.live.get(&t), probe.cells.get(&t)) {
+                (Some((Live::Long, _)), Some(cells)) => cells.unchanged(l),
+                _ => None,
+            }
+        })
+        .collect();
+
     // --- Tier transitions: the per-key close-out of the other tier, in
     // input order (plan D6). ---
     let mut closed = vec![0usize; n];
@@ -1819,7 +2326,8 @@ fn write_long_round(
     for retained in [true, false] {
         let idx: Vec<usize> = (0..n)
             .filter(|&i| {
-                w[i].retained == retained
+                unchanged[i].is_none()
+                    && w[i].retained == retained
                     && matches!(probe.live.get(&triple(&w[i].key)), Some((Live::Long, _)))
             })
             .collect();
@@ -1846,69 +2354,65 @@ fn write_long_round(
         }
     }
 
-    // --- Insert: every column built in one pass through the one encoder. ---
-    let empty = HashMap::new();
+    // --- Insert the changed keys: every column built in one pass through
+    // the one encoder. ---
+    let empty = LongCells::default();
     let mut keys = LongKeys::default();
     let mut cols = LongColumns::default();
     let mut max_version = Vec::with_capacity(n);
-    for l in w {
+    for (l, same) in w.iter().zip(&unchanged) {
+        if let Some(v) = same {
+            max_version.push(*v);
+            continue;
+        }
         let ordinal = keys.push(l)?;
-        let versions = probe.versions.get(&triple(&l.key)).unwrap_or(&empty);
-        max_version.push(cols.push_value(l.rows(), &l.value.axes, versions, ordinal)?);
+        let cells = probe.cells.get(&triple(&l.key)).unwrap_or(&empty);
+        max_version.push(cols.push_value(l.rows(), &l.value.axes, cells, ordinal)?);
     }
     insert_long_round(conn, c, &keys, &cols)?;
 
     Ok(w.iter()
         .zip(max_version)
         .zip(closed)
-        .map(|((l, version), rows_closed)| WriteOutcome {
-            tier: Some(Tier::Long),
-            version,
-            rows_written: l.rows().len(),
-            rows_closed,
-            axes_created: l.axes_created,
-            axes_reused: l.axes_reused,
+        .zip(&unchanged)
+        .map(|(((l, version), rows_closed), same)| match same {
+            Some(_) => unchanged_outcome(
+                Tier::Long,
+                version,
+                (l.axes_created, l.axes_reused),
+                l.rows().len(),
+            ),
+            None => WriteOutcome {
+                tier: Some(Tier::Long),
+                version,
+                rows_written: l.rows().len(),
+                rows_closed,
+                axes_created: l.axes_created,
+                axes_reused: l.axes_reused,
+                ..WriteOutcome::default()
+            },
         })
         .collect())
 }
 
-/// The current per-position `MAX(version)` for every position tuple the key
-/// already holds (live OR superseded — versioning spans both, as the former
-/// per-cell probe did: no `valid_to_commit` filter). The single-key form of
-/// [`LONG_PROBE_SQL`]'s version part.
-fn current_long_versions(
-    conn: &Connection,
-    key: &ValueKey,
-) -> Result<HashMap<[i32; 4], u16>, DbError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT i1_pos, i2_pos, i3_pos, i4_pos, MAX(version)::INTEGER \
-         FROM value_long \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-         GROUP BY i1_pos, i2_pos, i3_pos, i4_pos",
-    )?;
-    let mut map = HashMap::new();
-    let iter = stmt.query_map(
-        params![
-            key.entity_id,
-            key.parameter_definition_id,
-            key.alternative_id
-        ],
-        |r| {
-            let pos = [
-                r.get::<_, i32>(0)?,
-                r.get::<_, i32>(1)?,
-                r.get::<_, i32>(2)?,
-                r.get::<_, i32>(3)?,
-            ];
-            let v: i32 = r.get(4)?;
-            Ok((pos, v as u16))
-        },
-    )?;
-    for row in iter {
-        let (pos, v) = row?;
-        map.insert(pos, v);
+/// The probed cells of one key: per position tuple the key already holds
+/// (live OR superseded — versioning spans both, as the former per-cell
+/// probe did: no `valid_to_commit` filter) its `MAX(version)` and its
+/// current cell. The single-key form of [`LONG_PROBE_SQL`].
+fn current_long_cells(conn: &Connection, key: &ValueKey) -> Result<LongCells, DbError> {
+    let mut stmt = conn.prepare_cached(LONG_PROBE_ONE_SQL)?;
+    let mut rows = stmt.query(params![
+        key.entity_id,
+        key.parameter_definition_id,
+        key.alternative_id
+    ])?;
+    let mut cells = LongCells::default();
+    while let Some(r) = rows.next()? {
+        let pos = [r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?];
+        cells.push(r, pos, 4)?;
     }
-    Ok(map)
+    cells.finish();
+    Ok(cells)
 }
 
 /// Rows per columnar-bind execution (plan D5, critique C7): the long insert
@@ -2017,13 +2521,13 @@ impl LongColumns {
         &mut self,
         rows: &[crate::types::LongRow],
         axes: &[CanonicalAxis],
-        cur_versions: &HashMap<[i32; 4], u16>,
+        cur: &LongCells,
         k: i32,
     ) -> Result<u16, DbError> {
         let mut max_version = 0u16;
         for row in rows {
             let pos = pad4_pos(&row.positions);
-            let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
+            let version = cur.at(&pos).map_or(0, |c| c.version) + 1;
             let v16 = i16::try_from(version).map_err(|_| {
                 DbError::Internal(format!("long batch: version {version} out of range"))
             })?;
@@ -2390,6 +2894,198 @@ impl VCols {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Unchanged-write detection (skip_unchanged_writes_PLAN §2.1, critique C3)
+// ---------------------------------------------------------------------------
+
+/// The payload of one stored value row or long cell, decoded from its RAW
+/// stored columns: floats as bits, strings as their exact bytes, timestamps
+/// as µs. The stored side is never re-canonicalized (critique C3.1), and
+/// equality is never decided by `encoding::content_hash` / `encode_value`,
+/// whose string encoding is NFC-normalized while `v_str` is stored verbatim
+/// (C3.2). A new value is decoded by the same function from its
+/// [`VCols::of`] encoding, so equal cells mean equal encoder outputs: the
+/// same `value_kind` and the same bits in every value column.
+#[derive(Clone, Debug, PartialEq)]
+enum StoredCell {
+    Float(u64),
+    Int(i64),
+    Bool(bool),
+    Str(Box<str>),
+    DateTime(i64),
+    Duration(i32, i64),
+}
+
+/// The value columns of one row: `value_kind`, then the 7 payload columns.
+struct RawCols<'a> {
+    kind: &'a [u8],
+    f: Option<f64>,
+    i: Option<i64>,
+    b: Option<bool>,
+    s: Option<&'a str>,
+    dt: Option<i64>,
+    dm: Option<i32>,
+    du: Option<i64>,
+}
+
+impl StoredCell {
+    /// The cell, or `None` when the columns are not exactly what the encoder
+    /// writes for the row's kind (an unknown kind tag, a missing payload
+    /// column, a second one set). Such a row can never equal a new value,
+    /// so the write goes ahead: every doubt errs toward "changed".
+    fn decode(c: &RawCols) -> Option<StoredCell> {
+        let set = [
+            c.f.is_some(),
+            c.i.is_some(),
+            c.b.is_some(),
+            c.s.is_some(),
+            c.dt.is_some(),
+            c.dm.is_some(),
+            c.du.is_some(),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+        let is = |k: ValueKind| c.kind == k.tag().as_bytes();
+        match set {
+            1 if is(ValueKind::Float) => c.f.map(|x| StoredCell::Float(x.to_bits())),
+            1 if is(ValueKind::Int) => c.i.map(StoredCell::Int),
+            1 if is(ValueKind::Bool) => c.b.map(StoredCell::Bool),
+            1 if is(ValueKind::String) => c.s.map(|s| StoredCell::Str(s.into())),
+            1 if is(ValueKind::DateTime) => c.dt.map(StoredCell::DateTime),
+            2 if is(ValueKind::Duration) => match (c.dm, c.du) {
+                (Some(m), Some(u)) => Some(StoredCell::Duration(m, u)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The cell a write of `v` stores (through the one encoder).
+    fn of_new(v: &ScalarValue) -> Option<StoredCell> {
+        let vc = VCols::of(v);
+        StoredCell::decode(&RawCols {
+            kind: vc.kind.as_bytes(),
+            f: vc.f,
+            i: vc.i,
+            b: vc.b,
+            s: vc.s.as_deref(),
+            dt: vc.dt,
+            dm: vc.dm,
+            du: vc.du,
+        })
+    }
+
+    /// Read the 8 value columns of a probe row starting at column `o`
+    /// (`value_kind`, `v_float`, `v_int`, `v_bool`, `v_str`, `v_datetime`,
+    /// `v_dur_months`, `v_dur_micros`) and decode them. A timestamp is
+    /// converted to µs by its unit (critique C3.5); a column of an
+    /// unexpected type, or a timestamp not exact in µs, yields `None`.
+    fn read(r: &duckdb::Row, o: usize) -> duckdb::Result<Option<StoredCell>> {
+        let kind = match r.get_ref(o)? {
+            ValueRef::Text(t) => t,
+            _ => return Ok(None),
+        };
+        let s = match r.get_ref(o + 4)? {
+            ValueRef::Null => None,
+            ValueRef::Text(t) => match std::str::from_utf8(t) {
+                Ok(s) => Some(s),
+                Err(_) => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let dt = match r.get_ref(o + 5)? {
+            ValueRef::Null => None,
+            ValueRef::Timestamp(unit, v) => match timestamp_us(unit, v) {
+                Some(us) => Some(us),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        Ok(StoredCell::decode(&RawCols {
+            kind,
+            f: r.get(o + 1)?,
+            i: r.get(o + 2)?,
+            b: r.get(o + 3)?,
+            s,
+            dt,
+            dm: r.get(o + 6)?,
+            du: r.get(o + 7)?,
+        }))
+    }
+}
+
+/// A duckdb-rs timestamp as epoch µs, exactly, or `None`.
+fn timestamp_us(unit: TimeUnit, v: i64) -> Option<i64> {
+    match unit {
+        TimeUnit::Second => v.checked_mul(1_000_000),
+        TimeUnit::Millisecond => v.checked_mul(1_000),
+        TimeUnit::Microsecond => Some(v),
+        TimeUnit::Nanosecond => (v % 1_000 == 0).then_some(v / 1_000),
+    }
+}
+
+/// A key's (or a long position's) current row as a probe read it: its
+/// decoded value (`None` when not comparable: no exactly-one current row,
+/// a malformed or stub row), its binding and its version.
+#[derive(Clone, Debug)]
+struct CurRow {
+    cell: Option<StoredCell>,
+    pt: Option<i64>,
+}
+
+impl CurRow {
+    /// Read the [`cur_value_cols!`] block of a probe row at column `o`,
+    /// given the number of current rows the probe counted for it.
+    fn read(r: &duckdb::Row, o: usize, current: i64) -> duckdb::Result<CurRow> {
+        let cell = StoredCell::read(r, o)?;
+        let pt: Option<i64> = r.get(o + 8)?;
+        let retained: Option<bool> = r.get(o + 9)?;
+        Ok(CurRow {
+            cell: if current == 1 && retained == Some(true) {
+                cell
+            } else {
+                None
+            },
+            pt,
+        })
+    }
+
+    /// Does this current row equal a new write of `v` bound to `pt`? The
+    /// binding compares as `IS NOT DISTINCT FROM` (a stored NULL against a
+    /// new member is a change, which rebinds; critique C3.6, D8).
+    fn equals(&self, v: &ScalarValue, pt: Option<i64>) -> bool {
+        self.pt == pt
+            && match (&self.cell, StoredCell::of_new(v)) {
+                (Some(a), Some(b)) => *a == b,
+                _ => false,
+            }
+    }
+}
+
+/// An unchanged write's outcome: the current tier and version, nothing
+/// written or closed.
+fn unchanged_outcome(tier: Tier, version: u16, axes: (usize, usize), cells: usize) -> WriteOutcome {
+    WriteOutcome {
+        tier: Some(tier),
+        version,
+        unchanged: true,
+        cells_unchanged: cells,
+        rows_written: 0,
+        rows_closed: 0,
+        axes_created: axes.0,
+        axes_reused: axes.1,
+    }
+}
+
+/// Two `v_min` / `v_max` values that do not prove a change: equal bits, or
+/// both NaN (DuckDB orders NaN as one value). The array prefilter only
+/// ever uses a mismatch, as evidence of a change; a match proves nothing
+/// and the payload bytes decide (critique C3.5).
+fn same_bound(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}
+
 /// The `(v_datetime µs, v_num)` accelerator for a dimension's axis at `pos`.
 /// Datetime axes carry the timestamp, period axes the period's `start_ts`
 /// (the `ts` that `axis_position` renders for a period), integer axes the
@@ -2610,7 +3306,7 @@ mod tests {
         let mut keys = LongKeys::default();
         let mut cols = LongColumns::default();
         let k = keys.push(&w).unwrap();
-        cols.push_value(w.rows(), &w.value.axes, &HashMap::new(), k)
+        cols.push_value(w.rows(), &w.value.axes, &LongCells::default(), k)
             .unwrap();
         (keys, cols)
     }
@@ -3412,13 +4108,14 @@ mod tests {
     #[test]
     fn long_rewrite_in_one_commit_violates_the_span_check() {
         // Writing one key twice in one commit closes its cells at their own
-        // valid_from_commit: a zero-length span.
+        // valid_from_commit: a zero-length span. (The second value differs:
+        // an identical one is an unchanged write, which closes nothing.)
         let (_d, db) = fresh();
         assert_rejected(&db, "CHECK constraint failed", |conn, c| {
             let mut cache = AxisCache::new();
             let o = WriteOptions::default();
             write_value(conn, c, KEY, &long_value(3), &mut cache, &o, None)?;
-            write_value(conn, c, KEY, &long_value(3), &mut cache, &o, None).map(|_| ())
+            write_value(conn, c, KEY, &long_value(4), &mut cache, &o, None).map(|_| ())
         });
     }
 

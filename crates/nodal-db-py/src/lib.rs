@@ -255,6 +255,12 @@ impl Database {
     /// this id (see `head_commit()`), else raise `Stale` with nothing
     /// written. Checked inside the write transaction, so read → compute →
     /// write is atomic against other writers.
+    ///
+    /// A value equal to the stored one is not rewritten: it counts in the
+    /// report's `values_unchanged`, not `values_written`. A call that
+    /// changes nothing makes no commit: the report's `commit_id` is 0 and
+    /// the message is not recorded (use `head_commit()` for the commit the
+    /// data is current at).
     #[pyo3(signature = (class_name, parameter, alternative, batch, *, user, message = String::new(),
                         domains = None, force_replace = false, retain_override = None,
                         expect_commit = None))]
@@ -312,6 +318,12 @@ impl Database {
     ///   report's `"structural"` list.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
+    ///
+    /// Unchanged values are not rewritten (`values_unchanged`), and a call
+    /// whose every item changes nothing (unchanged values, deletes that
+    /// find nothing, structural no-ops, object deletes that find nothing)
+    /// makes no commit: `commit_id` is 0. A call that writes and deletes
+    /// the same value is refused before anything is written.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
                         object_deletes = None, user, message = String::new(),
                         force_replace = false, retain_override = None, expect_commit = None))]
@@ -389,7 +401,8 @@ impl Database {
 
     /// Delete (append-only close-out) named values in one atomic commit —
     /// the deletes-only convenience over `commit_changes`. `keys` is a list
-    /// of `(class, parameter, alternative, entity)` tuples.
+    /// of `(class, parameter, alternative, entity)` tuples. When no key
+    /// finds a live value, nothing is committed (`commit_id` 0).
     #[pyo3(signature = (keys, *, user, message = String::new(), expect_commit = None))]
     fn delete_values<'py>(
         &self,

@@ -1,6 +1,5 @@
 {
   "name": "array identical re-write is unchanged (no _hist pre-image, no in-place replace), then a change versions",
-  "pending": "P1 of skip_unchanged_writes_PLAN (whole-value skip)",
   "key": [18, 28, 38],
   "steps": [
     {

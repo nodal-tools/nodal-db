@@ -374,12 +374,15 @@ re-run without cleanup.
   set, the import fails before reading the file (a usage error without
   an `E` class).
 - `--message` sets the commit message (default empty).
-- Re-importing the same data writes a new version of each value; it is
-  not skipped as a duplicate.
+- A value equal to the stored one is not written again (no new version,
+  no history row); the summary counts it as unchanged. Re-importing the
+  same data therefore changes nothing, and when no value changed the
+  import makes no commit and prints `no changes (nothing committed)`.
 - With `--force-replace`, the versions this import replaces keep no
   content: they stay in history as stubs that record that the value
   changed, but not what it was (as if the parameter's `retain_content`
-  were false). New versions are written either way. This applies to all
+  were false). Changed values get new versions either way; unchanged
+  values are not rewritten, so they leave no stub. This applies to all
   segments.
 - `--class` and `--parameter` are assertions, not filters: if given,
   every segment must target that class or parameter, or the import
@@ -502,7 +505,7 @@ nodal-db import results.arrows --db model.duckdb --alternative Base \
 
 ```text
 initialized model.duckdb
-imported results.arrows: commit 2, 2 segment(s), 3 value(s), 5 row(s) written, axes 3 created / 1 reused, tiers [long, array]
+imported results.arrows: commit 2, 2 segment(s), 3 value(s) written, 0 unchanged, 5 row(s) written, axes 3 created / 1 reused, tiers [long, array]
 warning: auto-created entity_class "node" (id 1)
 warning: auto-created parameter_definition "flow" (id 1)
 warning: auto-created alternative "Base" (id 1)

@@ -186,7 +186,7 @@ do either.
     ```
 
     ```text
-    imported base.arrows: commit 2, 2 segment(s), 4 value(s), 4 row(s) written, axes 1 created / 1 reused, tiers [array, scalar]
+    imported base.arrows: commit 2, 2 segment(s), 4 value(s) written, 0 unchanged, 4 row(s) written, axes 1 created / 1 reused, tiers [array, scalar]
     warning: auto-created entity_class "node" (id 1)
     warning: auto-created parameter_definition "demand" (id 1)
     warning: auto-created entity "north" (id 1)
@@ -259,6 +259,38 @@ do either.
     that your code links against the same Arrow version as the core.
     `api::commit_changes` combines writes, deletions and structural
     changes in one commit.
+
+### Writing a value that has not changed
+
+A value equal to the one already stored is not written again: no new
+version, no history row. The report counts it in `values_unchanged`
+instead of `values_written`. Equal means the same tier, the same
+parameter type, the same axes and the same stored bits in every cell,
+so `-0.0` and `0.0` (which the core stores as one value) are equal,
+while `1.0` and the next larger float are not.
+
+When nothing in a call changes anything (every value unchanged, every
+delete finds nothing, every structural change is already in place),
+the call makes **no commit**. The report then has `commit_id` 0, the
+head commit does not move, and the commit message is not recorded:
+
+```text
+imported base.arrows: no changes (nothing committed), 2 segment(s), 4 value(s) unchanged
+```
+
+```python
+report = db.write_parameter("node", "demand", "high_demand", batch,
+                            user="alice", message="same data again")
+report["commit_id"], report["values_unchanged"]   # (0, 1)
+```
+
+Use `head_commit` when you need the commit the data is current at. A
+call that changes at least one value commits as usual, and only the
+changed values get the new commit. `--force-replace` (or
+`force_replace`) only decides what the replaced versions keep; it does
+not make the core rewrite unchanged values. A call may not write a
+value and delete the same value; the core refuses it before writing
+anything.
 
 ### Build a scenario
 

@@ -42,7 +42,7 @@ use duckdb::{params, Connection};
 
 use crate::axis::AxisCache;
 use crate::canon::{canonicalize, LabelDomain};
-use crate::conn::{head_on, with_read, with_write_txn_retrying_opts, TxnOptions};
+use crate::conn::{head_on, with_read, with_write_txn_retrying_ends, TxnEnd, TxnOptions};
 use crate::error::DbError;
 use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
@@ -51,8 +51,9 @@ use crate::history::{
 use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
 use crate::structural::{apply_structural, prepare_structural};
 use crate::types::{
-    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview, ShapedData,
-    StructuralChange, Tier, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
+    DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview,
+    ObjectDeleteResult, ShapedData, StructuralChange, StructuralEffect, Tier, ValueKey, ValueKind,
+    Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -190,6 +191,18 @@ pub struct DeleteKey {
 /// scenario, contradictory renames, the cross-channel object-delete orphan)
 /// before any DB work; per-item outcomes land in `report.structural`.
 /// Empty across every channel ⇒ [`DbError::Api`].
+///
+/// **Unchanged values and no-op calls** (skip_unchanged_writes_PLAN D1,
+/// D2): a value equal to the stored one is not rewritten (it counts in
+/// `report.values_unchanged`, not `values_written`). A call that changes
+/// nothing — every value unchanged, every delete a miss, every structural
+/// item `NoOp`, every object delete `NotFound`, nothing auto-created —
+/// makes **no commit**: the transaction is rolled back, the report says
+/// `commit_id == 0`, the head (the polling cookie) does not move and the
+/// commit message is not recorded. Its `seq_commit` value stays consumed
+/// (commit ids may skip, as after a conflict retry). A value delete of a
+/// key the same call writes is refused up front as [`DbError::Api`],
+/// whatever the content (D9).
 #[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
@@ -276,6 +289,9 @@ pub fn commit_changes(
     // charset/type validation, one-set-per-scenario (M3), contradictory renames,
     // and the cross-channel object-delete orphan guard (M2). No DB touched.
     prepare_structural(&structural, &object_deletes)?;
+    // A value written and deleted in one call: rejected whatever the
+    // content (D9).
+    reject_write_and_delete(&prepared, &prepared_deletes)?;
 
     // --- The atomic, retried commit. Everything below re-reads/re-creates DB
     // state inside a fresh transaction on each retry (VMP Part 5), so the axis
@@ -286,7 +302,7 @@ pub fn commit_changes(
     let txn = TxnOptions {
         expect_commit: opts.expect_commit,
     };
-    with_write_txn_retrying_opts(db, user, message, txn, |conn, commit_id| {
+    with_write_txn_retrying_ends(db, user, message, txn, |conn, commit_id| {
         // One axis cache across all segments: axes are immutable and
         // content-verified, so cross-segment reuse within one txn is sound.
         let mut cache = AxisCache::new();
@@ -360,15 +376,145 @@ pub fn commit_changes(
         }
         // Deletes resolve + close out AFTER the writes, under the same commit —
         // one atomic invocation (delete design MAJOR-2).
-        apply_deletes(conn, commit_id, &prepared_deletes, opts, &mut report)?;
+        let deleted = apply_deletes(
+            conn,
+            commit_id,
+            &prepared_deletes,
+            opts,
+            &buffers.keys,
+            &mut report,
+        )?;
         // Object deletes run LAST, under the same commit_id (object_delete plan
         // §2): every close-out is guarded by `valid_from < commit_id`, so a row
         // this commit created is never closed (would trip the span CHECK).
         for p in &prepared_object_deletes {
             apply_object_delete(conn, commit_id, p, &mut report)?;
         }
-        Ok(report)
+        // `tiers` lists the tiers written; the canonicalization noted every
+        // value's tier, unchanged ones included.
+        report.tiers.retain(|t| buffers.written_tiers.contains(t));
+        let evidence = NoopEvidence {
+            values: buffers.values,
+            deleted,
+            structural: structural.len(),
+            object_deletes: prepared_object_deletes.len(),
+        };
+        if wrote_nothing(&report, &evidence) {
+            // Nothing changed: no commit (D1). The report says so with
+            // commit id 0.
+            report.commit_id = 0;
+            return Ok((report, TxnEnd::Rollback));
+        }
+        Ok((report, TxnEnd::Commit))
     })
+}
+
+/// What a `commit_changes` attempt submitted and what its deletes did, for
+/// [`wrote_nothing`].
+struct NoopEvidence {
+    /// Values buffered (every one must have come back unchanged).
+    values: usize,
+    /// Value delete keys that closed at least one row.
+    deleted: usize,
+    /// Structural items submitted (each must report `NoOp`).
+    structural: usize,
+    /// Object deletes submitted (each must report `NotFound`).
+    object_deletes: usize,
+}
+
+/// Did this call provably change nothing (skip_unchanged_writes_PLAN D1,
+/// critique C2)? A false "nothing" would roll back real writes, so this is
+/// an allow-list: `true` only when every item of every channel positively
+/// reported a known no-op — every value unchanged, no delete closed a row,
+/// every structural item `NoOp`, every object delete `NotFound`, no axis
+/// created, no row written or closed, and no warning outside the known
+/// no-op kinds (an `AutoCreated` referent is a write). Anything else,
+/// including a report field or warning kind added later (the destructuring
+/// and the `match` below are exhaustive, so adding one does not compile
+/// until it is classified here), commits.
+fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
+    let WriteReport {
+        commit_id: _,
+        values_written,
+        values_unchanged,
+        rows_written,
+        rows_closed,
+        axes_created,
+        axes_reused: _,
+        tiers,
+        warnings,
+        object_deletes,
+        structural,
+    } = report;
+    let warnings_ok = warnings.iter().all(|w| match w.kind {
+        WarningKind::AutoCreated => false,
+        WarningKind::TimezoneNormalized { .. }
+        | WarningKind::UnknownReferent { .. }
+        | WarningKind::NothingToDelete { .. } => true,
+    });
+    *values_written == 0
+        && *values_unchanged == ev.values
+        && *rows_written == 0
+        && *rows_closed == 0
+        && *axes_created == 0
+        && tiers.is_empty()
+        && ev.deleted == 0
+        && warnings_ok
+        && structural.len() == ev.structural
+        && structural
+            .iter()
+            .all(|s| s.effect == StructuralEffect::NoOp)
+        && object_deletes.len() == ev.object_deletes
+        && object_deletes
+            .iter()
+            .all(|o| matches!(o.result, ObjectDeleteResult::NotFound))
+}
+
+/// D9 (critique C1): a call that writes a value and also deletes it is
+/// rejected up front, whatever the content. Deletes run after the writes,
+/// so the delete would close the row the write just inserted (a span
+/// CHECK error) when the write changed the value, but succeed when the
+/// write was an unchanged no-op: the outcome would depend on the content.
+/// This pure check compares Rust folds of the names; `apply_deletes`
+/// repeats it on the resolved ids.
+fn reject_write_and_delete(
+    prepared: &[PreparedSegment],
+    deletes: &[(usize, DeleteKey)],
+) -> Result<(), DbError> {
+    if deletes.is_empty() {
+        return Ok(());
+    }
+    let mut written: HashSet<(String, String, String, String)> = HashSet::new();
+    for p in prepared {
+        let (c, pa, a) = (
+            p.class.to_lowercase(),
+            p.parameter.to_lowercase(),
+            p.alternative.to_lowercase(),
+        );
+        for n in &p.names {
+            written.insert((c.clone(), pa.clone(), a.clone(), n.to_lowercase()));
+        }
+    }
+    for (i, k) in deletes {
+        let fold = (
+            k.class.to_lowercase(),
+            k.parameter.to_lowercase(),
+            k.alternative.to_lowercase(),
+            k.entity.to_lowercase(),
+        );
+        if written.contains(&fold) {
+            return Err(same_key_error(*i, k));
+        }
+    }
+    Ok(())
+}
+
+fn same_key_error(i: usize, k: &DeleteKey) -> DbError {
+    DbError::Api(format!(
+        "delete key {i} ({}:{}/{}/{}) names a value this call also writes: \
+         a value cannot be written and deleted in one call",
+        k.class, k.parameter, k.alternative, k.entity
+    ))
 }
 
 /// Delete (append-only close-out) each named value in ONE atomic, conflict-
@@ -545,15 +691,21 @@ enum DeleteResolution {
 /// get `NothingToDelete`, as a second per-key delete would (plan D10).
 /// Retention obeys the definition's `retain_content` unless the caller
 /// overrode it, as in the write path (`write_prepared`).
+///
+/// A key that resolves to a value this call also writes (`written`, the
+/// resolved write keys) is rejected as [`DbError::Api`] before anything is
+/// closed (D9; the resolved-id repeat of `reject_write_and_delete`).
+/// Returns the number of keys that closed at least one row.
 fn apply_deletes(
     conn: &Connection,
     commit_id: i64,
     deletes: &[(usize, DeleteKey)],
     opts: WriteOptions,
+    written: &HashSet<(i64, i64, i64)>,
     report: &mut WriteReport,
-) -> Result<(), DbError> {
+) -> Result<usize, DbError> {
     if deletes.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     // --- Class, parameter and alternative: memoized point lookups, in key
     // order (a key stops at its first missing level, as before). ---
@@ -633,7 +785,7 @@ fn apply_deletes(
     let mut seen: HashSet<(i64, i64, i64)> = HashSet::new();
     let mut round: Vec<DeleteWrite> = Vec::new();
     let mut resolved: Vec<DeleteResolution> = Vec::with_capacity(deletes.len());
-    for ((_, dk), p) in deletes.iter().zip(partial) {
+    for ((key_index, dk), p) in deletes.iter().zip(partial) {
         let (class_id, pd_id, alt_id) = match p {
             Ok(ids) => ids,
             Err((level, name)) => {
@@ -645,6 +797,9 @@ fn apply_deletes(
             resolved.push(DeleteResolution::Unknown("entity", dk.entity.clone()));
             continue;
         };
+        if written.contains(&(entity_id, pd_id, alt_id)) {
+            return Err(same_key_error(*key_index, dk));
+        }
         if !seen.insert((entity_id, pd_id, alt_id)) {
             resolved.push(DeleteResolution::Repeat);
             continue;
@@ -682,6 +837,7 @@ fn apply_deletes(
     let outcomes = history::delete_values(conn, commit_id, &round)?;
 
     // --- Report and warnings, in key order. ---
+    let mut deleted = 0usize;
     for ((key_index, dk), r) in deletes.iter().zip(resolved) {
         let rows_closed = match r {
             DeleteResolution::Unknown(level, name) => {
@@ -694,7 +850,9 @@ fn apply_deletes(
             }
             DeleteResolution::Repeat => 0,
         };
-        if rows_closed == 0 {
+        if rows_closed > 0 {
+            deleted += 1;
+        } else {
             report.warnings.push(Warning {
                 kind: WarningKind::NothingToDelete {
                     key_index: *key_index,
@@ -708,7 +866,7 @@ fn apply_deletes(
             });
         }
     }
-    Ok(())
+    Ok(deleted)
 }
 
 /// Push an [`WarningKind::UnknownReferent`] for a lookup miss at `level`.
@@ -1090,6 +1248,7 @@ fn write_prepared(
             parameter_definition_id: pd_id,
             alternative_id: alt_id,
         };
+        buffers.track(&key);
         match value.tier {
             Tier::Scalar => {
                 let ShapedData::Scalar(m) = value.shape else {
@@ -1374,9 +1533,37 @@ struct WriteBuffers {
     arrays: Vec<ArrayWrite<'static>>,
     /// The payload elements buffered in `arrays` (plan D3).
     array_elems: usize,
+    /// Every value key buffered by the commit, flushed or not: the
+    /// same-call write-and-delete check (skip_unchanged_writes_PLAN D9).
+    keys: HashSet<(i64, i64, i64)>,
+    /// Values buffered by the commit (the no-op evidence, D1: every one
+    /// must come back unchanged).
+    values: usize,
+    /// The tiers of the values actually written (not unchanged), for
+    /// `WriteReport::tiers`.
+    written_tiers: Vec<Tier>,
 }
 
 impl WriteBuffers {
+    /// Record one buffered value of key `k`.
+    fn track(&mut self, k: &ValueKey) {
+        self.values += 1;
+        self.keys
+            .insert((k.entity_id, k.parameter_definition_id, k.alternative_id));
+    }
+
+    /// Fold the outcomes of one flush into `report`, in buffer order.
+    fn absorb(&mut self, outcomes: &[crate::types::WriteOutcome], report: &mut WriteReport) {
+        for o in outcomes {
+            if let (false, Some(t)) = (o.unchanged, o.tier) {
+                if !self.written_tiers.contains(&t) {
+                    self.written_tiers.push(t);
+                }
+            }
+            report.absorb(o);
+        }
+    }
+
     /// Write the buffered scalars in one set-based call and fold their
     /// outcomes into `report` in buffer order (the tiers were already noted
     /// when each value was canonicalized). Empties the buffer.
@@ -1389,9 +1576,8 @@ impl WriteBuffers {
         if self.scalars.is_empty() {
             return Ok(());
         }
-        for o in write_scalars(conn, commit_id, &self.scalars)? {
-            report.absorb(&o);
-        }
+        let outcomes = write_scalars(conn, commit_id, &self.scalars)?;
+        self.absorb(&outcomes, report);
         self.scalars.clear();
         Ok(())
     }
@@ -1406,9 +1592,8 @@ impl WriteBuffers {
         if self.longs.is_empty() {
             return Ok(());
         }
-        for o in write_longs(conn, commit_id, &self.longs)? {
-            report.absorb(&o);
-        }
+        let outcomes = write_longs(conn, commit_id, &self.longs)?;
+        self.absorb(&outcomes, report);
         self.longs.clear();
         self.long_cells = 0;
         Ok(())
@@ -1424,9 +1609,8 @@ impl WriteBuffers {
         if self.arrays.is_empty() {
             return Ok(());
         }
-        for o in write_arrays(conn, commit_id, &self.arrays)? {
-            report.absorb(&o);
-        }
+        let outcomes = write_arrays(conn, commit_id, &self.arrays)?;
+        self.absorb(&outcomes, report);
         self.arrays.clear();
         self.array_elems = 0;
         Ok(())
@@ -2338,4 +2522,91 @@ fn read_retain_content(conn: &Connection, pd_id: i64) -> Result<bool, DbError> {
         params![pd_id],
         |r| r.get(0),
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ObjectDeleteOutcome, ObjectKind, StructuralKind, StructuralOutcome};
+
+    fn noop() -> (WriteReport, NoopEvidence) {
+        let report = WriteReport {
+            commit_id: 9,
+            values_unchanged: 2,
+            axes_reused: 1,
+            warnings: vec![Warning {
+                kind: WarningKind::NothingToDelete { key_index: 0 },
+                object_type: "value".into(),
+                name: "x".into(),
+                id: 0,
+            }],
+            structural: vec![StructuralOutcome {
+                change_index: 0,
+                kind: StructuralKind::Alternative,
+                object_id: 2,
+                effect: StructuralEffect::NoOp,
+            }],
+            object_deletes: vec![ObjectDeleteOutcome {
+                key_index: 0,
+                kind: ObjectKind::Alternative,
+                result: ObjectDeleteResult::NotFound,
+            }],
+            ..WriteReport::default()
+        };
+        let ev = NoopEvidence {
+            values: 2,
+            deleted: 0,
+            structural: 1,
+            object_deletes: 1,
+        };
+        (report, ev)
+    }
+
+    /// The D1 predicate is an allow-list (critique C2): the all-no-op report
+    /// passes, and every single deviation from it commits.
+    #[test]
+    fn wrote_nothing_is_an_allow_list() {
+        let (r, ev) = noop();
+        assert!(wrote_nothing(&r, &ev));
+        type Bend = Box<dyn Fn(&mut WriteReport, &mut NoopEvidence)>;
+        let bends: Vec<(&str, Bend)> = vec![
+            ("a value written", Box::new(|r, _| r.values_written = 1)),
+            ("a value not reported", Box::new(|_, e| e.values = 3)),
+            ("a row written", Box::new(|r, _| r.rows_written = 1)),
+            ("a row closed", Box::new(|r, _| r.rows_closed = 1)),
+            ("an axis created", Box::new(|r, _| r.axes_created = 1)),
+            (
+                "a tier written",
+                Box::new(|r, _| r.tiers.push(Tier::Scalar)),
+            ),
+            ("a delete applied", Box::new(|_, e| e.deleted = 1)),
+            (
+                "an auto-created referent",
+                Box::new(|r, _| r.warnings[0].kind = WarningKind::AutoCreated),
+            ),
+            (
+                "a structural change",
+                Box::new(|r, _| r.structural[0].effect = StructuralEffect::Created),
+            ),
+            (
+                "a structural outcome missing",
+                Box::new(|_, e| e.structural = 2),
+            ),
+            (
+                "an object deleted (or restricted)",
+                Box::new(|r, _| {
+                    r.object_deletes[0].result = ObjectDeleteResult::Restricted { blockers: vec![] }
+                }),
+            ),
+            (
+                "an object delete outcome missing",
+                Box::new(|_, e| e.object_deletes = 2),
+            ),
+        ];
+        for (what, bend) in bends {
+            let (mut r, mut ev) = noop();
+            bend(&mut r, &mut ev);
+            assert!(!wrote_nothing(&r, &ev), "{what} must commit");
+        }
+    }
 }

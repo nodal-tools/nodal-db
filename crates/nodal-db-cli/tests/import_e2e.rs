@@ -1282,9 +1282,23 @@ fn force_replace_passes_through_to_core() {
         "stderr: {}",
         String::from_utf8_lossy(&first.stderr)
     );
+    // The second import carries a modified payload: an identical one is an
+    // unchanged write, which supersedes nothing and so stubs nothing
+    // (skip_unchanged_writes_PLAN D3(i): --force-replace never versions an
+    // unchanged value).
+    let changed = write_file(
+        dir.path(),
+        "force2.arrows",
+        &long_segment(
+            "node",
+            "profile",
+            1,
+            &[("n1", 0, 1.0), ("n1", 1, 2.5), ("n1", 2, 3.0)],
+        ),
+    );
     let second = import(
         &db,
-        &file,
+        &changed,
         &[
             "--alternative",
             "Base",
@@ -1313,6 +1327,54 @@ fn force_replace_passes_through_to_core() {
         stubs, 1,
         "force-replace must stub the pre-image, proving pass-through"
     );
+}
+
+/// Re-importing the same file changes nothing (skip_unchanged_writes_PLAN
+/// §6.2): the second import prints "no changes", makes no commit and adds
+/// no history row, with and without `--force-replace` (D3(i)).
+#[test]
+fn reimport_of_the_same_file_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let file = write_file(
+        dir.path(),
+        "same.arrows",
+        &long_segment(
+            "node",
+            "profile",
+            1,
+            &[("n1", 0, 1.0), ("n1", 1, 2.0), ("n1", 2, 3.0)],
+        ),
+    );
+    let args = ["--alternative", "Base", "--user", "tester"];
+    let first = import(&db, &file, &args);
+    assert!(first.status.success());
+    let hist = |db: &Path| -> i64 {
+        let conn = Connection::open(db).unwrap();
+        let n = conn
+            .query_row("SELECT count(*) FROM value_array_hist", [], |r| r.get(0))
+            .unwrap();
+        conn.close().unwrap();
+        n
+    };
+    for extra in [&[][..], &["--force-replace"][..]] {
+        let mut a = args.to_vec();
+        a.extend_from_slice(extra);
+        let again = import(&db, &file, &a);
+        assert!(
+            again.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&again.stdout);
+        assert!(
+            stdout.contains("no changes (nothing committed)")
+                && stdout.contains("1 value(s) unchanged"),
+            "{stdout}"
+        );
+        assert_eq!(commits(&db), 2, "bootstrap + the first import only");
+        assert_eq!(hist(&db), 0, "no history row");
+    }
 }
 
 /// Critique F6: `init` onto an existing database refuses cleanly instead of

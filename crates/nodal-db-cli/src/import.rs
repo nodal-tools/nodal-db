@@ -187,18 +187,30 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             Tier::Long => "long",
         })
         .collect();
-    println!(
-        "imported {}: commit {}, {} segment(s), {} value(s), {} row(s) written, \
-         axes {} created / {} reused, tiers [{}]",
-        args.file.display(),
-        report.commit_id,
-        n_segments,
-        report.values_written,
-        report.rows_written,
-        report.axes_created,
-        report.axes_reused,
-        tiers.join(", ")
-    );
+    if report.commit_id == 0 {
+        // Every value equal to the stored one: the core made no commit
+        // (skip_unchanged_writes_PLAN D1), so the message is not recorded.
+        println!(
+            "imported {}: no changes (nothing committed), {} segment(s), {} value(s) unchanged",
+            args.file.display(),
+            n_segments,
+            report.values_unchanged,
+        );
+    } else {
+        println!(
+            "imported {}: commit {}, {} segment(s), {} value(s) written, {} unchanged, \
+             {} row(s) written, axes {} created / {} reused, tiers [{}]",
+            args.file.display(),
+            report.commit_id,
+            n_segments,
+            report.values_written,
+            report.values_unchanged,
+            report.rows_written,
+            report.axes_created,
+            report.axes_reused,
+            tiers.join(", ")
+        );
+    }
     for w in &report.warnings {
         match &w.kind {
             WarningKind::AutoCreated => {

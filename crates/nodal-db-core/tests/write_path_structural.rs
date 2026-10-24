@@ -16,7 +16,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::Value;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, Segment};
+use nodal_db_core::api::{commit_changes, head_commit, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
 use nodal_db_core::conn::with_write_txn;
@@ -1304,10 +1304,13 @@ fn array_batch_across_the_element_threshold_writes_and_replaces() {
     assert_audits_clean(&db);
 }
 
-/// A commit that writes a key and deletes the same key fails in every tier
-/// on the span CHECK (the delete closes a row at its own valid_from), as a
-/// DuckDB error, with nothing written. Only the error class is pinned: the
-/// message may name a different row once the writes are deferred.
+/// A call that writes a key and deletes the same key is rejected up front
+/// in every tier, as `DbError::Api`, with nothing written — whatever the
+/// content (skip_unchanged_writes_PLAN D9, critique C1). Before D9 a
+/// changed write died on the span CHECK (the delete closed the new row at
+/// its own valid_from), while an unchanged write, which writes nothing,
+/// would have let the delete succeed: the outcome must not depend on the
+/// content, so the identical write is refused the same way.
 #[test]
 fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
     let (_d, db) = fresh_db();
@@ -1328,15 +1331,24 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
     )
     .expect("seed");
     let cases: Vec<(&str, Segment)> = vec![
+        // Changed values.
         ("s", seg("s", "Base", scalar_batch("e", 2.0))),
         ("l", seg("l", "Base", long_batch("e", &[0, 2], &[3, 4]))),
         (
             "a",
             seg("a", "Base", float_series_batch("e", &[0, 1], &[3.0, 4.0])),
         ),
+        // Identical (unchanged) values: refused the same way.
+        ("s", seg("s", "Base", scalar_batch("e", 1.0))),
+        ("l", seg("l", "Base", long_batch("e", &[0, 1], &[1, 2]))),
+        (
+            "a",
+            seg("a", "Base", float_series_batch("e", &[0, 1], &[1.0, 2.0])),
+        ),
     ];
     for (parameter, s) in cases {
         let before = table_counts(&db);
+        let head = head_commit(&db).unwrap();
         let err = commit_changes(
             &db,
             vec![s],
@@ -1349,10 +1361,11 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
         )
         .expect_err("a write and a delete of one key in one commit");
         assert!(
-            matches!(err, DbError::Duckdb(_)) && err.to_string().contains("CHECK constraint"),
+            matches!(&err, DbError::Api(m) if m.contains("written and deleted in one call")),
             "{parameter}: {err:?}"
         );
         assert_eq!(table_counts(&db), before, "{parameter}");
+        assert_eq!(head_commit(&db).unwrap(), head, "{parameter}: no commit");
     }
     assert_audits_clean(&db);
 }

@@ -143,7 +143,22 @@ pub fn with_write_txn<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> 
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
-    run_txn_once(db_path, user, message, TxnOptions::default(), f)
+    run_txn_once(db_path, user, message, TxnOptions::default(), |conn, c| {
+        Ok((f(conn, c)?, TxnEnd::Commit))
+    })
+}
+
+/// How a successful write cycle ends (skip_unchanged_writes_PLAN D1): a
+/// closure that proved it wrote nothing asks for [`TxnEnd::Rollback`], so
+/// the call leaves no `commit` row and the head (the polling cookie) does
+/// not move. The `commit` row's sequence value stays consumed, as on a
+/// conflict retry, so commit ids may skip. Only the `api` entry points
+/// decide this (`commit_changes` and its wrappers); every other writer,
+/// [`with_write_txn`] included, commits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TxnEnd {
+    Commit,
+    Rollback,
 }
 
 /// Transaction-level options of one write cycle (save_path_open_reduction
@@ -185,7 +200,9 @@ pub(crate) fn head_on(conn: &Connection) -> Result<i64, DbError> {
 /// One open → BEGIN → `commit` row → closure → COMMIT → close cycle. Shared by
 /// [`with_write_txn`] (once) and [`with_write_txn_retrying`] (per attempt); a
 /// fresh RW connection and a fresh `commit` row are used every call, so a
-/// rolled-back attempt leaves no orphan commit (VMP Part 5).
+/// rolled-back attempt leaves no orphan commit (VMP Part 5). A closure that
+/// returns [`TxnEnd::Rollback`] ends the cycle with ROLLBACK instead of
+/// COMMIT and still returns its value.
 fn run_txn_once<T, F>(
     db_path: &Path,
     user: &str,
@@ -194,7 +211,7 @@ fn run_txn_once<T, F>(
     f: F,
 ) -> Result<T, DbError>
 where
-    F: FnOnce(&Connection, i64) -> Result<T, DbError>,
+    F: FnOnce(&Connection, i64) -> Result<(T, TxnEnd), DbError>,
 {
     // In-process per-path serialization (critique F1): held across the whole
     // open-use-close so a sibling thread can never hold a second instance.
@@ -241,11 +258,14 @@ where
                 |r| r.get(0),
             )
             .inspect_err(|_| commit_insert_failed = true)?;
-        let value = f(&conn, commit_id)?;
+        let (value, end) = f(&conn, commit_id)?;
         // COMMIT is inside the fallible block: DuckDB can raise the write-write
         // `Conflict` here (not only at the conflicting statement), and the retry
         // loop must see it.
-        conn.execute_batch("COMMIT")?;
+        match end {
+            TxnEnd::Commit => conn.execute_batch("COMMIT")?,
+            TxnEnd::Rollback => conn.execute_batch("ROLLBACK")?,
+        }
         Ok(value)
     })();
 
@@ -378,6 +398,24 @@ pub fn with_write_txn_retrying_opts<T, F>(
 ) -> Result<T, DbError>
 where
     F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
+    with_write_txn_retrying_ends(db_path, user, message, txn, |conn, c| {
+        Ok((f(conn, c)?, TxnEnd::Commit))
+    })
+}
+
+/// [`with_write_txn_retrying_opts`] for a closure that also says how its
+/// cycle ends ([`TxnEnd`]): the `api` entry points, which roll back a call
+/// that wrote nothing (skip_unchanged_writes_PLAN D1).
+pub(crate) fn with_write_txn_retrying_ends<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<(T, TxnEnd), DbError>,
 {
     for attempt in 1..=MAX_CONFLICT_ATTEMPTS {
         match run_txn_once(db_path, user, message, txn, &f) {

@@ -535,6 +535,7 @@ pub(crate) fn report_to_py<'py>(py: Python<'py>, r: &WriteReport) -> PyResult<Bo
     let d = PyDict::new(py);
     d.set_item("commit_id", r.commit_id)?;
     d.set_item("values_written", r.values_written)?;
+    d.set_item("values_unchanged", r.values_unchanged)?;
     d.set_item("rows_written", r.rows_written)?;
     d.set_item("rows_closed", r.rows_closed)?;
     d.set_item("axes_created", r.axes_created)?;

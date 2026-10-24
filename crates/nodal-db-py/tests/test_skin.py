@@ -112,6 +112,35 @@ def test_table_input_via_capsule_stream(db):
     assert rep["values_written"] == 2
 
 
+def test_identical_write_is_unchanged_and_commits_nothing(db):
+    # skip_unchanged_writes_PLAN D1/D2: an identical write_parameter writes
+    # no row and makes no commit; the report says so.
+    first = db.write_parameter(
+        "unit", "capacity", "Base", scalar_batch(["u1"], [1.5]), user="t"
+    )
+    assert first["commit_id"] > 0 and first["values_unchanged"] == 0
+    head = db.head_commit()
+    rep = db.write_parameter(
+        "unit", "capacity", "Base", scalar_batch(["u1"], [1.5]), user="t"
+    )
+    assert rep["commit_id"] == 0
+    assert (rep["values_written"], rep["values_unchanged"]) == (0, 1)
+    assert rep["tiers"] == []
+    assert db.head_commit() == head
+    # A delete that finds nothing commits nothing either.
+    db.delete_values([("unit", "capacity", "Base", "u1")], user="t")
+    rep = db.delete_values([("unit", "capacity", "Base", "u1")], user="t")
+    assert rep["commit_id"] == 0
+    # A write and a delete of one value in one call is refused up front.
+    with pytest.raises(nodal_db.ApiError):
+        db.commit_changes(
+            segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
+                       "batch": scalar_batch(["u1"], [2.0])}],
+            deletes=[("unit", "capacity", "Base", "u1")],
+            user="t",
+        )
+
+
 def test_query_returns_arrow_reader(db):
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
     reader = db.query("SELECT count(*) AS n FROM entity")

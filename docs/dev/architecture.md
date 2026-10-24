@@ -242,6 +242,29 @@ warning**: end-user tools choose their own policy, and the library
 neither guesses silently nor hard-blocks. The structural path resolves
 strictly and errors on a missing referent.
 
+**Unchanged writes are skipped.** Before it closes out or inserts
+anything, the history protocol compares each value with the key's
+current stored value, in the same probe statements it already runs
+(scalar: the grouped scalar probe; long: the per-position probe that is
+also the version source; array: the narrow live probe as a prefilter,
+then the payload by `array_id`). The comparison is on the *stored
+columns*, not on a second canonicalization or a hash: the new side is
+exactly what the encoder would insert, the stored side is read raw, and
+equal means the same tier, binding (`parameter_type_id`), axis ids, and
+per row or cell the same `value_kind` and payload bits, with the row's
+content retained. Every doubt errs toward "changed": a false "changed"
+costs one extra version, a false "unchanged" would silently drop a
+write. A long value is compared whole for now (a per-cell diff is
+planned). On top, `commit_changes` and its wrappers make no commit for
+a call that provably changed nothing (every item reported a known
+no-op: unchanged values, deletes that found nothing, structural no-ops,
+object deletes that found nothing, no auto-create); the transaction is
+rolled back and the report carries `commit_id` 0, so the head and the
+polling cookie do not move. The check is an allow-list, so a new
+outcome or channel commits until it is classified. A write and a delete
+of the same value in one call is refused up front. Direct `history`
+callers in their own transaction still commit.
+
 Canonical encodings: axes and values serialize to a pinned byte layout
 hashed with **XXH3-64, seed 0**. The hash is only an accelerator:
 deduplication narrows by hash and then compares bytes, so a hash

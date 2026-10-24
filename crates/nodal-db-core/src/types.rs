@@ -235,9 +235,20 @@ pub struct Warning {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WriteReport {
     /// The commit id stamped on every row this call wrote (the validity edge).
+    /// `0` when the call changed nothing (every value unchanged, every delete
+    /// a miss, every structural item a no-op, every object delete not found;
+    /// skip_unchanged_writes_PLAN D1): no commit was made and the head did
+    /// not move. Use `api::head_commit` for the commit the data is current
+    /// at.
     pub commit_id: i64,
-    /// Distinct per-entity values written (one canonicalized value per entity).
+    /// Distinct per-entity values written (one canonicalized value per
+    /// entity), plus values deleted. An unchanged value is not counted here
+    /// but in [`Self::values_unchanged`].
     pub values_written: usize,
+    /// Values whose write was skipped because the stored value already
+    /// equals it (same tier, binding, axes and stored payload): no row was
+    /// closed out or inserted for them.
+    pub values_unchanged: usize,
     /// Physical rows inserted/replaced as current across all values.
     pub rows_written: usize,
     /// Physical rows closed out / moved to a `_hist` twin across all values.
@@ -246,7 +257,8 @@ pub struct WriteReport {
     pub axes_created: usize,
     /// Existing `axis` rows reused (content-verified) for this call.
     pub axes_reused: usize,
-    /// Distinct tiers touched (first-seen order).
+    /// Distinct tiers written (first-seen order); a tier whose values were
+    /// all unchanged is not listed.
     pub tiers: Vec<Tier>,
     /// Machine-readable warnings (auto-create, decision B).
     pub warnings: Vec<Warning>,
@@ -262,16 +274,21 @@ pub struct WriteReport {
 }
 
 impl WriteReport {
-    /// Fold one per-value [`WriteOutcome`] into the aggregate.
+    /// Fold one per-value [`WriteOutcome`] into the aggregate. An unchanged
+    /// outcome counts in `values_unchanged` and notes no tier.
     pub fn absorb(&mut self, o: &WriteOutcome) {
-        self.values_written += 1;
+        if o.unchanged {
+            self.values_unchanged += 1;
+        } else {
+            self.values_written += 1;
+            if let Some(t) = o.tier {
+                self.note_tier(t);
+            }
+        }
         self.rows_written += o.rows_written;
         self.rows_closed += o.rows_closed;
         self.axes_created += o.axes_created;
         self.axes_reused += o.axes_reused;
-        if let Some(t) = o.tier {
-            self.note_tier(t);
-        }
     }
 
     /// Record `t` in `tiers` if not yet seen. The write path calls this when
@@ -306,8 +323,18 @@ impl WriteReport {
 pub struct WriteOutcome {
     /// The tier now current for the key; `None` after a delete.
     pub tier: Option<Tier>,
-    /// Version stamped on the new current row(s); `0` after a delete.
+    /// Version stamped on the new current row(s); `0` after a delete. For
+    /// an unchanged write, the version of the current row (long: the
+    /// highest version among the current cells).
     pub version: u16,
+    /// The stored value already equals the written one (same tier, binding,
+    /// axes and stored payload), so nothing was written: `rows_written` and
+    /// `rows_closed` are 0 (skip_unchanged_writes_PLAN §2).
+    pub unchanged: bool,
+    /// Long tier: the current cells left as they were. Every cell of an
+    /// unchanged long value; 0 for a long value that was rewritten and for
+    /// the other tiers.
+    pub cells_unchanged: usize,
     /// Rows newly inserted (or, on the array tier, replaced) as current.
     pub rows_written: usize,
     /// Rows closed out (from/to tiers) or moved to the `_hist` twin (array).

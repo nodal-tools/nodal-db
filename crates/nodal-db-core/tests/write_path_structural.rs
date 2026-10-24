@@ -1061,6 +1061,173 @@ fn delete_batch_one_key_past_the_round() {
     assert_audits_clean(&db);
 }
 
+/// An int long batch of `cells` cells (t = 0..cells) per entity.
+fn long_names_batch(names: &[String], cells: i64, seed: i64) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("t", DataType::Int64, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let ent: Vec<&str> = names
+        .iter()
+        .flat_map(|n| std::iter::repeat_n(n.as_str(), cells as usize))
+        .collect();
+    let t: Vec<i64> = names.iter().flat_map(|_| 0..cells).collect();
+    let v: Vec<i64> = (0..ent.len() as i64).map(|i| seed + i).collect();
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(ent)) as ArrayRef,
+            Arc::new(Int64Array::from(t)) as ArrayRef,
+            Arc::new(Int64Array::from(v)) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+/// Current `value_long` rows whose physical order is not (entity,
+/// position) order, as text (at most 5): empty when every key's cells
+/// landed in canonical order and the keys in batch order (entity ids are
+/// minted in batch order).
+fn long_order_violations(db: &Path) -> Vec<String> {
+    let conn = Connection::open(db).unwrap();
+    let v = conn
+        .prepare(
+            "SELECT CAST((rowid, entity_id, i1_pos, pe, pp) AS VARCHAR) FROM (                SELECT rowid, entity_id, i1_pos, lag(entity_id) OVER w AS pe,                       lag(i1_pos) OVER w AS pp                FROM value_long WHERE valid_to_commit IS NULL WINDOW w AS (ORDER BY rowid))              WHERE pe IS NOT NULL AND (entity_id, i1_pos) <= (pe, pp) LIMIT 5",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    conn.close().unwrap();
+    v
+}
+
+/// One commit of 683 keys x 24 cells (16 392 cells, one past a long round:
+/// two rounds of the set-based long write), then a replace of all of them,
+/// and a commit mixing small keys with one 20 000-cell value (a round of
+/// its own, inserted in two chunks): every cell lands once, at the right
+/// version, in canonical physical order, and the replace closes every cell.
+#[test]
+fn long_batch_across_rounds_writes_and_replaces() {
+    let (_d, db) = fresh_db();
+    let names: Vec<String> = (0..683).map(|i| format!("e{i:03}")).collect();
+    let commit = |segs: Vec<Segment>| {
+        commit_changes(
+            &db,
+            segs,
+            vec![],
+            vec![],
+            vec![],
+            "t",
+            "w",
+            WriteOptions::default(),
+        )
+        .expect("write")
+    };
+    let r = commit(vec![seg("p", "Base", long_names_batch(&names, 24, 0))]);
+    assert_eq!((r.values_written, r.rows_written), (683, 16_392));
+    assert_eq!((r.axes_created, r.axes_reused), (1, 682));
+    let r = commit(vec![seg("p", "Base", long_names_batch(&names, 24, 7))]);
+    assert_eq!((r.rows_written, r.rows_closed), (16_392, 16_392));
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_long WHERE valid_to_commit IS NULL AND version = 2"
+        ),
+        16_392
+    );
+    assert_eq!(long_order_violations(&db), Vec::<String>::new());
+
+    let small: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
+    let r = commit(vec![
+        seg("q", "Base", long_names_batch(&small[..2], 5, 0)),
+        seg(
+            "big",
+            "Base",
+            long_names_batch(&["big".to_string()], 20_000, 0),
+        ),
+        seg("q2", "Base", long_names_batch(&small[2..], 5, 0)),
+    ]);
+    assert_eq!((r.values_written, r.rows_written), (4, 20_015));
+    assert_eq!(long_order_violations(&db), Vec::<String>::new());
+    assert_audits_clean(&db);
+}
+
+/// Erasure removes rows with no close-out edge; a rewrite of the erased
+/// alternative's long and array keys starts from what remains (nothing):
+/// every cell and array at version 1, audits empty.
+#[test]
+fn long_and_array_rewritten_after_erasure_restart_at_version_one() {
+    use nodal_db_core::erasure::{erase_alternative, EraseOpts};
+    let (_d, db) = fresh_db();
+    let names: Vec<String> = (0..4).map(|i| format!("r{i}")).collect();
+    let write = |msg: &str, seed: i64| {
+        let floats: Vec<f64> = (0..8).map(|i| (seed + i) as f64).collect();
+        let arr = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("entity", DataType::Utf8, false),
+                Field::new("t", DataType::Int64, false),
+                Field::new("value", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(
+                    names
+                        .iter()
+                        .flat_map(|n| [n.as_str(); 2])
+                        .collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0, 1, 0, 1, 0, 1, 0, 1])) as ArrayRef,
+                Arc::new(Float64Array::from(floats)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        commit_changes(
+            &db,
+            vec![
+                seg("l", "run1", long_names_batch(&names, 3, seed)),
+                seg("a", "run1", arr),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            "t",
+            msg,
+            WriteOptions::default(),
+        )
+        .expect("write");
+    };
+    write("v1", 0);
+    write("v2", 10);
+    let rep = erase_alternative(
+        &db,
+        &ObjectDeleteKey {
+            kind: ObjectKind::Alternative,
+            class: None,
+            target: ObjectRef::Name("run1".into()),
+        },
+        &EraseOpts::default(),
+        "t",
+    )
+    .expect("erase");
+    assert!(rep.erased);
+    assert_eq!(q_i64(&db, "SELECT count(*) FROM value_long"), 0);
+    write("rewrite", 20);
+    assert_eq!(
+        q_i64(
+            &db,
+            "SELECT count(*) FROM value_long WHERE version = 1 AND valid_to_commit IS NULL"
+        ),
+        12
+    );
+    assert_eq!(
+        q_i64(&db, "SELECT count(*) FROM value_array WHERE version = 1"),
+        4
+    );
+    assert_audits_clean(&db);
+}
+
 /// A commit that writes a key and deletes the same key fails in every tier
 /// on the span CHECK (the delete closes a row at its own valid_from), as a
 /// DuckDB error, with nothing written. Only the error class is pinned: the

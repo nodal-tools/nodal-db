@@ -74,6 +74,19 @@ pub fn dedup_or_insert(
     cache: &mut AxisCache,
     axis: &CanonicalAxis,
 ) -> Result<i64, DbError> {
+    Ok(dedup_or_insert_created(conn, cache, axis)?.0)
+}
+
+/// [`dedup_or_insert`], also reporting whether it inserted a new axis
+/// (`true`) or reused an existing one (`false`): the write path's
+/// `axes_created` / `axes_reused` counts (set_based_long_and_delete_PLAN
+/// D8). Each insert adds exactly one `axis` row, so the count of `true`
+/// equals the `axis` row-count delta the counts were once taken from.
+pub(crate) fn dedup_or_insert_created(
+    conn: &Connection,
+    cache: &mut AxisCache,
+    axis: &CanonicalAxis,
+) -> Result<(i64, bool), DbError> {
     // F1 writer-boundary guard (Phase-2b critique): a materialized axis must
     // carry exactly `length` non-empty child rows. Checked here, at the axis
     // write boundary and BEFORE `encode_axis` (whose matching assert is
@@ -87,7 +100,7 @@ pub fn dedup_or_insert(
 
     // 1. Client-side cache (byte-verified).
     if let Some(id) = cache.lookup(hash, &input_bytes) {
-        return Ok(id);
+        return Ok((id, false));
     }
 
     // 2. DB candidates by hash + kind; reconstruct + byte-compare each.
@@ -95,14 +108,14 @@ pub fn dedup_or_insert(
         let candidate = reconstruct_axis(conn, candidate_id, kind)?;
         if encode_axis(&candidate)? == input_bytes {
             cache.remember(hash, candidate_id, candidate);
-            return Ok(candidate_id);
+            return Ok((candidate_id, false));
         }
     }
 
     // 3. No true match — insert a fresh axis (+ child rows for materialized).
     let new_id = insert_axis(conn, axis, hash)?;
     cache.remember(hash, new_id, axis.clone());
-    Ok(new_id)
+    Ok((new_id, true))
 }
 
 /// F1 guard: a materialized axis body must have a non-empty child list whose

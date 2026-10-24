@@ -30,6 +30,7 @@
 //! cross-process by DuckDB's file lock. Connections stay per-operation
 //! (CLAUDE.md invariant 1) — never shared, never long-lived.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -44,8 +45,8 @@ use crate::canon::{canonicalize, LabelDomain};
 use crate::conn::{with_read, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::history::{
-    self as history, keeps_content, write_scalars, write_value, DeleteWrite, ScalarWrite,
-    LONG_INSERT_CHUNK,
+    self as history, keeps_content, resolve_axes, write_longs, write_scalars, write_value,
+    DeleteWrite, LongWrite, ScalarWrite, LONG_INSERT_CHUNK,
 };
 use crate::object_delete::{apply_object_delete, prepare_object_deletes, preview_one};
 use crate::structural::{apply_structural, prepare_structural};
@@ -287,11 +288,12 @@ pub fn commit_changes(
             commit_id,
             ..Default::default()
         };
-        // The commit's scalar writes, deferred to one set-based write
-        // (set_based_scalar_write_PLAN D1): flushed whenever it reaches one
-        // round (16 384 keys, D6) and after the last segment. A closure local,
-        // so a conflict retry rebuilds it from scratch.
-        let mut scalars: Vec<ScalarWrite> = Vec::new();
+        // The commit's scalar and long writes, deferred to set-based writes
+        // (set_based_scalar_write_PLAN D1, set_based_long_and_delete_PLAN
+        // D2): each buffer is flushed whenever it reaches one round and after
+        // the last segment. A closure local, so a conflict retry rebuilds it
+        // from scratch.
+        let mut buffers = WriteBuffers::default();
         let mut entities = EntityCache::new();
         // The resolved (parameter definition, alternative) of every segment
         // so far: the up-front duplicate-target check folds names in Rust,
@@ -314,7 +316,7 @@ pub fn commit_changes(
                 opts,
                 &mut cache,
                 &mut report,
-                &mut scalars,
+                &mut buffers,
                 &mut entities,
                 &mut targets,
             )
@@ -336,9 +338,9 @@ pub fn commit_changes(
                 }
             })?;
         }
-        // The remaining deferred scalar writes, before any delete reads value
-        // rows (deletes and object deletes run after every write, as before).
-        flush_scalars(conn, commit_id, &mut scalars, &mut report)?;
+        // The remaining deferred writes, before any delete reads value rows
+        // (deletes and object deletes run after every write, as before).
+        buffers.flush(conn, commit_id, &mut report)?;
         // Deletes resolve + close out AFTER the writes, under the same commit —
         // one atomic invocation (delete design MAJOR-2).
         apply_deletes(conn, commit_id, &prepared_deletes, opts, &mut report)?;
@@ -948,7 +950,7 @@ fn write_prepared(
     opts: WriteOptions,
     cache: &mut AxisCache,
     report: &mut WriteReport,
-    scalars: &mut Vec<ScalarWrite>,
+    buffers: &mut WriteBuffers,
     entities: &mut EntityCache,
     targets: &mut HashSet<(i64, i64)>,
 ) -> Result<(), DbError> {
@@ -1015,6 +1017,18 @@ fn write_prepared(
         }
     };
 
+    // The buffered writes rely on distinct keys (a key lives in one buffer
+    // and its probes run once): `resolve_entities` rejects two spellings
+    // DuckDB folds to one entity, so a repeated id here is a core invariant
+    // breach (critique C5), checked where the buffers rely on it.
+    let mut seen: HashSet<i64> = HashSet::with_capacity(entity_ids.len());
+    if let Some(dup) = entity_ids.iter().find(|&&id| !seen.insert(id)) {
+        return Err(DbError::Internal(format!(
+            "segment {}:{}: entity id {dup} resolved twice",
+            p.class, p.parameter
+        )));
+    }
+
     let retained = keeps_content(&resolved_opts);
     for ((&entity_id, &minted), idx) in entity_ids.iter().zip(&entity_minted).zip(p.rows.iter()) {
         let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
@@ -1024,53 +1038,131 @@ fn write_prepared(
             parameter_definition_id: pd_id,
             alternative_id: alt_id,
         };
-        if let ShapedData::Scalar(m) = value.shape {
-            // Deferred to the commit's set-based scalar write (plan D1). The
-            // tier is recorded now, in the order values are met (critique C5).
-            report.note_tier(Tier::Scalar);
-            scalars.push(ScalarWrite {
-                key,
-                value: m,
-                parameter_type_id: Some(pt_id),
-                retained,
-                entity_minted: minted,
-            });
-            if scalars.len() >= LONG_INSERT_CHUNK {
-                flush_scalars(conn, commit_id, scalars, report)?;
+        match value.tier {
+            Tier::Scalar => {
+                let ShapedData::Scalar(m) = value.shape else {
+                    unreachable!("shape/tier mismatch from canon")
+                };
+                // Deferred to the commit's set-based scalar write (plan D1).
+                // The tier is recorded now, in the order values are met
+                // (critique C5).
+                report.note_tier(Tier::Scalar);
+                buffers.scalars.push(ScalarWrite {
+                    key,
+                    value: m,
+                    parameter_type_id: Some(pt_id),
+                    retained,
+                    entity_minted: minted,
+                });
+                if buffers.scalars.len() >= LONG_INSERT_CHUNK {
+                    buffers.flush_scalars(conn, commit_id, report)?;
+                }
             }
-            continue;
+            Tier::Long => {
+                // Deferred to the commit's set-based long write
+                // (set_based_long_and_delete_PLAN §3.1). The axes resolve
+                // now, in value order, so axis ids are minted as before.
+                report.note_tier(Tier::Long);
+                let (axis_ids, axes_created, axes_reused) = resolve_axes(conn, cache, &value.axes)?;
+                let cells = match &value.shape {
+                    ShapedData::Long(rows) => rows.len(),
+                    _ => unreachable!("shape/tier mismatch from canon"),
+                };
+                buffers.longs.push(LongWrite {
+                    key,
+                    value: Cow::Owned(value),
+                    axis_ids,
+                    axes_created,
+                    axes_reused,
+                    parameter_type_id: Some(pt_id),
+                    retained,
+                    entity_minted: minted,
+                });
+                buffers.long_cells += cells;
+                if buffers.long_cells >= LONG_INSERT_CHUNK
+                    || buffers.longs.len() >= LONG_INSERT_CHUNK
+                {
+                    buffers.flush_longs(conn, commit_id, report)?;
+                }
+            }
+            Tier::Array => {
+                let outcome = write_value(
+                    conn,
+                    commit_id,
+                    key,
+                    &value,
+                    cache,
+                    &resolved_opts,
+                    Some(pt_id),
+                )?;
+                report.absorb(&outcome);
+            }
         }
-        let outcome = write_value(
-            conn,
-            commit_id,
-            key,
-            &value,
-            cache,
-            &resolved_opts,
-            Some(pt_id),
-        )?;
-        report.absorb(&outcome);
     }
     Ok(())
 }
 
-/// Write the buffered scalars in one set-based call and fold their outcomes
-/// into `report` in buffer order (the tiers were already noted when each
-/// value was canonicalized). Empties the buffer.
-fn flush_scalars(
-    conn: &Connection,
-    commit_id: i64,
-    scalars: &mut Vec<ScalarWrite>,
-    report: &mut WriteReport,
-) -> Result<(), DbError> {
-    if scalars.is_empty() {
-        return Ok(());
+/// The deferred writes of one commit (closure locals of the retried
+/// commit). The keys of one commit are distinct across all buffers (the
+/// up-front and resolved-id duplicate-target checks and the per-segment
+/// entity dedup), so per-key writes commute and a key lives in exactly one
+/// buffer; nothing between buffering and flushing reads value rows.
+#[derive(Default)]
+struct WriteBuffers {
+    scalars: Vec<ScalarWrite>,
+    longs: Vec<LongWrite<'static>>,
+    /// The cells buffered in `longs` (plan D3 flush threshold).
+    long_cells: usize,
+}
+
+impl WriteBuffers {
+    /// Write the buffered scalars in one set-based call and fold their
+    /// outcomes into `report` in buffer order (the tiers were already noted
+    /// when each value was canonicalized). Empties the buffer.
+    fn flush_scalars(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        report: &mut WriteReport,
+    ) -> Result<(), DbError> {
+        if self.scalars.is_empty() {
+            return Ok(());
+        }
+        for o in write_scalars(conn, commit_id, &self.scalars)? {
+            report.absorb(&o);
+        }
+        self.scalars.clear();
+        Ok(())
     }
-    for o in write_scalars(conn, commit_id, scalars)? {
-        report.absorb(&o);
+
+    /// The long counterpart of [`Self::flush_scalars`].
+    fn flush_longs(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        report: &mut WriteReport,
+    ) -> Result<(), DbError> {
+        if self.longs.is_empty() {
+            return Ok(());
+        }
+        for o in write_longs(conn, commit_id, &self.longs)? {
+            report.absorb(&o);
+        }
+        self.longs.clear();
+        self.long_cells = 0;
+        Ok(())
     }
-    scalars.clear();
-    Ok(())
+
+    /// Flush every buffer.
+    fn flush(
+        &mut self,
+        conn: &Connection,
+        commit_id: i64,
+        report: &mut WriteReport,
+    ) -> Result<(), DbError> {
+        self.flush_scalars(conn, commit_id, report)?;
+        self.flush_longs(conn, commit_id, report)
+    }
 }
 
 /// Read a written parameter back for one class/parameter/alternative into a

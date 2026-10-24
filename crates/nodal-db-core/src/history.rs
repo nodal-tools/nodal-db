@@ -44,9 +44,9 @@
 //! once per transaction through the connection's statement cache
 //! (`prepare_cached`; the cache capacity is raised in `conn`); the rare paths
 //! (definition defaults, the template string rewrites) use plain `execute`. The bulk inserts bind each column
-//! as ONE list parameter ("columnar bind"): a long value is
-//! `INSERT … SELECT ?, unnest(?::T[]), …` per ≤ `LONG_INSERT_CHUNK` cells,
-//! an array payload is one bound `?::DOUBLE[]`. The statement text no longer
+//! as ONE list parameter ("columnar bind"): the long cells of a round are
+//! `INSERT … SELECT … FROM (SELECT unnest(?::T[]), …)` per
+//! ≤ `LONG_INSERT_CHUNK` cells, an array payload is one bound `?::DOUBLE[]`. The statement text no longer
 //! depends on the cell count, so DuckDB parses it once per transaction, not
 //! once per value. The encoder is still the one [`VCols::of`]; timestamps
 //! still cross as µs through `make_timestamp`; floats arrive canonical. A
@@ -64,6 +64,20 @@
 //! sequential scan rather than the compound indexes, so a set-based round is
 //! what makes a scalar batch cost O(keys + table) per commit.
 //!
+//! **Set-based long write (set_based_long_and_delete_PLAN §3.2)**: the long
+//! tier has one writer, [`write_longs`], on the scalar skeleton: per round
+//! (≤ `LONG_INSERT_CHUNK` keys and cells, or one larger value) the scalar
+//! live probe, one grouped long probe returning the per-position max
+//! version and the current-cell count, the array live probe for the keys
+//! live in neither, the per-key `close_out_tier` for a transition, one
+//! close-out UPDATE per retention mode, and one columnar INSERT in the
+//! key-ordinal form: the per-key columns bind as short lists that a
+//! per-cell key ordinal indexes, and every `unnest` sits in a FROM subquery
+//! (measured ~2x faster than SELECT-list `unnest`s for large values). The
+//! API defers a commit's long values into one such call, with their axes
+//! resolved at buffer time; [`write_value`] delegates a long value with
+//! N = 1, which keeps the point probe and close-out statements.
+//!
 //! **Set-based delete (set_based_long_and_delete_PLAN §3.4)**: deletes have
 //! one implementation, [`delete_values`]: per round, the three live probes
 //! (scalar; long with its current-cell count; array with its `array_id`)
@@ -78,12 +92,13 @@
 //! `content_retained = FALSE` with the payload columns nulled — so the prior
 //! content is not preserved (VMP Part 5 retention).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use duckdb::types::Value;
 use duckdb::{params, Connection, OptionalExt};
 
-use crate::axis::{dedup_or_insert, AxisCache};
+use crate::axis::{dedup_or_insert_created, AxisCache};
 use crate::canon::CanonicalValue;
 use crate::encoding::{datetime_coord, AxisBody, CanonicalAxis};
 use crate::error::DbError;
@@ -128,28 +143,31 @@ pub fn write_value(
         return Ok(write_scalars(conn, commit_id, std::slice::from_ref(&w))?[0]);
     }
 
-    // --- 1. Resolve the value's axes (array/long tiers) via content-verified
-    // dedup, threading the caller's cache. Count created vs reused by the axis
-    // population delta (dedup itself returns only the id). A value without
-    // axes skips both counts. ---
-    let mut axis_ids: Vec<i64> = Vec::with_capacity(value.axes.len());
-    let axes_created = if value.axes.is_empty() {
-        0
-    } else {
-        let axes_before = axis_count(conn)?;
-        for ax in &value.axes {
-            axis_ids.push(dedup_or_insert(conn, cache, ax)?);
-        }
-        (axis_count(conn)? - axes_before) as usize
-    };
-    let axes_reused = value.axes.len() - axes_created;
+    // --- 1. Resolve the value's axes via content-verified dedup, threading
+    // the caller's cache (plan D8: dedup reports created vs reused). ---
+    let (axis_ids, axes_created, axes_reused) = resolve_axes(conn, cache, &value.axes)?;
 
-    // --- 2. Current state: which tier (if any) holds a live row for the key. ---
+    // --- 2. A long value goes through the one set-based long writer with
+    // N = 1 (set_based_long_and_delete_PLAN §3.2). ---
+    if value.tier == Tier::Long {
+        let w = LongWrite {
+            key,
+            value: Cow::Borrowed(value),
+            axis_ids,
+            axes_created,
+            axes_reused,
+            parameter_type_id,
+            retained,
+            entity_minted: false,
+        };
+        return Ok(write_longs(conn, commit_id, std::slice::from_ref(&w))?[0]);
+    }
+
+    // --- 3. Current state: which tier (if any) holds a live row for the key. ---
     let current = live_tier(conn, &key)?;
     let target = value.tier;
-    let same_tier_live = current.map(Live::tier) == Some(target);
 
-    // --- 3. Tier transition: close out / move the OLD tier's current row. ---
+    // --- 4. Tier transition: close out / move the OLD tier's current row. ---
     let mut rows_closed = 0usize;
     if let Some(cur) = current {
         if cur.tier() != target {
@@ -157,7 +175,7 @@ pub fn write_value(
         }
     }
 
-    // --- 4. Write into the target tier. ---
+    // --- 5. Write into the target tier. ---
     let (version, rows_written, closed_same) = match (&value.shape, target) {
         (ShapedData::Array(vals), Tier::Array) => write_array(
             conn,
@@ -166,17 +184,6 @@ pub fn write_value(
             &axis_ids,
             vals,
             current.and_then(Live::array_id),
-            retained,
-            parameter_type_id,
-        )?,
-        (ShapedData::Long(rows), Tier::Long) => write_long(
-            conn,
-            &key,
-            commit_id,
-            &axis_ids,
-            &value.axes,
-            rows,
-            same_tier_live,
             retained,
             parameter_type_id,
         )?,
@@ -627,12 +634,6 @@ pub(crate) fn rewrite_definition_string_values(
 // ---------------------------------------------------------------------------
 // Current-state detection
 // ---------------------------------------------------------------------------
-
-fn axis_count(conn: &Connection) -> Result<i64, DbError> {
-    Ok(conn
-        .prepare_cached("SELECT count(*) FROM axis")?
-        .query_row([], |r| r.get(0))?)
-}
 
 /// The live state of a key triple: the tier holding its current row and, for
 /// the array tier, that row's `array_id` (the physical handle every
@@ -1298,64 +1299,283 @@ fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u16, DbError>
 // Long tier
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn write_long(
+/// One key of a set-based long write: the canonical value (borrowed from a
+/// direct `write_value` caller, owned in the API's commit buffer), its axis
+/// ids resolved at buffer time (in value order, so axis ids are minted as
+/// before) with the created / reused counts of that resolution, the D11
+/// member binding, whether the superseded cells keep their content, and
+/// whether the key's entity was minted by this commit (no value row of any
+/// tier can exist: the probes are skipped and every cell is version 1).
+#[derive(Clone, Debug)]
+pub(crate) struct LongWrite<'a> {
+    pub(crate) key: ValueKey,
+    pub(crate) value: Cow<'a, CanonicalValue>,
+    pub(crate) axis_ids: Vec<i64>,
+    pub(crate) axes_created: usize,
+    pub(crate) axes_reused: usize,
+    pub(crate) parameter_type_id: Option<i64>,
+    pub(crate) retained: bool,
+    pub(crate) entity_minted: bool,
+}
+
+impl LongWrite<'_> {
+    fn rows(&self) -> &[crate::types::LongRow] {
+        match &self.value.shape {
+            ShapedData::Long(rows) => rows,
+            // canon guarantees the shape matches the tier.
+            _ => unreachable!("long write of a non-long shape"),
+        }
+    }
+}
+
+/// The axis ids of `axes`, in order, through the content-verified dedup
+/// (threading the caller's cache), with the created and reused counts
+/// (plan D8: one `axis` row per insert, so the counts equal the former
+/// `axis` row-count delta).
+pub(crate) fn resolve_axes(
     conn: &Connection,
-    key: &ValueKey,
-    c: i64,
-    axis_ids: &[i64],
+    cache: &mut AxisCache,
     axes: &[CanonicalAxis],
-    rows: &[crate::types::LongRow],
-    same_tier_live: bool,
-    retained: bool,
-    pt_id: Option<i64>,
-) -> Result<(u16, usize, usize), DbError> {
-    // Close out every live cell of the triple first; a cell that reappears in
-    // the new value re-opens at its own (per-cell) version + 1, one absent from
-    // the new value simply stays dead (VMP Part 5 per-(triple, index tuple)).
-    let closed = if same_tier_live {
-        close_out_long(conn, key, c, retained)?
-    } else {
-        0
+) -> Result<(Vec<i64>, usize, usize), DbError> {
+    let mut ids = Vec::with_capacity(axes.len());
+    let mut created = 0usize;
+    for ax in axes {
+        let (id, new) = dedup_or_insert_created(conn, cache, ax)?;
+        ids.push(id);
+        created += usize::from(new);
+    }
+    Ok((ids, created, axes.len() - created))
+}
+
+/// Write every long value of `w` at `commit_id` in set-based rounds
+/// (set_based_long_and_delete_PLAN §3.2): the one long history
+/// implementation (`write_value` delegates here with N = 1). A round holds
+/// ≤ [`LONG_INSERT_CHUNK`] keys and ≤ [`LONG_INSERT_CHUNK`] cells, except a
+/// single larger value, which forms its own round (plan D3).
+///
+/// Per round: the scalar live probe; one grouped long probe returning the
+/// per-position max version over all rows of each key and its current-cell
+/// count (D5); the array live probe for the keys live in neither; the
+/// per-key `close_out_tier` for each tier transition (D6); one same-tier
+/// close-out UPDATE per retention mode; and one key-ordinal columnar INSERT
+/// (D7 as amended by critique C1-C2), chunked at [`LONG_INSERT_CHUNK`]
+/// cells. A round of one key binds its probes and close-out as today's
+/// point statements (D4); the insert has one form for every N.
+///
+/// Semantics are those of one per-key write per key in input order: the
+/// live tier by the per-key precedence (scalar, then long, then array), the
+/// per-cell `version = max(all rows of the (key, positions)) + 1`, every
+/// current cell closed (a cell absent from the new value stays dead), the
+/// same SET lists and retention. Keys must be distinct (the callers
+/// guarantee it); a repeated key, a close-out count that differs from the
+/// probe, or a list of the wrong length fails as [`DbError::Internal`].
+/// Returns one [`WriteOutcome`] per input, in input order.
+pub(crate) fn write_longs(
+    conn: &Connection,
+    commit_id: i64,
+    w: &[LongWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    check_distinct_keys("long batch", w.iter().map(|l| &l.key))?;
+    let mut out = Vec::with_capacity(w.len());
+    let (mut lo, mut cells) = (0usize, 0usize);
+    for (i, l) in w.iter().enumerate() {
+        debug_assert_value_floats_canonical(&l.value);
+        let n = l.rows().len();
+        if i > lo && (cells + n > LONG_INSERT_CHUNK || i - lo == LONG_INSERT_CHUNK) {
+            out.extend(write_long_round(conn, commit_id, &w[lo..i])?);
+            (lo, cells) = (i, 0);
+        }
+        cells += n;
+    }
+    if lo < w.len() {
+        out.extend(write_long_round(conn, commit_id, &w[lo..])?);
+    }
+    Ok(out)
+}
+
+/// Per key: the max version of each position tuple over every
+/// `value_long` row of the key (current and closed, as
+/// `current_long_versions` reads it) and that tuple's current-cell count
+/// (0 or 1), grouped per (key, positions).
+const LONG_PROBE_SQL: &str = "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
+            l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, max(l.version)::INTEGER, \
+            count(*) FILTER (WHERE l.valid_to_commit IS NULL) \
+     FROM value_long l JOIN k ON l.entity_id = k.e \
+          AND l.parameter_definition_id = k.p AND l.alternative_id = k.a \
+     GROUP BY ALL";
+
+/// The per-key state the probes of a long round collect.
+#[derive(Default)]
+struct LongProbe {
+    /// Per key, the max version per position tuple (all rows).
+    versions: HashMap<Triple, HashMap<[i32; 4], u16>>,
+    /// The live tier per key (per-key precedence), with its current-row
+    /// count (the current cells for long).
+    live: HashMap<Triple, (Live, usize)>,
+}
+
+impl LongProbe {
+    /// The single-key form: today's point statements (`live_tier`, then
+    /// `current_long_versions`).
+    fn point(conn: &Connection, k: &ValueKey) -> Result<LongProbe, DbError> {
+        let mut p = LongProbe::default();
+        if let Some(l) = live_tier(conn, k)? {
+            // The point close-out reports its own count; 0 is not checked.
+            p.live.insert(triple(k), (l, 0));
+        }
+        p.versions
+            .insert(triple(k), current_long_versions(conn, k)?);
+        Ok(p)
+    }
+
+    /// The set form over `keys` (none minted): the scalar live probe, the
+    /// grouped long probe (versions and current cells) and the array live
+    /// probe for the keys live in neither.
+    fn set(conn: &Connection, keys: &[&ValueKey]) -> Result<LongProbe, DbError> {
+        let mut p = LongProbe::default();
+        for (t, _, _) in probe_keys(conn, SCALAR_LIVE_SQL, keys.iter().copied(), false)? {
+            p.live.insert(t, (Live::Scalar, 1));
+        }
+        let mut current: HashMap<Triple, usize> = HashMap::new();
+        {
+            let mut stmt = conn.prepare_cached(&format!("{SCALAR_KEYS_CTE}{LONG_PROBE_SQL}"))?;
+            let rows = stmt.query_map(
+                duckdb::params_from_iter(key_lists(keys.iter().copied())),
+                |r| {
+                    Ok((
+                        (
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ),
+                        [
+                            r.get::<_, i32>(3)?,
+                            r.get::<_, i32>(4)?,
+                            r.get::<_, i32>(5)?,
+                            r.get::<_, i32>(6)?,
+                        ],
+                        r.get::<_, i32>(7)?,
+                        r.get::<_, i64>(8)?,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (t, pos, v, cur) = row?;
+                p.versions.entry(t).or_default().insert(pos, v as u16);
+                if cur > 0 {
+                    *current.entry(t).or_default() += cur as usize;
+                }
+            }
+        }
+        for (t, cells) in current {
+            p.live.entry(t).or_insert((Live::Long, cells));
+        }
+        let rest: Vec<&ValueKey> = keys
+            .iter()
+            .copied()
+            .filter(|k| !p.live.contains_key(&triple(k)))
+            .collect();
+        if !rest.is_empty() {
+            for (t, array_id, _) in probe_keys(conn, ARRAY_LIVE_SQL, rest.iter().copied(), false)? {
+                p.live.insert(t, (Live::Array(array_id), 1));
+            }
+        }
+        Ok(p)
+    }
+}
+
+/// One round of [`write_longs`] (see there for the bounds).
+fn write_long_round(
+    conn: &Connection,
+    c: i64,
+    w: &[LongWrite],
+) -> Result<Vec<WriteOutcome>, DbError> {
+    let n = w.len();
+    let single = n == 1;
+    // --- Probes (only for keys whose entity existed before this commit). ---
+    let probed: Vec<&ValueKey> = w
+        .iter()
+        .filter(|l| !l.entity_minted)
+        .map(|l| &l.key)
+        .collect();
+    let probe = match probed[..] {
+        [] => LongProbe::default(),
+        [k] if single => LongProbe::point(conn, k)?,
+        _ => LongProbe::set(conn, &probed)?,
     };
 
-    // Physical batching (RESULTS.md alarm #1): the former per-cell `MAX(version)`
-    // probe is replaced by ONE set-based query returning the current per-position
-    // max, from which each cell's next version is computed in Rust. Long-tier
-    // versions are per-cell (a key can hold pos0 at v2, pos1 at v1); canon
-    // guarantees the cells of one write carry distinct position tuples, so this
-    // snapshot (taken AFTER close-out, BEFORE any insert) yields exactly the
-    // versions the per-cell probe did — each position advances independently.
-    let cur_versions = current_long_versions(conn, key)?;
+    // --- Tier transitions: the per-key close-out of the other tier, in
+    // input order (plan D6). ---
+    let mut closed = vec![0usize; n];
+    for (i, l) in w.iter().enumerate() {
+        if let Some(&(cur @ (Live::Scalar | Live::Array(_)), _)) = probe.live.get(&triple(&l.key)) {
+            closed[i] = close_out_tier(conn, &l.key, c, cur, l.retained)?;
+        }
+    }
 
-    // Encode every cell column-wise in one pass, tracking the max new version.
-    let cols = LongColumns::build(rows, axes, &cur_versions);
-    let max_version = cols.version.iter().copied().max().unwrap_or(0) as u16;
+    // --- Same-tier close-out: every current cell, one UPDATE per retention
+    // mode. The close-out changes no version, so the probe's versions equal
+    // a snapshot taken after it. ---
+    for retained in [true, false] {
+        let idx: Vec<usize> = (0..n)
+            .filter(|&i| {
+                w[i].retained == retained
+                    && matches!(probe.live.get(&triple(&w[i].key)), Some((Live::Long, _)))
+            })
+            .collect();
+        if idx.is_empty() {
+            continue;
+        }
+        if single {
+            closed[0] += close_out_long(conn, &w[0].key, c, retained)?;
+            continue;
+        }
+        let sql = if retained {
+            LONG_CLOSE_SQL
+        } else {
+            LONG_CLOSE_STUB_SQL
+        };
+        let [e, p, a] = key_lists(idx.iter().map(|&i| &w[i].key));
+        let affected = conn
+            .prepare_cached(sql)?
+            .execute(duckdb::params_from_iter([Value::BigInt(c), e, p, a]))?;
+        let expected: usize = idx.iter().map(|&i| probe.live[&triple(&w[i].key)].1).sum();
+        check_affected("long close-out", affected, expected)?;
+        for i in idx {
+            closed[i] += probe.live[&triple(&w[i].key)].1;
+        }
+    }
 
-    // Columnar-bind INSERT (plan D1): one cached statement, one execution per
-    // ≤ LONG_INSERT_CHUNK cells. Issued on the caller's connection inside the
-    // open write transaction — no autocommit, no separate connection; a
-    // write-write conflict or any error surfaces here or at COMMIT, and
-    // ROLLBACK unwinds every row, so conflict-retry and crash atomicity are
-    // unchanged. Rows land in canonical cell order (DuckDB's default
-    // `preserve_insertion_order`, which the write connection never changes).
-    let consts = LongConsts {
-        entity_id: key.entity_id,
-        parameter_definition_id: key.parameter_definition_id,
-        alternative_id: key.alternative_id,
-        parameter_type_id: pt_id,
-        valid_from_commit: c,
-        axis_ids,
-    };
-    insert_long_columns(conn, &consts, &cols)?;
+    // --- Insert: every column built in one pass through the one encoder. ---
+    let empty = HashMap::new();
+    let mut keys = LongKeys::default();
+    let mut cols = LongColumns::default();
+    let mut max_version = Vec::with_capacity(n);
+    for l in w {
+        let ordinal = keys.push(l)?;
+        let versions = probe.versions.get(&triple(&l.key)).unwrap_or(&empty);
+        max_version.push(cols.push_value(l.rows(), &l.value.axes, versions, ordinal)?);
+    }
+    insert_long_round(conn, c, &keys, &cols)?;
 
-    Ok((max_version, rows.len(), closed))
+    Ok(w.iter()
+        .zip(max_version)
+        .zip(closed)
+        .map(|((l, version), rows_closed)| WriteOutcome {
+            tier: Some(Tier::Long),
+            version,
+            rows_written: l.rows().len(),
+            rows_closed,
+            axes_created: l.axes_created,
+            axes_reused: l.axes_reused,
+        })
+        .collect())
 }
 
 /// The current per-position `MAX(version)` for every position tuple the key
 /// already holds (live OR superseded — versioning spans both, as the former
-/// per-cell probe did: no `valid_to_commit` filter). One scan per key replaces
-/// one probe per cell (RESULTS.md alarm #1).
+/// per-cell probe did: no `valid_to_commit` filter). The single-key form of
+/// [`LONG_PROBE_SQL`]'s version part.
 fn current_long_versions(
     conn: &Connection,
     key: &ValueKey,
@@ -1400,24 +1620,82 @@ fn current_long_versions(
 /// execution. The statement text does not depend on the chunk length.
 pub(crate) const LONG_INSERT_CHUNK: usize = 16_384;
 
-/// The per-key constants of a long write: bound as scalars, not lists.
-struct LongConsts<'a> {
-    entity_id: i64,
-    parameter_definition_id: i64,
-    alternative_id: i64,
-    parameter_type_id: Option<i64>,
-    valid_from_commit: i64,
-    axis_ids: &'a [i64],
+/// The per-key columns of one long round, in key order: bound as short
+/// per-key lists that the per-cell key ordinal indexes (critique C1-C2).
+#[derive(Default)]
+struct LongKeys {
+    e: Vec<i64>,
+    p: Vec<i64>,
+    a: Vec<i64>,
+    pt: Vec<Option<i64>>,
+    axis: [Vec<Option<i64>>; 4],
 }
 
-/// The per-cell columns of one long value, built column-wise in ONE pass over
-/// the canonical rows (plan D4). Still the one encoder: the value columns come
-/// from [`VCols::of`], the accelerators from [`accel`], the positions from
-/// [`pad4_pos`] and the versions from the per-position version map. Each
-/// column holds exactly one Rust type, so each binds as a list of one `Value`
-/// variant (duckdb-rs rejects a list mixing variants).
+impl LongKeys {
+    /// Append one key; returns its 1-based ordinal.
+    fn push(&mut self, l: &LongWrite) -> Result<i32, DbError> {
+        self.e.push(l.key.entity_id);
+        self.p.push(l.key.parameter_definition_id);
+        self.a.push(l.key.alternative_id);
+        self.pt.push(l.parameter_type_id);
+        for (d, col) in self.axis.iter_mut().enumerate() {
+            col.push(l.axis_ids.get(d).copied());
+        }
+        i32::try_from(self.e.len())
+            .map_err(|_| DbError::Internal("long batch: key ordinal out of range".into()))
+    }
+
+    fn len(&self) -> usize {
+        self.e.len()
+    }
+
+    /// The 8 per-key bind values: entity, definition, alternative, member
+    /// binding, then the four axis ids, each a list of one entry per key
+    /// (an all-NULL column binds a plain NULL, which indexes to NULL).
+    fn params(&self) -> [Value; 8] {
+        [
+            list(&self.e, |&v| Value::BigInt(v)),
+            list(&self.p, |&v| Value::BigInt(v)),
+            list(&self.a, |&v| Value::BigInt(v)),
+            opt_list(&self.pt, |&v| Value::BigInt(v)),
+            opt_list(&self.axis[0], |&v| Value::BigInt(v)),
+            opt_list(&self.axis[1], |&v| Value::BigInt(v)),
+            opt_list(&self.axis[2], |&v| Value::BigInt(v)),
+            opt_list(&self.axis[3], |&v| Value::BigInt(v)),
+        ]
+    }
+
+    /// Every per-key column must hold one entry per key.
+    fn check_column_lengths(&self) -> Result<(), DbError> {
+        let n = self.len();
+        let lens = [
+            self.p.len(),
+            self.a.len(),
+            self.pt.len(),
+            self.axis[0].len(),
+            self.axis[1].len(),
+            self.axis[2].len(),
+            self.axis[3].len(),
+        ];
+        if lens.iter().any(|&l| l != n) {
+            return Err(DbError::Internal(format!(
+                "columnar insert: per-key column lengths {lens:?} differ from {n} keys"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The per-cell columns of one long round, built column-wise in ONE pass
+/// over the canonical rows (plan D4). Still the one encoder: the value
+/// columns come from [`VCols::of`], the accelerators from [`accel`], the
+/// positions from [`pad4_pos`] and the versions from the per-position
+/// version map; `k` is the cell's 1-based key ordinal into [`LongKeys`].
+/// Each column holds exactly one Rust type, so each binds as a list of one
+/// `Value` variant (duckdb-rs rejects a list mixing variants).
 #[derive(Default)]
 struct LongColumns {
+    k: Vec<i32>,
     version: Vec<i16>,
     pos: [Vec<i32>; 4],
     dt: [Vec<Option<i64>>; 4],
@@ -1433,48 +1711,60 @@ struct LongColumns {
 }
 
 impl LongColumns {
-    fn build(
+    /// Append one value's cells (key ordinal `k`); each cell's version is
+    /// its position's max + 1 (or 1). Returns the max new version.
+    fn push_value(
+        &mut self,
         rows: &[crate::types::LongRow],
         axes: &[CanonicalAxis],
         cur_versions: &HashMap<[i32; 4], u16>,
-    ) -> LongColumns {
-        let mut c = LongColumns::default();
+        k: i32,
+    ) -> Result<u16, DbError> {
+        let mut max_version = 0u16;
         for row in rows {
             let pos = pad4_pos(&row.positions);
             let version = cur_versions.get(&pos).copied().unwrap_or(0) + 1;
-            c.version.push(version as i16);
+            let v16 = i16::try_from(version).map_err(|_| {
+                DbError::Internal(format!("long batch: version {version} out of range"))
+            })?;
+            max_version = max_version.max(version);
+            self.k.push(k);
+            self.version.push(v16);
             // Per-dimension index accelerators, derived from the bound axis at
             // the cell's position (audited by audit_index_accelerator; never
             // authoritative). NULL beyond the declared rank.
             for (d, &p) in pos.iter().enumerate() {
-                c.pos[d].push(p);
+                self.pos[d].push(p);
                 let (a_dt, a_num) = axes.get(d).map_or((None, None), |ax| accel(ax, p));
-                c.dt[d].push(a_dt);
-                c.num[d].push(a_num);
+                self.dt[d].push(a_dt);
+                self.num[d].push(a_num);
             }
             let vc = VCols::of(&row.value);
-            c.kind.push(vc.kind);
-            c.f.push(vc.f);
-            c.i.push(vc.i);
-            c.b.push(vc.b);
-            c.s.push(vc.s);
-            c.vdt.push(vc.dt);
-            c.dm.push(vc.dm);
-            c.du.push(vc.du);
+            self.kind.push(vc.kind);
+            self.f.push(vc.f);
+            self.i.push(vc.i);
+            self.b.push(vc.b);
+            self.s.push(vc.s);
+            self.vdt.push(vc.dt);
+            self.dm.push(vc.dm);
+            self.du.push(vc.du);
         }
-        c
+        Ok(max_version)
     }
 
     fn len(&self) -> usize {
         self.version.len()
     }
 
-    /// Every per-cell column must hold exactly one entry per cell. Part of the
-    /// hard length check (critique C2): a short column whose chunk is all
-    /// NULL would otherwise bind as a plain NULL and pass the list check.
-    fn check_column_lengths(&self) -> Result<(), DbError> {
+    /// The hard length check (critique C2): every per-cell column holds
+    /// exactly one entry per cell (a short column whose chunk is all NULL
+    /// would otherwise bind as a plain NULL and pass the list check), and
+    /// every key ordinal lies in `1..=keys` (an out-of-range `list[k]` reads
+    /// NULL silently).
+    fn check(&self, keys: usize) -> Result<(), DbError> {
         let n = self.len();
         let lens = [
+            ("k", vec![self.k.len()]),
             ("pos", self.pos.iter().map(Vec::len).collect::<Vec<_>>()),
             ("dt", self.dt.iter().map(Vec::len).collect()),
             ("num", self.num.iter().map(Vec::len).collect()),
@@ -1499,22 +1789,25 @@ impl LongColumns {
                 )));
             }
         }
+        if let Some(&k) = self
+            .k
+            .iter()
+            .find(|&&k| k < 1 || usize::try_from(k).map_or(true, |k| k > keys))
+        {
+            return Err(DbError::Internal(format!(
+                "columnar insert: key ordinal {k} outside 1..={keys}"
+            )));
+        }
         Ok(())
     }
 
-    /// The 30 bind values of one execution over cells `r`, in the column order
-    /// of [`LONG_INSERT_SQL`]: per-key constants as scalars, per-cell columns
-    /// as lists. A column that is NULL in every cell of the chunk binds a
-    /// plain NULL (the zip pads it).
-    fn params(&self, k: &LongConsts, r: std::ops::Range<usize>) -> Vec<Value> {
-        let mut p: Vec<Value> = Vec::with_capacity(30);
-        p.push(Value::BigInt(k.entity_id));
-        p.push(Value::BigInt(k.parameter_definition_id));
-        p.push(Value::BigInt(k.alternative_id));
-        p.push(k.parameter_type_id.map_or(Value::Null, Value::BigInt));
-        p.push(Value::BigInt(k.valid_from_commit));
+    /// The 23 per-cell bind values of one execution over cells `r`, in the
+    /// order of the FROM subquery of [`LONG_INSERT_SQL`]. A column that is
+    /// NULL in every cell of the chunk binds a plain NULL (the zip pads it).
+    fn params(&self, r: std::ops::Range<usize>) -> Vec<Value> {
+        let mut p: Vec<Value> = Vec::with_capacity(23);
+        p.push(list(clip(&self.k, &r), |&v| Value::Int(v)));
         p.push(list(clip(&self.version, &r), |&v| Value::SmallInt(v)));
-        push_axis4(&mut p, k.axis_ids);
         for d in 0..4 {
             p.push(list(clip(&self.pos[d], &r), |&v| Value::Int(v)));
         }
@@ -1534,10 +1827,14 @@ impl LongColumns {
     }
 }
 
-/// The columnar `value_long` INSERT (plan Appendix A). Per-key constants are
-/// scalar `?`; every per-cell column is `unnest(?::T[])`, zipped by position;
-/// the timestamp columns cross as BIGINT µs through `make_timestamp`, the
-/// same conversion as every other timestamp write. 30 columns (29 + the D11
+/// The columnar `value_long` INSERT in the key-ordinal form (plan Appendix
+/// A.3', critique C1-C2), the one long insert for every N. The per-key
+/// columns bind as short per-key lists indexed by the cell's 1-based key
+/// ordinal `u.k`; every per-cell column is an `unnest` inside the FROM
+/// subquery (zipped by position; no join, so the rows keep list order, i.e.
+/// keys in round order and each key's cells in canonical order). The
+/// timestamp columns cross as BIGINT µs through `make_timestamp`, the same
+/// conversion as every other timestamp write. 30 columns (29 + the D11
 /// `parameter_type_id` binding); `content_retained` keeps its TRUE default.
 const LONG_INSERT_SQL: &str = "INSERT INTO value_long \
        (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
@@ -1545,26 +1842,66 @@ const LONG_INSERT_SQL: &str = "INSERT INTO value_long \
         axis1_id, axis2_id, axis3_id, axis4_id, i1_pos, i2_pos, i3_pos, i4_pos, \
         i1_dt, i1_num, i2_dt, i2_num, i3_dt, i3_num, i4_dt, i4_num, \
         value_kind, v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
-     SELECT ?, ?, ?, ?, ?, unnest(?::SMALLINT[]), ?, ?, ?, ?, \
-       unnest(?::INTEGER[]), unnest(?::INTEGER[]), unnest(?::INTEGER[]), unnest(?::INTEGER[]), \
-       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
-       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
-       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
-       make_timestamp(unnest(?::BIGINT[])), unnest(?::BIGINT[]), \
-       unnest(?::VARCHAR[]), unnest(?::DOUBLE[]), unnest(?::BIGINT[]), unnest(?::BOOLEAN[]), \
-       unnest(?::VARCHAR[]), make_timestamp(unnest(?::BIGINT[])), \
-       unnest(?::INTEGER[]), unnest(?::BIGINT[])";
+     SELECT (?::BIGINT[])[u.k], (?::BIGINT[])[u.k], (?::BIGINT[])[u.k], (?::BIGINT[])[u.k], \
+       ?, u.version, \
+       (?::BIGINT[])[u.k], (?::BIGINT[])[u.k], (?::BIGINT[])[u.k], (?::BIGINT[])[u.k], \
+       u.i1_pos, u.i2_pos, u.i3_pos, u.i4_pos, \
+       u.i1_dt, u.i1_num, u.i2_dt, u.i2_num, u.i3_dt, u.i3_num, u.i4_dt, u.i4_num, \
+       u.value_kind, u.v_float, u.v_int, u.v_bool, u.v_str, u.v_datetime, \
+       u.v_dur_months, u.v_dur_micros \
+     FROM (SELECT unnest(?::INTEGER[]) AS k, unnest(?::SMALLINT[]) AS version, \
+       unnest(?::INTEGER[]) AS i1_pos, unnest(?::INTEGER[]) AS i2_pos, \
+       unnest(?::INTEGER[]) AS i3_pos, unnest(?::INTEGER[]) AS i4_pos, \
+       make_timestamp(unnest(?::BIGINT[])) AS i1_dt, unnest(?::BIGINT[]) AS i1_num, \
+       make_timestamp(unnest(?::BIGINT[])) AS i2_dt, unnest(?::BIGINT[]) AS i2_num, \
+       make_timestamp(unnest(?::BIGINT[])) AS i3_dt, unnest(?::BIGINT[]) AS i3_num, \
+       make_timestamp(unnest(?::BIGINT[])) AS i4_dt, unnest(?::BIGINT[]) AS i4_num, \
+       unnest(?::VARCHAR[]) AS value_kind, unnest(?::DOUBLE[]) AS v_float, \
+       unnest(?::BIGINT[]) AS v_int, unnest(?::BOOLEAN[]) AS v_bool, \
+       unnest(?::VARCHAR[]) AS v_str, make_timestamp(unnest(?::BIGINT[])) AS v_datetime, \
+       unnest(?::INTEGER[]) AS v_dur_months, unnest(?::BIGINT[]) AS v_dur_micros) u";
 
-/// Insert one long value's cells: one cached columnar statement, executed per
-/// ≤ [`LONG_INSERT_CHUNK`] cells after the hard length check. All executes run
-/// on `conn` inside the caller's transaction; a 0-cell chunk never executes.
-fn insert_long_columns(
+/// Insert one long round's cells: one cached statement, executed per
+/// ≤ [`LONG_INSERT_CHUNK`] cells after the hard length checks (per-key
+/// lists against the key count, per-cell lists against the chunk, ordinals
+/// in range). All executes run on `conn` inside the caller's transaction,
+/// so a write-write conflict or any error surfaces here or at COMMIT and
+/// ROLLBACK unwinds every row; a 0-cell round never executes.
+fn insert_long_round(
     conn: &Connection,
-    k: &LongConsts,
+    c: i64,
+    keys: &LongKeys,
     cols: &LongColumns,
 ) -> Result<(), DbError> {
-    cols.check_column_lengths()?;
-    exec_columnar(conn, LONG_INSERT_SQL, cols.len(), |r| cols.params(k, r))
+    keys.check_column_lengths()?;
+    cols.check(keys.len())?;
+    let key_params = keys.params();
+    check_list_lengths(&key_params, keys.len())?;
+    let n = cols.len();
+    if n == 0 {
+        return Ok(());
+    }
+    let [e, p, a, pt, ax1, ax2, ax3, ax4] = key_params;
+    let mut stmt = conn.prepare_cached(LONG_INSERT_SQL)?;
+    let mut lo = 0;
+    while lo < n {
+        let hi = (lo + LONG_INSERT_CHUNK).min(n);
+        let cells = cols.params(lo..hi);
+        check_list_lengths(&cells, hi - lo)?;
+        let mut v: Vec<Value> = Vec::with_capacity(31);
+        v.extend([
+            e.clone(),
+            p.clone(),
+            a.clone(),
+            pt.clone(),
+            Value::BigInt(c),
+        ]);
+        v.extend([ax1.clone(), ax2.clone(), ax3.clone(), ax4.clone()]);
+        v.extend(cells);
+        stmt.execute(duckdb::params_from_iter(v))?;
+        lo = hi;
+    }
+    Ok(())
 }
 
 /// Run one columnar-bind statement (`INSERT … SELECT ?, unnest(?::T[]), …`)
@@ -1957,19 +2294,29 @@ mod tests {
         assert_eq!(counts(db), before, "rollback left rows or a commit row");
     }
 
-    fn consts(c: i64, axis_ids: &[i64]) -> LongConsts<'_> {
-        LongConsts {
-            entity_id: KEY.entity_id,
-            parameter_definition_id: KEY.parameter_definition_id,
-            alternative_id: KEY.alternative_id,
+    /// The per-key and per-cell columns of one round holding `KEY` with an
+    /// `n`-cell long value on `axis_ids` (versions 1).
+    fn long_round(axis_ids: &[i64], n: i32) -> (LongKeys, LongColumns) {
+        let w = LongWrite {
+            key: KEY,
+            value: Cow::Owned(long_value(n)),
+            axis_ids: axis_ids.to_vec(),
+            axes_created: 0,
+            axes_reused: 0,
             parameter_type_id: None,
-            valid_from_commit: c,
-            axis_ids,
-        }
+            retained: true,
+            entity_minted: true,
+        };
+        let mut keys = LongKeys::default();
+        let mut cols = LongColumns::default();
+        let k = keys.push(&w).unwrap();
+        cols.push_value(w.rows(), &w.value.axes, &HashMap::new(), k)
+            .unwrap();
+        (keys, cols)
     }
 
     fn axis_id(conn: &Connection, len: i32) -> i64 {
-        dedup_or_insert(conn, &mut AxisCache::new(), &int_axis(len)).unwrap()
+        crate::axis::dedup_or_insert(conn, &mut AxisCache::new(), &int_axis(len)).unwrap()
     }
 
     #[test]
@@ -1980,12 +2327,37 @@ mod tests {
         let before = counts(&db);
         let err = with_write_txn(&db, "t", "short", |conn, c| {
             let ax = axis_id(conn, 3);
-            let mut cols = LongColumns::build(&rows(3), &[int_axis(3)], &HashMap::new());
+            let (keys, mut cols) = long_round(&[ax], 3);
             cols.f.pop();
-            insert_long_columns(conn, &consts(c, &[ax]), &cols)
+            insert_long_round(conn, c, &keys, &cols)
         })
         .expect_err("a short column must be rejected");
         assert!(matches!(err, DbError::Internal(_)), "got {err:?}");
+        assert_eq!(counts(&db), before);
+
+        // The key-ordinal form (critique C2): a short per-key list and a
+        // key ordinal outside 1..=keys (which would read NULL) fail too.
+        let err = with_write_txn(&db, "t", "short key", |conn, c| {
+            let ax = axis_id(conn, 3);
+            let (mut keys, cols) = long_round(&[ax], 3);
+            keys.pt.pop();
+            insert_long_round(conn, c, &keys, &cols)
+        })
+        .expect_err("a short per-key column must be rejected");
+        assert!(matches!(err, DbError::Internal(_)), "got {err:?}");
+        for bad in [0, 2] {
+            let err = with_write_txn(&db, "t", "ordinal", |conn, c| {
+                let ax = axis_id(conn, 3);
+                let (keys, mut cols) = long_round(&[ax], 3);
+                cols.k[1] = bad;
+                insert_long_round(conn, c, &keys, &cols)
+            })
+            .expect_err("an out-of-range key ordinal must be rejected");
+            assert!(
+                matches!(&err, DbError::Internal(m) if m.contains("key ordinal")),
+                "got {err:?}"
+            );
+        }
         assert_eq!(counts(&db), before);
 
         // An empty list against a non-empty chunk is caught too; a plain NULL
@@ -2248,6 +2620,219 @@ mod tests {
         }
     }
 
+    /// A rank-1 float long value over `positions` of a 4-long axis.
+    fn sparse_long(positions: &[i32], base: f64) -> CanonicalValue {
+        CanonicalValue {
+            tier: Tier::Long,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(4)],
+            shape: ShapedData::Long(
+                positions
+                    .iter()
+                    .map(|&p| LongRow {
+                        positions: vec![p],
+                        value: ScalarValue::Float(base + p as f64),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Every prior state of `KEY` the long and array equivalence tests run
+    /// over: per-commit steps (Some writes, None deletes), then an optional
+    /// planted row (a damaged, doubly-live key).
+    type PriorState = (
+        &'static str,
+        Vec<Option<CanonicalValue>>,
+        Option<&'static str>,
+    );
+
+    fn prior_states() -> Vec<PriorState> {
+        let scalar = |x: f64| CanonicalValue {
+            tier: Tier::Scalar,
+            value_kind: ValueKind::Float,
+            axes: vec![],
+            shape: ShapedData::Scalar(ScalarValue::Float(x)),
+        };
+        let array = |x: f64| CanonicalValue {
+            tier: Tier::Array,
+            value_kind: ValueKind::Float,
+            axes: vec![int_axis(3)],
+            shape: ShapedData::Array(vec![x, 2.0, 3.0]),
+        };
+        vec![
+            ("none", vec![], None),
+            (
+                "scalar live",
+                vec![Some(scalar(1.0)), Some(scalar(2.0))],
+                None,
+            ),
+            ("scalar closed", vec![Some(scalar(1.0)), None], None),
+            (
+                // pos0 v2 dead (stays dead), pos1 v3, pos2 v1 dead, pos3 v1.
+                "long diverged",
+                vec![
+                    Some(sparse_long(&[0, 1, 2], 1.0)),
+                    Some(sparse_long(&[0, 1], 2.0)),
+                    Some(sparse_long(&[1, 3], 3.0)),
+                ],
+                None,
+            ),
+            (
+                "long closed",
+                vec![Some(sparse_long(&[1, 2], 1.0)), None],
+                None,
+            ),
+            ("array live", vec![Some(array(1.0))], None),
+            (
+                "array replaced",
+                vec![Some(array(1.0)), Some(array(4.0))],
+                None,
+            ),
+            ("array closed", vec![Some(array(1.0)), None], None),
+            (
+                "scalar+long",
+                vec![Some(sparse_long(&[0, 1], 1.0))],
+                Some("value_scalar"),
+            ),
+            (
+                "long+array",
+                vec![Some(sparse_long(&[0, 1], 1.0))],
+                Some("value_array"),
+            ),
+            ("scalar+array", vec![Some(scalar(1.0))], Some("value_array")),
+        ]
+    }
+
+    const OTHER: ValueKey = ValueKey {
+        entity_id: 9,
+        parameter_definition_id: 2,
+        alternative_id: 3,
+    };
+
+    /// Build `KEY`'s prior state, plus a value for `OTHER` (`other`).
+    fn setup_prior(
+        db: &Path,
+        steps: &[Option<CanonicalValue>],
+        planted: Option<&str>,
+        other: &CanonicalValue,
+    ) {
+        let opts = WriteOptions::default();
+        for step in steps {
+            with_write_txn(db, "t", "setup", |conn, c| match step {
+                Some(v) => write_value(conn, c, KEY, v, &mut AxisCache::new(), &opts, None),
+                None => delete_value(conn, c, KEY, &opts),
+            })
+            .unwrap();
+        }
+        with_write_txn(db, "t", "other", |conn, c| {
+            write_value(conn, c, OTHER, other, &mut AxisCache::new(), &opts, None)
+        })
+        .unwrap();
+        if let Some(t) = planted {
+            plant(db, t);
+        }
+    }
+
+    /// The outcome of one write, as text: the outcome, or the error class
+    /// (DuckDB constraint errors name a row, which may differ).
+    fn outcome_text(r: &Result<Vec<WriteOutcome>, DbError>, i: usize) -> String {
+        match r {
+            Ok(o) => format!("{:?}", o[i]),
+            Err(DbError::Duckdb(e)) if e.to_string().contains("UNIQUE") => "UNIQUE".into(),
+            Err(e) => format!("error {e}"),
+        }
+    }
+
+    /// The point statements of a one-key long round and the set statements
+    /// of a larger round give the same rows and outcome for the same key,
+    /// over every prior state (each tier live, closed or replaced, per-cell
+    /// versions diverged, and the doubly-live damaged states, where the
+    /// per-key precedence decides, so a scalar+long key fails on the long
+    /// UNIQUE as before), both retention modes, plus a minted key.
+    #[test]
+    fn single_key_long_round_matches_the_set_round() {
+        let target = sparse_long(&[0, 2, 3], 10.0);
+        let other = sparse_long(&[0, 1], 20.0);
+        for (name, steps, planted) in &prior_states() {
+            for retained in [true, false] {
+                for minted in [false, true] {
+                    if minted && !steps.is_empty() {
+                        continue;
+                    }
+                    let (_da, a) = fresh();
+                    let (_db, b) = fresh();
+                    setup_prior(&a, steps, *planted, &other);
+                    setup_prior(&b, steps, *planted, &other);
+                    let run = |db: &Path, with_other: bool| {
+                        with_write_txn(db, "t", "w", |conn, c| {
+                            let mut cache = AxisCache::new();
+                            let mut w = Vec::new();
+                            if with_other {
+                                let (ids, cr, re) = resolve_axes(conn, &mut cache, &other.axes)?;
+                                w.push(LongWrite {
+                                    key: OTHER,
+                                    value: Cow::Borrowed(&other),
+                                    axis_ids: ids,
+                                    axes_created: cr,
+                                    axes_reused: re,
+                                    parameter_type_id: None,
+                                    retained: !retained,
+                                    entity_minted: false,
+                                });
+                            }
+                            let (ids, cr, re) = resolve_axes(conn, &mut cache, &target.axes)?;
+                            w.push(LongWrite {
+                                key: KEY,
+                                value: Cow::Borrowed(&target),
+                                axis_ids: ids,
+                                axes_created: cr,
+                                axes_reused: re,
+                                parameter_type_id: Some(4),
+                                retained,
+                                entity_minted: minted,
+                            });
+                            write_longs(conn, c, &w)
+                        })
+                    };
+                    let oa = run(&a, false);
+                    let ob = run(&b, true);
+                    let case = format!("{name}, retained={retained}, minted={minted}");
+                    assert_eq!(outcome_text(&oa, 0), outcome_text(&ob, 1), "{case}");
+                    assert_eq!(oa.is_ok(), *name != "scalar+long", "{case}");
+                    assert_eq!(key_rows(&a), key_rows(&b), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_batch_with_a_duplicate_key_is_an_internal_error() {
+        let (_d, db) = fresh();
+        let before = counts(&db);
+        let v = long_value(2);
+        let err = with_write_txn(&db, "t", "dup", |conn, c| {
+            let (ids, cr, re) = resolve_axes(conn, &mut AxisCache::new(), &v.axes)?;
+            let w = LongWrite {
+                key: KEY,
+                value: Cow::Borrowed(&v),
+                axis_ids: ids,
+                axes_created: cr,
+                axes_reused: re,
+                parameter_type_id: None,
+                retained: true,
+                entity_minted: false,
+            };
+            write_longs(conn, c, &[w.clone(), w]).map(|_| ())
+        })
+        .expect_err("a duplicate key must be rejected");
+        assert!(
+            matches!(&err, DbError::Internal(m) if m.contains("duplicate key")),
+            "got {err:?}"
+        );
+        assert_eq!(counts(&db), before);
+    }
+
     #[test]
     fn delete_batch_with_a_duplicate_key_is_an_internal_error() {
         let (_d, db) = fresh();
@@ -2316,9 +2901,9 @@ mod tests {
         let (_d, db) = fresh();
         assert_rejected(&db, "UNIQUE constraint violation", |conn, c| {
             let ax = axis_id(conn, 3);
-            let cols = LongColumns::build(&rows(3), &[int_axis(3)], &HashMap::new());
-            insert_long_columns(conn, &consts(c, &[ax]), &cols)?;
-            insert_long_columns(conn, &consts(c, &[ax]), &cols)
+            let (keys, cols) = long_round(&[ax], 3);
+            insert_long_round(conn, c, &keys, &cols)?;
+            insert_long_round(conn, c, &keys, &cols)
         });
     }
 
@@ -2326,8 +2911,8 @@ mod tests {
     fn bad_axis_on_long_violates_foreign_key() {
         let (_d, db) = fresh();
         assert_rejected(&db, "foreign key", |conn, c| {
-            let cols = LongColumns::build(&rows(2), &[int_axis(2)], &HashMap::new());
-            insert_long_columns(conn, &consts(c, &[999_999]), &cols)
+            let (keys, cols) = long_round(&[999_999], 2);
+            insert_long_round(conn, c, &keys, &cols)
         });
     }
 

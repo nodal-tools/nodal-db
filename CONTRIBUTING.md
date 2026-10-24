@@ -82,7 +82,7 @@ arm to have no more history rows and no audit finding the old arm lacks.
 An as-of row may be a content-less stub in one arm only (the arms version
 different spans): an old-arm stub matches any content, a new-arm stub
 only when the old arm shows at most one distinct content across that
-stub's whole span. See `check.py`.
+stub's whole span and a stub somewhere in it. See `check.py`.
 
 ## PR checklist
 To be defined with the first release process.

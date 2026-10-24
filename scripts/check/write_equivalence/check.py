@@ -46,10 +46,13 @@ cells across a cell diff, so a later stub covers a longer span in NEW
 and a shorter one in OLD. An OLD stub matches any NEW content. A NEW
 stub (printed with its span's start, `STUB#<commit>`) matches only when
 OLD shows at most one distinct content across every boundary where NEW
-shows that stubbed span: a NEW stub over OLD content that changed would
-mean NEW lost a version. The current state must match exactly; NEW must
-also have no more history rows than OLD and no audit finding OLD lacks
-(an audit view only NEW has must be empty).
+shows that stubbed span, and a stub at one of them at least: a NEW stub
+over OLD content that changed would mean NEW lost a version, and one
+over OLD content retained across the whole span would mean NEW lost
+content (NEW stubs a cell only where OLD stubs it too, so OLD's last
+version inside the span is a stub). The current state must match
+exactly; NEW must also have no more history rows than OLD and no audit
+finding OLD lacks (an audit view only NEW has must be empty).
 """
 
 import argparse
@@ -206,16 +209,25 @@ def compare_logical(old, new):
                 break
             sa, sb = pa.startswith("STUB"), pb.startswith("STUB")
             if sb:
-                payloads = spans.setdefault((ib, pb), set())
-                if not sa:
+                payloads, olds = spans.setdefault((ib, pb), (set(), []))
+                if sa:
+                    olds.append(pa)
+                else:
                     payloads.add(pa)
             elif not sa and pa != pb:
                 problems.append(f"{h}: old {a[:200]!r} new {b[:200]!r}")
                 break
-    for (ident, stub), payloads in spans.items():
+    for (ident, stub), (payloads, olds) in spans.items():
         if len(payloads) > 1:
             problems.append(
                 f"new stub {stub} of {ident[:120]!r} spans {len(payloads)} different old values"
+            )
+        if not olds:
+            # NEW stubs a row only where OLD closes the same cell with a
+            # stub too, so OLD's last version in the span is a stub: a NEW
+            # stub over OLD content retained throughout would be lost content.
+            problems.append(
+                f"new stub {stub} of {ident[:120]!r}: old retained the content across the whole span"
             )
     hist = {}
     for arm, s in (("old", so), ("new", sn)):

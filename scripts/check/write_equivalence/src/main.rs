@@ -6,7 +6,8 @@
 //! structural creates, value deletes with misses and duplicates, alternative
 //! erasure, and direct `history::write_value` / `delete_value` commits),
 //! then prints every commit's report or error, every row of every base
-//! table, the sequence counters and the row count of every `audit_*` view.
+//! table, the sequence counters and the row count of every `audit_*` view
+//! that has findings.
 //! Two cores whose write paths are meant to be equivalent print the same
 //! text.
 //!
@@ -1167,9 +1168,13 @@ const LOGICAL: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The rows of one logical query as `identity\tpayload` lines (payload
-/// `STUB` for a row whose content was not retained). `None` when the query
-/// fails (an as-of read behind an erasure marker).
-fn logical_rows(conn: &Connection, sql: &str, n_id: usize) -> Option<Vec<String>> {
+/// `STUB` for a row whose content was not retained). With `span`, the
+/// query's second-to-last column is the row's `valid_from_commit` and a
+/// stub prints as `STUB#<valid_from_commit>`: the commit is arm-local, but
+/// it tells one stubbed span from the next, which `check.py --logical`
+/// needs to compare a stub with the other arm's content across its span.
+/// `None` when the query fails (an as-of read behind an erasure marker).
+fn logical_rows(conn: &Connection, sql: &str, n_id: usize, span: bool) -> Option<Vec<String>> {
     let mut stmt = conn.prepare(sql).ok()?;
     let mut rows = stmt.query([]).ok()?;
     let n = rows.as_ref().unwrap().column_count();
@@ -1183,11 +1188,13 @@ fn logical_rows(conn: &Connection, sql: &str, n_id: usize) -> Option<Vec<String>
         let cells: Vec<String> = (0..n)
             .map(|i| render(&row.get::<_, Value>(i).unwrap()))
             .collect();
-        // The last column is content_retained.
-        let payload = if cells[n - 1] == "false" {
-            "STUB".to_string()
-        } else {
-            cells[n_id..n - 1].join("|")
+        // The last column is content_retained (after valid_from_commit
+        // with `span`).
+        let end = if span { n - 2 } else { n - 1 };
+        let payload = match (cells[n - 1].as_str(), span) {
+            ("false", true) => format!("STUB#{}", cells[n - 2]),
+            ("false", false) => "STUB".to_string(),
+            _ => cells[n_id..end].join("|"),
         };
         out.push(format!("{}\t{payload}", cells[..n_id].join("|")));
     }
@@ -1216,7 +1223,7 @@ fn logical_state(db: &Path, mode: Mode, tag: &str, log: &mut String) {
             "SELECT '{t}', {id}, {payload}, {retained} FROM {table} WHERE {current} ORDER BY ALL"
         );
         let n_id = 1 + id.split(',').count();
-        for line in logical_rows(&conn, &sql, n_id).expect("current state") {
+        for line in logical_rows(&conn, &sql, n_id, false).expect("current state") {
             writeln!(log, "{line}").unwrap();
         }
     }
@@ -1232,10 +1239,11 @@ fn logical_end(db: &Path, boundaries: &[i64], log: &mut String) {
         writeln!(log, "## asof {k}").unwrap();
         for (t, id, payload, table) in LOGICAL {
             let sql = format!(
-                "SELECT '{t}', {id}, {payload}, content_retained FROM {table}_asof({c}) ORDER BY ALL"
+                "SELECT '{t}', {id}, {payload}, valid_from_commit, content_retained \
+                 FROM {table}_asof({c}) ORDER BY ALL"
             );
             let n_id = 1 + id.split(',').count();
-            match logical_rows(&conn, &sql, n_id) {
+            match logical_rows(&conn, &sql, n_id, true) {
                 Some(lines) => {
                     for line in lines {
                         writeln!(log, "{line}").unwrap();
@@ -1278,7 +1286,7 @@ fn logical_end(db: &Path, boundaries: &[i64], log: &mut String) {
 }
 
 /// Every row of every base table (sorted), the sequence counters and the
-/// row count of every `audit_*` view, rendered in Rust (never through
+/// row count of every `audit_*` view with findings, rendered in Rust (never through
 /// DuckDB's `::VARCHAR`, whose float formatting is engine dependent).
 fn dump(db: &Path, out: &mut String) {
     let conn = Connection::open(db).unwrap();
@@ -1323,8 +1331,16 @@ fn dump(db: &Path, out: &mut String) {
         "sequences",
         "SELECT sequence_name, last_value FROM duckdb_sequences() ORDER BY sequence_name",
     );
+    // Only the audits with findings: a core that adds an audit view (which
+    // is empty on correct data) still prints the same text.
+    drop(q);
     for a in &audits {
-        q(a, &format!("SELECT count(*) FROM \"{a}\""));
+        let n: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM \"{a}\""), [], |r| r.get(0))
+            .unwrap();
+        if n != 0 {
+            writeln!(out, "## {a}\n{n}").unwrap();
+        }
     }
 }
 

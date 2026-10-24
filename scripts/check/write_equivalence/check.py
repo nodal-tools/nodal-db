@@ -4,9 +4,9 @@ Builds the workload in this directory (src/main.rs) against the core of
 each revision, runs the same seeded random API workload with both, and
 diffs the outputs: every commit's report or error, every row of every
 base table (without the commit timestamps and the db_identity row), the
-sequence counters and the audit view counts. Use it to show that a
-write-path change that is meant to be invisible (a refactor, a
-performance change) writes the same data as before.
+sequence counters and the counts of the audit views with findings. Use
+it to show that a write-path change that is meant to be invisible (a
+refactor, a performance change) writes the same data as before.
 
 usage:
     python3 scripts/check/write_equivalence/check.py OLD [NEW]
@@ -40,10 +40,16 @@ match line for line, except that an as-of row may be a content-less
 stub in one arm and carry content in the other: the arms version
 different spans. OLD re-versions an identical write (with
 --force-replace it stubs the identical old version; without, it keeps
-that version's content), NEW keeps one row across it, so a later stub
-covers a longer span in NEW and a shorter one in OLD. The current
-state must match exactly; NEW must also have no more history rows than
-OLD and no audit finding OLD lacks.
+that version's content) and rewrites a whole long value for one changed
+cell, NEW keeps one row across an identical write and the unchanged
+cells across a cell diff, so a later stub covers a longer span in NEW
+and a shorter one in OLD. An OLD stub matches any NEW content. A NEW
+stub (printed with its span's start, `STUB#<commit>`) matches only when
+OLD shows at most one distinct content across every boundary where NEW
+shows that stubbed span: a NEW stub over OLD content that changed would
+mean NEW lost a version. The current state must match exactly; NEW must
+also have no more history rows than OLD and no audit finding OLD lacks
+(an audit view only NEW has must be empty).
 """
 
 import argparse
@@ -165,29 +171,28 @@ def compare_logical(old, new):
     problems = []
     so, sn = sections(old), sections(new)
 
-    def shape(h):
-        # The history and audit headers carry counts compared by rule below.
-        if h.startswith("## history_rows ") or h.startswith("## audit "):
-            return h.rsplit(" ", 1)[0]
-        return h
+    def counted(h):
+        # The history and audit blocks carry counts compared by rule below
+        # (and an audit view may exist in one arm only).
+        return h.startswith("## history_rows ") or h.startswith("## audit ")
 
-    ho = [shape(h) for h, _ in so]
-    hn = [shape(h) for h, _ in sn]
+    ho = [h for h, _ in so if not counted(h)]
+    hn = [h for h, _ in sn if not counted(h)]
     if ho != hn:
         first = next((i for i, (a, b) in enumerate(zip(ho, hn)) if a != b), min(len(ho), len(hn)))
         problems.append(f"headers differ at block {first}: old {ho[first:first + 1]} new {hn[first:first + 1]}")
         return problems
-    for (h, bo), (_, bn) in zip(so, sn):
-        if h.startswith("## history_rows "):
-            continue
-        if h.startswith("## audit "):
-            continue
+    bo_all = [(h, b) for h, b in so if not counted(h)]
+    bn_all = [(h, b) for h, b in sn if not counted(h)]
+    # Per NEW stubbed span (identity, STUB#<valid_from>): the OLD payloads
+    # at the boundaries where NEW shows that stub (module docs).
+    spans = {}
+    for (h, bo), (_, bn) in zip(bo_all, bn_all):
         if not h.startswith("## asof "):
             if bo != bn:
                 problems.append(f"{h}: bodies differ")
             continue
-        # As of a call boundary: rows sorted by identity; a stub in either
-        # arm matches any payload (module docs).
+        # As of a call boundary: rows sorted by identity.
         ro = sorted(bo, key=lambda line: line.split("\t")[0])
         rn = sorted(bn, key=lambda line: line.split("\t")[0])
         if len(ro) != len(rn):
@@ -196,9 +201,22 @@ def compare_logical(old, new):
         for a, b in zip(ro, rn):
             ia, pa = a.split("\t", 1)
             ib, pb = b.split("\t", 1)
-            if ia != ib or (pa != pb and "STUB" not in (pa, pb)):
+            if ia != ib:
                 problems.append(f"{h}: old {a[:200]!r} new {b[:200]!r}")
                 break
+            sa, sb = pa.startswith("STUB"), pb.startswith("STUB")
+            if sb:
+                payloads = spans.setdefault((ib, pb), set())
+                if not sa:
+                    payloads.add(pa)
+            elif not sa and pa != pb:
+                problems.append(f"{h}: old {a[:200]!r} new {b[:200]!r}")
+                break
+    for (ident, stub), payloads in spans.items():
+        if len(payloads) > 1:
+            problems.append(
+                f"new stub {stub} of {ident[:120]!r} spans {len(payloads)} different old values"
+            )
     hist = {}
     for arm, s in (("old", so), ("new", sn)):
         for h, _ in s:

@@ -57,11 +57,16 @@
 //! (min and max kept, interior changed: the payload is fetched and
 //! compared before the write — the worst case).
 //!
+//! Large-long-value modes (skip_unchanged_writes_PLAN P2): see
+//! `longbig.rs` (`build_longbig`, `api_longbig_unchanged`, `_1cell`,
+//! `_10pct`, `_changed`, on a copy of `NODAL_AB_LONGBIG`).
+//!
 //! Save-path modes (save_path_open_reduction plan §6.2): see `save_path.rs`
 //! (`editor_save`, `editor_reload`, `editor_session_100`,
 //! `txn_1_scalar_replace`, `growth_session`, `build_m1k`). The new arm is
 //! built with `--features save_api`.
 
+mod longbig;
 mod save_path;
 
 use std::path::Path;
@@ -436,6 +441,10 @@ fn main() {
         build_big(Path::new(&args[2]));
         return;
     }
+    if mode == "build_longbig" {
+        longbig::build(Path::new(&args[2]));
+        return;
+    }
     if mode == "build_m1k" {
         save_path::build_m1k(Path::new(&args[2]));
         return;
@@ -443,6 +452,10 @@ fn main() {
     let dir = tempfile::tempdir().unwrap();
     if mode == "growth_session" {
         save_path::growth_session(dir.path());
+        return;
+    }
+    if let Some(ms) = longbig::run(mode, dir.path()) {
+        println!("{ms:.6}");
         return;
     }
     if let Some(ms) = save_path::run(mode, dir.path()) {

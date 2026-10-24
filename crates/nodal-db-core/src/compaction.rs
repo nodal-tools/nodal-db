@@ -315,7 +315,10 @@ pub fn compact_if_needed(db_path: &Path, growth_factor: f64) -> Result<Compactio
 /// concurrent commits, and the no-op path stays open-free (two `stat`s and a
 /// sidecar read). `None` reads it with [`crate::api::head_commit`]: **one RO
 /// open**, made only when the byte gate did not fire and the backstop is on
-/// (fine for the CLI and the skin, not for a per-save path).
+/// (fine for the CLI and the skin, not for a per-save path). `Some(0)` (the
+/// `commit_id` of a call that changed nothing and made no commit) is read
+/// as `None`; a caller can skip the gate after such a call anyway, since
+/// it grew nothing.
 ///
 /// Every repack (from either gate, an unconditional [`compact`], or an
 /// [`crate::extract::extract`]) records both the size and the head it copied
@@ -345,9 +348,13 @@ pub fn compact_if_due(
     let Some(n) = policy.max_commits.threshold(current) else {
         return Ok(no_op_report(current));
     };
+    // A `head` of 0 or less is not a head: a `commit_changes` call that
+    // changed nothing reports `commit_id == 0` (skip_unchanged_writes_PLAN
+    // D1), and taking it at face value would read as `head < baseline`
+    // ("another file") and force a full repack. Read the real head instead.
     let head = match head {
-        Some(h) => h,
-        None => crate::api::head_commit(db_path)?,
+        Some(h) if h > 0 => h,
+        _ => crate::api::head_commit(db_path)?,
     };
     match baseline.commit {
         // Old-format sidecar: adopt, never compact on an upgrade.

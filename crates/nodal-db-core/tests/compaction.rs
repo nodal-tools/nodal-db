@@ -920,6 +920,20 @@ fn commit_gate_fires_at_exactly_n() {
     assert!(!r.swapped);
 }
 
+/// A no-op save reports `commit_id == 0` (skip_unchanged_writes_PLAN D1). A
+/// caller passing that report's id as the head must not read as "head below
+/// the baseline" (another file), which would force a repack: 0 means "read
+/// the head".
+#[test]
+fn a_zero_head_is_read_not_taken_as_another_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    write_scalar(&db, "Widget", "size", "Base", "w1", 1.0);
+    let r = compact_if_due(&db, commits_only(3), Some(0)).unwrap();
+    assert!(!r.swapped, "a zero head must not force a repack");
+    assert_eq!(r.trigger, None);
+}
+
 /// Plan test 16: The byte gate still fires through `compact_if_due` (`Growth`), and a
 /// missing sidecar compacts (`NoBaseline`).
 #[test]

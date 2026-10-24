@@ -428,6 +428,11 @@ def main():
     check("storage format: built file is native DuckDB 2.0 (v2.0.0+)",
           tag == "v2.0.0+", str(tag))
 
+    # key order is a size decision (see the one_current_long order check)
+    order = unique_index_order(con, "one_current_def_long")
+    check("index key order: one_current_def_long is (c4, c3, c2, cs, cp, c1)",
+          order == "[c4, c3, c2, cs, cp, c1]", str(order))
+
     # ---- plain (non-unique) indexes: access paths, not integrity. DuckDB 2.0
     # scans through an index only for a lone filter on a single-key index
     # (name_index_and_unused_indexes_PLAN.md §1), so every plain index must be

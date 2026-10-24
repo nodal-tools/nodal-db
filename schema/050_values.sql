@@ -225,7 +225,9 @@ CREATE TABLE definition_value_long (
   c3 INTEGER GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN i3_pos END) VIRTUAL,
   c4 INTEGER GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN i4_pos END) VIRTUAL
 );
-CREATE UNIQUE INDEX one_current_def_long ON definition_value_long (cp, cs, c1, c2, c3, c4);
+-- Column order as one_current_long (a size decision): the columns that are
+-- constant within a value lead, c1 trails.
+CREATE UNIQUE INDEX one_current_def_long ON definition_value_long (c4, c3, c2, cs, cp, c1);
 
 CREATE TABLE definition_value_array (
   parameter_definition_id  BIGINT NOT NULL,

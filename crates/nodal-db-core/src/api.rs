@@ -30,7 +30,7 @@
 //! cross-process by DuckDB's file lock. Connections stay per-operation
 //! (CLAUDE.md invariant 1) — never shared, never long-lived.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use duckdb::arrow::array::{Array, StringArray, UInt32Array};
@@ -288,6 +288,12 @@ pub fn commit_changes(
         // so a conflict retry rebuilds it from scratch.
         let mut scalars: Vec<ScalarWrite> = Vec::new();
         let mut entities = EntityCache::new();
+        // The resolved (parameter definition, alternative) of every segment
+        // so far: the up-front duplicate-target check folds names in Rust,
+        // which can disagree with DuckDB's `lower()` (final sigma, dotted
+        // capital I), so two targets it keeps apart may resolve to one key
+        // set. The deferred scalar write relies on distinct targets.
+        let mut targets: HashSet<(i64, i64)> = HashSet::new();
         // Structural changes run FIRST (§4.1): a value write / rank / activation
         // later in this same commit may target a referent an earlier structural
         // item just created, and items apply sequentially against the one open
@@ -305,6 +311,7 @@ pub fn commit_changes(
                 &mut report,
                 &mut scalars,
                 &mut entities,
+                &mut targets,
             )
             .map_err(|e| {
                 // Name the failing segment (spec §9.1) — but never rewrap a raw
@@ -831,6 +838,7 @@ fn write_prepared(
     report: &mut WriteReport,
     scalars: &mut Vec<ScalarWrite>,
     entities: &mut EntityCache,
+    targets: &mut HashSet<(i64, i64)>,
 ) -> Result<(), DbError> {
     report.warnings.extend(p.tz_warnings.iter().cloned());
 
@@ -846,6 +854,19 @@ fn write_prepared(
     )?;
     let retain_content = read_retain_content(conn, pd_id)?;
     let alt_id = resolve_alternative(conn, commit_id, &p.alternative, &mut report.warnings)?;
+    // Two segments that resolve to one (parameter, alternative) would write
+    // the same value keys twice in one commit. The up-front check compares a
+    // Rust fold; this one compares the ids DuckDB resolved, so a spelling
+    // pair the two folds disagree on cannot reach the writers (with the
+    // deferred scalar write, a minted entity skips its probes and would
+    // otherwise end up live in two tiers).
+    if !targets.insert((pd_id, alt_id)) {
+        return Err(DbError::Api(format!(
+            "duplicate target {}:{} (alternative {:?}): resolves to the same parameter \
+             and alternative as an earlier segment (name resolution is case-insensitive)",
+            p.class, p.parameter, p.alternative
+        )));
+    }
 
     // Fold the definition's retain_content into retain_override unless the
     // caller already overrode it (VMP Part 5 primary retention lever): else a

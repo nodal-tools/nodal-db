@@ -887,3 +887,95 @@ fn entities_resolved_by_earlier_segments_of_a_commit_are_reused() {
     );
     assert_audits_clean(&db);
 }
+
+/// Two alternative spellings that Rust's `to_lowercase` keeps apart (final
+/// sigma: `"ΑΣ"` -> `"ας"`) but DuckDB's `lower()` folds together
+/// (`"ασ"`), so the up-front duplicate-target check passes while both
+/// segments resolve to one (parameter, alternative). Segment 1 writes a
+/// scalar for a NEW entity (minted, so the deferred write skips its probes),
+/// segment 2 an array to the same key. Without the resolved-id target check
+/// the commit landed with the key live in two tiers; it must be rejected as
+/// an Api error, with nothing written.
+#[test]
+fn segments_resolving_to_one_target_are_rejected() {
+    use nodal_db_core::template::ir::{DimSpec, TypeDecl};
+    use nodal_db_core::types::StructuralChange;
+    let (_d, db) = fresh_db();
+    commit_changes(
+        &db,
+        vec![seg("seed", "Base", scalar_batch("s", 1.0))],
+        vec![],
+        vec![],
+        vec![],
+        "t",
+        "seed",
+        WriteOptions::default(),
+    )
+    .expect("seed");
+    let mixed = StructuralChange::CreateParameter {
+        class: "node".into(),
+        name: "mixed".into(),
+        types: vec![
+            TypeDecl {
+                kind: "float".into(),
+                dims: None,
+            },
+            TypeDecl {
+                kind: "indexed".into(),
+                dims: Some(vec![DimSpec {
+                    name: "t".into(),
+                    kind: "integer".into(),
+                }]),
+            },
+        ],
+        value_list: None,
+        description: None,
+    };
+    let indexed = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("t", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["z", "z"])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![0, 1])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let before = (
+        q_i64(&db, "SELECT count(*) FROM \"commit\""),
+        q_i64(&db, "SELECT count(*) FROM value_scalar"),
+    );
+    let err = commit_changes(
+        &db,
+        vec![
+            seg("mixed", "ΑΣ", scalar_batch("z", 1.0)),
+            seg("mixed", "ασ", indexed),
+        ],
+        vec![mixed],
+        vec![],
+        vec![],
+        "t",
+        "m",
+        WriteOptions::default(),
+    )
+    .expect_err("one target written twice in a commit");
+    assert!(matches!(err, DbError::Api(_)), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "segment 2 (node:mixed): duplicate target node:mixed (alternative \"ασ\"): \
+         resolves to the same parameter and alternative as an earlier segment \
+         (name resolution is case-insensitive)"
+    );
+    assert_eq!(
+        (
+            q_i64(&db, "SELECT count(*) FROM \"commit\""),
+            q_i64(&db, "SELECT count(*) FROM value_scalar"),
+        ),
+        before
+    );
+    assert_eq!(q_i64(&db, "SELECT count(*) FROM value_array"), 0);
+    assert_audits_clean(&db);
+}

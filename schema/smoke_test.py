@@ -901,10 +901,20 @@ def main():
                  " FROM value_timeline WHERE tier = 'long' AND entity_id = ? ORDER BY version", gas)
     n_coh = one("SELECT count(*) FROM audit_long_value_coherence")[0]
     n_til = one("SELECT count(*) FROM audit_history_tiling")[0]
+    # A history horizon (an extract's marker at its commit E) clips the long
+    # leg: no span starts before E, the cells valid there make one span.
+    e = new_commit(con, "horizon")
+    con.execute("INSERT INTO erasure_marker (kind, horizon_commit, at_commit, rows_removed)"
+                " VALUES ('horizon', ?, ?, 0)", [c3, e])
+    tl_h = allrows("SELECT version, valid_from_commit, valid_to_commit, content_retained"
+                   " FROM value_timeline WHERE tier = 'long' AND entity_id = ? ORDER BY version",
+                   gas)
     con.execute("ROLLBACK")
     check("value_timeline: a one-cell diff of a long value is one new value-level span",
           tl == [(1, c2, c3, True), (2, c3, None, True)] and n_coh == 0 and n_til == 0,
           f"{tl} coherence={n_coh} tiling={n_til}")
+    check("value_timeline: a history horizon clips the long spans at its commit",
+          tl_h == [(1, e, None, True)], str(tl_h))
 
     # ---- array_id: the physical row handle on value_array -------------------
     cons = allrows("SELECT constraint_type, constraint_column_names FROM duckdb_constraints()"

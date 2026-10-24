@@ -36,7 +36,7 @@ full:
     # release run checks the engine as shipped.
     cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan
 
-# DuckDB schema smoke suite alone (233 checks).
+# DuckDB schema smoke suite alone (234 checks).
 smoke:
     {{py}} schema/smoke_test.py
 

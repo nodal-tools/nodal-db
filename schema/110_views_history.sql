@@ -286,8 +286,17 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 -- any cell valid in the span is a stub. Computed as an event sweep
 -- (+1 per cell at valid_from, -1 at valid_to, running sums over the
 -- distinct boundaries), so it is O(rows), not rows x spans.
+-- Clipped at a history horizon: a history-free extract carries only the
+-- cells current at its horizon, so the boundaries before its extract
+-- commit E (the newest kind='horizon' marker's at_commit) are not the
+-- value's real change points. Every boundary before E is moved to E, so
+-- no long span starts before E (the cells then valid sum into one span
+-- from E). The scalar and array legs carry their versions verbatim.
 CREATE VIEW value_timeline AS
-WITH long_events AS (
+WITH long_horizon AS (
+  SELECT max(at_commit) AS e FROM erasure_marker WHERE kind = 'horizon'
+),
+long_events AS (
   SELECT entity_id, parameter_definition_id, alternative_id,
          valid_from_commit AS c, count(*) AS d_live,
          count(*) FILTER (WHERE NOT content_retained) AS d_stub
@@ -302,10 +311,11 @@ WITH long_events AS (
   GROUP BY entity_id, parameter_definition_id, alternative_id, valid_to_commit
 ),
 long_bounds AS (
-  SELECT entity_id, parameter_definition_id, alternative_id, c,
+  SELECT entity_id, parameter_definition_id, alternative_id,
+         greatest(c, coalesce(h.e, c)) AS c,
          sum(d_live) AS d_live, sum(d_stub) AS d_stub
-  FROM long_events
-  GROUP BY entity_id, parameter_definition_id, alternative_id, c
+  FROM long_events CROSS JOIN long_horizon h
+  GROUP BY entity_id, parameter_definition_id, alternative_id, greatest(c, coalesce(h.e, c))
 ),
 long_spans AS (
   SELECT entity_id, parameter_definition_id, alternative_id,

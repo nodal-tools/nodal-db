@@ -87,7 +87,7 @@ Design points:
 
 The [schema page](../schema.md) shows the generated table diagram.
 
-The schema is verified by `schema/smoke_test.py` (233 checks), which
+The schema is verified by `schema/smoke_test.py` (234 checks), which
 includes hostile-data regressions: it plants corruptions and asserts
 that the right constraint or audit fires. Run it with the project-local
 `.venv/bin/python`; its DuckDB version must match the engine bundled in

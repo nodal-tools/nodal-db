@@ -348,6 +348,15 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
         "Base",
         long_batch("n1", &[0, 3, 7], &[4, 5, 6]),
     );
+    // ...then one of its cells changes: a cell diff, so its current cells
+    // carry two valid_from commits.
+    write(
+        &db,
+        "Node",
+        "ragged",
+        "Base",
+        long_batch("n1", &[0, 3, 7], &[4, 9, 6]),
+    );
     // A definition-value supersede (close-out + successor).
     let conn = Connection::open(&db).unwrap();
     conn.execute_batch(
@@ -546,11 +555,19 @@ fn t1_head_extract_reads_identically() {
     assert_eq!(fingerprint(&fx.db, md), fingerprint(&dest, md));
     // value_timeline: the scalar and array legs carry the surviving
     // versions verbatim. The long leg is value-level change spans derived
-    // from the cells (skip_unchanged_writes_PLAN §4.3): a value whose
-    // current cells were written by different commits (a cell diff) has
-    // one span per such commit in the extract, cut from the carried cells
-    // alone, so its span numbering and start are not the source's; the
-    // current span per key and its retention are.
+    // from the cells (skip_unchanged_writes_PLAN §4.3), clipped at the
+    // horizon: the extract carries only the cells current at H, whose
+    // valid_from commits (several, for a cell-diffed value) are not the
+    // value's change points, so every long value is exactly one open span
+    // from the extract commit E, with the source's current retention.
+    let e = report.extract_commit;
+    assert!(
+        scalar(
+            &fx.db,
+            "SELECT count(*) FROM (SELECT entity_id, parameter_definition_id, alternative_id              FROM value_long WHERE valid_to_commit IS NULL GROUP BY ALL              HAVING count(DISTINCT valid_from_commit) > 1)"
+        ) > 0,
+        "the fixture has a cell-diffed long value"
+    );
     for view in ["value_timeline", "history_untrusted_span"] {
         assert_eq!(
             fingerprint(
@@ -560,13 +577,19 @@ fn t1_head_extract_reads_identically() {
             fingerprint(&dest, &format!("SELECT * FROM {view} WHERE tier <> 'long'")),
             "{view}"
         );
-        let long_now = format!(
-            "SELECT entity_id, parameter_definition_id, alternative_id, content_retained \
-             FROM {view} WHERE tier = 'long' AND valid_to_commit IS NULL"
-        );
+        let long = "SELECT entity_id, parameter_definition_id, alternative_id, \
+                    version::BIGINT AS version, valid_from_commit::BIGINT AS f, \
+                    valid_to_commit::BIGINT AS t, content_retained";
         assert_eq!(
-            fingerprint(&fx.db, &long_now),
-            fingerprint(&dest, &long_now),
+            fingerprint(
+                &fx.db,
+                &format!(
+                    "SELECT entity_id, parameter_definition_id, alternative_id, \
+                     1::BIGINT AS version, {e}::BIGINT AS f, NULL::BIGINT AS t, content_retained \
+                     FROM {view} WHERE tier = 'long' AND valid_to_commit IS NULL"
+                )
+            ),
+            fingerprint(&dest, &format!("{long} FROM {view} WHERE tier = 'long'")),
             "{view} long"
         );
     }

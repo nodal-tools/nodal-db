@@ -160,8 +160,10 @@ returns the table as it was at commit `c`: `value_scalar_asof`,
 For a long-format value a version is a *change span*: a new span starts
 at every commit that changed any of its cells, a deletion leaves a gap,
 and `content_retained` is false when any cell valid in the span was kept
-only as a stub. `history_untrusted_span` lists the spans whose content
-was not retained.
+only as a stub. In an extract, long spans start no earlier than the
+extract commit: the carried cells cannot tell when the value last
+changed before the horizon. `history_untrusted_span` lists the spans
+whose content was not retained.
 
 **Why:** you can reproduce exactly what a model run saw, or compare the
 current data with any earlier state, using SQL.
@@ -271,7 +273,9 @@ commits before the extract commit fail loudly in the extract: the
 history behind them lives in the source. Reads at the extract commit or
 later are exact. `audit_history_tiling` accepts version numbers that
 start above 1 for values that existed at the horizon, and checks
-everything written afterwards as usual. The extract is an ordinary
+everything written afterwards as usual. In `value_timeline` the scalar
+and array versions keep their source commits, while each long value
+shows one span starting at the extract commit. The extract is an ordinary
 database: writes, erasure, compaction and further extracts all work on
 it.
 

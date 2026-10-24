@@ -18,7 +18,9 @@ All lasting work products (plans, findings, critiques, handoffs) go in
 ## DuckDB upgrades
 A DuckDB bump is a matched bump: the bundled engine (`duckdb` in the
 root `Cargo.toml`) and the Python pins (`dev-requirements.txt`,
-`docs-requirements.txt`) move together. After one:
+`docs-requirements.txt`) move together; when the bump changes the arrow
+version duckdb-rs re-exports, so do the `arrow` and `arrow-pyarrow` pins
+(and through them `pyo3`; see the comments in `Cargo.toml`). After one:
 - Run `just full`. Besides the slow tests and the benchmark gate, it
   runs the index-scan guards (`array_id_index_scan`,
   `entity_name_index_scan`) on a release-built engine. They check

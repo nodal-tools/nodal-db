@@ -17,6 +17,12 @@ Building the two arms (each in its own target directory, release):
     python3 scripts/bench/ab_write_path/ab.py /tmp/ab-old/release/ab_write_path \
         /tmp/ab-new/release/ab_write_path 21 long_insert array_insert ...
 
+The harness's default feature `lookup_const` needs a core that exports
+`api::ENTITY_NAME_LOOKUP_SQL` (2026-10-24 on). An old arm on an earlier
+core fails to compile with it, whatever the modes: build that arm with
+`--no-default-features` (plus any other feature it needs, e.g.
+`--features save_api`).
+
 Discard a mode whose 1-minute load average changes by more than 2x
 between its start and end. The core opens its own connections, so the
 DuckDB thread count is the engine default in both arms.

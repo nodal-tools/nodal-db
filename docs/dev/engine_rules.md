@@ -168,7 +168,9 @@ instance, so every other connection on it fails too. No data is
 damaged. DuckDB 1.5.5 is not affected; 2.0.0 and the 2.0.1 pre-releases
 up to 2026-10-21 are. DuckDB issue: pending upstream report.
 
-Turning the caching operators off avoids the bug. The setting does not
+Turning the caching operators off avoids the bug, at no measurable
+cost: the A/B perf gate passed every metric against the code without
+the setting (quick scale, 2026-10-26). The setting does not
 reach users who open the file with their own DuckDB connection; the
 [usage guide](../usage.md#duckdb-version) tells them to set it
 themselves. The setting is tagged `debug_` in DuckDB, so a release may

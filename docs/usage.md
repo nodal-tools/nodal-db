@@ -659,6 +659,40 @@ residue items: 0
 read it from the source by overriding `version_of`. The report lists
 everything that could not be imported.
 
+**The import creates a new file, all or nothing.** The importer builds
+the database in a temporary directory next to the target and moves it
+to the target path only when every write has succeeded. If the import
+fails, nothing is left at the target path and the temporary files are
+removed. If the target path already exists, the import refuses to
+start and leaves the existing file as it is.
+
+**Duplicate keys.** Spine stores a map as two parallel lists, so a map
+can repeat a key, for example `{"a": 1, "b": 2, "a": 3}`. A nodal-db
+value holds one value per index, so the importer keeps the **last**
+entry for a repeated key and imports the rest of the value normally.
+This is the entry a Python `dict` built from the map keeps. The same
+rule applies at every level of a nested map. A repeated key in an
+outer map keeps the last entry's whole sub-map; the earlier sub-maps
+are not merged into it. A time stamp repeated in a time series is
+treated the same way.
+
+Each repeated key is a problem in the source data, so the importer
+reports it as a warning: in `report.duplicate_keys`, in
+`report.summary()`, and through Python's `logging` (logger
+`nodal_spine_import`). The warning names the class, entity, parameter
+and alternative, the path of keys down to the map level, every
+conflicting entry with its position in that map, and which entry was
+kept:
+
+```text
+duplicate keys: 1 (last entry kept)
+  duplicate key: class 'hub', entity 'h1', parameter 'settings', alternative 'Base': key 'a' appears 2 times at the top level of the value (entry 0: 1.0; entry 2: 3.0); kept the last, entry 2. A map holds one value per key: fix the source so the key appears once.
+```
+
+The last entry is a choice, not necessarily what the author of the
+source meant. Fix the source so that each key appears once, then
+import again.
+
 ## For integrators
 
 Tools that read or write nodal-db databases must respect a few

@@ -670,8 +670,11 @@ start and leaves the existing file as it is.
 can repeat a key, for example `{"a": 1, "b": 2, "a": 3}`. A nodal-db
 value holds one value per index, so the importer keeps the **last**
 entry for a repeated key and imports the rest of the value normally.
-This is the entry a Python `dict` built from the map keeps. The same
-rule applies at every level of a nested map. A repeated key in an
+This is the entry a Python `dict` built from the map keeps. As in a
+`dict`, the key keeps the place where it first appears, which sets the
+label order: `{"b": 1, "a": 2, "b": 3}` imports as `b = 3`, `a = 2`,
+with `b` ordered before `a`. The same rule applies at every level of a
+nested map. A repeated key in an
 outer map keeps the last entry's whole sub-map; the earlier sub-maps
 are not merged into it. A time stamp repeated in a time series is
 treated the same way.

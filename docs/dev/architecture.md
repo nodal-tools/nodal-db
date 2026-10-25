@@ -287,7 +287,12 @@ outcome or channel commits until it is classified. A write and a delete
 of the same value in one call is refused up front, and so is a write
 of a value that an object delete in the same call would cascade over
 (the cascade closes only rows older than the commit, so it would keep
-the cells the write just inserted). Direct `history`
+the cells the write just inserted). A caller can opt out of both
+refusals with `WriteOptions::covered_writes = DeleteWins`: the deletes
+are then resolved inside the transaction before the first segment and
+every write they cover is dropped before it is resolved or buffered
+(reported as a `DroppedByDelete` warning, which the no-op check treats
+as a no-op), so the cascade never meets a row this commit wrote. Direct `history`
 callers in their own transaction still commit.
 
 Canonical encodings: axes and values serialize to a pinned byte layout

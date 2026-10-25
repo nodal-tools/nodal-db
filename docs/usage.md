@@ -296,6 +296,37 @@ of), its parameter, its alternative or its class. The core refuses
 such a call whatever the values and whatever the `cascade` option.
 Write the values and delete the objects in separate calls.
 
+A script that has to send such a batch as one call can make the delete
+win instead: pass `covered_writes="delete_wins"` to `commit_changes` in
+Python, or set `covered_writes: CoveredWrites::DeleteWins` in the
+`WriteOptions` in Rust. The core then drops every write that a delete in
+the call covers before anything is written (a dropped write creates no
+entity, parameter or alternative either), runs the deletes as usual and
+writes the rest. For the covered values the result is what the deletes
+alone would leave. Each dropped write is listed in the report as a
+`dropped_by_delete` warning, with the segment's index and the index of
+one delete that covers it (`by` names the list, `deletes` or
+`object_deletes`):
+
+```python
+report = db.commit_changes(
+    segments=[{"class": "node", "parameter": "demand",
+               "alternative": "Base", "batch": batch}],
+    object_deletes=[{"kind": "entity", "class": "node", "name": "north",
+                     "cascade": True}],
+    user="alice", covered_writes="delete_wins")
+report["warnings"]
+# [{'kind': 'dropped_by_delete', 'segment_index': 0, 'by': 'object_deletes',
+#   'key_index': 0, 'object_type': 'value', 'name': 'node:demand/Base/north',
+#   'id': 0}]
+```
+
+Names are compared the way the database resolves them, and an object
+delete covers everything its cascade would reach (an entity's
+containers, a class's entities and parameters), whatever its `cascade`
+option. A dropped write is not a change: if the deletes in the call find
+nothing to delete either, the call makes no commit.
+
 ### Build a scenario
 
 A scenario is an ordered list of alternatives; later entries take

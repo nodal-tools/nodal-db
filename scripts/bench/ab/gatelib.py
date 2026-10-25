@@ -168,6 +168,18 @@ def resolve_capabilities(caps, trees):
     return shared, features, lacking
 
 
+def lost_capability(metric, lacking):
+    """The first capability `metric` needs that the base has and the
+    candidate lacks, else None. In a release run (the candidate descends
+    from the base) that means the API was removed or the probe in
+    capabilities.toml went stale; silently skipping the metric would let
+    the release gate pass and advance BASELINE without it."""
+    for need in metric.needs:
+        if lacking.get(need) == ["cand"]:
+            return need
+    return None
+
+
 def skip_reason(metric, shared, lacking, arm_names=None):
     names = arm_names or {"base": "base", "cand": "candidate"}
     for need in metric.needs:
@@ -307,8 +319,8 @@ def take_pairs(metric, sampler, n, rng, load_fn):
             got[arm] = sampler(arm)
         compare_digests(metric, got["base"][1], got["cand"][1])
         b, c = got["base"][0], got["cand"][0]
-        if b <= 0:
-            raise HarnessError(f"non-positive base sample {b}")
+        if b <= 0 or c <= 0:
+            raise HarnessError(f"non-positive sample (base {b}, cand {c})")
         pairs.append({"b": b, "c": c, "ratio": c / b, "b_first": b_first, "load": load_fn()})
     return pairs
 
@@ -362,6 +374,8 @@ def measure_size(metric, sampler, rng, load_fn, samples=3):
         bs.append(got["base"][0])
         cs.append(got["cand"][0])
         digest = got["cand"][1]
+    if min(bs) <= 0:
+        raise HarnessError(f"non-positive base size {min(bs)}")
     ratio = max(cs) / min(bs)
     return {
         "n_pairs": samples,

@@ -255,6 +255,16 @@ class Capabilities(unittest.TestCase):
         shared, features, lacking = g.resolve_capabilities(self.caps, {"base": base, "cand": cand})
         self.assertNotIn("lookup_const", features)
         self.assertEqual(lacking["lookup_const"], ["cand"])
+        # A release run turns this into an ERROR (ab.py), never a silent skip.
+        self.assertEqual(g.lost_capability(metric("lk", needs=["lookup_const"]), lacking),
+                         "lookup_const")
+
+    def test_lost_capability_only_when_the_base_has_it(self):
+        self.assertIsNone(g.lost_capability(metric("lk", needs=["lookup_const"]),
+                                            {"lookup_const": ["base"]}))
+        self.assertIsNone(g.lost_capability(metric("lk", needs=["lookup_const"]),
+                                            {"lookup_const": ["base", "cand"]}))
+        self.assertIsNone(g.lost_capability(metric("w"), {"lookup_const": ["cand"]}))
 
     def test_both_have_it(self):
         src = {"crates/core/src/lib.rs": "pub const ENTITY_NAME_LOOKUP_SQL: &str = \"\";"}

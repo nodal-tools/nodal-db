@@ -46,6 +46,10 @@ class ParseSample(unittest.TestCase):
         with self.assertRaises(g.HarnessError):
             ab.parse_sample("base", M, proc(0, "12.5\n"))
 
+    def test_malformed_digest_is_harness_error(self):
+        with self.assertRaises(g.HarnessError):
+            ab.parse_sample("base", M, proc(0, "digest a=1 oops\n12.5\n"))
+
     def test_garbage_value_is_harness_error(self):
         with self.assertRaises(g.HarnessError):
             ab.parse_sample("base", M, proc(0, "digest a=1\nnot a number\n"))
@@ -80,6 +84,12 @@ class StartupRefusals(unittest.TestCase):
         code, text = self.run_main(["HEAD~1", "HEAD", "--allow", "nope=x"])
         self.assertEqual(code, g.EXIT_ERROR)
 
+    def test_an_unexpected_exception_is_an_error_not_a_fail(self):
+        with mock.patch.object(ab, "gate", side_effect=ZeroDivisionError("x")):
+            code, text = self.run_main(["HEAD~1", "HEAD"])
+        self.assertEqual(code, g.EXIT_ERROR)
+        self.assertIn("ZeroDivisionError", text)
+
     def test_list(self):
         code, text = self.run_main(["--list"])
         self.assertEqual(code, 0)
@@ -99,15 +109,17 @@ class Baseline(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def out(self, **kw):
-        o = {"cand": {"rev": "HEAD", "commit": "2" * 40}, "forced": False, "aa": False,
-             "injection": None}
+        o = {"base": {"rev": "1" * 40, "commit": "1" * 40},
+             "cand": {"rev": "HEAD", "commit": "2" * 40}, "forced": False, "aa": False,
+             "injection": None, "release": True, "scale": "full", "metrics_filter": None,
+             "gate_tool_clean": True, "results": []}
         o.update(kw)
         return o
 
     def advance(self, out, code):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            ab.advance_baseline(out, code, None)
+            ab.advance_baseline(out, code)
         return ab.read_baseline(), buf.getvalue()
 
     def test_read(self):
@@ -122,10 +134,21 @@ class Baseline(unittest.TestCase):
         for out, code in ((self.out(), 1), (self.out(), 2),
                           (self.out(cand={"rev": "WORKTREE", "commit": "3" * 40}), 0),
                           (self.out(forced=True), 0), (self.out(aa=True), 0),
-                          (self.out(injection={"metric": "x", "spec": "wrong"}), 0)):
+                          (self.out(injection={"metric": "x", "spec": "wrong"}), 0),
+                          (self.out(release=False), 0), (self.out(scale="quick"), 0),
+                          (self.out(metrics_filter="rd_point*"), 0),
+                          (self.out(base={"rev": "x", "commit": "4" * 40}), 0),
+                          (self.out(gate_tool_clean=False), 0)):
             rev, text = self.advance(out, code)
             self.assertEqual(rev, "1" * 40)
             self.assertIn("not advanced", text)
+
+    def test_an_allowed_regression_advances_and_is_listed_for_the_record(self):
+        res = [{"metric": "wr_x", "verdict": g.ALLOWED, "verdict_unallowed": g.FAIL,
+                "allowed_reason": "accepted: new index"}]
+        rev, text = self.advance(self.out(results=res), 0)
+        self.assertEqual(rev, "2" * 40)
+        self.assertIn("accepted: new index", text)
 
 
 if __name__ == "__main__":

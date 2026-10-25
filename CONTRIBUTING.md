@@ -118,9 +118,15 @@ criterion gate's fixture sizes instead of a tenth of them.
 --advance-baseline`: BASE is the commit in `scripts/bench/ab/BASELINE` (the
 last passing release run), CAND is HEAD (a clean tree; with uncommitted
 changes, the working tree, and nothing advances). When every metric
-passes, BASELINE moves to HEAD: commit it together with the run's block in
+passes (exit 0; an `--allow`ed metric counts, and its reason goes into the
+block), BASELINE moves to HEAD: commit it together with the run's block in
 `crates/nodal-db-core/benches/RESULTS.md` ("A/B gate runs"), so the chain
-of release-to-release ratios stays visible. Each pre-merge gate tolerates
+of release-to-release ratios stays visible. Only a complete run advances
+it: full scale, no `--metrics` subset, BASE = BASELINE, and no uncommitted
+change in the gate itself (`scripts/bench/ab/`, `scripts/lib/`). In a
+release run, a metric whose API the baseline has and HEAD lacks is an
+ERROR rather than SKIPPED (an API removal, or a stale probe in
+`capabilities.toml`). Each pre-merge gate tolerates
 a few percent; the release gate is what catches several of them adding up.
 
 **How a metric is judged.** Each metric (`scripts/bench/ab/metrics.toml`)

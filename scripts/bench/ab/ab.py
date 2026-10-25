@@ -13,7 +13,10 @@ BASE defaults to `git merge-base HEAD main` (give it explicitly on main
 itself), CAND to WORKTREE (the uncommitted working tree). `--release` (the
 release gate, `just full`): BASE = the commit in scripts/bench/ab/BASELINE,
 CAND = HEAD when the working tree is clean; `--advance-baseline` then moves
-BASELINE to CAND after an all-PASS, unforced run (a ratchet, plan D2). Both arms build
+BASELINE to CAND after an exit-0, unforced run of every metric at full
+scale against BASELINE itself, with the gate's own code committed (a
+ratchet, plan D2). In a release run, a metric whose capability the base
+has and the candidate lacks is an ERROR, not SKIPPED. Both arms build
 the harness in `harness/` of *this* checkout against their own core
 (scripts/lib/revbuild.py: one shared target dir under --work, the harness
 lock seeded from the revision's root Cargo.lock, binaries cached by tree,
@@ -250,7 +253,10 @@ def parse_sample(arm, metric, proc):
     digest = None
     for ln in lines:
         if ln.startswith("digest"):
-            digest = dict(kv.split("=", 1) for kv in ln.split()[1:])
+            kvs = [kv.split("=", 1) for kv in ln.split()[1:]]
+            if any(len(kv) != 2 for kv in kvs):
+                raise gatelib.HarnessError(f"{arm}: {metric.mode}: malformed digest line {ln!r}")
+            digest = dict(kvs)
     if digest is None:
         raise gatelib.HarnessError(f"{arm}: {metric.mode} printed no digest (no result check)")
     try:
@@ -389,13 +395,38 @@ def worktree_clean():
                         *revbuild.CORE_PATHS) == ""
 
 
-def advance_baseline(out, code, a):
-    """After a passing release run on a committed tree: BASELINE = CAND."""
+# The gate's own code and configuration (harness, metrics, thresholds, the
+# runner and revbuild): taken from the working tree for both arms, so they
+# do not decide CAND, but a BASELINE advance must not rest on uncommitted
+# thresholds or checks. BASELINE itself is excluded (the previous advance
+# may still be waiting for its commit).
+GATE_PATHS = (os.path.relpath(HERE, REPO), os.path.join("scripts", "lib"),
+              ":!" + os.path.relpath(os.path.join(HERE, "BASELINE"), REPO))
+
+
+def gate_tool_clean():
+    return revbuild.git(REPO, "status", "--porcelain", "--untracked-files=normal", "--",
+                        *GATE_PATHS) == ""
+
+
+def advance_baseline(out, code):
+    """After a passing, complete, full-scale release run of a committed
+    candidate against the current BASELINE: BASELINE = CAND."""
     why = None
+    baseline = read_baseline()
     if code != gatelib.EXIT_PASS:
         why = f"exit {code}"
+    elif not out.get("release") or out.get("scale") != "full":
+        why = "only a full-scale --release run advances it"
+    elif out.get("metrics_filter"):
+        why = f"a --metrics subset ({out['metrics_filter']})"
+    elif not out["base"]["commit"].startswith(baseline):
+        why = f"BASE {out['base']['commit'][:12]} is not the BASELINE commit {baseline[:12]}"
     elif out["cand"]["rev"] == "WORKTREE":
         why = "the candidate is an uncommitted working tree"
+    elif not out.get("gate_tool_clean", True):
+        why = "uncommitted changes in the gate's own code or metrics (" + ", ".join(
+            p for p in GATE_PATHS if not p.startswith(":!")) + ")"
     elif out["forced"] or out["aa"] or out["injection"]:
         why = "a forced, A/A or self-test run"
     if why:
@@ -404,7 +435,11 @@ def advance_baseline(out, code, a):
     with open(BASELINE, "w") as f:
         f.write(out["cand"]["commit"] + "\n")
     print(f"BASELINE advanced to {out['cand']['commit'][:12]}: commit it together with "
-          "the run's row in crates/nodal-db-core/benches/RESULTS.md (\"A/B gate runs\")")
+          "the run's block in crates/nodal-db-core/benches/RESULTS.md (\"A/B gate runs\")")
+    for r in out.get("results", []):
+        if r.get("allowed_reason"):
+            print(f"  record the accepted regression: {r['metric']} "
+                  f"({r.get('verdict_unallowed')}): {r['allowed_reason']}")
 
 
 def main(argv=None):
@@ -421,6 +456,12 @@ def main(argv=None):
         return gatelib.EXIT_ERROR
     except subprocess.CalledProcessError as e:
         print(f"error: {' '.join(map(str, e.cmd))} failed ({e.returncode})", file=sys.stderr)
+        return gatelib.EXIT_ERROR
+    except Exception:
+        # An uncaught exception would exit 1, which means FAIL; it is an
+        # error of the tool or the host (exit 3).
+        import traceback
+        traceback.print_exc()
         return gatelib.EXIT_ERROR
 
 
@@ -495,6 +536,14 @@ def gate(a):
 
     runnable, results = [], []
     for m in metrics:
+        lost = gatelib.lost_capability(m, lacking) if a.release else None
+        if lost:
+            results.append({"metric": m.id, "mode": m.mode, "class": m.cls,
+                            "threshold": m.threshold, "verdict": gatelib.ERROR,
+                            "label": gatelib.ERROR,
+                            "error": f"the base has {lost} and the candidate does not "
+                                     "(API removed, or its probe in capabilities.toml is stale)"})
+            continue
         why = gatelib.skip_reason(m, shared, lacking)
         if not why and scale not in m.scales:
             why = f"{scale}: runs at {'/'.join(m.scales)} scale only"
@@ -550,6 +599,9 @@ def gate(a):
         "cand": {"rev": cand, "commit": arms["cand"].commit, "tree": arms["cand"].tree,
                  "key": arms["cand"].key, "salt": arms["cand"].salt},
         "harness": hh,
+        "release": a.release,
+        "metrics_filter": a.metrics,
+        "gate_tool_clean": gate_tool_clean(),
         "scale": scale,
         "looks": list(plan.looks),
         "first_look_margin": plan.first_margin,
@@ -576,7 +628,7 @@ def gate(a):
           + (f"; INJECTED {inject[0]}={inject[1]}" if inject else ""))
     print(f"results: {paths[0]}")
     if a.advance_baseline:
-        advance_baseline(out, code, a)
+        advance_baseline(out, code)
     print(f"exit {code}")
     return code
 

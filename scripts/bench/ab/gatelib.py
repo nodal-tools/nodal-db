@@ -67,6 +67,11 @@ class Metric:
         self.digest_exclude = set(d.get("digest_exclude", []))
         self.layout_floor = d.get("layout_floor")
         self.scaled = bool(d.get("scaled", False))
+        # The scales the metric runs at (default both): a metric whose op is
+        # too short to measure at quick scale runs at full scale only.
+        self.scales = list(d.get("scales", ["quick", "full"]))
+        if not set(self.scales) <= {"quick", "full"} or not self.scales:
+            raise ConfigError(f"metric {mid}: scales must be a subset of quick, full")
         self.note = d.get("note", "")
 
     @property

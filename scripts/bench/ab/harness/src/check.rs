@@ -95,8 +95,8 @@ impl Sample {
     pub fn emit(mut self) {
         match injection().as_deref() {
             Some("wrongvalue") => {
-                if let Some(first) = self.digest.first_mut() {
-                    first.1.push_str("~injected");
+                if let Some(last) = self.digest.last_mut() {
+                    last.1.push_str("~injected");
                 } else {
                     self.digest.push(("injected".into(), "wrongvalue".into()));
                 }

@@ -11,6 +11,12 @@
 # Initial classes (D4 as amended by critique T1); recalibrated from the A/A
 # runs (specs/ab_ratio_gates_FINDINGS.md).
 
+# `layout_floor` (per metric): the largest |median - 1| of three salted
+# quick A/A runs on the Ryzen 5900XT host (2026-10-25, load 3.6-5.6,
+# governor powersave): the code-layout and fixture floor. A FAIL within it
+# of T is labelled "FAIL (<= layout floor)" for human judgement; it still
+# fails. Recalibrate with `just perf-gate HEAD HEAD --aa [--aa-salt K]`.
+
 [settings]
 # The pre-fixed sequential plan (gatelib.Plan; error rates: sim.py and
 # specs/ab_ratio_gates_FINDINGS.md): cumulative pairs per look. A metric
@@ -86,18 +92,21 @@ env = "NODAL_AB_CLI"
 # recorded per result (quick = a tenth of the criterion gate's sizes).
 
 [metric.rd_point_scalar]
+layout_floor = 0.025
 class = "hot"
 fixtures = ["synth"]
 scaled = true
 check = "every execution returns exactly 1 row; digest of value_kind, v_float"
 
 [metric.rd_point_long]
+layout_floor = 0.015
 class = "hot"
 fixtures = ["synth"]
 scaled = true
 check = "every execution returns exactly 1 row; digest of the cell"
 
 [metric.rd_point_array_dense]
+layout_floor = 0.015
 class = "hot"
 fixtures = ["synth"]
 scaled = true
@@ -105,24 +114,31 @@ check = "every execution returns exactly 1 row; digest of the 8 760-value payloa
 note = "read_parameter_dense filtered by entity and alternative (index scan)"
 
 [metric.rd_point_array_by_id]
+layout_floor = 0.015
 class = "hot"
 fixtures = ["synth"]
 scaled = true
 check = "every execution returns exactly 1 row; digest of the payload"
 
 [metric.rd_scalars_loader]
+layout_floor = 0.025
 class = "hot"
 fixtures = ["synth"]
 scaled = true
 check = "row count = the scalar entities (10^5 full); digest of the loader columns"
 
 [metric.rd_dense]
+layout_floor = 0.040
 class = "hot"
 fixtures = ["synth"]
 scaled = true
+# ~8 ms at quick scale, with the same two per-process speed modes as the
+# long scan: A/A [0.85, 1.03], [0.92, 1.07], [0.76, 1.04]. Full only.
+scales = ["full"]
 check = "row count = the array entities (1 000 full, ~70 MB); digest of the payloads"
 
 [metric.rd_model_load_long]
+layout_floor = 0.020
 class = "hot"
 fixtures = ["synth"]
 scaled = true
@@ -132,70 +148,88 @@ check = "row count = long entities x 8 760 (1.23 M full); digest of the logical 
 class = "hot"
 fixtures = ["synth"]
 scaled = true
+# At quick scale the scan takes ~2.5 ms and each process lands in one of two
+# speed modes (2.1-2.5 vs 3.8-4.5 ms: thread placement), so a pair's ratio
+# is 0.5-2.0 and no N decides it (A/A 1: [0.75, 1.25] at 21 pairs). The
+# model-load read covers the same rows at quick scale.
+scales = ["full"]
 check = "row count = long entities x 8 760 at ~17 % dead; digest of position, time, value"
 
 # ---------------------------------------------------------------- writes
 
 [metric.wr_scalar_100_new_100k]
+layout_floor = 0.035
 class = "io"
 fixtures = ["base100k"]
 check = "3 commits; the 300 new (entity, value) rows read back (count + digest)"
 note = "ms per value; 3 commits of 100 new scalar entities on the 10^5 file"
 
 [metric.wr_scalar_1_replace_100k]
+layout_floor = 0.030
 class = "io"
 fixtures = ["base100k"]
 check = "3 commits; the 3 replaced values read back (count + digest)"
 note = "the editor's single-value save on the 10^5 file, ms per commit"
 
 [metric.wr_20x1_scalars_100k]
+layout_floor = 0.040
 class = "io"
 fixtures = ["base100k"]
 check = "3 commits; q00..q19 of s000000 read back (20 rows + digest)"
 
 [metric.wr_long_1000x24_new]
+layout_floor = 0.020
 class = "io"
 check = "1 commit; read_parameter of the new value: 24 000 cells + digest"
 
 [metric.wr_long_10x8760_replace]
+layout_floor = 0.030
 class = "io"
 check = "1 commit (the timed replace); 87 600 current cells + digest"
 
 [metric.wr_array_1000x24_new]
+layout_floor = 0.045
 class = "io"
 check = "1 commit; read_parameter of the new arrays: 24 000 cells + digest"
 
 [metric.wr_array_1000x24_replace_big]
+layout_floor = 0.010
 class = "io"
 fixtures = ["big"]
 check = "1 commit; the 1 000 replaced arrays read back: 24 000 cells + digest"
 
 [metric.wr_delete_1000_scalar_big]
+layout_floor = 0.010
 class = "io"
 fixtures = ["big"]
 check = "1 commit; the 1 000 keys are gone; the 99 000 remaining rows + digest"
 
 [metric.wr_delete_1000_long_big]
+layout_floor = 0.025
 class = "io"
 fixtures = ["big"]
 check = "1 commit; the 1 000 keys are gone; the 216 000 remaining cells + digest"
 
 [metric.wr_delete_500_array_big]
+layout_floor = 0.025
 class = "io"
 fixtures = ["big"]
 check = "1 commit; the 500 keys are gone; the 36 000 remaining cells + digest"
 
 [metric.wr_1_delete_big]
+layout_floor = 0.030
 class = "io"
 fixtures = ["big"]
 check = "3 commits; the 3 keys are gone; the 99 997 remaining rows + digest"
 
 [metric.wr_editor_save]
+layout_floor = 0.020
 class = "io"
 check = "11 commits; the saved cell reads back with the last value; cls0/p00 digest"
 note = "gate arm semantics: RO head poll + commit (the save_api feature is never set)"
 
 [metric.wr_replace_scalar_cycle_ckpt]
+layout_floor = 0.015
 class = "io"
 fixtures = ["synth"]
 scaled = true
@@ -203,23 +237,27 @@ check = "3 commits; the entity reads back with the last cycle's value (count + d
 note = "write_parameter commit + CHECKPOINT, mean of 3 cycles on a fresh copy"
 
 [metric.wr_replace_array_cycle_ckpt]
+layout_floor = 0.025
 class = "io"
 fixtures = ["synth"]
 scaled = true
 check = "3 commits; the array reads back with the last cycle's content (8 760 cells + digest)"
 
 [metric.wr_replace_long_cycle_ckpt]
+layout_floor = 0.010
 class = "io"
 fixtures = ["synth"]
 scaled = true
 check = "3 commits; the long value reads back with the last cycle's content (8 760 cells + digest)"
 
 [metric.wr_unchanged_scalar_10k]
+layout_floor = 0.030
 class = "io"
 needs = ["skip_unchanged"]
 check = "no commit and no new history row; the 10 000 values read back + digest"
 
 [metric.wr_longbig_1cell]
+layout_floor = 0.005
 class = "io"
 fixtures = ["longbig"]
 check = "1 commit; current cell count unchanged; the changed cell reads back; exact value checksum"
@@ -227,17 +265,20 @@ check = "1 commit; current cell count unchanged; the changed cell reads back; ex
 # --------------------------------------------------- reads and lookups
 
 [metric.rd_editor_reload]
+layout_floor = 0.045
 class = "io"
 check = "5 reloads read identical content; 5 classes; digest of everything read"
 note = "includes the RO open: io class"
 
 [metric.lk_core_sql_100k]
+layout_floor = 0.025
 class = "hot"
 fixtures = ["base100k"]
 needs = ["lookup_const"]
 check = "200 lookups return ids; the ids map back to exactly the 200 names looked up"
 
 [metric.lk_ensure_entity_100k]
+layout_floor = 0.025
 class = "io"
 fixtures = ["base100k"]
 check = "no commit, entity count unchanged; the 20 ids map back to the 20 names"
@@ -247,6 +288,7 @@ note = "the public verb on existing entities: an RO open + lookups, io class"
 # ---------------------------------------------------------------- import
 
 [metric.imp_ipc_dense]
+layout_floor = 0.020
 class = "io"
 fixtures = ["ipc", "cli"]
 scaled = true
@@ -256,12 +298,14 @@ note = "the arm's own nodal-db import, wall incl. spawn; not the 87.6 M-value im
 # ----------------------------------------------------------- maintenance
 
 [metric.mt_compact_history_heavy]
+layout_floor = 0.020
 class = "io"
 fixtures = ["hheavy"]
 scaled = true
 check = "current-state digest equal before and after; value_long row count kept"
 
 [metric.mt_extract_head]
+layout_floor = 0.005
 class = "io"
 fixtures = ["xsrc"]
 scaled = true

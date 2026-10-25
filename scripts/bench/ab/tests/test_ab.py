@@ -80,5 +80,47 @@ class StartupRefusals(unittest.TestCase):
         self.assertIn("check:", text)
 
 
+class Baseline(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        fd, self.path = tempfile.mkstemp(prefix="ab-baseline-")
+        os.close(fd)
+        with open(self.path, "w") as f:
+            f.write("1111111111111111111111111111111111111111\n")
+        self.addCleanup(os.remove, self.path)
+        p = mock.patch.object(ab, "BASELINE", self.path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def out(self, **kw):
+        o = {"cand": {"rev": "HEAD", "commit": "2" * 40}, "forced": False, "aa": False,
+             "injection": None}
+        o.update(kw)
+        return o
+
+    def advance(self, out, code):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ab.advance_baseline(out, code, None)
+        return ab.read_baseline(), buf.getvalue()
+
+    def test_read(self):
+        self.assertEqual(ab.read_baseline(), "1" * 40)
+
+    def test_advances_after_a_passing_committed_run(self):
+        rev, text = self.advance(self.out(), 0)
+        self.assertEqual(rev, "2" * 40)
+        self.assertIn("advanced", text)
+
+    def test_never_after_a_failure_a_worktree_or_a_forced_run(self):
+        for out, code in ((self.out(), 1), (self.out(), 2),
+                          (self.out(cand={"rev": "WORKTREE", "commit": "3" * 40}), 0),
+                          (self.out(forced=True), 0), (self.out(aa=True), 0),
+                          (self.out(injection={"metric": "x", "spec": "wrong"}), 0)):
+            rev, text = self.advance(out, code)
+            self.assertEqual(rev, "1" * 40)
+            self.assertIn("not advanced", text)
+
+
 if __name__ == "__main__":
     unittest.main()

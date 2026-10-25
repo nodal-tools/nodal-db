@@ -3,14 +3,17 @@ by paired, interleaved ratios against a baseline on this host, never
 against absolute numbers.
 
 usage:
-    python3 scripts/bench/ab/ab.py [BASE] [CAND] [--quick | --full]
+    python3 scripts/bench/ab/ab.py [BASE] [CAND] [--quick | --full] [--release]
         [--metrics GLOB[,GLOB]] [--allow METRIC=reason]... [--force]
         [--aa [--aa-salt K]] [--cpus LIST] [--work DIR] [--json PATH]
     python3 scripts/bench/ab/ab.py --list
     python3 scripts/bench/ab/ab.py --bins OLD_BIN NEW_BIN --modes M [M ...] [-n N]
 
 BASE defaults to `git merge-base HEAD main` (give it explicitly on main
-itself), CAND to WORKTREE (the uncommitted working tree). Both arms build
+itself), CAND to WORKTREE (the uncommitted working tree). `--release` (the
+release gate, `just full`): BASE = the commit in scripts/bench/ab/BASELINE,
+CAND = HEAD when the working tree is clean; `--advance-baseline` then moves
+BASELINE to CAND after an all-PASS, unforced run (a ratchet, plan D2). Both arms build
 the harness in `harness/` of *this* checkout against their own core
 (scripts/lib/revbuild.py: one shared target dir under --work, the harness
 lock seeded from the revision's root Cargo.lock, binaries cached by tree,
@@ -341,6 +344,10 @@ def parse_args(argv):
     ap.add_argument("--json", help="also write results.json here")
     ap.add_argument("--seed", type=int, default=None, help="pair-order RNG seed")
     ap.add_argument("--list", action="store_true", help="list the metrics and exit")
+    ap.add_argument("--release", action="store_true",
+                    help="the release gate: BASE = the BASELINE file, CAND = HEAD if the tree is clean")
+    ap.add_argument("--advance-baseline", action="store_true",
+                    help="after an all-PASS run of a committed CAND, write it to BASELINE")
     ap.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--inject", help=argparse.SUPPRESS)
     ap.add_argument("--bins", nargs=2, metavar=("OLD_BIN", "NEW_BIN"))
@@ -356,6 +363,43 @@ def default_base():
             "HEAD is main's tip (merge-base = HEAD): give BASE explicitly "
             "(e.g. the commit before your change, or the release baseline)")
     return mb
+
+
+BASELINE = os.path.join(HERE, "BASELINE")
+
+
+def read_baseline():
+    """The release gate's baseline commit (scripts/bench/ab/BASELINE: one
+    commit id; advanced by `--advance-baseline` after a passing release
+    run, plan D2)."""
+    try:
+        with open(BASELINE) as f:
+            rev = f.read().split()[0]
+    except (OSError, IndexError):
+        raise gatelib.ConfigError(f"{BASELINE}: no baseline commit")
+    return rev
+
+
+def worktree_clean():
+    return revbuild.git(REPO, "status", "--porcelain", "--untracked-files=normal") == ""
+
+
+def advance_baseline(out, code, a):
+    """After a passing release run on a committed tree: BASELINE = CAND."""
+    why = None
+    if code != gatelib.EXIT_PASS:
+        why = f"exit {code}"
+    elif out["cand"]["rev"] == "WORKTREE":
+        why = "the candidate is an uncommitted working tree"
+    elif out["forced"] or out["aa"] or out["injection"]:
+        why = "a forced, A/A or self-test run"
+    if why:
+        print(f"BASELINE not advanced ({why})")
+        return
+    with open(BASELINE, "w") as f:
+        f.write(out["cand"]["commit"] + "\n")
+    print(f"BASELINE advanced to {out['cand']['commit'][:12]}: commit it together with "
+          "the run's row in crates/nodal-db-core/benches/RESULTS.md (\"A/B gate runs\")")
 
 
 def main(argv=None):
@@ -381,6 +425,7 @@ def gate(a):
     if a.list:
         for m in cfg.metrics.values():
             needs = f" needs {','.join(m.needs)}" if m.needs else ""
+            needs += "" if len(m.scales) == 2 else f" ({'/'.join(m.scales)} only)"
             print(f"{m.id:32} {m.cls:4} T={m.threshold:.2f}  fixtures={','.join(m.fixtures) or '-'}{needs}")
             print(f"{'':32} check: {m.check}")
         return 0
@@ -411,8 +456,12 @@ def gate(a):
     if host["governor"] and host["governor"] != "performance":
         log(f"warning: CPU governor is {host['governor']!r}, not 'performance' (not changed)")
 
-    base = a.base or default_base()
-    cand = a.cand or "WORKTREE"
+    if a.release:
+        base = a.base or read_baseline()
+        cand = a.cand or ("HEAD" if worktree_clean() else "WORKTREE")
+    else:
+        base = a.base or default_base()
+        cand = a.cand or "WORKTREE"
     salts = (f"aa{a.aa_salt}b", f"aa{a.aa_salt}c") if a.aa else ("", "")
     arms = {"base": Arm("base", base, salts[0]), "cand": Arm("cand", cand, salts[1])}
     if arms["base"].tree == arms["cand"].tree and not a.aa:
@@ -442,6 +491,8 @@ def gate(a):
     runnable, results = [], []
     for m in metrics:
         why = gatelib.skip_reason(m, shared, lacking)
+        if not why and scale not in m.scales:
+            why = f"{scale}: runs at {'/'.join(m.scales)} scale only"
         if why:
             results.append({"metric": m.id, "mode": m.mode, "class": m.cls,
                             "threshold": m.threshold, "verdict": gatelib.SKIPPED,
@@ -519,6 +570,8 @@ def gate(a):
           + ("; FORCED (loaded host)" if forced else "")
           + (f"; INJECTED {inject[0]}={inject[1]}" if inject else ""))
     print(f"results: {paths[0]}")
+    if a.advance_baseline:
+        advance_baseline(out, code, a)
     print(f"exit {code}")
     return code
 

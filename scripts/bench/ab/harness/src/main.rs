@@ -83,8 +83,11 @@
 
 mod check;
 mod gate;
+mod import;
 mod longbig;
+mod maint;
 mod save_path;
+mod synth;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -465,6 +468,17 @@ fn main() {
     if mode == "build_m1k" {
         save_path::build_m1k(Path::new(&args[2]));
         return;
+    }
+    let scale = || args.get(3).map(String::as_str).unwrap_or("quick");
+    match mode {
+        "build_synth" => return synth::build(Path::new(&args[2]), scale()),
+        "build_hheavy" => return maint::build_hheavy(Path::new(&args[2]), scale()),
+        "build_xsrc" => return maint::build_xsrc(Path::new(&args[2]), scale()),
+        "build_ipc_dense" => {
+            let entities = import::entities_for(scale());
+            return import::build_ipc_dense(Path::new(&args[2]), entities);
+        }
+        _ => {}
     }
     if mode == "threads" {
         let conn = nodal_db_core::duckdb::Connection::open_in_memory().unwrap();

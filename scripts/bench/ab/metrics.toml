@@ -48,6 +48,92 @@ build = "build_big"
 env = "NODAL_AB_LONGBIG"
 build = "build_longbig"
 
+# The criterion gate's synthetic DB (full) or a tenth of it (quick).
+[fixture.synth]
+env = "NODAL_AB_SYNTH"
+build = "build_synth"
+scaled = true
+
+# compaction_size.rs's history-heavy long table (raw SQL, like that bench).
+[fixture.hheavy]
+env = "NODAL_AB_HHEAVY"
+build = "build_hheavy"
+scaled = true
+
+# extract.rs's churned source.
+[fixture.xsrc]
+env = "NODAL_AB_XSRC"
+build = "build_xsrc"
+scaled = true
+
+# One dense-form Arrow-IPC container, read by both arms' importers.
+[fixture.ipc]
+env = "NODAL_AB_IPC"
+build = "build_ipc_dense"
+scaled = true
+shared = true
+
+# The arm's own `nodal-db` binary (built from the arm's root workspace).
+[fixture.cli]
+env = "NODAL_AB_CLI"
+
+# ----------------------------------------------------------------- reads
+# Synthetic-fixture reads (the criterion gate's point and bulk groups) on
+# one warm RO connection, Arrow end to end. Point reads: 20 warm-up and
+# 200 timed executions, the sample is the median per execution; bulk
+# reads: 1 warm-up, the median of K (25 quick / 5-9 full; 5 for the model
+# load). Scale-neutral ids: the scale is
+# recorded per result (quick = a tenth of the criterion gate's sizes).
+
+[metric.rd_point_scalar]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "every execution returns exactly 1 row; digest of value_kind, v_float"
+
+[metric.rd_point_long]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "every execution returns exactly 1 row; digest of the cell"
+
+[metric.rd_point_array_dense]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "every execution returns exactly 1 row; digest of the 8 760-value payload"
+note = "read_parameter_dense filtered by entity and alternative (index scan)"
+
+[metric.rd_point_array_by_id]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "every execution returns exactly 1 row; digest of the payload"
+
+[metric.rd_scalars_loader]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "row count = the scalar entities (10^5 full); digest of the loader columns"
+
+[metric.rd_dense]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "row count = the array entities (1 000 full, ~70 MB); digest of the payloads"
+
+[metric.rd_model_load_long]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "row count = long entities x 8 760 (1.23 M full); digest of the logical columns"
+
+[metric.rd_long_scan_17pct]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "row count = long entities x 8 760 at ~17 % dead; digest of position, time, value"
+
 # ---------------------------------------------------------------- writes
 
 [metric.wr_scalar_100_new_100k]
@@ -109,6 +195,25 @@ class = "io"
 check = "11 commits; the saved cell reads back with the last value; cls0/p00 digest"
 note = "gate arm semantics: RO head poll + commit (the save_api feature is never set)"
 
+[metric.wr_replace_scalar_cycle_ckpt]
+class = "io"
+fixtures = ["synth"]
+scaled = true
+check = "3 commits; the entity reads back with the last cycle's value (count + digest)"
+note = "write_parameter commit + CHECKPOINT, mean of 3 cycles on a fresh copy"
+
+[metric.wr_replace_array_cycle_ckpt]
+class = "io"
+fixtures = ["synth"]
+scaled = true
+check = "3 commits; the array reads back with the last cycle's content (8 760 cells + digest)"
+
+[metric.wr_replace_long_cycle_ckpt]
+class = "io"
+fixtures = ["synth"]
+scaled = true
+check = "3 commits; the long value reads back with the last cycle's content (8 760 cells + digest)"
+
 [metric.wr_unchanged_scalar_10k]
 class = "io"
 needs = ["skip_unchanged"]
@@ -137,3 +242,41 @@ class = "io"
 fixtures = ["base100k"]
 check = "no commit, entity count unchanged; the 20 ids map back to the 20 names"
 note = "the public verb on existing entities: an RO open + lookups, io class"
+
+
+# ---------------------------------------------------------------- import
+
+[metric.imp_ipc_dense]
+class = "io"
+fixtures = ["ipc", "cli"]
+scaled = true
+check = "the import exits 0 with 1 commit; the dense rows (200 quick / 1 000 full) read back with names + digest"
+note = "the arm's own nodal-db import, wall incl. spawn; not the 87.6 M-value import (~50 s a sample)"
+
+# ----------------------------------------------------------- maintenance
+
+[metric.mt_compact_history_heavy]
+class = "io"
+fixtures = ["hheavy"]
+scaled = true
+check = "current-state digest equal before and after; value_long row count kept"
+
+[metric.mt_extract_head]
+class = "io"
+fixtures = ["xsrc"]
+scaled = true
+check = "the extract's current state equals the source's (both parameters: counts + digests)"
+
+[metric.sz_compacted_bytes]
+class = "size"
+fixtures = ["hheavy"]
+scaled = true
+check = "as mt_compact_history_heavy"
+note = "file bytes after compaction; deterministic in the Phase-0 check (two builds x 3 runs)"
+
+[metric.sz_extract_bytes]
+class = "size"
+fixtures = ["xsrc"]
+scaled = true
+check = "as mt_extract_head"
+note = "file bytes of the head extract; deterministic in the Phase-0 check"

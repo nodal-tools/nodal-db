@@ -131,7 +131,6 @@ pub fn elapsed_ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
-#[allow(dead_code)] // used by the read modes (synth.rs)
 pub fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
@@ -142,7 +141,6 @@ pub fn median(mut v: Vec<f64>) -> f64 {
     }
 }
 
-#[allow(dead_code)] // used by the read modes (synth.rs)
 pub fn mean(v: &[f64]) -> f64 {
     v.iter().sum::<f64>() / v.len() as f64
 }
@@ -278,7 +276,6 @@ pub fn batches(conn: &Connection, sql: &str) -> Result<Vec<RecordBatch>, duckdb:
     Ok(arrow.collect())
 }
 
-#[allow(dead_code)] // used by the read modes (synth.rs)
 pub fn rows(b: &[RecordBatch]) -> usize {
     b.iter().map(|x| x.num_rows()).sum()
 }

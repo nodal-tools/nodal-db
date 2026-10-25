@@ -270,7 +270,8 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
             Sample::new(ms).hash("names", &h)
         }
         "lk_core_sql_100k" => lookup_core_sql(dir),
-        _ => return None,
+        "imp_ipc_dense" => crate::import::import_dense(dir),
+        _ => return crate::synth::run(mode, dir).or_else(|| crate::maint::run(mode, dir)),
     })
 }
 

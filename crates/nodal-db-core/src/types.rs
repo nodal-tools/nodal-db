@@ -87,6 +87,35 @@ pub struct WriteOptions {
     /// `conn::with_write_txn_retrying_opts` there). `None` (the default):
     /// no check.
     pub expect_commit: Option<i64>,
+    /// What `api::commit_changes` does with a value write that a delete in
+    /// the same call covers: a value delete of the same key
+    /// (skip_unchanged_writes_PLAN D9), or an object delete whose cascade
+    /// reaches the value (its entity or a container of it, its parameter
+    /// definition, its alternative, or a class above them; D10). The default,
+    /// [`CoveredWrites::Refuse`], refuses the whole call; a script that needs
+    /// such a batch opts into [`CoveredWrites::DeleteWins`]. Meaningless
+    /// outside the `api` entry points (like `expect_commit`).
+    pub covered_writes: CoveredWrites,
+}
+
+/// The policy for a value write that a delete in the same `commit_changes`
+/// call covers (see [`WriteOptions::covered_writes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoveredWrites {
+    /// Refuse the call as [`crate::error::DbError::Api`] before anything is
+    /// written, whatever the content, the tier or the object delete's
+    /// `cascade` option (the default).
+    #[default]
+    Refuse,
+    /// The delete wins: every covered write is dropped before anything runs
+    /// (it is not resolved, canonicalized, auto-created or written) and
+    /// reported as a [`WarningKind::DroppedByDelete`] warning; the deletes
+    /// then run as usual and the uncovered writes proceed normally. For the
+    /// covered keys the end state is that of the deletes alone. Coverage is
+    /// decided as the database resolves names (DuckDB's `lower()` fold) and,
+    /// for an object delete, over its full cascade closure whatever its
+    /// `cascade` option.
+    DeleteWins,
 }
 
 /// A value's identity key. OPEN-7 (jkiviluo, 2026-08-17) folds this into the
@@ -212,6 +241,27 @@ pub enum WarningKind {
     /// value; the delete was a no-op. `key_index` is the key's position in the
     /// caller's `deletes` vec (delete critique MINOR-3).
     NothingToDelete { key_index: usize },
+    /// A value write was dropped because a delete in the same call covers
+    /// it ([`CoveredWrites::DeleteWins`]): nothing was written for it.
+    /// `segment_index` is the segment's position in the caller's `segments`
+    /// vec; `by` names one covering delete. `object_type` is `"value"`,
+    /// `name` is `class:parameter/alternative/entity` in the segment's
+    /// spelling and `id` is 0.
+    DroppedByDelete {
+        segment_index: usize,
+        by: CoveringDelete,
+    },
+}
+
+/// The delete that covers a dropped write ([`WarningKind::DroppedByDelete`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoveringDelete {
+    /// A value delete of the same key; `key_index` is its position in the
+    /// caller's `deletes` vec.
+    Value { key_index: usize },
+    /// An object delete whose cascade reaches the value; `key_index` is its
+    /// position in the caller's `object_deletes` vec.
+    Object { key_index: usize },
 }
 
 /// One structured warning. For [`WarningKind::AutoCreated`], `object_type` is

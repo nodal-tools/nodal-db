@@ -1441,17 +1441,14 @@ pub(crate) fn written_value_covered(
     key: &ObjectDeleteKey,
     written: &WrittenIds<'_>,
 ) -> Result<Option<(i64, i64, i64)>, DbError> {
-    if written.keys.is_empty() || object_legs(key.kind).is_none() {
+    if written.keys.is_empty() {
         return Ok(None);
     }
-    let Some(target) = resolve_target(conn, key)? else {
-        return Ok(None);
-    };
     // Probe the closure against the written ids (O(closure), not
     // O(written) per object delete); the covered key is looked up only on
     // a hit, for the refusal message.
     let mut hit = (HashSet::new(), HashSet::new(), HashSet::new());
-    for (k, id) in cascade_closure(conn, key.kind, target.id)? {
+    for (k, id) in cascade_scope(conn, key)? {
         match k {
             ObjectKind::Entity if written.entities.contains(&id) => hit.0.insert(id),
             ObjectKind::Parameter if written.params.contains(&id) => hit.1.insert(id),
@@ -1469,6 +1466,26 @@ pub(crate) fn written_value_covered(
         .iter()
         .find(|(e, p, a)| hit.0.contains(e) || hit.1.contains(p) || hit.2.contains(a))
         .copied())
+}
+
+/// Every object an object delete would reach through its FULL cascade
+/// closure, whatever its `cascade` option: the resolved target plus its
+/// recursively reachable containers and children, as `(kind, id)` items.
+/// Empty when the target does not resolve (it would be `NotFound`) or the
+/// kind has no leg set (it reaches no value). The scope of the D10 checks
+/// ([`written_value_covered`]) and of the `CoveredWrites::DeleteWins`
+/// pre-filter (`api::DropPlan`).
+pub(crate) fn cascade_scope(
+    conn: &Connection,
+    key: &ObjectDeleteKey,
+) -> Result<Vec<(ObjectKind, i64)>, DbError> {
+    if object_legs(key.kind).is_none() {
+        return Ok(Vec::new());
+    }
+    let Some(target) = resolve_target(conn, key)? else {
+        return Ok(Vec::new());
+    };
+    cascade_closure(conn, key.kind, target.id)
 }
 
 /// The value keys a call wrote, indexed by each id column, for the D10

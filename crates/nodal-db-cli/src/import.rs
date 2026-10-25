@@ -164,8 +164,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
 
     let opts = WriteOptions {
         force_replace: args.force_replace,
-        retain_override: None,
-        expect_commit: None,
+        ..Default::default()
     };
     let n_segments = segments.len();
     let report =
@@ -230,6 +229,12 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             }
             WarningKind::NothingToDelete { key_index } => {
                 println!("warning: nothing to delete for key {key_index} (no live value)")
+            }
+            WarningKind::DroppedByDelete { .. } => {
+                println!(
+                    "warning: write of {} dropped (a delete in the call covers it)",
+                    w.name
+                )
             }
         }
     }

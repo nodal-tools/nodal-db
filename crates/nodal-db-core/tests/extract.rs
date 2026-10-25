@@ -1478,6 +1478,7 @@ fn t9_asof_refusals() {
             force_replace: true,
             retain_override: None,
             expect_commit: None,
+            covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         },
         "t",
         "replace without keeping content",

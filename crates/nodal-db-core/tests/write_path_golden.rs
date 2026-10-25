@@ -270,6 +270,7 @@ const FORCE: WriteOptions = WriteOptions {
     force_replace: true,
     retain_override: None,
     expect_commit: None,
+    covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
 };
 
 /// One commit of direct `write_value` / `delete_value` steps.
@@ -897,6 +898,7 @@ fn api_scalar_batches(db: &Path, log: &mut String) {
             force_replace: true,
             retain_override: None,
             expect_commit: None,
+            covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         },
         log,
     );

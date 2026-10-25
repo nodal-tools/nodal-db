@@ -40,10 +40,8 @@
 //!   failing filters and gets the exact counts, while `value_rows` (which
 //!   keeps the self-join shape) under the same filter still raises the
 //!   INTERNAL error (the positive control; if it stops raising, the fixture
-//!   no longer triggers the bug).
-//! - **The canary**: the minimal repro of the bug still raises on the
-//!   bundled engine. When an upgrade fixes it, this test fails on purpose:
-//!   the engine_rules §6 rule and the docs' workaround note can be revisited.
+//!   no longer triggers the bug, or DuckDB fixed it: see the tripwire in
+//!   `duckdb_dict_cache_guard.rs`, engine_rules §5).
 //!
 //! **Debug-build engine.** As in `array_id_index_scan.rs`: a DEBUG DuckDB
 //! compresses every join key, which no index can serve, so the guard
@@ -973,8 +971,8 @@ fn bug_fixture(dir: &Path) -> PathBuf {
 }
 
 /// Run `sql` on a FRESH raw DuckDB connection with default settings (caching
-/// operators on): never the core's open, which may one day turn them off
-/// (dict-bug mitigation A) and make this guard vacuous. One connection per
+/// operators on): never the core's open, which turns them off
+/// (`conn::core_config`, engine_rules §5) and would make this guard vacuous. One connection per
 /// query, because a failure invalidates the instance. The rows are fetched
 /// with every column: a `count(*)` wrapper would let the optimizer prune the
 /// pass-through columns, and with them the bug shape.
@@ -999,9 +997,9 @@ fn expect_bug(r: Result<i64, String>, what: &str) {
         Err(e) if e.contains("INTERNAL") || e.contains("dict") => {}
         other => panic!(
             "{what}: expected DuckDB's INTERNAL 'dict-surviving cache' error, got {other:?}. \
-             If the bundled DuckDB fixed the bug, re-evaluate docs/dev/engine_rules.md §6 \
-             and the workaround notes in docs/usage.md (specs: \
-             duckdb_dict_cache_bug_FINDINGS.md) instead of deleting this check."
+             Either the fixture no longer triggers the bug, or the bundled DuckDB fixed it \
+             (then duckdb_dict_cache_guard.rs's tripwire fails too): re-evaluate \
+             docs/dev/engine_rules.md §5 and §6 instead of deleting this check."
         ),
     }
 }
@@ -1072,27 +1070,4 @@ fn point_read_macros_are_immune_to_the_dict_cache_bug() {
         raw_count(&db, &format!("{ids_sql} {window}")),
         Ok(in_window(BUG_ARRAYS))
     );
-}
-
-/// The canary: the minimal repro of the DuckDB 2.0 dict-cache bug (no
-/// nodal-db objects) still raises on the bundled engine. When an upgrade
-/// fixes it, this fails on purpose (see `expect_bug`).
-#[test]
-fn dict_cache_bug_canary_still_present() {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE k AS SELECT i AS id, 1 AS a FROM range(1000) t(i);
-         CREATE TABLE p AS SELECT i AS id, range(8760) AS l FROM range(1000) t(i);",
-    )
-    .unwrap();
-    let r: Result<i64, String> = conn
-        .query_row(
-            "SELECT count(*), sum(a) \
-             FROM (SELECT k.a, unnest(p.l) AS v FROM p JOIN k ON k.id = p.id) \
-             WHERE v % 977 = 0",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string());
-    expect_bug(r, "canary (minimal repro)");
 }

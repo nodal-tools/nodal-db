@@ -252,20 +252,18 @@ with `k`'s columns passed through, which `value_array_cells` (and through
 it `value_cells`, `value_rows` and `read_parameter`) uses, is excluded
 for new code.
 
-**Why.** DuckDB 2.0 has a bug in which a join whose build side is
-emitted as a global dictionary (the `array_id` self-join runs as a
-perfect hash join, because the ids are dense), followed by an UNNEST of
-lists longer than 2 048 elements whose length is not a multiple of
-2 048 (8 760 hourly values), followed by a selective filter, raises
-`INTERNAL Error: dict-surviving cache: global dictionary column 0
-changed identity …` and invalidates the database instance. It needs
-several hundred such arrays, so small files hide it. No data is
-damaged. A time window (`WHERE idx1_ts BETWEEN …`) or a threshold
-(`WHERE v_float > …`) on `value_rows` (or on `read_parameter`, which
-reads through it) is enough to trigger it. The
-point-read macros follow this rule and are not affected, which is why the
-user docs recommend them as the workaround for such reads. Turning
-`debug_enable_caching_operators` off also avoids it.
+**Why.** This is the shape of the DuckDB 2.0 dict-cache bug of §5: the
+`array_id` self-join runs as a perfect hash join (the ids are dense) and
+emits its build-side columns as a global dictionary; passed through an
+UNNEST of lists whose length is not a multiple of 2 048 and followed by
+a selective filter, they raise `INTERNAL Error: dict-surviving cache …`
+and invalidate the database instance. §5 protects the core's own
+connections, but not a user's: the SQL macros are the public read
+surface, and a direct-SQL user opens the file with DuckDB's defaults. A
+macro that follows this rule works on any connection, which is why the
+user docs point direct-SQL users to `read_value` / `read_values` for
+filtered reads of one or a few series. The rule also keeps new code
+correct when the §5 workaround is removed after an upgrade.
 
 **Guards.**
 [`crates/nodal-db-core/tests/point_read_index_scan.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/point_read_index_scan.rs):
@@ -276,10 +274,8 @@ user docs recommend them as the workaround for such reads. Turning
   It flags `value_array_cells` as a self-check;
 - a data guard on a 1 000 x 8 760-cell fixture with dense ids, on a raw
   DuckDB connection with default settings (never the core's open, which
-  may turn caching off): the macros return the exact counts under both
+  turns caching off, §5): the macros return the exact counts under both
   failing filters, while `value_rows` under the same filter still
-  raises (the positive control);
-- a canary: the bug's minimal repro, without nodal-db, still raises on
-  the bundled DuckDB. When an upgrade fixes the bug, the canary and the
-  positive control fail on purpose: re-evaluate this rule and the user
-  docs' workaround note then.
+  raises (the positive control). When an upgrade fixes the bug, the
+  positive control fails together with §5's tripwire: re-evaluate this
+  rule then (it costs nothing to keep).

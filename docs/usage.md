@@ -505,21 +505,11 @@ SELECT * FROM read_values('node', 'demand', ['north', 'south'], ['Base', 'high_d
 - `value_rows_for(parameter_definition_id, entity_ids, alternative_ids)`
   is the same read by ids, with the columns of `value_rows`.
 - Row order is unspecified, as for `read_parameter`: add an `ORDER BY`.
+- They are not affected by the DuckDB 2.0 error on filtered array reads
+  (see [the warning under DuckDB version](#duckdb-version)), so a filtered
+  read of one or a few series, such as one series in one time window,
+  works on any connection, whatever its settings.
 
-!!! note "A DuckDB 2.0 error on filtered array reads"
-    On DuckDB 2.0.x, a `read_parameter` or `value_rows` query with a
-    selective filter on the cells, such as a time window
-    (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`), can
-    fail with `INTERNAL Error: dict-surviving cache: global dictionary
-    column 0 changed identity …` on a file with several hundred long
-    arrays (8 760 hourly values, for example). It is a DuckDB bug, not
-    damage to the file: no data is changed, but the failed connection's
-    database instance is invalidated, so reconnect. `read_value` and
-    `read_values` are not affected, so use them for such reads (one
-    series, one time window). For a filtered read of a whole parameter,
-    open the connection with caching operators turned off:
-    `duckdb.connect(path, read_only=True,
-    config={"debug_enable_caching_operators": "false"})`.
 
 ### Read history
 
@@ -951,7 +941,10 @@ use a nodal-db build that matches the file.
     with a "different configuration" error: use `SET` on that connection
     instead. For the DuckDB CLI, run the `SET` statement first. Unfiltered reads,
     aggregates over a whole parameter and `read_parameter_dense` are
-    not affected.
+    not affected. Neither are `read_value` and `read_values`: to filter
+    one or a few series (one series in one time window), use them and
+    no setting is needed (see
+    [Reading one value or a few](#reading-one-value-or-a-few)).
 
 ### Arrow versions
 

@@ -19,8 +19,9 @@ use duckdb::Connection;
 use nodal_db_core::api::head_commit;
 use nodal_db_core::api::{db_identity, write_parameter};
 use nodal_db_core::compaction::{
-    baseline_path, compact, compact_if_due, compact_if_needed, read_baseline, sweep_orphan_temps,
-    CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionReport, CompactionTrigger,
+    baseline_path, compact, compact_if_due, compact_if_needed, keeps_original, read_baseline,
+    sweep_orphan_temps, CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionReport,
+    CompactionTrigger,
 };
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract::{extract, ExtractOpts};
@@ -1311,11 +1312,22 @@ fn automatic_trigger_keeps_original_when_rebuild_is_not_smaller() {
     assert!(r.kept_original && r.trigger == Some(CompactionTrigger::Growth));
     assert_eq!(read_baseline(&db).unwrap().bytes, bytes);
 
-    // The commit backstop: after a kept original it waits N commits again.
+    // The commit backstop keeps the original only on a LARGER rebuild
+    // (`commit_backstop_keeps_original_only_when_rebuild_is_larger`); this
+    // equal-size rebuild is swapped in, with a warning, and the baseline
+    // restarts from the head either way.
     write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head - 3));
     let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
     assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
-    assert!(r.kept_original, "{r:?}");
+    assert_eq!(r.bytes_rebuilt, bytes, "re-compacting a compacted file");
+    assert!(r.swapped && !r.kept_original, "{r:?}");
+    assert!(
+        r.warning
+            .as_deref()
+            .is_some_and(|w| w.contains("swapped anyway (commit backstop")),
+        "{:?}",
+        r.warning
+    );
     assert_eq!(
         read_baseline(&db).unwrap().commit,
         Some(head),
@@ -1332,6 +1344,68 @@ fn automatic_trigger_keeps_original_when_rebuild_is_not_smaller() {
     write_scalar(&db, "Widget", "size", "Base", "w1", 60.0);
     let r = compact_if_due(&db, commits_only(3), None).unwrap();
     assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+}
+
+/// The size guard's rule per trigger (`keeps_original`): growth and
+/// no-baseline keep the original when the rebuild is not smaller, the commit
+/// backstop only when it is strictly larger, an explicit compact never.
+#[test]
+fn size_guard_rule_per_trigger() {
+    use CompactionTrigger::*;
+    // (trigger, keeps on smaller, keeps on equal, keeps on larger)
+    for (t, smaller, equal, larger) in [
+        (Growth, false, true, true),
+        (NoBaseline, false, true, true),
+        (Commits, false, false, true),
+        (Requested, false, false, false),
+    ] {
+        assert_eq!(keeps_original(t, 99, 100), smaller, "{t:?} smaller");
+        assert_eq!(keeps_original(t, 100, 100), equal, "{t:?} equal");
+        assert_eq!(keeps_original(t, 101, 100), larger, "{t:?} larger");
+    }
+}
+
+/// The commit backstop on a rebuild that is strictly larger than the source
+/// keeps the original (and resets the baseline); the same source under the
+/// growth trigger keeps it too. The fixture: a few checkpointed commits after
+/// a compaction leave a source that DuckDB truncated below its rebuild
+/// (measured: 9 187 328 vs 10 498 048 bytes at DuckDB 1.5.5).
+#[test]
+fn commit_backstop_keeps_original_only_when_rebuild_is_larger() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = baselined(dir.path());
+    for i in 0..3 {
+        write_scalar(&db, "Widget", "size", "Base", "w1", 10.0 + i as f64);
+        checkpoint(&db);
+    }
+    let head = head_commit(&db).unwrap();
+    let bytes = std::fs::metadata(&db).unwrap().len();
+    let content = std::fs::read(&db).unwrap();
+
+    let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Commits));
+    assert!(
+        r.bytes_rebuilt > bytes,
+        "fixture drift: the rebuild is no longer larger than the source: {r:?}"
+    );
+    assert!(r.kept_original && !r.swapped, "{r:?}");
+    assert_eq!((r.bytes_before, r.bytes_after), (bytes, bytes));
+    assert!(
+        r.warning
+            .as_deref()
+            .is_some_and(|w| w.contains("original kept")),
+        "{:?}",
+        r.warning
+    );
+    assert_eq!(std::fs::read(&db).unwrap(), content, "original kept");
+    let b = read_baseline(&db).unwrap();
+    assert_eq!((b.bytes, b.commit), (bytes, Some(head)));
+
+    // A source smaller than its rebuild by any margin is kept under growth.
+    write_sidecar(&db, &format!("bytes=1\ncommit={head}\n"));
+    let r = compact_if_due(&db, CompactionPolicy::default(), Some(head)).unwrap();
+    assert_eq!(r.trigger, Some(CompactionTrigger::Growth));
+    assert!(r.kept_original, "{r:?}");
 }
 
 /// An explicit compact swaps even when the rebuild is not smaller, and says

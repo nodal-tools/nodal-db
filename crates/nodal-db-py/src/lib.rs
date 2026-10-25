@@ -842,8 +842,11 @@ impl Database {
     /// When the rebuilt file is not smaller than the original,
     /// `if_needed=True` keeps the original (`kept_original` True, the
     /// discarded size in `bytes_rebuilt`) and still resets the baseline, so
-    /// it does not retry until the next threshold; a plain `compact()`
-    /// replaces the file anyway. Both set `warning` (a string, else None).
+    /// it does not retry until the next threshold; when it ran on the
+    /// commit count (`trigger == "commits"`) it keeps the original only
+    /// when the rebuild is larger. A plain `compact()` replaces the file
+    /// anyway. A rebuild that is not smaller sets `warning` (a string,
+    /// else None).
     ///
     /// `if_needed=True` compacts only when due: the file has grown past
     /// `growth` (default 3.0) times its size after the last compaction, OR

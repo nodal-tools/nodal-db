@@ -548,8 +548,11 @@ densely packed. With `--if-needed`, if the rebuilt file is not smaller,
 nodal-db keeps the original file, prints a warning, and still records the
 size and commit, so it does not try again until the next threshold. The
 Python report then has `kept_original: True` and the rebuilt size in
-`bytes_rebuilt`. A plain `nodal-db maintain compact` (or `db.compact()`)
-always replaces the file, because you asked for it, and prints a warning
+`bytes_rebuilt`. A compaction due to the commit count is the exception:
+it keeps the original only when the rebuilt file is larger, because it
+pays off through faster opens even when the file stays the same size.
+A plain `nodal-db maintain compact` (or `db.compact()`) always replaces
+the file, because you asked for it, and prints a warning
 when the result is not smaller. That is rare; the warning is there so
 that you notice it.
 

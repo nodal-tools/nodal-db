@@ -518,14 +518,19 @@ measured by `benches/compaction_size.rs`.
 
 **Size guard.** Before the swap, the rebuilt file's on-disk size (after
 its checkpoint and close, so its WAL is empty) is compared with the
-source's. If it is not smaller, an automatic trigger (`compact_if_due`,
-`compact_if_needed`) keeps the original, deletes the temporary file, and
-still resets the baseline to the original's size and the head, so the
-commit backstop waits another `N` commits instead of repeating the
-repack on every save. The report says `swapped: false`,
-`kept_original: true`, with the discarded size in `bytes_rebuilt` and a
-`warning`. Keeping the original is the same path as a failed
-self-check: the original is never written. An explicit
+source's, both measured as the file plus its WAL
+(`compaction::keeps_original`). The growth and no-baseline triggers
+(`compact_if_due`, `compact_if_needed`) keep the original when the
+rebuild is not smaller. The commit-count backstop keeps it only when the
+rebuild is strictly larger: the backstop exists to reset the per-commit
+open cost, which barely shows in the byte size, so an equal-size rebuild
+still pays off and is swapped in (with a `warning`). A kept original
+deletes the temporary file and still resets the baseline to the
+original's size and the head, so the commit backstop waits another `N`
+commits instead of repeating the repack on every save. The report says
+`swapped: false`, `kept_original: true`, with the discarded size in
+`bytes_rebuilt` and a `warning`. Keeping the original is the same path
+as a failed self-check: the original is never written. An explicit
 `compaction::compact` (the CLI's `maintain compact` without
 `--if-needed`, Python's `compact()`) swaps anyway and sets `warning`.
 

@@ -25,15 +25,23 @@
 //!
 //! ## Size guard (`specs/compaction_growth_FINDINGS.md` §5)
 //! The rebuilt temp's on-disk size (after its `CHECKPOINT` and close, so its
-//! WAL is empty) is compared with the source file's before the swap. When it
-//! is **not smaller**:
-//! - an **automatic** trigger ([`compact_if_due`] / [`compact_if_needed`]:
-//!   no baseline, growth, commit count) keeps the original, deletes the temp
-//!   and still resets the baseline (size and head), so the commit backstop
-//!   waits another `N` commits instead of re-paying the repack on every save
-//!   (`swapped == false`, [`CompactionReport::kept_original`]);
-//! - an **explicit** [`compact`] swaps anyway (the caller asked for the
-//!   repack) and reports it in [`CompactionReport::warning`].
+//! WAL is empty) is compared with the source's (the file plus its WAL, if
+//! any, measured the same way) before the swap ([`keeps_original`]):
+//! - the **growth** and **no-baseline** triggers ([`compact_if_due`] /
+//!   [`compact_if_needed`]) keep the original when the rebuild is **not
+//!   smaller**;
+//! - the **commit-count backstop** ([`CompactionTrigger::Commits`]) keeps it
+//!   only when the rebuild is strictly **larger**: an equal-size rebuild
+//!   still pays off, since the backstop exists to reset the per-commit open
+//!   cost (catalog growth), which barely moves the byte size;
+//! - an **explicit** [`compact`] always swaps (the caller asked for the
+//!   repack).
+//!
+//! A kept original deletes the temp and still resets the baseline (size and
+//! head), so the commit backstop waits another `N` commits instead of
+//! re-paying the repack on every save (`swapped == false`,
+//! [`CompactionReport::kept_original`]). A swap of a rebuild that is not
+//! smaller is reported in [`CompactionReport::warning`].
 //!
 //! The kept-original path is the self-check-abort path: the original is never
 //! written, so crash safety and invariant 3 are unchanged.
@@ -102,8 +110,9 @@ pub struct CompactionReport {
     /// `true` ⇒ [`CompactionBackoff`] skipped the gate entirely because a
     /// repack failed recently (no stat, no sidecar read, no DB open).
     pub backed_off: bool,
-    /// `true` ⇒ an automatic trigger rebuilt the file, the rebuild was not
-    /// smaller than the source, and the original was kept (the temp was
+    /// `true` ⇒ an automatic trigger rebuilt the file, the rebuild did not
+    /// pay off ([`keeps_original`]: not smaller, or for the commit backstop
+    /// strictly larger), and the original was kept (the temp was
     /// deleted; the baseline was still reset). `swapped` is then `false`,
     /// `trigger` names the gate that fired, and `bytes_rebuilt` holds the
     /// discarded rebuild's size.
@@ -112,8 +121,9 @@ pub struct CompactionReport {
     /// and close; `0` when nothing was rebuilt (a gate no-op).
     pub bytes_rebuilt: u64,
     /// Set when the rebuild was not smaller than the source: on a kept
-    /// original (automatic trigger) and on an explicit [`compact`] that
-    /// swapped anyway. Callers surface it (the CLI prints it to stderr).
+    /// original (automatic trigger), and on a swap anyway (an explicit
+    /// [`compact`], or the commit backstop on an equal-size rebuild).
+    /// Callers surface it (the CLI prints it to stderr).
     pub warning: Option<String>,
 }
 
@@ -255,7 +265,7 @@ pub const DEFAULT_GROWTH_FACTOR: f64 = 3.0;
 ///
 /// An explicit repack **always swaps**, even when the rebuild is not smaller
 /// than the source (then [`CompactionReport::warning`] says so). Only the
-/// automatic triggers keep the original on no gain (see the module docs).
+/// automatic triggers keep the original on no gain ([`keeps_original`]).
 pub fn compact(db_path: &Path) -> Result<CompactionReport, DbError> {
     compact_locked(db_path, CompactionTrigger::Requested)
 }
@@ -461,6 +471,9 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     sweep_orphan_temps(db_path);
 
     let bytes_before = fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    // The size guard's measure of the source: the file plus its WAL, the
+    // same measure as the rebuild's (a stale WAL's content is in the copy).
+    let source_bytes = on_disk_bytes(db_path);
 
     // ---- Cheap source probe: schema_version gate (R2) + block metrics -------
     // One per-operation RO handle (opened directly so it does not re-take the
@@ -532,15 +545,15 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // empty or gone, but it is counted anyway so a leftover WAL can never
     // make a rebuild look smaller than it is.
     let bytes_rebuilt = on_disk_bytes(&temp_path);
-    let not_smaller = bytes_rebuilt >= bytes_before;
+    let not_smaller = bytes_rebuilt >= source_bytes;
     let warning = not_smaller.then(|| {
         format!(
             "compaction did not shrink {}: rebuilt {bytes_rebuilt} bytes >= source \
-             {bytes_before} bytes",
+             {source_bytes} bytes",
             db_path.display()
         )
     });
-    if not_smaller && trigger != CompactionTrigger::Requested {
+    if keeps_original(trigger, bytes_rebuilt, source_bytes) {
         // Automatic trigger, no gain: keep the original (the self-check-abort
         // path: the original is never written). Reset the baseline anyway, so
         // the commit backstop waits another N commits instead of retrying on
@@ -618,8 +631,32 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         backed_off: false,
         kept_original: false,
         bytes_rebuilt,
-        warning: warning.map(|w| format!("{w}; swapped anyway (explicit compact)")),
+        warning: warning.map(|w| {
+            let why = match trigger {
+                CompactionTrigger::Commits => "commit backstop, not larger",
+                _ => "explicit compact",
+            };
+            format!("{w}; swapped anyway ({why})")
+        }),
     })
+}
+
+/// The size guard (module docs, "Size guard"): whether a rebuild of
+/// `rebuilt` bytes is discarded in favor of a source of `source` bytes
+/// (both on disk, WAL included).
+///
+/// - [`CompactionTrigger::Requested`]: never (the caller asked for it);
+/// - [`CompactionTrigger::Commits`]: only when strictly larger, since the
+///   backstop's gain (the per-commit open cost it resets) does not show in
+///   the byte size;
+/// - [`CompactionTrigger::Growth`] / [`CompactionTrigger::NoBaseline`]: when
+///   not smaller.
+pub fn keeps_original(trigger: CompactionTrigger, rebuilt: u64, source: u64) -> bool {
+    match trigger {
+        CompactionTrigger::Requested => false,
+        CompactionTrigger::Commits => rebuilt > source,
+        CompactionTrigger::Growth | CompactionTrigger::NoBaseline => rebuilt >= source,
+    }
 }
 
 /// A database file's on-disk bytes: the main file plus its WAL, if any.

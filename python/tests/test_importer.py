@@ -525,3 +525,179 @@ def test_unnamed_map_index_gets_a_generic_dim_name(tmp_path):
     assert rep.residue == [], rep.summary()
     vals = _nodal_values(_nodal(out), "hub", "levels")
     assert vals[("h1", "Base")] == ("map", [("hi", 9.0), ("lo", 1.0)])
+
+
+# ---------------------------------------------------------------------------
+# Duplicate keys in source values: keep the last entry, report the problem
+# ---------------------------------------------------------------------------
+
+
+def _add_param_value(spine, cls, entity, param, value, alt="Base"):
+    from spinedb_api import DatabaseMapping
+
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("parameter_definition", entity_class_name=cls, name=param)
+        _value(db, cls, [entity], param, alt, value)
+        db.commit_session(f"{cls}.{param}")
+
+
+def _cells(db, cls, param, rank):
+    cols = ", ".join(f"idx{i}_text" for i in range(1, rank + 1))
+    rows = _rows(db, f"SELECT {cols}, v_float FROM read_parameter('{cls}', '{param}')")
+    return sorted((tuple(r[f"idx{i}_text"] for i in range(1, rank + 1)), r["v_float"])
+                  for r in rows)
+
+
+def test_duplicate_top_level_key_keeps_last_and_warns(tmp_path, caplog):
+    from spinedb_api import Map
+
+    spine = make_basic_spine(tmp_path)
+    _add_param_value(spine, "hub", "h1", "settings",
+                     Map(["a", "b", "a"], [1.0, 2.0, 3.0], index_name="key"))
+    with caplog.at_level("WARNING", logger="nodal_spine_import"):
+        rep, out = run_import(tmp_path, spine)
+
+    assert _cells(_nodal(out), "hub", "settings", 1) == [(("a",), 3.0), (("b",), 2.0)]
+    assert len(rep.duplicate_keys) == 1, rep.summary()
+    dup = rep.duplicate_keys[0]
+    assert (dup.entity_class, dup.entity, dup.parameter, dup.alternative) == (
+        "hub", "h1", "settings", "Base")
+    assert dup.path == ()
+    assert dup.key == "a"
+    assert dup.entries == [(0, "1.0"), (2, "3.0")]
+    assert dup.kept == 2
+    text = dup.describe()
+    assert text == (
+        "class 'hub', entity 'h1', parameter 'settings', alternative 'Base': key "
+        "'a' appears 2 times at the top level of the value (entry 0: 1.0; entry 2: "
+        "3.0); kept the last, entry 2. A map holds one value per key: fix the "
+        "source so the key appears once."
+    )
+    assert "duplicate keys: 1 (last entry kept)" in rep.summary()
+    assert text in rep.summary()
+    assert any(text in r.getMessage() for r in caplog.records), caplog.text
+    # The kept entry is not residue: the value imported.
+    assert not [r for r in rep.residue if "settings" in r], rep.residue
+
+
+def test_duplicate_outer_key_keeps_the_last_whole_sub_map(tmp_path):
+    """A repeated key in an outer map keeps the last entry's whole sub-map;
+    the earlier sub-map is not merged in (as a ``dict`` built from the map
+    would read it)."""
+    from spinedb_api import Map
+
+    spine = make_basic_spine(tmp_path)
+    _add_param_value(spine, "hub", "h1", "nested", Map(
+        ["a", "a", "b"],
+        [Map(["x"], [1.0]), Map(["y"], [2.0]), Map(["x"], [5.0])],
+    ))
+    rep, out = run_import(tmp_path, spine)
+
+    assert _cells(_nodal(out), "hub", "nested", 2) == [
+        (("a", "y"), 2.0), (("b", "x"), 5.0)]
+    [dup] = rep.duplicate_keys
+    assert (dup.path, dup.key, dup.kept) == ((), "a", 1)
+    assert dup.entries == [(0, "a map of 1 entries"), (1, "a map of 1 entries")]
+
+
+def test_duplicate_inner_key_keeps_last_and_names_the_path(tmp_path):
+    from spinedb_api import Map
+
+    spine = make_basic_spine(tmp_path)
+    _add_param_value(spine, "hub", "h1", "nested", Map(
+        ["a", "b"],
+        [Map(["x", "y", "x"], [1.0, 2.0, 3.0]), Map(["x"], [5.0])],
+    ))
+    rep, out = run_import(tmp_path, spine)
+
+    assert _cells(_nodal(out), "hub", "nested", 2) == [
+        (("a", "x"), 3.0), (("a", "y"), 2.0), (("b", "x"), 5.0)]
+    [dup] = rep.duplicate_keys
+    assert (dup.path, dup.key, dup.kept) == (("a",), "x", 2)
+    assert "in the map at key path ('a')" in dup.describe()
+
+
+def test_duplicate_time_stamp_keeps_last_and_warns(tmp_path):
+    """spinedb_api writes a time series as a JSON object (so it cannot
+    repeat a stamp itself), but it reads the list-of-pairs form too, which
+    can: store that form directly."""
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    raw = (b'{"data": [["2030-01-01T00:00", 1.0], ["2030-01-01T01:00", 2.0], '
+           b'["2030-01-01T01:00", 4.0]]}')
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="profile")
+        db.add_update_item(
+            "parameter_value", entity_class_name="hub", entity_byname=("h1",),
+            parameter_definition_name="profile", alternative_name="Base",
+            value=raw, type="time_series",
+        )
+        db.commit_session("raw time series")
+    rep, out = run_import(tmp_path, spine)
+
+    vals = _rows(_nodal(out), "SELECT v_float FROM read_parameter('hub', 'profile')")
+    assert sorted(r["v_float"] for r in vals) == [1.0, 4.0]
+    [dup] = rep.duplicate_keys
+    assert dup.kept == 2
+    assert "key 2030-01-01T01:00:00 appears 2 times" in dup.describe()
+
+
+def test_clean_source_reports_no_duplicate_keys(tmp_path):
+    rep, _out = run_import(tmp_path, make_basic_spine(tmp_path))
+    assert rep.duplicate_keys == []
+    assert "duplicate keys: 0" in rep.summary()
+
+
+# ---------------------------------------------------------------------------
+# Atomic import: a failed import leaves no database behind
+# ---------------------------------------------------------------------------
+
+
+def _leftovers(tmp_path, out_name="out.duckdb"):
+    return sorted(p.name for p in tmp_path.iterdir()
+                  if p.name.startswith(out_name) or p.name.startswith(f".{out_name}"))
+
+
+def test_failed_write_leaves_no_target_and_no_temporary(tmp_path, monkeypatch):
+    """A failure after the vocabulary and structural commits (the values
+    write fails) leaves nothing at the target and removes the partial
+    build."""
+    import nodal_db
+
+    real_init = nodal_db.init
+
+    class FailingValues:
+        def __init__(self, db):
+            self._db = db
+
+        def __getattr__(self, name):
+            return getattr(self._db, name)
+
+        def commit_changes(self, **kw):
+            if kw.get("segments"):
+                raise nodal_db.ApiError("injected values failure")
+            return self._db.commit_changes(**kw)
+
+    monkeypatch.setattr(nodal_db, "init", lambda path, **kw: FailingValues(real_init(path, **kw)))
+    spine = make_basic_spine(tmp_path)
+    with pytest.raises(nodal_db.ApiError, match="injected"):
+        run_import(tmp_path, spine)
+    assert _leftovers(tmp_path) == []
+
+
+def test_successful_import_leaves_only_the_target(tmp_path):
+    _rep, out = run_import(tmp_path, make_basic_spine(tmp_path))
+    assert _leftovers(tmp_path) == ["out.duckdb"]
+    assert _meta(_nodal(out))["template_name"] == TEMPLATE_NAME
+
+
+def test_existing_target_is_refused_and_left_untouched(tmp_path):
+    spine = make_basic_spine(tmp_path)
+    target = tmp_path / "out.duckdb"
+    target.write_bytes(b"not mine to overwrite")
+    with pytest.raises(ImportError_, match="already exists"):
+        run_import(tmp_path, spine)
+    assert target.read_bytes() == b"not mine to overwrite"
+    assert _leftovers(tmp_path) == ["out.duckdb"]

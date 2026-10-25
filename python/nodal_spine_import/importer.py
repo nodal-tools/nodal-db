@@ -24,6 +24,13 @@ Mechanics
 5. Emit a LOUD residue report: unconsumed constructs, unflattenable values,
    ambiguous member picks, and the `parameter_type_list` drift table
    ("declared X, observed Y — chain will repair"). Zero silent drops.
+   A key repeated within one map level (or a repeated time stamp) keeps its
+   LAST entry and is reported as a warning in ``duplicate_keys`` (and
+   logged), at every map level.
+
+The whole import builds into a temporary directory next to the target and
+is moved into place only on success: a failed import leaves no database at
+the target path, and an existing target is refused, never overwritten.
 
 Allowlist posture: allowlist OFF for migration-range imports — vocabulary imports as
 found. The closed-allowlist mode exists for curated non-migration imports
@@ -33,12 +40,17 @@ and is out of scope here.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyarrow as pa
+
+log = logging.getLogger("nodal_spine_import")
 
 #: Names are free-text (was #2373 charset [A-Za-z0-9_]+; relaxed for
 #: Spine interop). The importer enforces only a hygiene floor,
@@ -124,13 +136,104 @@ def _index_of(idx):
     return ("label", str(idx))
 
 
-def flatten_value(parsed, residue: list, where: str) -> list[_LeafGroup]:
+@dataclass
+class DuplicateKey:
+    """One map level of a source value that repeats a key.
+
+    Spine stores a map as two parallel lists, so a key can appear more than
+    once; nodal-db maps one value per index. The importer keeps the LAST
+    entry for the key (what a Python ``dict`` built from the map keeps) and
+    records the conflict here. A repeated key in a nested map keeps the last
+    entry's whole sub-map; the earlier sub-maps are not merged into it."""
+
+    entity_class: str
+    entity: str
+    parameter: str
+    alternative: str
+    #: the keys of the enclosing map levels, outermost first (``()`` = the
+    #: top level of the value)
+    path: tuple
+    #: the repeated key, as the importer converts it (a string label or a
+    #: ``datetime``)
+    key: object
+    #: every entry with this key: ``(position, value description)``, where
+    #: ``position`` is the entry's 0-based position in that map's source
+    #: order
+    entries: list
+    #: the position of the entry that was imported (the last one)
+    kept: int
+
+    def describe(self) -> str:
+        level = (
+            "at the top level of the value"
+            if not self.path
+            else "in the map at key path (" + ", ".join(_show_key(k) for k in self.path) + ")"
+        )
+        entries = "; ".join(f"entry {pos}: {desc}" for pos, desc in self.entries)
+        return (
+            f"class {self.entity_class!r}, entity {self.entity!r}, parameter "
+            f"{self.parameter!r}, alternative {self.alternative!r}: key "
+            f"{_show_key(self.key)} appears {len(self.entries)} times {level} "
+            f"({entries}); kept the last, entry {self.kept}. A map holds one "
+            "value per key: fix the source so the key appears once."
+        )
+
+
+def _show_key(key) -> str:
+    if hasattr(key, "isoformat"):
+        return key.isoformat()
+    return repr(key)
+
+
+def _describe_entry(value, limit: int = 60) -> str:
+    """A short, readable description of one map entry's value."""
+    import spinedb_api
+
+    if isinstance(value, spinedb_api.Map):
+        return f"a map of {len(value.indexes)} entries"
+    if isinstance(value, spinedb_api.Array):
+        return f"an array of {len(value.values)} values"
+    if isinstance(value, spinedb_api.IndexedValue):
+        return f"a {type(value).__name__} of {len(value.indexes)} entries"
+    if isinstance(value, spinedb_api.DateTime):
+        text = repr(value.value.isoformat())
+    else:
+        text = repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def flatten_value(parsed, residue: list, where: str, duplicates=None) -> list[_LeafGroup]:
     """Flatten one parsed Spine value into leaf groups (one group per
     distinct (index kinds, leaf kind) signature — ragged maps are legal in
-    Spine and land as several groups, i.e. several observed members)."""
+    Spine and land as several groups, i.e. several observed members).
+
+    A key repeated within one map level (or one time stamp repeated in a
+    time series) keeps its LAST entry; ``duplicates(path, key, entries,
+    kept)`` is called once per repeated key (see :class:`DuplicateKey`).
+    The kept entry takes the key's first position, as in a ``dict``."""
     import spinedb_api
 
     groups: dict[tuple, _LeafGroup] = {}
+
+    def last_wins(keys, items, path):
+        """``[(key, item)]`` with one entry per key: the key's first
+        position, its last item. ``keys`` are the converted keys."""
+        by_key: dict = {}
+        for pos, (k, item) in enumerate(zip(keys, items)):
+            by_key.setdefault(k, []).append((pos, item))
+        if len(by_key) == len(keys):
+            return list(zip(keys, items))
+        out = []
+        for k, entries in by_key.items():
+            if len(entries) > 1 and duplicates is not None:
+                duplicates(
+                    path,
+                    k[1],
+                    [(pos, _describe_entry(item)) for pos, item in entries],
+                    entries[-1][0],
+                )
+            out.append((k, entries[-1][1]))
+        return out
 
     def add(kinds, names, idx_tuple, leaf_value):
         lk = _leaf(leaf_value)
@@ -147,8 +250,8 @@ def flatten_value(parsed, residue: list, where: str) -> list[_LeafGroup]:
     def walk(v, kinds, names, idx_tuple):
         if isinstance(v, spinedb_api.Map):
             iname = getattr(v, "index_name", "") or ""
-            for i, leaf in zip(v.indexes, v.values):
-                ik, iconv = _index_of(i)
+            keys = [_index_of(i) for i in v.indexes]
+            for (ik, iconv), leaf in last_wins(keys, list(v.values), idx_tuple):
                 walk(leaf, kinds + [ik], names + [iname], idx_tuple + (iconv,))
         elif isinstance(v, spinedb_api.Array):
             iname = getattr(v, "index_name", "") or "i"
@@ -157,11 +260,14 @@ def flatten_value(parsed, residue: list, where: str) -> list[_LeafGroup]:
         elif isinstance(v, spinedb_api.TimeSeriesFixedResolution) or isinstance(
             v, spinedb_api.TimeSeriesVariableResolution
         ):
-            for ts, leaf in zip(v.indexes, v.values):
-                # numpy datetime64[s] -> python datetime (pyarrow refuses to
-                # cast a datetime64[s] scalar straight into timestamp[us]).
-                ts = ts.astype("datetime64[us]").item() if hasattr(ts, "astype") else ts
-                add(kinds + ["datetime"], names + ["time"], idx_tuple + (ts,), float(leaf))
+            # numpy datetime64[s] -> python datetime (pyarrow refuses to
+            # cast a datetime64[s] scalar straight into timestamp[us]).
+            keys = [
+                ("datetime", ts.astype("datetime64[us]").item() if hasattr(ts, "astype") else ts)
+                for ts in v.indexes
+            ]
+            for (_, ts), leaf in last_wins(keys, [float(x) for x in v.values], idx_tuple):
+                add(kinds + ["datetime"], names + ["time"], idx_tuple + (ts,), leaf)
         elif isinstance(v, spinedb_api.TimePattern):
             residue.append(f"{where}: time_pattern value not flattenable (long-input door closed)")
         else:
@@ -196,6 +302,10 @@ class ImportReport:
     #: to the stored one): the core then makes no commit. Nothing reads these
     #: ids back; 0 is not an error.
     commits: list = field(default_factory=list)
+    #: source values with a repeated map key (or time stamp), one
+    #: :class:`DuplicateKey` per repeated key: the import kept the last
+    #: entry; each describes the problem in the source data.
+    duplicate_keys: list = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
@@ -204,12 +314,20 @@ class ImportReport:
             "counts: " + ", ".join(f"{k}={v}" for k, v in sorted(self.counts.items())),
             f"drift rows: {len(self.drift_table)}",
             f"residue items: {len(self.residue)}",
+            f"duplicate keys: {len(self.duplicate_keys)} (last entry kept)",
         ]
+        for d in self.duplicate_keys[:50]:
+            lines.append(f"  duplicate key: {d.describe()}")
         for r in self.residue[:50]:
             lines.append(f"  residue: {r}")
         for d in self.drift_table[:50]:
             lines.append(f"  drift: {d}")
         return "\n".join(lines)
+
+
+def _wal_of(path: Path) -> Path:
+    """DuckDB's write-ahead log next to a database file."""
+    return path.with_name(path.name + ".wal")
 
 
 def _check_name(kind: str, name: str):
@@ -257,6 +375,44 @@ class SpineImporter:
         return "sqlite:///" + p
 
     def run(self) -> ImportReport:
+        """Import the source into a NEW database at ``nodal_path``.
+
+        The import is atomic at the file level: it builds the database in a
+        temporary directory next to the target and moves it into place only
+        after every write succeeded. A failed import leaves no file at the
+        target (the temporary one is removed). An existing target is never
+        touched: the import refuses it before reading the source."""
+        target = Path(self.nodal_path)
+        for p in (target, _wal_of(target)):
+            if os.path.lexists(p):
+                raise ImportError_(
+                    f"{p} already exists; the importer writes a new database and "
+                    "never overwrites one: remove it or choose another path"
+                )
+        workdir = Path(tempfile.mkdtemp(
+            prefix=f".{target.name}.import-", dir=target.parent
+        ))
+        try:
+            build = workdir / target.name
+            self._import_into(str(build))
+            # Every connection is closed by now (per-operation discipline),
+            # so DuckDB has checkpointed and normally left no WAL; one that
+            # remains belongs with the file and moves first.
+            for p in (target, _wal_of(target)):
+                if os.path.lexists(p):
+                    raise ImportError_(
+                        f"{p} appeared while the import ran; the import was not "
+                        "moved into place"
+                    )
+            if os.path.lexists(_wal_of(build)):
+                os.replace(_wal_of(build), _wal_of(target))
+            os.replace(build, target)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+        return self.report
+
+    def _import_into(self, nodal_path: str) -> ImportReport:
+        """The import proper, into a fresh database at ``nodal_path``."""
         from spinedb_api import DatabaseMapping, from_database
 
         import nodal_db
@@ -352,8 +508,16 @@ class SpineImporter:
                 if parsed is None:
                     null_values += 1
                     continue
-                groups = flatten_value(parsed, rep.residue, where)
                 ent_name = pv.get("entity_name") or "__".join(pv["entity_byname"])
+
+                def on_duplicate(path, key, entries, kept, _cls=cls, _par=par,
+                                 _ent=ent_name, _alt=pv["alternative_name"]):
+                    dup = DuplicateKey(_cls, _ent, _par, _alt, tuple(path), key,
+                                       entries, kept)
+                    rep.duplicate_keys.append(dup)
+                    log.warning("duplicate key in source value: %s", dup.describe())
+
+                groups = flatten_value(parsed, rep.residue, where, on_duplicate)
                 for g in groups:
                     if not g.rows:
                         continue
@@ -411,7 +575,7 @@ class SpineImporter:
                 observed, rep,
             )
 
-            db = nodal_db.init(self.nodal_path)
+            db = nodal_db.init(nodal_path)
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".yaml", prefix="spine_bootstrap_", delete=False
             ) as f:

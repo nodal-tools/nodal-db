@@ -125,6 +125,7 @@ From `schema/110_views_history.sql`.
 | `semantic_annotation_asof(c)` | macro | Rows of `semantic_annotation` as of commit `c` |
 | `units_of_measure_asof(c)` | macro | Rows of `units_of_measure` as of commit `c` |
 | `value_array_asof(c)` | macro | Rows of `value_array` as of commit `c` |
+| `value_array_asof_for(c, pd_id, e_id, al_id)` | macro | One array value as of commit c |
 | `value_long_asof(c)` | macro | Rows of `value_long` as of commit `c` |
 | `value_scalar_asof(c)` | macro | Rows of `value_scalar` as of commit `c` |
 | `value_timeline` | view | The long leg is VALUE-level |

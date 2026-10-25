@@ -697,19 +697,44 @@ const ASOF_MACROS: &[&str] = &[
     "definition_value_array_asof",
 ];
 
+/// The as-of macros that take more than the commit: one value's key after
+/// `c` (fast_point_reads_PLAN §5.3). Their names do not end in `_asof`, so
+/// the census below matches `_asof` anywhere in the name.
+const ASOF_POINT_MACROS: &[&str] = &["value_array_asof_for"];
+
 /// The consumer shapes of the B1 sweep: bare, aggregate (projection fully
 /// pruned), column-pruned constant projection, and a join into another
 /// relation. Every macro exposes valid_from_commit, so the join is generic.
 fn shapes(macro_name: &str, c: i64) -> Vec<String> {
+    shapes_of(&format!("{macro_name}({c})"))
+}
+
+/// The same shapes over any macro call.
+fn shapes_of(call: &str) -> Vec<String> {
     vec![
-        format!("SELECT * FROM {macro_name}({c})"),
-        format!("SELECT count(*) FROM {macro_name}({c})"),
-        format!("SELECT 1 FROM {macro_name}({c})"),
+        format!("SELECT * FROM {call}"),
+        format!("SELECT count(*) FROM {call}"),
+        format!("SELECT 1 FROM {call}"),
         format!(
-            "SELECT count(*) FROM {macro_name}({c}) t \
+            "SELECT count(*) FROM {call} t \
              JOIN \"commit\" cm ON cm.id = t.valid_from_commit"
         ),
     ]
+}
+
+/// The point as-of call for runB's `Node.profile` array of n1: a key whose
+/// content survives the erase of runA, so only the guard can make it raise.
+fn point_asof_call(conn: &Connection, c: i64) -> String {
+    let (pd, e, a): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT va.parameter_definition_id, va.entity_id, va.alternative_id \
+             FROM value_array va JOIN alternative al ON al.id = va.alternative_id \
+             WHERE al.name = 'runB'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    format!("{}({c}, {pd}, {e}, {a})", ASOF_POINT_MACROS[0])
 }
 
 fn run_shape(conn: &Connection, sql: &str) -> Result<(), duckdb::Error> {
@@ -733,6 +758,10 @@ fn guard_consumer_shape_sweep_all_31_macros() {
                 run_shape(&conn, &sql)
                     .unwrap_or_else(|e| panic!("marker-free {sql} must succeed: {e}"));
             }
+        }
+        for sql in shapes_of(&point_asof_call(&conn, pre_commit)) {
+            run_shape(&conn, &sql)
+                .unwrap_or_else(|e| panic!("marker-free {sql} must succeed: {e}"));
         }
         conn.close().unwrap();
     }
@@ -763,6 +792,32 @@ fn guard_consumer_shape_sweep_all_31_macros() {
                 .unwrap_or_else(|e| panic!("as-of at the marker commit must succeed: {sql}: {e}"));
         }
     }
+    // The point as-of macro, on a key the erase did not touch: the same two
+    // directions in every shape.
+    for sql in shapes_of(&point_asof_call(&conn, c_erase - 1)) {
+        match run_shape(&conn, &sql) {
+            Ok(()) => panic!("guard FAILED to fire (silent partial history): {sql}"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("unreliable") && msg.contains("erasure"),
+                    "wrong error for {sql}: {msg}"
+                );
+            }
+        }
+    }
+    for sql in shapes_of(&point_asof_call(&conn, c_erase)) {
+        run_shape(&conn, &sql)
+            .unwrap_or_else(|e| panic!("as-of at the marker commit must succeed: {sql}: {e}"));
+    }
+    let n: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM {}", point_asof_call(&conn, c_erase)),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "the surviving runB array reads at the marker commit");
     conn.close().unwrap();
 }
 
@@ -1150,10 +1205,11 @@ fn erase_refuses_schema_version_mismatch_cleanly() {
 
 // --- review 7: sweep list == catalog census ----------------------------------
 
-/// The hardcoded 31-name sweep list must equal the live catalog's census of
-/// `*_asof` table macros — a new as-of macro that never enters the guard
+/// The hardcoded sweep lists (the 31 one-argument macros and the point
+/// macros) must equal the live catalog's census of table macros with `_asof`
+/// anywhere in the name — a new as-of macro that never enters the guard
 /// sweep fails HERE, not never. (`value_timeline` / `history_untrusted_span`
-/// are views, not macros; nothing else matches the suffix.)
+/// are views, not macros; nothing else matches.)
 #[test]
 fn guard_sweep_list_matches_catalog_census() {
     let dir = tempfile::tempdir().unwrap();
@@ -1164,7 +1220,7 @@ fn guard_sweep_list_matches_catalog_census() {
         .prepare(
             "SELECT DISTINCT function_name FROM duckdb_functions() \
              WHERE NOT internal AND function_type = 'table_macro' \
-               AND ends_with(function_name, '_asof') \
+               AND contains(function_name, '_asof') \
              ORDER BY function_name",
         )
         .unwrap();
@@ -1174,7 +1230,11 @@ fn guard_sweep_list_matches_catalog_census() {
         .collect::<Result<_, _>>()
         .unwrap();
     conn.close().unwrap();
-    let mut expected: Vec<String> = ASOF_MACROS.iter().map(|m| m.to_string()).collect();
+    let mut expected: Vec<String> = ASOF_MACROS
+        .iter()
+        .chain(ASOF_POINT_MACROS)
+        .map(|m| m.to_string())
+        .collect();
     expected.sort();
     assert_eq!(census, expected, "sweep list has drifted from the catalog");
 }

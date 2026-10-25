@@ -64,7 +64,7 @@ perf-gate-test:
 perf-gate-selftest *ARGS:
     python3 scripts/bench/ab/selftest.py {{ARGS}}
 
-# DuckDB schema smoke suite alone (239 checks).
+# DuckDB schema smoke suite alone (241 checks).
 smoke:
     {{py}} schema/smoke_test.py
 

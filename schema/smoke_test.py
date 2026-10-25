@@ -1768,7 +1768,8 @@ def main():
     # Erasure marker + the as-of guard (erasure_compaction_plan §1, decisions
     # D-E1/D-E3 2026-09-19). The marker CHECK trio is exercised, then a marker
     # is planted raw and the FULL consumer-shape sweep of acceptance 3 runs
-    # over all 31 as-of macros: the guard must fire under a bare SELECT *,
+    # over all 32 as-of macros (31 one-argument `*_asof(c)` macros and the
+    # point form value_array_asof_for): the guard must fire under a bare SELECT *,
     # count(*), a pruned projection, AND a join — and must stay silent without
     # a marker and at/after the marker commit. This sweep is the PERMANENT
     # engine-upgrade tripwire (the guard's soundness rests on optimizer
@@ -1809,23 +1810,34 @@ def main():
         "value_scalar_asof", "value_long_asof", "value_array_asof",
         "definition_value_scalar_asof", "definition_value_long_asof",
         "definition_value_array_asof"]
+    # Each macro's call at commit c. The point form takes one value's key
+    # after c (fast_point_reads_PLAN §5.3): a current array of the `base`
+    # alternative, so its content survives the planted marker below and only
+    # the guard can make it raise.
+    pt_key = one("SELECT parameter_definition_id, entity_id, alternative_id"
+                 " FROM value_array WHERE alternative_id = ? ORDER BY array_id LIMIT 1",
+                 base)
+    asof_calls = {m: (lambda c, m=m: f"{m}({c})") for m in asof_macros}
+    asof_calls["value_array_asof_for"] = (
+        lambda c: "value_array_asof_for({}, {}, {}, {})".format(c, *pt_key))
 
     def guard_shapes(m, c):
         # The B1 consumer shapes: bare, aggregate (projection fully pruned),
         # column-pruned constant projection, join into another relation
         # (every macro exposes valid_from_commit).
+        call = asof_calls[m](c)
         return [
-            f"SELECT * FROM {m}({c})",
-            f"SELECT count(*) FROM {m}({c})",
-            f"SELECT 1 FROM {m}({c})",
-            f'SELECT count(*) FROM {m}({c}) t JOIN "commit" cm'
+            f"SELECT * FROM {call}",
+            f"SELECT count(*) FROM {call}",
+            f"SELECT 1 FROM {call}",
+            f'SELECT count(*) FROM {call} t JOIN "commit" cm'
             f" ON cm.id = t.valid_from_commit"]
 
     def guard_sweep(c):
         """Per macro: 'error' if all shapes fail loudly on the guard,
         'silent' if all succeed, else the offending shape."""
         out = {}
-        for m in asof_macros:
+        for m in asof_calls:
             verdicts = set()
             for shape in guard_shapes(m, c):
                 try:
@@ -1836,18 +1848,19 @@ def main():
             out[m] = verdicts.pop() if len(verdicts) == 1 else f"mixed:{verdicts}"
         return out
 
-    # The hardcoded sweep list must equal the live catalog's census of *_asof
-    # table macros — a new as-of macro that skips the guard sweep (or a
-    # renamed one that silently drops out of it) fails HERE, not never.
+    # The hardcoded sweep list must equal the live catalog's census of table
+    # macros with `_asof` anywhere in the name (`*_asof` and the point form
+    # value_array_asof_for) — a new as-of macro that skips the guard sweep (or
+    # a renamed one that silently drops out of it) fails HERE, not never.
     # `value_timeline` / `history_untrusted_span` are views, not macros, and
-    # do not match the suffix; there are no other exclusions.
+    # do not match; there are no other exclusions.
     census = sorted(r[0] for r in allrows(
         "SELECT DISTINCT function_name FROM duckdb_functions()"
         " WHERE NOT internal AND function_type = 'table_macro'"
-        " AND ends_with(function_name, '_asof')"))
-    check("erasure guard: sweep list == catalog census of *_asof table macros"
-          " (31, no stragglers)",
-          census == sorted(asof_macros), str(set(census) ^ set(asof_macros)))
+        " AND contains(function_name, '_asof')"))
+    check("erasure guard: sweep list == catalog census of as-of table macros"
+          " (32, no stragglers)",
+          census == sorted(asof_calls), str(set(census) ^ set(asof_calls)))
 
     # Column parity: every *_asof macro projects every real (non-generated)
     # column of its base table, in table order. value_array_asof mirrors the
@@ -1860,17 +1873,41 @@ def main():
             table)]
 
     drift = {}
-    for m in asof_macros:
-        base_table = "value_array_hist" if m == "value_array_asof" else m[:-len("_asof")]
-        cols = [r[0] for r in allrows(f"DESCRIBE SELECT * FROM {m}(1)")]
+    for m in asof_calls:
+        base_table = ("value_array_hist" if m in ("value_array_asof", "value_array_asof_for")
+                      else m[:-len("_asof")])
+        cols = [r[0] for r in allrows(f"DESCRIBE SELECT * FROM {asof_calls[m](1)}")]
         if cols != real_cols(base_table):
             drift[m] = cols
     check("as-of macros: each projects every real column of its base table, in order",
           not drift, str(drift))
 
     c_latest = one('SELECT max(id) FROM "commit"')[0]
+
+    # The point form equals value_array_asof(c) filtered to the key, for
+    # every key that ever had an array and every commit (replaced values,
+    # deletes and the pre-image history of this database).
+    keys = allrows("SELECT DISTINCT parameter_definition_id, entity_id, alternative_id FROM"
+                   " (SELECT parameter_definition_id, entity_id, alternative_id FROM value_array"
+                   "  UNION ALL SELECT parameter_definition_id, entity_id, alternative_id"
+                   "  FROM value_array_hist)")
+    bad_asof, hits = {}, 0
+    for pd_k, e_k, a_k in keys:
+        for c in range(0, c_latest + 2):
+            got = (f"SELECT * FROM value_array_asof_for({c}, {pd_k}, {e_k}, {a_k})")
+            want = (f"SELECT * FROM value_array_asof({c}) WHERE parameter_definition_id = {pd_k}"
+                    f" AND entity_id = {e_k} AND alternative_id = {a_k}")
+            d = multiset_diff(got, want)
+            hits += d[2] > 0
+            if d[:2] != (0, 0):
+                bad_asof[(c, pd_k, e_k, a_k)] = d
+    n_hist = one("SELECT count(*) FROM value_array_hist")[0]
+    check(f"as-of point: value_array_asof_for == value_array_asof(c) for each of {len(keys)}"
+          f" array keys at every commit ({hits} non-empty reads, {n_hist} hist rows)",
+          not bad_asof and hits > len(keys) and n_hist > 0, str(bad_asof))
+
     sweep = guard_sweep(c_latest)
-    check("erasure guard: all 31 as-of macros silent in every shape on a"
+    check("erasure guard: all 32 as-of macros silent in every shape on a"
           " marker-free database",
           all(v == "silent" for v in sweep.values()),
           str({m: v for m, v in sweep.items() if v != "silent"}))
@@ -1886,11 +1923,11 @@ def main():
     con.execute("COMMIT")
 
     sweep = guard_sweep(c_erase - 1)
-    for m in asof_macros:
+    for m in asof_calls:
         check(f"erasure guard: {m} fails loudly before the marker in ALL"
               f" consumer shapes", sweep[m] == "error", str(sweep[m]))
     sweep = guard_sweep(c_erase)
-    check("erasure guard: all 31 macros exact and silent AT the marker commit",
+    check("erasure guard: all 32 macros exact and silent AT the marker commit",
           all(v == "silent" for v in sweep.values()),
           str({m: v for m, v in sweep.items() if v != "silent"}))
 

@@ -28,3 +28,9 @@ feature = ""
 probe_glob = "schema/*.sql"
 probe_regex = 'CREATE MACRO read_values\b'
 note = "the point-read macros read_value / read_values (fast_point_reads_PLAN): metrics rd_point_value_*, rd_values_20"
+
+[asof_point_macro]
+feature = ""
+probe_glob = "schema/*.sql"
+probe_regex = 'CREATE MACRO value_array_asof_for\b'
+note = "the point as-of macro value_array_asof_for (fast_point_reads_PLAN §5.3): metric rd_asof_point_head"

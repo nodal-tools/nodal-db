@@ -771,6 +771,152 @@ fn value_rows_for_equals_value_rows() {
     conn.close().unwrap();
 }
 
+/// `value_array_asof_for(c, pd, e, a)` = `value_array_asof(c) WHERE <triple>`
+/// (fast_point_reads_PLAN §5.3) for every triple that ever had an array and
+/// every commit, across replaces, a content-less stub (`retain_override =
+/// false`) and a deleted and re-created value; then, after an
+/// alternative is erased, both raise before the marker and agree at and
+/// after it.
+#[test]
+fn value_array_asof_for_equals_value_array_asof() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("asof.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    let hours = [0, 1, 2, 3];
+    let wr = |e: &str, alt: &str, k: f64, retain: Option<bool>| {
+        write_parameter(
+            &db,
+            "node",
+            "profile",
+            alt,
+            dt_series(&[e], &hours, k),
+            &[],
+            WriteOptions {
+                retain_override: retain,
+                ..Default::default()
+            },
+            "tester",
+            "asof fixture",
+        )
+        .unwrap_or_else(|err| panic!("write {e}/{alt}: {err}"));
+    };
+    for e in ["a", "b", "c"] {
+        wr(e, "Base", 1.0, None);
+    }
+    wr("a", "Base", 2.0, None);
+    wr("b", "Base", 2.0, Some(false)); // the superseded b version is a stub
+    wr("a", "Base", 3.0, None);
+    wr("a", "runA", 4.0, None);
+    delete_values(
+        &db,
+        vec![DeleteKey {
+            class: "node".into(),
+            parameter: "profile".into(),
+            alternative: "Base".into(),
+            entity: "c".into(),
+        }],
+        "tester",
+        "delete c",
+        WriteOptions::default(),
+    )
+    .expect("delete c");
+    wr("c", "Base", 5.0, None); // re-created: a new array_id
+    wr("b", "Base", 6.0, None);
+    // A scalar parameter: no array rows, both forms empty.
+    w(
+        &db,
+        "node",
+        "cap",
+        "Base",
+        scalar(&["a"], Arc::new(Float64Array::from(vec![1.0]))),
+        &[],
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let head = n(&conn, "SELECT max(id) FROM \"commit\"");
+    let triples: Vec<(i64, i64, i64)> = {
+        let mut st = conn
+            .prepare(
+                "SELECT DISTINCT parameter_definition_id, entity_id, alternative_id FROM \
+                 (SELECT parameter_definition_id, entity_id, alternative_id FROM value_array \
+                  UNION ALL SELECT parameter_definition_id, entity_id, alternative_id \
+                  FROM value_array_hist \
+                  UNION ALL SELECT parameter_definition_id, entity_id, alternative_id \
+                  FROM value_scalar) ORDER BY ALL",
+            )
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(triples.len(), 5, "a, b, c, a/runA arrays and the scalar");
+    assert!(
+        n(
+            &conn,
+            "SELECT count(*) FROM value_array_hist WHERE NOT content_retained"
+        ) >= 1
+    );
+    let asof = |c: i64, (pd, e, a): (i64, i64, i64)| {
+        (
+            format!("SELECT * FROM value_array_asof_for({c}, {pd}, {e}, {a})"),
+            format!(
+                "SELECT * FROM value_array_asof({c}) WHERE parameter_definition_id = {pd} \
+                 AND entity_id = {e} AND alternative_id = {a}"
+            ),
+        )
+    };
+    let mut hits = 0;
+    for &t in &triples {
+        for c in 0..=head + 1 {
+            let (got, want) = asof(c, t);
+            if same(&conn, &format!("as-of {c} {t:?}"), &got, &want) > 0 {
+                hits += 1;
+            }
+        }
+    }
+    assert!(hits >= 20, "too few non-empty as-of cases: {hits}");
+    conn.close().unwrap();
+
+    // The erasure guard: erase runA; every as-of before the marker raises,
+    // in both forms; at and after it they agree.
+    let rep = erase_alternative(
+        &db,
+        &ObjectDeleteKey {
+            kind: ObjectKind::Alternative,
+            class: None,
+            target: ObjectRef::Name("runA".into()),
+        },
+        &EraseOpts::default(),
+        "tester",
+    )
+    .expect("erase");
+    let marker = rep.commit_id;
+    let conn = Connection::open(&db).unwrap();
+    for &t in &triples {
+        for c in [1, marker - 1] {
+            let (got, want) = asof(c, t);
+            for sql in [&got, &want] {
+                let err = conn
+                    .prepare(sql)
+                    .and_then(|mut st| st.query([]).and_then(|mut r| r.next().map(|_| ())))
+                    .expect_err("an as-of read before an erasure marker must raise");
+                assert!(err.to_string().contains("unreliable"), "{sql}: {err}");
+            }
+        }
+        for c in [marker, marker + 1] {
+            let (got, want) = asof(c, t);
+            same(
+                &conn,
+                &format!("after the marker: as-of {c} {t:?}"),
+                &got,
+                &want,
+            );
+        }
+    }
+    conn.close().unwrap();
+}
+
 /// `api::read_values` (fast_point_reads_PLAN §5.4) is the macro on a
 /// per-operation connection: the same rows as the SQL call, the columns of
 /// `api::read_parameter`, `None` = every current alternative, and empty

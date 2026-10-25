@@ -654,6 +654,64 @@ fn prepared_read_values_with_bound_lists_uses_the_index() {
     conn.close().unwrap();
 }
 
+/// `value_array_asof_for` (fast_point_reads_PLAN §5.3): the current leg is an
+/// index fetch, and for a head-near read (the value unchanged since `c`, or
+/// absent at `c`) the history leg's probe is -1, which the zone maps prune:
+/// the hist payload scan reads no row. A value that changed after `c` still
+/// scans the hist payloads (no single-column key there; plan D6), which is
+/// not asserted.
+#[test]
+fn asof_point_read_uses_the_index_and_prunes_the_history_leg() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(dir.path());
+    let conn = guard_conn(&db);
+    let head = one_i64(&conn, "SELECT max(id) FROM \"commit\"");
+    let key = |e: &str| -> (i64, i64, i64) {
+        conn.query_row(
+            "SELECT pd.id, e.id, al.id FROM parameter_definition pd \
+             JOIN entity_class ec ON ec.id = pd.entity_class_id \
+             JOIN entity e ON e.entity_class_id = ec.id \
+             JOIN alternative al ON al.name = 'Base' \
+             WHERE ec.name = 'node' AND pd.name = 'profile' AND e.name = ?",
+            [e],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    let ver = engine_version(&conn);
+    for (label, e, want) in [
+        ("head-near hit", ent(10), 1),
+        ("deleted at c (absent)", ent(N_ENT - 1), 0),
+    ] {
+        let (pd, eid, al) = key(&e);
+        let sql = format!("SELECT * FROM value_array_asof_for({head}, {pd}, {eid}, {al})");
+        assert_eq!(count(&conn, &sql), want, "{label}: rows");
+        let plan = explain(&conn, &sql);
+        let cur = payload_scans(&plan, "value_array");
+        assert!(
+            !cur.is_empty() && cur.iter().all(|(ty, _)| ty == "Index Scan"),
+            "{label}: the current leg's payload scan is not an index scan on DuckDB {ver}: \
+             {cur:?}\n{sql}"
+        );
+        let mut hist_rows = vec![];
+        for r in roots(&plan) {
+            walk(&r, &mut |n| {
+                if scan_table(n) == Some("value_array_hist")
+                    && projections(n).iter().any(|p| p == "values")
+                {
+                    hist_rows.push(n.get("rows_scanned").and_then(Json::as_u64));
+                }
+            });
+        }
+        assert!(
+            !hist_rows.is_empty() && hist_rows.iter().all(|r| *r == Some(0)),
+            "{label}: the history leg read payload rows {hist_rows:?} for a head-near read \
+             on DuckDB {ver}: the -1 probe no longer prunes (engine_rules §2)\n{sql}"
+        );
+    }
+    conn.close().unwrap();
+}
+
 /// Critique M4: the `ap` CTE evaluates `axis_position` only for the value's own
 /// axes. The axis UNNESTs (the parametric legs of `axis_position`; the only
 /// UNNESTs with no `value_array` scan below them that read `axis`) must emit no

@@ -250,6 +250,45 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND valid_to_commit > c;
 
+-- One array value as of commit c: value_array_asof(c) WHERE <the key
+-- triple>, the same columns and the same erasure guard in both legs, but the
+-- current leg is fetched by array_id (index; fast_point_reads_PLAN §5.3).
+-- Each leg resolves its key on narrow columns first, as a scalar folded
+-- with coalesce(…, -1): a miss probes -1, which lies below every zone map,
+-- so an empty leg reads nothing (engine_rules §2). The history leg cannot
+-- be an index fetch (value_array_hist has no single-column key: one array_id
+-- has many versions), so a value that changed after c still scans the hist
+-- payloads, at the cost of value_array_asof; the head-near case (unchanged
+-- since c) is the fast one. Argument order as value_rows_for: definition,
+-- entity, alternative.
+CREATE MACRO value_array_asof_for(c, pd_id, e_id, al_id) AS TABLE
+SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
+       valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
+       values, values_int, v_min, v_max,
+       NULL::BIGINT AS valid_to_commit, TRUE AS content_retained
+FROM value_array
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND array_id = coalesce((SELECT array_id FROM value_array
+                           WHERE entity_id = e_id AND parameter_definition_id = pd_id
+                             AND alternative_id = al_id AND valid_from_commit <= c), -1)
+UNION ALL
+SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
+       valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
+       values, values_int, v_min, v_max,
+       valid_to_commit, content_retained
+FROM value_array_hist
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND array_id = coalesce((SELECT array_id FROM value_array_hist
+                           WHERE entity_id = e_id AND parameter_definition_id = pd_id
+                             AND alternative_id = al_id
+                             AND valid_from_commit <= c AND valid_to_commit > c), -1)
+  AND valid_from_commit = (SELECT valid_from_commit FROM value_array_hist
+                           WHERE entity_id = e_id AND parameter_definition_id = pd_id
+                             AND alternative_id = al_id
+                             AND valid_from_commit <= c AND valid_to_commit > c);
+
 -- definition-value mirrors (uniformly from/to, no twin — VMP Part 3)
 CREATE MACRO definition_value_scalar_asof(c) AS TABLE
 SELECT * EXCLUDE (cp, cs) FROM definition_value_scalar

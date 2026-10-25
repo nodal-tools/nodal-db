@@ -532,6 +532,24 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
                 k(60, 40),
             )
         }
+        // One array value as of the head commit (value_array_asof_for, the
+        // index-served current leg; the history leg pruned).
+        "rd_asof_point_head" => with_read(&synth_path(), |conn| {
+            let (e, pd, al) = keys(conn, s)?.array;
+            let c: i64 = conn.query_row("SELECT max(id) FROM \"commit\"", [], |r| r.get(0))?;
+            Ok(rendered(
+                conn,
+                mode,
+                &format!("SELECT * FROM value_array_asof_for({c}, {pd}, {e}, {al})"),
+                1,
+                Some(&format!(
+                    "SELECT * FROM value_array_asof({c}) WHERE parameter_definition_id = {pd} \
+                     AND entity_id = {e} AND alternative_id = {al}"
+                )),
+                k(60, 40),
+            )?)
+        })
+        .unwrap_or_else(|e| crate::check::query_failed(&format!("{mode}: {e}"))),
         "rd_values_20" => {
             let first = s.arrays / 2 - 10;
             let picked: Vec<String> = (first..first + 20).map(|i| format!("a{i:04}")).collect();

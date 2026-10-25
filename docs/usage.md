@@ -428,6 +428,7 @@ Commonly used parts of the read surface:
 | `scenario_contents(scenario)` | entities, activation and group membership in a scenario |
 | `value_rows`, `value_cells` | all current values as long rows |
 | `<table>_asof(commit)` | a table as of an earlier commit, e.g. `value_scalar_asof(3)` |
+| `value_array_asof_for(commit, parameter_definition_id, entity_id, alternative_id)` | one array value as of an earlier commit (see [Read history](#read-history)) |
 | `"commit"` | the commit log: id, timestamp, user, message |
 | `audit_health`, `audit_*` | integrity, completeness and maintenance reports |
 
@@ -545,6 +546,12 @@ and an as-of read returns the earlier state:
 ```sql
 SELECT entity_id, v_float FROM value_scalar_asof(3);   -- 400.0 and 250.0
 ```
+
+For one array value, `value_array_asof_for(commit, parameter_definition_id,
+entity_id, alternative_id)` returns the rows of `value_array_asof(commit)`
+for that key. It fetches a value that has not changed since `commit` by
+index, in milliseconds; a value that changed after `commit` still scans
+the stored history of every array, as `value_array_asof` does.
 
 ### Erase an alternative
 

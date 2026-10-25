@@ -15,7 +15,7 @@
 //! Arrow types by kind: `datetime` -> `Timestamp(µs)`, `integer` -> `Int64`,
 //! `label` -> `Utf8`. The value column's type follows `value_kind`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use duckdb::arrow::array::{
     Array, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
@@ -116,8 +116,26 @@ pub enum CanonError {
     MissingDomain(u8),
     #[error("label {0:?} in dimension {1} is not in the caller-supplied ordered domain")]
     LabelNotInDomain(String, usize),
-    #[error("duplicate index tuple {0:?} (a value maps one measure per index tuple)")]
-    DuplicateTuple(Vec<i32>),
+    /// Two rows of one value share an index tuple. `coords` is the tuple as
+    /// the caller wrote it (labels quoted, integers, ISO timestamps), not the
+    /// internal axis positions; `location` names the value (entity, class,
+    /// parameter, alternative) once the write path knows it
+    /// ([`CanonError::at_value`]).
+    #[error("{}", duplicate_tuple_message(coords, location.as_deref()))]
+    DuplicateTuple {
+        coords: Vec<String>,
+        location: Option<String>,
+    },
+    #[error(
+        "the label domain of dimension {position}{} repeats the label {label:?}; \
+         each label may appear only once in a domain",
+        dimension.as_ref().map(|n| format!(" ({n:?})")).unwrap_or_default()
+    )]
+    RepeatedDomainLabel {
+        label: String,
+        position: u8,
+        dimension: Option<String>,
+    },
     #[error("rank-0 scalar must have exactly one non-null value, got {0}")]
     ScalarRows(usize),
     #[error("indexed value has no non-null cells after NULL elimination")]
@@ -133,6 +151,73 @@ pub enum CanonError {
     TimestampOutOfRange { value: i64, column: usize },
     #[error(transparent)]
     Encode(#[from] EncodeError),
+}
+
+impl CanonError {
+    /// Attach the value's location to an error that needs it to be found in
+    /// the source data (today [`CanonError::DuplicateTuple`]); every other
+    /// variant passes through unchanged.
+    pub fn at_value(self, entity: &str, class: &str, parameter: &str, alternative: &str) -> Self {
+        match self {
+            CanonError::DuplicateTuple { coords, .. } => CanonError::DuplicateTuple {
+                coords,
+                location: Some(format!(
+                    "entity {entity:?} (class {class:?}, parameter {parameter:?}, \
+                     alternative {alternative:?})"
+                )),
+            },
+            other => other,
+        }
+    }
+}
+
+fn duplicate_tuple_message(coords: &[String], location: Option<&str>) -> String {
+    let tuple = coords.join(", ");
+    match location {
+        Some(loc) => format!(
+            "{loc}: duplicate index tuple ({tuple}); a value maps one measure per index tuple"
+        ),
+        None => {
+            format!("duplicate index tuple ({tuple}); a value maps one measure per index tuple")
+        }
+    }
+}
+
+/// A timestamp (µs since the Unix epoch) as ISO 8601 (`YYYY-MM-DDTHH:MM:SS`,
+/// with `.ffffff` only when there are sub-second digits). Diagnostics only.
+fn render_timestamp(us: i64) -> String {
+    const DAY_US: i64 = 86_400_000_000;
+    let (y, m, d) = crate::encoding::civil_from_days(us.div_euclid(DAY_US));
+    let rem = us.rem_euclid(DAY_US);
+    let (secs, micros) = (rem / 1_000_000, rem % 1_000_000);
+    let (h, mi, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if micros == 0 {
+        format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}")
+    } else {
+        format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{micros:06}")
+    }
+}
+
+/// Reject a label domain that repeats a label. A label's ordinal is its
+/// place in the domain, so a repeat makes the order ambiguous; it is almost
+/// always a producer bug. `dim_name` gives the dimension name of a domain
+/// position, for the message. The write path runs this once per segment,
+/// before any value is canonicalized.
+pub fn check_domain_labels(
+    domains: &[LabelDomain],
+    dim_name: impl Fn(u8) -> Option<String>,
+) -> Result<(), CanonError> {
+    for d in domains {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(d.labels.len());
+        if let Some(label) = d.labels.iter().find(|l| !seen.insert(l.as_str())) {
+            return Err(CanonError::RepeatedDomainLabel {
+                label: label.clone(),
+                position: d.position,
+                dimension: dim_name(d.position),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// One dimension column, downcast once before the row loop.
@@ -267,6 +352,9 @@ pub fn canonicalize(
     let mut label_pos: Vec<HashMap<String, i32>> = Vec::new();
     // Parallel bookkeeping so every dimension has an entry at its own index.
     let mut is_label = vec![false; rank];
+    // Sorted distinct coords of each numeric dimension (position -> coord),
+    // kept to report a duplicate tuple in the caller's coordinates.
+    let mut num_coords: Vec<Vec<i64>> = Vec::with_capacity(rank);
 
     for (i, (position, kind)) in declared.positions.iter().enumerate() {
         match kind {
@@ -296,6 +384,7 @@ pub fn canonicalize(
                 });
                 num_pos.push(map);
                 label_pos.push(HashMap::new());
+                num_coords.push(distinct);
             }
             IndexKind::Label => {
                 is_label[i] = true;
@@ -338,6 +427,7 @@ pub fn canonicalize(
                 });
                 num_pos.push(HashMap::new());
                 label_pos.push(map);
+                num_coords.push(Vec::new());
             }
             other => return Err(CanonError::UnsupportedKind(*other)),
         }
@@ -372,7 +462,10 @@ pub fn canonicalize(
     rows.sort_by(|a, b| a.positions.cmp(&b.positions));
     for w in rows.windows(2) {
         if w[0].positions == w[1].positions {
-            return Err(CanonError::DuplicateTuple(w[0].positions.clone()));
+            return Err(CanonError::DuplicateTuple {
+                coords: render_tuple(&w[0].positions, declared, &axes, &num_coords),
+                location: None,
+            });
         }
     }
 
@@ -386,6 +479,25 @@ pub fn canonicalize(
         axes,
         shape,
     })
+}
+
+/// A position tuple back in the caller's coordinates: labels quoted,
+/// integers as written, datetimes as ISO 8601.
+fn render_tuple(
+    positions: &[i32],
+    declared: &DeclaredType,
+    axes: &[CanonicalAxis],
+    num_coords: &[Vec<i64>],
+) -> Vec<String> {
+    positions
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| match (&declared.positions[i].1, &axes[i].body) {
+            (_, AxisBody::Label { positions }) => format!("{:?}", positions[p as usize].label),
+            (IndexKind::Datetime, _) => render_timestamp(num_coords[i][p as usize]),
+            _ => num_coords[i][p as usize].to_string(),
+        })
+        .collect()
 }
 
 /// Read one value cell; `Ok(None)` is a NULL cell (absent). `column` is the

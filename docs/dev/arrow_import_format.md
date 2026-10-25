@@ -195,7 +195,11 @@ Grouping rows by entity is good for locality.
   cannot convert is an error, not a null.
 - An entity all of whose value cells are null is an error (E6).
 - At rank 0, each entity must appear in exactly one row (E6 otherwise).
-- Two rows with the same entity and index tuple are an error (E6).
+- Two rows with the same entity and index tuple are an error (E6). The
+  message names the entity, class, parameter and alternative, and shows
+  the tuple as written (labels, integers, timestamps). A row whose value
+  is null does not count: it is dropped first, so `("x", 1.0)` and
+  `("x", null)` together are the single cell `x = 1.0`.
 - Entity names must be non-empty, and one segment must use one spelling
   per entity: `north` and `North` in the same segment are an error (E6),
   because names resolve case-insensitively.
@@ -350,6 +354,9 @@ Rules:
 - Every label that appears in the data must be in the domain (E6
   otherwise). The domain may contain labels that do not appear.
 - Invalid JSON is an error (E6).
+- A domain must not repeat a label (E6): a label's place in the domain
+  is its order, so a repeat leaves the order undefined. Labels are
+  compared exactly, so `x` and `X` are two different labels.
 
 The domain sets the label order used for storage and sorting. In the
 dense form the dimension list says which labels the entity has; the
@@ -412,7 +419,7 @@ is stable; the message text may change between releases.
 | E3 | version problem | `spinal:format_version` missing, malformed, a major version other than 1, or different in different segments |
 | E4 | metadata or target problem | `spinal:segment_count`, `spinal:class`, `spinal:parameter` or `spinal:form` missing; unknown `spinal:form`; no alternative; `spinal:alternative` conflicts with `--alternative`; `--class`/`--parameter` assertion does not match |
 | E5 | warning only | unknown `spinal:` metadata key, ignored |
-| E6 | malformed payload or rejected by the core | unsupported Arrow type (`timestamp[ns]`, `large_utf8`, `float32`, …); run-end encoding; rank above 4; null where not allowed; zero-row segment; `entity`/`value` column out of place; label domain missing, invalid or not covering the data; duplicate index tuple or dense entity; rank-0 entity with several rows; timestamp outside the supported range (290309 BC to 294247 AD), including after conversion from s/ms; empty entity name or two spellings of one entity; type does not match the existing definition; entity of a multi-dimensional class does not exist; `--db` is not an initialized nodal-db database; trailing bytes after a segment; a stream cut off in the middle of a message |
+| E6 | malformed payload or rejected by the core | unsupported Arrow type (`timestamp[ns]`, `large_utf8`, `float32`, …); run-end encoding; rank above 4; null where not allowed; zero-row segment; `entity`/`value` column out of place; label domain missing, invalid, repeating a label or not covering the data; duplicate index tuple or dense entity; rank-0 entity with several rows; timestamp outside the supported range (290309 BC to 294247 AD), including after conversion from s/ms; empty entity name or two spellings of one entity; type does not match the existing definition; entity of a multi-dimensional class does not exist; `--db` is not an initialized nodal-db database; trailing bytes after a segment; a stream cut off in the middle of a message |
 | E7 | duplicate target | two segments target the same `(class, parameter, alternative)` |
 | E8 | dense shape error | value list length is not the product of the dimension list lengths; duplicate coordinate in a dimension list; empty dimension list |
 | E9 | database busy | the write lock could not be obtained, or a write conflict persisted, within the retry budget; retry later |
@@ -425,6 +432,7 @@ Error: E1: file.arrow is in the Arrow IPC *file* (Feather / random-access) forma
 Error: E6: segment 1 (node:cap): column "t" is timestamp[ns]; nanosecond truncation is lossy and never silent — cast to microseconds producer-side (pandas: .astype("datetime64[us]"))
 Error: E6: segment 1 (node:cap): label dimension "s" has no spinal:label_domain field metadata (required on every label dimension)
 Error: E6: segment 1 (node:cap): dimension column "t", row 1 (entity "a"): timestamp[s] value 4611686018427387904 overflows the supported timestamp range when converted to microseconds (×1000000); supported timestamps run from 290309 BC to 294247 AD
+Error: E6: entity "n1" (class "node", parameter "cap", alternative "Base"): duplicate index tuple ("high"); a value maps one measure per index tuple
 Error: E8: segment 1 (node:cap): dense row 0 (entity "a"): payload length 2 != product of axis lengths 3 (values are row-major: the last dimension varies fastest)
 Error: E10: segment 2 is not terminated by the end-of-stream marker — truncation suspected (producer crash before close?)
 ```

@@ -1119,6 +1119,51 @@ fn present_label_missing_from_domain_is_e6() {
     assert_error_leaves_db_untouched(&db, &out, "E6");
 }
 
+/// A label domain that repeats a label is E6, naming the label and the
+/// dimension (the order of a repeated label is ambiguous).
+#[test]
+fn repeated_label_in_domain_is_e6() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let file = write_file(
+        dir.path(),
+        "repeated.arrows",
+        &label_segment(Some(r#"["low","high","low"]"#), &[("n1", "high", 1.0)]),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(r#"label domain of dimension 1 ("scenario") repeats the label "low""#),
+        "{stderr}"
+    );
+}
+
+/// Two rows with the same entity and index tuple are E6, and the message
+/// says which value and which tuple, in the file's own terms.
+#[test]
+fn duplicate_tuple_is_e6_naming_entity_and_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let file = write_file(
+        dir.path(),
+        "duptuple.arrows",
+        &label_segment(
+            Some(r#"["low","high"]"#),
+            &[("n1", "high", 1.0), ("n1", "low", 2.0), ("n1", "high", 3.0)],
+        ),
+    );
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            r#"entity "n1" (class "node", parameter "profile", alternative "Base"): duplicate index tuple ("high")"#
+        ),
+        "{stderr}"
+    );
+}
+
 /// §7.1 happy path: a superset domain is accepted, and ordinals come from the
 /// DOMAIN order, not wire order (wire emits high before low; the stored axis
 /// orders low before high).

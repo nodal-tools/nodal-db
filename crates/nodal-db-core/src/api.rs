@@ -41,7 +41,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{params, Connection};
 
 use crate::axis::AxisCache;
-use crate::canon::{canonicalize, LabelDomain};
+use crate::canon::{canonicalize, check_domain_labels, CanonicalValue, LabelDomain};
 use crate::conn::{head_on, with_read, with_write_txn_retrying_ends, TxnEnd, TxnOptions};
 use crate::error::DbError;
 use crate::history::{
@@ -1622,6 +1622,26 @@ struct PreparedSegment {
 }
 
 impl PreparedSegment {
+    /// Canonicalize the value of entity `j` (an index into `names`). An
+    /// error that needs the value's location to be found in the source data
+    /// (a duplicate index tuple) names the entity, class, parameter and
+    /// alternative.
+    fn canonicalize_entity(
+        &self,
+        j: usize,
+        declared: &DeclaredType,
+    ) -> Result<CanonicalValue, DbError> {
+        let sub = take_record_batch(&self.sub_all, &UInt32Array::from(self.rows[j].clone()))?;
+        canonicalize(&sub, declared, self.value_kind, &self.domains).map_err(|e| {
+            DbError::Canon(e.at_value(
+                &self.names[j],
+                &self.class,
+                &self.parameter,
+                &self.alternative,
+            ))
+        })
+    }
+
     /// This segment without the names `dropped` lists (indices into
     /// `names`; `CoveredWrites::DeleteWins`). The row indices of the kept
     /// names still point into the shared `sub_all`.
@@ -1704,6 +1724,13 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     // Effective label domains: the in-process arg, plus any Arrow field-metadata
     // domain for a label dimension the arg did not cover (decision D).
     let domains = effective_domains(&batch, &inferred, &seg.domains)?;
+    // A domain that repeats a label has no well-defined order: refuse it once
+    // per segment, before any value is canonicalized.
+    check_domain_labels(&domains, |position| {
+        inferred
+            .get(usize::from(position).wrapping_sub(1))
+            .map(|(name, _)| name.clone())
+    })?;
 
     // Tz-bearing timestamp columns are accepted — a Timestamp(µs, tz) is a
     // well-defined instant, stored as the UTC-µs instant unchanged — but never
@@ -1855,9 +1882,8 @@ fn write_prepared(
     let (entity_ids, entity_minted) = match resolved {
         Resolved::Ids { ids, minted } => (ids, minted),
         Resolved::NdRefused { first_missing, err } => {
-            for idx in &p.rows[..first_missing] {
-                let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
-                canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
+            for j in 0..first_missing {
+                p.canonicalize_entity(j, &declared)?;
             }
             return Err(err);
         }
@@ -1876,9 +1902,8 @@ fn write_prepared(
     }
 
     let retained = keeps_content(&resolved_opts);
-    for ((&entity_id, &minted), idx) in entity_ids.iter().zip(&entity_minted).zip(p.rows.iter()) {
-        let sub = take_record_batch(&p.sub_all, &UInt32Array::from(idx.clone()))?;
-        let value = canonicalize(&sub, &declared, p.value_kind, &p.domains)?;
+    for (j, (&entity_id, &minted)) in entity_ids.iter().zip(&entity_minted).enumerate() {
+        let value = p.canonicalize_entity(j, &declared)?;
         let key = ValueKey {
             entity_id,
             parameter_definition_id: pd_id,

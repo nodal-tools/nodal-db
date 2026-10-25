@@ -268,16 +268,21 @@ impl RowHash {
     pub fn add(&mut self, batches: &[RecordBatch]) {
         for b in batches {
             let schema = b.schema();
-            let cols: Vec<(usize, &ArrayRef)> = b
+            // Keyed by the position among the *logical* columns: a
+            // surrogate column (excluded) added to a view in one arm must
+            // not shift the columns after it into a false WRONG RESULT.
+            // (Not by name: an engine bump may rename expression columns.)
+            let cols: Vec<&ArrayRef> = b
                 .columns()
                 .iter()
                 .enumerate()
                 .filter(|(k, _)| logical(schema.field(*k).name()))
+                .map(|(_, c)| c)
                 .collect();
             for i in 0..b.num_rows() {
                 let mut h = FNV;
-                for (k, col) in &cols {
-                    h = fnv(h, &(*k as u64).to_le_bytes());
+                for (k, col) in cols.iter().enumerate() {
+                    h = fnv(h, &(k as u64).to_le_bytes());
                     h = fnv(h, &cell(col, i).to_le_bytes());
                 }
                 self.sum = self.sum.wrapping_add(mix(h));

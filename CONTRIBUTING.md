@@ -22,7 +22,7 @@ root `Cargo.toml`) and the Python pins (`dev-requirements.txt`,
 version duckdb-rs re-exports, so do the `arrow` and `arrow-pyarrow` pins
 (and through them `pyo3`; see the comments in `Cargo.toml`). The engine
 behaviours the code relies on (storage format, `array_id` parity, index
-access paths, index key order) are listed with their guards in
+access paths, index key order, the caching-operators workaround) are listed with their guards in
 [`docs/dev/engine_rules.md`](docs/dev/engine_rules.md); read it before
 changing the schema, core SQL, indexes, sequences, storage or compaction,
 and re-check it after a bump. After one:
@@ -33,6 +33,11 @@ and re-check it after a bump. After one:
   `entity_name_index_scan`) on a release-built engine. They check
   optimizer behaviour, not a documented contract, and fail loudly when it
   changes; their failure messages say what to re-evaluate.
+- If `duckdb_dict_cache_guard`'s tripwire fails ("the DuckDB dict-cache
+  bug appears fixed"), remove the `debug_enable_caching_operators`
+  workaround as described in engine_rules.md §5. If every core open
+  fails on that setting, the new DuckDB renamed or dropped it: check
+  whether the bug is fixed before deciding what replaces it.
 - If the release notes mention Unicode or utf8proc updates (case
   mapping), compact the dev files after the bump. The `lower(name)`
   indexes (`ix_entity_lname`, the `uq_*_name` unique indexes over

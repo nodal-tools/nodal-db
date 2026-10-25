@@ -11,7 +11,8 @@ exists, and the test that guards it.
 - the schema DDL (`schema/*.sql`), including indexes and sequences;
 - SQL statements in the core (`crates/nodal-db-core/src/`), especially
   ones that read or write `value_array` or look up entities by name;
-- how database files are created, rebuilt or compacted;
+- how database files are created, rebuilt or compacted, or how
+  connections to them are opened;
 - the bundled DuckDB version (see also
   [DuckDB upgrades](https://github.com/nodal-tools/nodal-db/blob/main/CONTRIBUTING.md#duckdb-upgrades)
   in `CONTRIBUTING.md`).
@@ -146,3 +147,55 @@ fails silently: the file is just bigger. The measurements are in
 [`crates/nodal-db-core/tests/long_index_size.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/long_index_size.rs)
 (fails when the order or a DuckDB upgrade makes the index grow) and the
 key-order checks in `schema/smoke_test.py`.
+
+## 5. Every connection turns off DuckDB's caching operators
+
+**Rule.** Every connection the core opens (and the CLI's one direct
+open) gets its configuration from `conn::core_config`, which sets
+`debug_enable_caching_operators = false`. Never open a connection with a
+bare `Config::default()` or `Connection::open` in library code.
+
+**Why.** DuckDB 2.0 has a bug in its caching operators. The query shape
+that hits it is a join over dense ids that DuckDB runs as a perfect hash
+join, then `unnest` of a list longer than 2048 elements whose length is
+not a multiple of 2048, then a selective filter. In nodal-db that is
+`read_parameter` or `value_rows` on 8760-long array values with a time
+window (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`),
+on a file with several hundred such arrays. The query fails with
+`INTERNAL Error: dict-surviving cache: global dictionary column 0
+changed identity …`, and the error invalidates the whole database
+instance, so every other connection on it fails too. No data is
+damaged. DuckDB 1.5.5 is not affected; 2.0.0 and the 2.0.1 pre-releases
+up to 2026-10-21 are. DuckDB issue: pending upstream report.
+
+Turning the caching operators off avoids the bug. The setting does not
+reach users who open the file with their own DuckDB connection; the
+[usage guide](../usage.md#duckdb-version) tells them to set it
+themselves. The setting is tagged `debug_` in DuckDB, so a release may
+rename or remove it; every core open then fails with a clear error, and
+the upgrade has to deal with it.
+
+**Guards.**
+[`crates/nodal-db-core/tests/duckdb_dict_cache_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/duckdb_dict_cache_guard.rs):
+
+- `raw_duckdb_still_has_the_bug` is a deliberate tripwire. It runs a
+  three-statement repro on a plain connection and asserts that DuckDB
+  still fails. When a DuckDB upgrade fixes the bug, it fails with "the
+  DuckDB dict-cache bug appears fixed; remove the
+  debug_enable_caching_operators workaround".
+- `core_connection_reads_filtered_arrays_correctly` builds a file with
+  800 arrays of 8760 values, checks that a time-window `read_parameter`
+  fails on a plain connection, then checks the exact result through the
+  core's read connection and that the core's read and write
+  connections carry the setting.
+
+**Removing the workaround,** once the tripwire fires on an upgrade:
+
+1. Drop the `.with("debug_enable_caching_operators", "false")` line from
+   `conn::core_config` (keep the function: it is the one place every
+   open gets its configuration).
+2. Delete `duckdb_dict_cache_guard.rs`, or keep its core test as a plain
+   regression test of filtered array reads.
+3. Remove this section and the warning in the usage guide (or narrow it
+   to the DuckDB versions that still have the bug).
+4. Run the perf gate (`just perf-gate`) with the DuckDB bump.

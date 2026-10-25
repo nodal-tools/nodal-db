@@ -409,7 +409,9 @@ parameter, across all alternatives, in one long shape: `idx1`…`idx4`
 columns per index kind (`_text`, `_ts`, `_num`, `_ordinal`, `_coord`)
 and `v_*` columns per value kind (`v_float`, `v_int`, `v_bool`, `v_str`,
 `v_datetime`, …). The index columns are numbered by position; the
-declared dimension names are in `parameter_type_dimension`.
+declared dimension names are in `parameter_type_dimension`. If you
+filter array values on your own DuckDB connection, see
+[DuckDB 2.0: filtered reads of long arrays](#duckdb-version) first.
 
 Commonly used parts of the read surface:
 
@@ -855,6 +857,33 @@ use a nodal-db build that matches the file.
     the file with a storage-version error. The DuckDB 2.0 Python client
     needs Python 3.11 or later. Check with
     `duckdb --version` or `python -c "import duckdb; print(duckdb.__version__)"`.
+
+!!! warning "DuckDB 2.0: filtered reads of long arrays can fail"
+    On DuckDB 2.0.x, a query that filters `read_parameter` or
+    `value_rows` on array values, such as a time window
+    (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`),
+    can fail with `INTERNAL Error: dict-surviving cache: …` on a
+    database with several hundred long arrays (for example 8760 hourly
+    values each). This is a DuckDB bug, not damaged data. The error also
+    invalidates the connection: open a new one.
+
+    The core and the Python package (`db.query`, `db.read_parameter`)
+    avoid it already. On your own DuckDB connection, turn off the
+    setting that triggers it, either when you open the file or with
+    `SET`:
+
+    ```python
+    con = duckdb.connect("demo.duckdb", read_only=True,
+                         config={"debug_enable_caching_operators": "false"})
+    ```
+
+    ```sql
+    SET debug_enable_caching_operators = false;
+    ```
+
+    For the DuckDB CLI, run the `SET` statement first. Unfiltered reads,
+    aggregates over a whole parameter and `read_parameter_dense` are
+    not affected.
 
 ### Arrow versions
 

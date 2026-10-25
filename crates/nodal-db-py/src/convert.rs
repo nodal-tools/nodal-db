@@ -19,10 +19,10 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::extract::ExtractReport;
 use nodal_db_core::template::{ApplyOutcome, ReconcilePlan};
 use nodal_db_core::types::{
-    Blocker, CascadeCounts, EntityAddr, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteOutcome,
-    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, StructuralChange,
-    StructuralEffect, StructuralKind, StructuralOutcome, TableCount, Tier, Warning, WarningKind,
-    WriteReport,
+    Blocker, CascadeCounts, CoveredWrites, CoveringDelete, EntityAddr, ObjectDeleteKey,
+    ObjectDeleteOpts, ObjectDeleteOutcome, ObjectDeletePreview, ObjectDeleteResult, ObjectKind,
+    ObjectRef, StructuralChange, StructuralEffect, StructuralKind, StructuralOutcome, TableCount,
+    Tier, Warning, WarningKind, WriteReport,
 };
 
 use crate::{
@@ -407,6 +407,18 @@ pub(crate) fn structural_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Stru
 // Reports out (plain dicts/lists — no wrapper classes to hold on to)
 // ---------------------------------------------------------------------------
 
+/// The `covered_writes=` keyword: `"refuse"` (the default) or
+/// `"delete_wins"`.
+pub(crate) fn covered_writes_from_str(s: &str) -> PyResult<CoveredWrites> {
+    match s {
+        "refuse" => Ok(CoveredWrites::Refuse),
+        "delete_wins" => Ok(CoveredWrites::DeleteWins),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "covered_writes must be \"refuse\" or \"delete_wins\", got {other:?}"
+        ))),
+    }
+}
+
 fn tier_tag(t: Tier) -> &'static str {
     match t {
         Tier::Scalar => "scalar",
@@ -432,6 +444,16 @@ fn warning_to_py<'py>(py: Python<'py>, w: &Warning) -> PyResult<Bound<'py, PyDic
         WarningKind::NothingToDelete { key_index } => {
             d.set_item("key_index", key_index)?;
             "nothing_to_delete"
+        }
+        WarningKind::DroppedByDelete { segment_index, by } => {
+            d.set_item("segment_index", segment_index)?;
+            let (channel, key_index) = match by {
+                CoveringDelete::Value { key_index } => ("deletes", key_index),
+                CoveringDelete::Object { key_index } => ("object_deletes", key_index),
+            };
+            d.set_item("by", channel)?;
+            d.set_item("key_index", key_index)?;
+            "dropped_by_delete"
         }
     };
     d.set_item("kind", kind)?;

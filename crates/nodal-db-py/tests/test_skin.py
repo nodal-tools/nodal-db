@@ -173,6 +173,70 @@ def test_commit_changes_write_plus_delete_one_commit(db):
     assert rep["rows_closed"] >= 1
 
 
+def test_commit_changes_covered_writes_delete_wins(db):
+    # WriteOptions::covered_writes: refused by default, dropped with a
+    # warning under "delete_wins"; the uncovered write proceeds.
+    db.write_parameter(
+        "unit", "capacity", "Base", scalar_batch(["u1", "u2"], [1.0, 2.0]), user="t"
+    )
+    segments = [
+        {
+            "class": "unit",
+            "parameter": "capacity",
+            "alternative": "Base",
+            "batch": scalar_batch(["u1", "u2"], [5.0, 6.0]),
+        }
+    ]
+    deletes = [("unit", "capacity", "Base", "U1")]
+    with pytest.raises(nodal_db.ApiError):
+        db.commit_changes(segments=segments, deletes=deletes, user="t")
+    with pytest.raises(nodal_db.ApiError):
+        db.commit_changes(
+            segments=segments, deletes=deletes, user="t", covered_writes="refuse"
+        )
+    with pytest.raises(ValueError):
+        db.commit_changes(
+            segments=segments, deletes=deletes, user="t", covered_writes="nope"
+        )
+    rep = db.commit_changes(
+        segments=segments, deletes=deletes, user="t", covered_writes="delete_wins"
+    )
+    assert rep["commit_id"] > 0
+    assert rep["warnings"] == [
+        {
+            "kind": "dropped_by_delete",
+            "segment_index": 0,
+            "by": "deletes",
+            "key_index": 0,
+            "object_type": "value",
+            "name": "unit:capacity/Base/u1",
+            "id": 0,
+        }
+    ]
+    rb = db.read_parameter("unit", "capacity", "Base")
+    assert rb.column("entity").to_pylist() == ["u2"]
+    assert rb.column("v_float").to_pylist() == [6.0]
+    # An object delete that finds nothing beside a write it covers: the
+    # write is dropped and nothing is committed (no entity auto-created).
+    head = db.head_commit()
+    rep = db.commit_changes(
+        segments=[
+            {
+                "class": "unit",
+                "parameter": "capacity",
+                "alternative": "Base",
+                "batch": scalar_batch(["u9"], [9.0]),
+            }
+        ],
+        object_deletes=[{"kind": "entity", "class": "unit", "name": "u9", "cascade": True}],
+        user="t",
+        covered_writes="delete_wins",
+    )
+    assert rep["commit_id"] == 0
+    assert [w["by"] for w in rep["warnings"]] == ["object_deletes"]
+    assert db.head_commit() == head
+
+
 def test_object_delete_preview_and_commit(db):
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
     key = {"kind": "entity", "class": "unit", "name": "u1"}

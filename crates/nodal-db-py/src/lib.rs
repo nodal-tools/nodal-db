@@ -285,6 +285,7 @@ impl Database {
             force_replace,
             retain_override,
             expect_commit,
+            ..Default::default()
         };
         let seg = api::Segment {
             class: class_name,
@@ -318,6 +319,8 @@ impl Database {
     ///   report's `"structural"` list.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
+    /// * `covered_writes`: `"refuse"` (the default) or `"delete_wins"`; see
+    ///   below.
     ///
     /// Unchanged values are not rewritten (`values_unchanged`), and a call
     /// whose every item changes nothing (unchanged values, deletes that
@@ -325,10 +328,16 @@ impl Database {
     /// makes no commit: `commit_id` is 0. A call that writes and deletes
     /// the same value, or writes a value and deletes an object it belongs
     /// to (entity, parameter, alternative, class), is refused before
-    /// anything is written.
+    /// anything is written. With `covered_writes="delete_wins"` it is not:
+    /// each such write is dropped before anything runs and reported as a
+    /// `"dropped_by_delete"` warning (with `segment_index`, `by` =
+    /// `"deletes"` or `"object_deletes"`, and that list's `key_index`), the
+    /// deletes run as usual and the other writes proceed. A dropped write
+    /// is not a write: if nothing else changes, nothing is committed.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
                         object_deletes = None, user, message = String::new(),
-                        force_replace = false, retain_override = None, expect_commit = None))]
+                        force_replace = false, retain_override = None, expect_commit = None,
+                        covered_writes = "refuse"))]
     #[allow(clippy::too_many_arguments)]
     fn commit_changes<'py>(
         &self,
@@ -342,7 +351,9 @@ impl Database {
         force_replace: bool,
         retain_override: Option<bool>,
         expect_commit: Option<i64>,
+        covered_writes: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let covered_writes = covered_writes_from_str(covered_writes)?;
         let mut segs = Vec::new();
         if let Some(s) = segments {
             for item in s.try_iter()? {
@@ -367,6 +378,7 @@ impl Database {
             force_replace,
             retain_override,
             expect_commit,
+            covered_writes,
         };
         let report = py
             .detach(move || {

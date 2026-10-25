@@ -135,7 +135,7 @@ freeze.
 | Point array, `v_min`/`v_max` only (mitigation context) | 0.6–0.8 ms | **0.56 ms** | (context) | **0.70 ms** | (context) | **0.73 ms** | (context) |
 | Point array via `read_parameter_dense` (`array_point_dense_macro`, added with the `array_id` key, schema 0.4) | — | — (bench added after the 1.5.5 run) | new | **2.52 ms** | **PASS** (< 5 ms; the API path for a point array) | **2.66 ms** | **PASS** |
 | Point array by `array_id = ?` (`array_point_by_array_id`, the index-lookup floor) | — | — (bench added after the 1.5.5 run) | new | **0.61 ms** | (floor) | **0.63 ms** | (floor) |
-| 10⁵ scalars, `read_parameter_scalar`, the loader's columns (< 20 ms; bench added 2026-10-24, see below) | — | — | — | **20.3-20.9 ms** on a shared host (≈ 18 ms scaled to the quiet run) | **AT BUDGET** (see below) | **20.0 ms** [19.8, 20.4] | **AT BUDGET**: the estimate is 0.1 % over 20 ms and its interval straddles it, at load 3.5-11 (see below) |
+| 10⁵ scalars, `read_parameter_scalar`, the loader's columns (< 25 ms since 2026-10-25, was < 20 ms; bench added 2026-10-24, see below) | — | — | — | **20.3-20.9 ms** on a shared host (≈ 18 ms scaled to the quiet run) | **AT BUDGET** against the then 20 ms (see below) | **20.0 ms** [19.8, 20.4] | **PASS** (< 25 ms; was AT BUDGET against 20 ms: 0.1 % over, interval straddling it, at load 3.5-11; see below) |
 | 10⁵ scalars, `read_parameter_scalar`, every column (context; was the budget row) | 24.5 ms | **30.0 ms** | RECORDED-OVER (raw-scan parity residual, §10; scale ≈ machine ratio) | **22.5 ms** | context (+12 % over 20 ms; the budget now applies to the loader's columns) | **24.9 ms** | context (+24 % over 20 ms) |
 | 1 000 × 8 760 (~70 MB), `read_parameter_dense` (< 300 ms warm) | 219 ms | **311.5 ms** | RECORDED-OVER (borderline; 219 ms on the ref machine — treat as machine-scaled PASS, re-measure on NVMe-class) | **240.1 ms** | **PASS** | **253.3 ms** | **PASS** |
 | Same, canonical `read_parameter` (recorded; dense form is the budget path per VMP P6) | 4 240 ms | **7 351 ms** | recorded | **3 151 ms** | recorded | **3 278 ms** | recorded |
@@ -193,6 +193,14 @@ budget: by its estimate 0.1 % over, with an interval that includes values
 under it. It is not a clean PASS on this shared host, and the quiet-host
 measurement is still to do. Like every absolute budget in this file, the
 verdict holds for this machine and load only.
+
+**Budget raised to 25 ms (2026-10-25, owner decision).** The loader's
+columns now read against < 25 ms, so the `1507cf5` measurement (20.0 ms)
+is a PASS with about 20 % headroom; the context row (every column,
+24.9 ms) is still not the budget path.
+
+**Next step (owner):** replace the absolute millisecond budgets in this
+file with A/B ratio gates (a change against its base, paired on one host).
 
 ## From/to scan degradation vs dead fraction (raw current-rows long scan, Arrow end-to-end)
 

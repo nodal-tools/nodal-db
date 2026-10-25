@@ -150,7 +150,8 @@ fn bench_bulk_reads(c: &mut Criterion) {
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(10));
 
-    // 10^5 scalar rows, budget path (< 20 ms): the columns a model loader
+    // 10^5 scalar rows, budget path (< 25 ms; 20 ms until 2026-10-25, owner
+    // decision, see RESULTS.md): the columns a model loader
     // reads, here the nodal-editor's scalar-sheet load (`model.rs`: entity,
     // alternative, value_kind and the four value columns).
     g.bench_function("scalars_100k_read_parameter_scalar_loader_cols", |b| {

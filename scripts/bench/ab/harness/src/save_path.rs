@@ -218,10 +218,22 @@ fn first_strings(batches: &[RecordBatch]) -> Vec<String> {
 /// fetch but without the editor's Fact decode. Keep it in step with the
 /// editor by hand: the bench must not depend on the editor crate.
 fn model_slurp(conn: &Connection) -> Result<usize, nodal_db_core::error::DbError> {
+    Ok(model_slurp_digest(conn)?.0)
+}
+
+/// [`model_slurp`] plus the digest of everything it read (without the
+/// file's storage-version tag, which an engine bump legitimately changes).
+fn model_slurp_digest(
+    conn: &Connection,
+) -> Result<(usize, crate::check::RowHash), nodal_db_core::error::DbError> {
     let mut rows = 0usize;
+    let mut hash = crate::check::RowHash::default();
     let mut q = |sql: &str| -> Result<Vec<RecordBatch>, nodal_db_core::error::DbError> {
         let b = query_rows(conn, sql)?;
         rows += b.iter().map(|x| x.num_rows()).sum::<usize>();
+        if !sql.contains("storage_version") {
+            hash.add(&b);
+        }
         Ok(b)
     };
     let classes = first_strings(&q(
@@ -294,7 +306,7 @@ fn model_slurp(conn: &Connection) -> Result<usize, nodal_db_core::error::DbError
             ))?;
         }
     }
-    Ok(rows)
+    Ok((rows, hash))
 }
 
 /// The editor's post-save reload: one RO open → `model_slurp` → close.
@@ -553,4 +565,77 @@ pub fn growth_session(dir: &Path) {
 #[cfg(not(feature = "save_api"))]
 pub fn growth_session(_dir: &Path) {
     panic!("growth_session needs --features save_api (compact_if_due)");
+}
+
+// ------------------------------------------------------------- gate modes
+
+/// `wr_editor_save` (gate): the mean commit span of 10 one-scalar editor
+/// saves (after one untimed warm-up save) on the 5 x 40 x 10 fixture, in
+/// the gate's arm semantics (no `save_api`: RO head poll + commit). Checks:
+/// 11 commits, and the saved cell reads back with the last value.
+pub fn gate_editor_save(dir: &Path) -> crate::check::Sample {
+    use crate::check::{check_commits, check_rows, read_hash, scalar_i64, Sample};
+    let db = dir.join("save.duckdb");
+    build_fixture(&db);
+    let before = head(&db);
+    let mut epoch = before;
+    save(&db, &mut epoch, 0, "p00", "e0_00");
+    let spans: Vec<f64> = (1..=10)
+        .map(|k| save(&db, &mut epoch, k, "p00", "e0_00"))
+        .collect();
+    check_commits(&db, before, 11);
+    check_rows(
+        "saved value read back",
+        scalar_i64(
+            &db,
+            "SELECT count(*) FROM read_parameter_scalar('cls0', 'p00') \
+             WHERE entity = 'e0_00' AND v_float = 1010.0",
+        ) as usize,
+        1,
+    );
+    let h = read_hash(
+        &db,
+        "SELECT entity, alternative, v_float FROM read_parameter_scalar('cls0', 'p00')",
+    );
+    check_rows("cls0/p00 rows", h.rows as usize, 40);
+    Sample::new(mean(&spans)).hash("readback", &h)
+}
+
+/// `rd_editor_reload` (gate): the mean of 5 editor reloads (`model_slurp`
+/// on a fresh RO connection; one untimed warm-up) after 11 saves on the
+/// fixture. Checks: every reload reads the same rows and content, 5
+/// classes; the digest covers everything read.
+pub fn gate_editor_reload(dir: &Path) -> crate::check::Sample {
+    use crate::check::{check, fail, Sample};
+    let db = dir.join("save.duckdb");
+    build_fixture(&db);
+    let mut epoch = head(&db);
+    for k in 0..=10 {
+        save(&db, &mut epoch, k, "p00", "e0_00");
+    }
+    let once = || {
+        let t = Instant::now();
+        let r =
+            with_read(&db, model_slurp_digest).unwrap_or_else(|e| fail(&format!("reload: {e}")));
+        (ms(t), r)
+    };
+    let (_, first) = once();
+    let mut spans = vec![];
+    for _ in 0..5 {
+        let (m, r) = once();
+        check(r == first, "two reloads of one file read different content");
+        spans.push(m);
+    }
+    let classes = with_read(&db, |c| {
+        Ok(
+            c.query_row("SELECT count(*) FROM entity_class_current", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    })
+    .unwrap();
+    crate::check::check_rows("classes", classes as usize, 5);
+    Sample::new(mean(&spans))
+        .with("rows", first.0)
+        .hash("content", &first.1)
 }

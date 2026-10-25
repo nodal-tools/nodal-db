@@ -14,10 +14,12 @@ default:
     @just --list
 
 # Quick gate (every-push tier): workspace tests with slow #[ignore] tests skipped,
-# then the DuckDB schema smoke suite. Needs the .venv (see `just venv`).
+# the DuckDB schema smoke suite, then the perf-gate tool's own unit tests
+# (stdlib, seconds, no builds). Needs the .venv (see `just venv`).
 test:
     cargo test --workspace
     {{py}} schema/smoke_test.py
+    python3 -m unittest discover -s scripts/bench/ab/tests
 
 # Targeted run — forwards any args to `cargo test`.
 # e.g. `just t -p nodal-db-core canon`  /  `just t --test api_write_parameter`
@@ -35,6 +37,18 @@ full:
     # join keys and needs an optimizer override in those tests, so only a
     # release run checks the engine as shipped.
     cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan
+
+# Opt-in, being introduced (CONTRIBUTING "Performance gates"): BASE (default:
+# merge-base with main) vs CAND (default: the working tree), paired ratios on
+# this host. e.g. `just perf-gate --quick`, `just perf-gate 88c0c5b HEAD
+# --metrics 'wr_*'`, `just perf-gate HEAD HEAD --aa`.
+# A/B perf gate (exit 0 pass, 1 fail, 2 inconclusive, 3 error, 4 wrong result).
+perf-gate *ARGS:
+    python3 scripts/bench/ab/ab.py {{ARGS}}
+
+# The perf-gate tool's unit tests alone (stdlib, no builds).
+perf-gate-test:
+    python3 -m unittest discover -s scripts/bench/ab/tests
 
 # DuckDB schema smoke suite alone (234 checks).
 smoke:

@@ -1,0 +1,139 @@
+# The perf gate's metrics (ab_ratio_gates_PLAN §2). A metric = one harness
+# mode (`mode`, default: the metric id), a threshold class, the fixtures it
+# runs on, the capabilities it needs (capabilities.toml), and its RESULT
+# CHECK (`check`, required: the runner refuses a metric without one,
+# critique M4). Every sample's fixed check runs in the harness; the arms'
+# result digests must be equal (`digest_exclude` lists digest fields a
+# metric may legitimately differ in). Gate metrics use only the public
+# surface: api::*, the SQL read macros and tables, the nodal-db CLI.
+#
+# Thresholds apply to the upper bound of the median ratio's 95 % CI.
+# Initial classes (D4 as amended by critique T1); recalibrated from the A/A
+# runs (specs/ab_ratio_gates_FINDINGS.md).
+
+[settings]
+# The pre-fixed sequential plan (gatelib.Plan; error rates: sim.py and
+# specs/ab_ratio_gates_FINDINGS.md): cumulative pairs per look. A metric
+# stops at the first decided look; only undecided ones get more pairs.
+quick_looks = [6, 11, 21]
+full_looks = [6, 11, 21]
+# Extra margin under T for a PASS at the first look (a systematic A/A
+# offset, from the A/A calibration); 0 = the exact order-statistic rule.
+first_look_margin = 0.0
+
+[classes]
+# In-process reads and lookups on a warm connection, CPU-bound.
+hot = 1.05
+# Every whole-commit write (RW open, commit, close), CHECKPOINT cycles,
+# deletes, imports, maintenance, and reads that include an open.
+io = 1.10
+# File sizes: 3 samples per arm, gate max(C) / min(B).
+size = 1.02
+
+# ------------------------------------------------------------- fixtures
+# `build` = the harness subcommand (`<bin> <build> <path> [scale]`), run
+# by each arm's own binary; `scaled` = built at the run's --quick/--full
+# scale; `shared` = built once (by the candidate) and read by both arms.
+# A fixture without `build` is the arm's own nodal-db CLI binary.
+
+[fixture.base100k]
+env = "NODAL_AB_BASE"
+build = "build_100k"
+
+[fixture.big]
+env = "NODAL_AB_BIG"
+build = "build_big"
+
+[fixture.longbig]
+env = "NODAL_AB_LONGBIG"
+build = "build_longbig"
+
+# ---------------------------------------------------------------- writes
+
+[metric.wr_scalar_100_new_100k]
+class = "io"
+fixtures = ["base100k"]
+check = "3 commits; the 300 new (entity, value) rows read back (count + digest)"
+note = "ms per value; 3 commits of 100 new scalar entities on the 10^5 file"
+
+[metric.wr_scalar_1_replace_100k]
+class = "io"
+fixtures = ["base100k"]
+check = "3 commits; the 3 replaced values read back (count + digest)"
+note = "the editor's single-value save on the 10^5 file, ms per commit"
+
+[metric.wr_20x1_scalars_100k]
+class = "io"
+fixtures = ["base100k"]
+check = "3 commits; q00..q19 of s000000 read back (20 rows + digest)"
+
+[metric.wr_long_1000x24_new]
+class = "io"
+check = "1 commit; read_parameter of the new value: 24 000 cells + digest"
+
+[metric.wr_long_10x8760_replace]
+class = "io"
+check = "1 commit (the timed replace); 87 600 current cells + digest"
+
+[metric.wr_array_1000x24_new]
+class = "io"
+check = "1 commit; read_parameter of the new arrays: 24 000 cells + digest"
+
+[metric.wr_array_1000x24_replace_big]
+class = "io"
+fixtures = ["big"]
+check = "1 commit; the 1 000 replaced arrays read back: 24 000 cells + digest"
+
+[metric.wr_delete_1000_scalar_big]
+class = "io"
+fixtures = ["big"]
+check = "1 commit; the 1 000 keys are gone; the 99 000 remaining rows + digest"
+
+[metric.wr_delete_1000_long_big]
+class = "io"
+fixtures = ["big"]
+check = "1 commit; the 1 000 keys are gone; the 216 000 remaining cells + digest"
+
+[metric.wr_delete_500_array_big]
+class = "io"
+fixtures = ["big"]
+check = "1 commit; the 500 keys are gone; the 36 000 remaining cells + digest"
+
+[metric.wr_1_delete_big]
+class = "io"
+fixtures = ["big"]
+check = "3 commits; the 3 keys are gone; the 99 997 remaining rows + digest"
+
+[metric.wr_editor_save]
+class = "io"
+check = "11 commits; the saved cell reads back with the last value; cls0/p00 digest"
+note = "gate arm semantics: RO head poll + commit (the save_api feature is never set)"
+
+[metric.wr_unchanged_scalar_10k]
+class = "io"
+needs = ["skip_unchanged"]
+check = "no commit and no new history row; the 10 000 values read back + digest"
+
+[metric.wr_longbig_1cell]
+class = "io"
+fixtures = ["longbig"]
+check = "1 commit; current cell count unchanged; the changed cell reads back; exact value checksum"
+
+# --------------------------------------------------- reads and lookups
+
+[metric.rd_editor_reload]
+class = "io"
+check = "5 reloads read identical content; 5 classes; digest of everything read"
+note = "includes the RO open: io class"
+
+[metric.lk_core_sql_100k]
+class = "hot"
+fixtures = ["base100k"]
+needs = ["lookup_const"]
+check = "200 lookups return ids; the ids map back to exactly the 200 names looked up"
+
+[metric.lk_ensure_entity_100k]
+class = "io"
+fixtures = ["base100k"]
+check = "no commit, entity count unchanged; the 20 ids map back to the 20 names"
+note = "the public verb on existing entities: an RO open + lookups, io class"

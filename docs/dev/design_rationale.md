@@ -460,7 +460,8 @@ The sources:
   floats, 1.23 million current long rows (integer cells), 100 000
   scalars; 136 MiB on disk. Reads hold an open connection and include
   conversion to Arrow. Load average 3.5–11 while measuring.
-- **Write-path comparison** (`scripts/bench/ab_write_path/`). Old and
+- **Write-path comparison** (`scripts/bench/ab_write_path/`, since moved
+  to `scripts/bench/ab/harness/`). Old and
   new core, 21 interleaved pairs per row in random order, median of the
   per-pair ratios with a bootstrap 95 % interval; times per value
   through `history::write_value`, commit included. Load average 2–37;

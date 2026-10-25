@@ -41,3 +41,9 @@ jobs:
       # DuckDB pinned to the line the schema is verified on (2.0.0).
       - name: schema smoke test
         run: .venv/bin/python schema/smoke_test.py
+
+      # The A/B perf gate's tool tests (stdlib unittest: statistics,
+      # verdicts, exit codes, cache keys on a temp repository). No builds
+      # and no benchmarks: the gate itself is local-only (ab_ratio_gates D3).
+      - name: perf-gate tool tests
+        run: python -m unittest discover -s scripts/bench/ab/tests

@@ -1,0 +1,37 @@
+# Paired A/B harness of the perf gate (scripts/bench/ab/ab.py;
+# ab_ratio_gates_PLAN §3). Not a workspace member: the runner copies this
+# directory into an extracted tree of each revision and builds it against
+# that revision's core, with this crate's Cargo.lock seeded from the
+# revision's root Cargo.lock (scripts/lib/revbuild.py).
+[package]
+name = "ab_harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: keeps it out of the repository workspace.
+[workspace]
+
+[dependencies]
+# Points at this checkout's core; in an arm, at that revision's core.
+nodal-db-core = { path = "../../../../crates/nodal-db-core" }
+tempfile = "3.27.0"
+# The IPC import metric's input container (`build_ipc_dense`): the IPC
+# writer, which duckdb::arrow does not re-export. The seeded lock pins it to
+# the revision's arrow line; no arrow type crosses into the core here.
+arrow = { version = "60", default-features = false, features = ["ipc"] }
+
+[features]
+# The runner always builds with --no-default-features plus the capability
+# features both arms provide (capabilities.toml); the default is for
+# hand builds of a current core.
+default = ["lookup_const"]
+# Capability: the core exports api::ENTITY_NAME_LOOKUP_SQL (2026-10-24 on).
+# Enables the `lk_core_sql_100k` metric; the diagnostic `lookup_raw_100k`
+# then runs the core's statement instead of the pre-2026-10-24 one.
+lookup_const = []
+# Behaviour-selecting, never set by the gate (an A/B *subject*, ad-hoc
+# studies only): saves commit with `WriteOptions::expect_commit` instead of
+# a pre-commit RO poll, and `growth_session` is available. Needs a core that
+# has `expect_commit`.
+save_api = []

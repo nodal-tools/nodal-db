@@ -2,7 +2,7 @@
 //! 2-D label x label value of ~4.6 M cells (8 760 x 840 at 62 % fill, the
 //! scale study's realistic shape), written through the API as the importer
 //! and the editor do. The base file is built once with
-//! `ab_write_path build_longbig <path>`; the modes run on a COPY of the file
+//! `ab_harness build_longbig <path>`; the modes run on a COPY of the file
 //! named by `NODAL_AB_LONGBIG` and time one whole commit (ms):
 //!
 //! - `api_longbig_unchanged`: the same value re-written;
@@ -180,4 +180,51 @@ pub fn run(mode: &str, dir: &Path) -> Option<f64> {
     std::fs::copy(base, &db).expect("copy longbig");
     let seg = segment(changed);
     Some(commit(&db, seg))
+}
+
+/// `wr_longbig_1cell` (gate): one cell of the ~4.6 M-cell value changed,
+/// one whole commit on a copy of `NODAL_AB_LONGBIG`. Checks: one commit;
+/// the current cell count is unchanged and the changed cell reads back
+/// with its new value; the digest is the cell count and an exact integer
+/// checksum of the current values (values are multiples of 1/1000).
+pub fn gate_1cell(dir: &Path) -> crate::check::Sample {
+    use crate::check::{check_commits, check_rows, head, Sample};
+    let base =
+        std::env::var("NODAL_AB_LONGBIG").expect("set NODAL_AB_LONGBIG to a build_longbig file");
+    let db = dir.join("longbig.duckdb");
+    std::fs::copy(base, &db).expect("copy longbig");
+    let target = 1_234_567;
+    let (b, _, _) = batch(|i| i == target);
+    let cells = b.num_rows();
+    let new_v = b
+        .column(3)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .value(target);
+    let seg = segment(|i| i == target);
+    let before = head(&db);
+    let ms = commit(&db, seg);
+    check_commits(&db, before, 1);
+    let sql = format!(
+        "SELECT count(*), sum(round(v_float * 1000)::BIGINT)::BIGINT, \
+                count(*) FILTER (WHERE round(v_float * 1000)::BIGINT = {}) \
+         FROM read_parameter('timeset', 'weights')",
+        (new_v * 1000.0).round() as i64
+    );
+    let (count, sum, hit) = nodal_db_core::conn::with_read(&db, |c| {
+        Ok(c.query_row(&sql, [], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?)
+    })
+    .unwrap_or_else(|e| crate::check::fail(&format!("read-back: {e}")));
+    check_rows("current cells", count as usize, cells);
+    crate::check::check(hit >= 1, "the changed cell does not read back");
+    Sample::new(ms)
+        .with("cells", count)
+        .with("value_sum_milli", sum)
 }

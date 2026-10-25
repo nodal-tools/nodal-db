@@ -1,0 +1,24 @@
+# Capabilities a baseline may lack (ab_ratio_gates_PLAN §3.3, as amended
+# by critique C1/C2). Each one is detected by a SOURCE PROBE on the arm's
+# extracted tree (a glob plus a regex over the code that will be compiled),
+# never by git ancestry. Both arms build with the features of the
+# capabilities BOTH provide (the intersection), so a shared metric runs the
+# same harness code in both arms; a metric whose `needs` are outside the
+# intersection is SKIPPED with the reason.
+#
+# `feature` is the harness cargo feature it enables ("" = a behaviour the
+# metric depends on, no code switch). A compat feature may only switch HOW
+# the harness calls the core, never what a shared metric measures.
+# One entry per new public API a gate metric uses.
+
+[lookup_const]
+feature = "lookup_const"
+probe_glob = "crates/nodal-db-core/src/**/*.rs"
+probe_regex = 'pub const ENTITY_NAME_LOOKUP_SQL\b'
+note = "api::ENTITY_NAME_LOOKUP_SQL (2026-10-24): metric lk_core_sql_100k"
+
+[skip_unchanged]
+feature = ""
+probe_glob = "crates/nodal-db-core/src/**/*.rs"
+probe_regex = 'pub values_unchanged\b'
+note = "a no-op write makes no commit (skip_unchanged_writes P1): metric wr_unchanged_scalar_10k"

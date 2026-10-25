@@ -1,8 +1,23 @@
-//! Paired A/B write-path sample (appender_write_path_PLAN §8): one invocation
-//! = one measurement of one mode, printed as milliseconds per unit (per
-//! value, or per key for `read_long`). Built twice (old core / new core) and
-//! driven interleaved by `ab.py`. DB init and seeding are never timed; every
-//! write goes through `history::write_value` or `api::write_parameter`.
+//! The A/B harness of the perf gate (scripts/bench/ab/ab.py;
+//! ab_ratio_gates_PLAN §3): one invocation = one measurement of one mode.
+//! The runner builds it twice (base core / candidate core, the same harness
+//! source in both) and drives the two binaries interleaved. DB init,
+//! seeding, fixture copies and result checks are never timed.
+//!
+//! **Gate modes** (`metrics.toml`; `gate.rs`, `synth.rs`, `import.rs`,
+//! `maint.rs`, and the gate wrappers in `save_path.rs` / `longbig.rs`) go
+//! through the public surface only (`api::*`, the SQL read macros, the
+//! `nodal-db` CLI) and print a `digest k=v ...` line (the logical result,
+//! compared across the arms) before the value on the last line; a failed
+//! result check exits with code 86 (`check.rs`). Fixture builders:
+//! `build_100k`, `build_big`, `build_longbig`, `build_synth <path>
+//! <quick|full>`, `build_hheavy <path> <quick|full>`, `build_xsrc <path>
+//! <quick|full>`, `build_ipc_dense <path> <entities>`. `threads` prints the
+//! DuckDB default thread count (pinning study, plan §6.2).
+//!
+//! **Diagnostic modes** (below; not gated, no digest, the value only) keep
+//! their names for ad-hoc studies (`ab.py --bins OLD NEW --modes ...`);
+//! some use crate-internal APIs (`history::write_value`).
 //!
 //! Modes: long_insert, long_replace (8 760-cell long values), array_insert,
 //! array_replace (8 760-element arrays, 20 per transaction), axis_insert (a
@@ -18,13 +33,13 @@
 //! `NODAL_AB_BASE`: api_100_scalars_100k (100 new entities, per value),
 //! api_1_scalar_100k (a single-value replace, per commit; the editor save)
 //! and api_20x1_scalars_100k (20 segments x 1 replaced value, per commit).
-//! Build the base once with `ab_write_path build_100k <path>` (prints the
+//! Build the base once with `ab_harness build_100k <path>` (prints the
 //! build time; build it with the faster arm, the file format is the same).
 //!
 //! Set-based long, array and delete modes (set_based_long_and_delete_PLAN
 //! §6), all through the API and timed per whole commit (open, write,
 //! commit, close), in ms per commit. The `_big` modes run on a COPY of the
-//! file named by `NODAL_AB_BIG`, built once with `ab_write_path build_big
+//! file named by `NODAL_AB_BIG`, built once with `ab_harness build_big
 //! <path>` (plan §1.1: 10^5 scalar entities with parameter `p`; `bg24` =
 //! 10 000 x 24-cell int long values; `bg8760` = 100 x 8 760-cell int long
 //! values; `arr24` = 2 000 x 24-element float arrays; `lq00..lq19` = one
@@ -66,6 +81,8 @@
 //! `txn_1_scalar_replace`, `growth_session`, `build_m1k`). The new arm is
 //! built with `--features save_api`.
 
+mod check;
+mod gate;
 mod longbig;
 mod save_path;
 
@@ -449,7 +466,22 @@ fn main() {
         save_path::build_m1k(Path::new(&args[2]));
         return;
     }
+    if mode == "threads" {
+        let conn = nodal_db_core::duckdb::Connection::open_in_memory().unwrap();
+        let t: String = conn
+            .query_row("SELECT current_setting('threads')::VARCHAR", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        println!("{t}");
+        return;
+    }
+    check::set_mode(mode);
     let dir = tempfile::tempdir().unwrap();
+    if let Some(sample) = gate::run(mode, dir.path()) {
+        sample.emit();
+        return;
+    }
     if mode == "growth_session" {
         save_path::growth_session(dir.path());
         return;

@@ -195,7 +195,10 @@ pub fn init_schema_from_dir_with_default(
     // Same in-process per-path serialization as every other open (conn F1).
     let lock = crate::conn::path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let conn = Connection::open(db_path)?;
+    let conn = Connection::open_with_flags(
+        db_path,
+        crate::conn::core_config(duckdb::AccessMode::ReadWrite)?,
+    )?;
     apply_schema_from(&conn, dir)?;
     if let Some(name) = default_alternative {
         seed_default_alternative(&conn, name)?;
@@ -212,7 +215,10 @@ pub fn init_schema_from_sources_with_default(
 ) -> Result<(), DbError> {
     let lock = crate::conn::path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let conn = Connection::open(db_path)?;
+    let conn = Connection::open_with_flags(
+        db_path,
+        crate::conn::core_config(duckdb::AccessMode::ReadWrite)?,
+    )?;
     let mut sorted: Vec<&(&str, &str)> = sources.iter().collect();
     sorted.sort_by_key(|(name, _)| *name);
     for (_, sql) in sorted {

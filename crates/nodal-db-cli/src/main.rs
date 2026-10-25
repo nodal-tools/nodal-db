@@ -342,8 +342,8 @@ fn main() -> anyhow::Result<()> {
             // DB that happens to contain run rows is not caught. Warning
             // only — never a refusal (no flag surface in v1).
             {
-                use nodal_db_core::duckdb::{AccessMode, Config, Connection};
-                let config = Config::default().access_mode(AccessMode::ReadOnly)?;
+                use nodal_db_core::duckdb::{AccessMode, Connection};
+                let config = nodal_db_core::conn::core_config(AccessMode::ReadOnly)?;
                 let conn = Connection::open_with_flags(&db, config)?;
                 let runs: i64 = conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?;
                 let _ = conn.close();

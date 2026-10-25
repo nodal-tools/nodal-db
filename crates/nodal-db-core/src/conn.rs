@@ -88,6 +88,25 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
     e.to_string().contains("Could not set lock")
 }
 
+/// The DuckDB configuration of every connection the core (and the CLI)
+/// opens: the access mode plus the engine workarounds below. Every open goes
+/// through this function, so a workaround cannot miss a path.
+///
+/// `debug_enable_caching_operators = false` works around a DuckDB 2.0
+/// INTERNAL error ("dict-surviving cache: global dictionary column 0 changed
+/// identity …") for a join over dense ids, then `unnest` of a list longer
+/// than 2048 elements, then a selective filter: e.g. `read_parameter` on
+/// 8760-long arrays with a time-window filter. The error invalidates the
+/// whole database instance. DuckDB issue: pending upstream report; see
+/// docs/dev/engine_rules.md §5 (bug, guard test, how to remove this).
+/// The setting is debug-tagged: if a DuckDB release renames or drops it,
+/// every open fails loudly here, which the upgrade checklist catches.
+pub fn core_config(mode: AccessMode) -> Result<Config, duckdb::Error> {
+    Config::default()
+        .access_mode(mode)?
+        .with("debug_enable_caching_operators", "false")
+}
+
 /// Open a connection in the given access mode, retrying with bounded backoff
 /// while the file is locked by another connection (surfaced as [`DbError::Busy`]).
 /// `Config` is not `Clone`, so it is rebuilt per attempt (cheap).
@@ -98,7 +117,7 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
 pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connection, DbError> {
     let mut backoff = BACKOFF_START;
     for attempt in 1..=MAX_ATTEMPTS {
-        let config = Config::default().access_mode(mode.clone())?;
+        let config = core_config(mode.clone())?;
         match Connection::open_with_flags(db_path, config) {
             Ok(conn) => return Ok(conn),
             Err(e) if is_lock_busy(&e) => {

@@ -72,7 +72,9 @@ The DDL files form layers, each building on the ones before:
 
   A filter on the key triple directly on the list-carrying scan
   (`SELECT values FROM value_array WHERE entity_id = …`) reads the list
-  data of the whole table instead.
+  data of the whole table instead. For one value rendered as rows (axis
+  positions and values), use `read_value` / `read_values` (by name) or
+  `value_rows_for` (by id), which fetch the payload by `array_id` too.
 - **One current row, case-insensitive names.** Hidden generated `cur_*`
   columns back unique indexes that allow exactly one current row per id
   and case-insensitive name uniqueness; they are omitted from the diagrams.

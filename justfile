@@ -38,11 +38,12 @@ full:
     {{py}} schema/smoke_test.py
     python3 -m unittest discover -s scripts/bench/ab/tests
     cargo bench --no-run
-    # The index-scan guards (array_id; entity lower(name) + axis_hash behind
-    # the OFFSET 0 fence) in a release build: debug-built DuckDB compresses
+    # The index-scan guards (array_id; the point-read macros and their
+    # dict-cache bug guards; entity lower(name) + axis_hash behind the
+    # OFFSET 0 fence) in a release build: debug-built DuckDB compresses
     # join keys and needs an optimizer override in those tests, so only a
     # release run checks the engine as shipped.
-    cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan
+    cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan --test point_read_index_scan
     python3 scripts/bench/ab/ab.py --release --full --advance-baseline
 
 # Pre-merge, expected for perf-sensitive branches (CONTRIBUTING "Performance
@@ -63,7 +64,7 @@ perf-gate-test:
 perf-gate-selftest *ARGS:
     python3 scripts/bench/ab/selftest.py {{ARGS}}
 
-# DuckDB schema smoke suite alone (234 checks).
+# DuckDB schema smoke suite alone (239 checks).
 smoke:
     {{py}} schema/smoke_test.py
 

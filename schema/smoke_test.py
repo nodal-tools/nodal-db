@@ -1693,6 +1693,78 @@ def main():
         check(f"M12: scenario_contents({weird!r}) -> empty, no error", n == 0, f"n={n}")
 
     # =======================================================================
+    # Point reads (fast_point_reads_PLAN §7.2/§7.4): read_values / read_value
+    # / value_rows_for are a second copy of value_rows' rendering, so they
+    # must return exactly the rows of the filtered read_parameter /
+    # value_rows, with the same columns and types, over EVERY current value
+    # of this database (all three tiers, every scalar kind incl. durations,
+    # ranks 1-4, period / time-pattern / float / label / datetime / integer
+    # axes, the straddling parameter). The index-scan and dict-bug guards
+    # are in crates/nodal-db-core/tests/point_read_index_scan.rs.
+    # =======================================================================
+    def described(sql):
+        return [(r[0], r[1]) for r in allrows(f"DESCRIBE {sql}")]
+
+    def multiset_diff(got, want):
+        return one(f"WITH g AS MATERIALIZED ({got}), w AS MATERIALIZED ({want})"
+                   " SELECT (SELECT count(*) FROM (FROM g EXCEPT ALL FROM w)),"
+                   " (SELECT count(*) FROM (FROM w EXCEPT ALL FROM g)),"
+                   " (SELECT count(*) FROM g)")
+
+    check("point reads: read_values / read_value project read_parameter's columns and types",
+          described("SELECT * FROM read_values('node', 'inflow_forecast', ['node_a'])")
+          == described("SELECT * FROM read_parameter('node', 'inflow_forecast')")
+          == described("SELECT * FROM read_value('node', 'inflow_forecast', 'node_a')"))
+    check("point reads: value_rows_for projects value_rows' columns and types",
+          described("SELECT * FROM value_rows_for(1, [1], [1])")
+          == described("SELECT * FROM value_rows"))
+
+    params = allrows(
+        "SELECT DISTINCT ec.name, pd.name, pd.id FROM value_cells vc"
+        " JOIN parameter_definition pd ON pd.id = vc.parameter_definition_id"
+        " AND pd.valid_to_commit IS NULL"
+        " JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL"
+        " ORDER BY 1, 2")
+    bad_rv, bad_vr, bad_pt, n_rows, n_points = {}, {}, {}, 0, 0
+    for cls, par, pd_id in params:
+        names = [r[0] for r in allrows(
+            "SELECT DISTINCT e.name FROM value_cells vc JOIN entity e ON e.id = vc.entity_id"
+            " AND e.valid_to_commit IS NULL WHERE vc.parameter_definition_id = ?"
+            " ORDER BY 1", pd_id)]
+        upper = "[" + ", ".join("'" + n.upper().replace("'", "''") + "'" for n in names) + "]"
+        d = multiset_diff(f"SELECT * FROM read_values('{cls.upper()}', '{par}', {upper})",
+                          f"SELECT * FROM read_parameter('{cls}', '{par}')")
+        n_rows += d[2]
+        if d[:2] != (0, 0) or d[2] == 0:
+            bad_rv[f"{cls}.{par}"] = d
+        d = multiset_diff(
+            f"SELECT * FROM value_rows_for({pd_id}, (SELECT list(id) FROM entity),"
+            " (SELECT list(id) FROM alternative))",
+            f"SELECT * FROM value_rows WHERE parameter_definition_id = {pd_id}")
+        if d[:2] != (0, 0):
+            bad_vr[f"{cls}.{par}"] = d
+        for name in names:
+            q = name.replace("'", "''")
+            for alt in [r[0] for r in allrows(
+                    "SELECT DISTINCT alternative FROM read_parameter(?, ?) WHERE entity = ?",
+                    cls, par, name)]:
+                a = alt.replace("'", "''")
+                d = multiset_diff(
+                    f"SELECT * FROM read_value('{cls}', '{par}', '{q}', '{a.upper()}')",
+                    f"SELECT * FROM read_parameter('{cls}', '{par}')"
+                    f" WHERE entity = '{q}' AND alternative = '{a}'")
+                n_points += 1
+                if d[:2] != (0, 0) or d[2] == 0:
+                    bad_pt[f"{cls}.{par}/{name}/{alt}"] = d
+    check(f"point reads: read_values == read_parameter over all {len(params)} parameters"
+          f" with values ({n_rows} rows, case-folded names, alternatives omitted)",
+          not bad_rv and len(params) >= 10, str(bad_rv))
+    check("point reads: value_rows_for == value_rows for every parameter (all ids)",
+          not bad_vr, str(bad_vr))
+    check(f"point reads: read_value == read_parameter filtered, for each of the"
+          f" {n_points} current values", not bad_pt and n_points >= 15, str(bad_pt))
+
+    # =======================================================================
     # Erasure marker + the as-of guard (erasure_compaction_plan §1, decisions
     # D-E1/D-E3 2026-09-19). The marker CHECK trio is exercised, then a marker
     # is planted raw and the FULL consumer-shape sweep of acceptance 3 runs

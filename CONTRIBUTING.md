@@ -30,14 +30,18 @@ and re-check it after a bump. After one:
   the canonical perf-sensitive change; both arms compile their own
   DuckDB), then `just full`. Besides the slow tests and the release perf
   gate, it runs the index-scan guards (`array_id_index_scan`,
-  `entity_name_index_scan`) on a release-built engine. They check
-  optimizer behaviour, not a documented contract, and fail loudly when it
-  changes; their failure messages say what to re-evaluate.
+  `entity_name_index_scan`, `point_read_index_scan`) on a release-built
+  engine. They check optimizer behaviour, not a documented contract, and
+  fail loudly when it changes; their failure messages say what to
+  re-evaluate.
 - If `duckdb_dict_cache_guard`'s tripwire fails ("the DuckDB dict-cache
   bug appears fixed"), remove the `debug_enable_caching_operators`
   workaround as described in engine_rules.md §5. If every core open
   fails on that setting, the new DuckDB renamed or dropped it: check
-  whether the bug is fixed before deciding what replaces it.
+  whether the bug is fixed before deciding what replaces it. The
+  dict-cache data guard in `point_read_index_scan` fails with it (its
+  positive control no longer raises): re-evaluate engine_rules.md §6
+  then.
 - If the release notes mention Unicode or utf8proc updates (case
   mapping), compact the dev files after the bump. The `lower(name)`
   indexes (`ix_entity_lname`, the `uq_*_name` unique indexes over

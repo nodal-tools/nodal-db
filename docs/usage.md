@@ -420,6 +420,9 @@ Commonly used parts of the read surface:
 | `read_parameter(class, parameter)` | current values of one parameter, all alternatives |
 | `read_parameter_scalar(class, parameter)` | scalar values only; faster for large scalar parameters |
 | `read_parameter_dense(class, parameter)` | dense-array values as lists with axis ids, for bulk reads |
+| `read_value(class, parameter, entity[, alternative])` | one value, in `read_parameter`'s shape; all alternatives if `alternative` is omitted |
+| `read_values(class, parameter, entities[, alternatives])` | a few values (lists of names), in `read_parameter`'s shape |
+| `value_rows_for(parameter_definition_id, entity_ids, alternative_ids)` | the same by ids, in `value_rows`' shape |
 | `resolved_value_rows(scenario)` | the winning value per (entity, parameter) in a scenario |
 | `scenario_value_conflict` | values that compete within a scenario, before resolution |
 | `scenario_contents(scenario)` | entities, activation and group membership in a scenario |
@@ -450,6 +453,52 @@ ORDER BY entity, idx1_ts;
 
 `north` takes its demand from `high_demand` (rank 2); `south` has no
 value there and falls back to `Base`.
+
+#### Reading one value or a few
+
+`read_parameter` reads a whole parameter: a filter written outside it
+(`WHERE entity = 'north'`) is applied after every array of the parameter
+has been read. To read one entity, or a few, use `read_value` or
+`read_values`. They return the same columns and rows as the filtered
+`read_parameter`, but read only the arrays they need, so a point read
+costs milliseconds instead of a scan of the whole array table:
+
+```sql
+-- one value
+SELECT idx1_ts, v_float FROM read_value('node', 'demand', 'north', 'Base');
+-- one entity in every alternative (the alternative argument omitted)
+SELECT alternative, idx1_ts, v_float FROM read_value('node', 'demand', 'north');
+-- a few entities in two alternatives
+SELECT * FROM read_values('node', 'demand', ['north', 'south'], ['Base', 'high_demand']);
+```
+
+- Names match case-insensitively, like the class and parameter names.
+  Omitting the alternatives (or passing `NULL`) means every current
+  alternative; an empty list means none.
+- Keep the reads small: up to **50 value hits** per call, where a hit is
+  an array value that exists for one of the (entity, alternative)
+  pairs, so 17 entities in 3 alternatives is already 51. Above that the
+  read falls back to scanning every array of the table, which costs as
+  much as `read_parameter`; for a whole parameter use `read_parameter`
+  (or `read_parameter_dense` in engine code).
+- `value_rows_for(parameter_definition_id, entity_ids, alternative_ids)`
+  is the same read by ids, with the columns of `value_rows`.
+- Row order is unspecified, as for `read_parameter`: add an `ORDER BY`.
+
+!!! note "A DuckDB 2.0 error on filtered array reads"
+    On DuckDB 2.0.x, a `read_parameter` or `value_rows` query with a
+    selective filter on the cells, such as a time window
+    (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`), can
+    fail with `INTERNAL Error: dict-surviving cache: global dictionary
+    column 0 changed identity …` on a file with several hundred long
+    arrays (8 760 hourly values, for example). It is a DuckDB bug, not
+    damage to the file: no data is changed, but the failed connection's
+    database instance is invalidated, so reconnect. `read_value` and
+    `read_values` are not affected, so use them for such reads (one
+    series, one time window). For a filtered read of a whole parameter,
+    open the connection with caching operators turned off:
+    `duckdb.connect(path, read_only=True,
+    config={"debug_enable_caching_operators": "false"})`.
 
 The Python package also offers reads that manage the connection for you:
 

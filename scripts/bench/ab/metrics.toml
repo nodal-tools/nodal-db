@@ -155,6 +155,42 @@ scaled = true
 scales = ["full"]
 check = "row count = long entities x 8 760 at ~17 % dead; digest of position, time, value"
 
+# The point-read macros (fast_point_reads_PLAN §6): rendered reads of one
+# or a few values through read_value / read_values, on one warm
+# connection; 5 warm-ups, then the median of 60 (quick) / 40 (full)
+# executions (25 / 15 for the 20-series read). The baseline needs the
+# macros (capability read_value_macro), so against an older base they are
+# SKIPPED. No layout floor yet (no A/A calibration).
+
+[metric.rd_point_value_array]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+needs = ["read_value_macro"]
+check = "every execution returns 8 760 rows; the digest equals read_parameter's for the same entity and alternative (read once, untimed)"
+
+[metric.rd_point_value_scalar]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+needs = ["read_value_macro"]
+check = "every execution returns 1 row (the empty array-key path); the digest equals read_parameter's"
+
+[metric.rd_point_value_window]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+needs = ["read_value_macro"]
+check = "every execution returns 6 rows (a 6-hour window of one series); digest of the rows"
+note = "raw DuckDB connection with default settings (caching operators on), not the core's open: the dict-cache bug shape (read_parameter with the same filter raises on the full fixture)"
+
+[metric.rd_values_20]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+needs = ["read_value_macro"]
+check = "every execution returns 20 x 8 760 rows; the digest equals read_parameter's for the same 20 entities"
+
 # ---------------------------------------------------------------- writes
 
 [metric.wr_scalar_100_new_100k]

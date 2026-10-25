@@ -22,3 +22,9 @@ feature = ""
 probe_glob = "crates/nodal-db-core/src/**/*.rs"
 probe_regex = 'pub values_unchanged\b'
 note = "a no-op write makes no commit (skip_unchanged_writes P1): metric wr_unchanged_scalar_10k"
+
+[read_value_macro]
+feature = ""
+probe_glob = "schema/*.sql"
+probe_regex = 'CREATE MACRO read_values\b'
+note = "the point-read macros read_value / read_values (fast_point_reads_PLAN): metrics rd_point_value_*, rd_values_20"

@@ -80,9 +80,40 @@ payload statement by the key triple has the same effect: the scan reads
 the list columns of every row it considers. There is no error in either
 case, only a slow read.
 
-**Guard.**
+**Inside a macro, fold the key set into one scalar list.** A macro that
+resolves its keys through joins (`read_values`, `value_rows_for`) fetches
+the payloads with
+
+```sql
+WHERE p.array_id = ANY(coalesce((SELECT list(DISTINCT va.array_id) FROM … ), [-1]))
+```
+
+DuckDB plans this as a SEMI join of the payload scan against the
+unnested list with a dynamic IN filter, which is an index scan for 0 to
+50 keys, in every case measured: a hit, a miss, a parameter with no
+arrays at all. Three details matter:
+
+- `[-1]` stands in **only for an empty list** (`coalesce`). Appended to a
+  non-empty list, a sentinel takes one of the 50 dynamic-filter slots, so
+  50 real keys become 51 and the scan goes sequential. -1 is below every
+  zone map, so the empty case prunes to nothing.
+- `DISTINCT`: a repeated input key would take another slot (50 ids listed
+  twice became a sequential scan).
+- Never a `UNION ALL SELECT -1` sentinel: inside a macro whose keys come
+  through joins it fell back to a full payload scan even on hits.
+
+Above 50 keys (`dynamic_or_filter_threshold`, a user setting) the read is
+a sequential scan: correct, but as slow as a whole-parameter read. The
+user docs state the limit in value hits, not names.
+
+**Guards.**
 [`crates/nodal-db-core/tests/array_id_index_scan.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/array_id_index_scan.rs)
-(checks the plans of the production statements with `EXPLAIN ANALYZE`).
+(checks the plans of the production statements with `EXPLAIN ANALYZE`)
+and
+[`crates/nodal-db-core/tests/point_read_index_scan.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/point_read_index_scan.rs)
+(the point-read macros: 0 to 50 keys, duplicates, the omitted-alternative
+default, a time-window filter on top, and a 51-key negative control that
+must stay sequential).
 
 ## 3. An index is an access path only for a lone single-key filter
 
@@ -204,3 +235,50 @@ the upgrade has to deal with it.
 3. Remove this section and the warning in the usage guide (or narrow it
    to the DuckDB versions that still have the bug).
 4. Run the perf gate (`just perf-gate`) with the DuckDB bump.
+
+## 6. No build-side column through an UNNEST
+
+**Rule.** In a statement that unnests array payloads, no column produced
+by a join's build side may pass through the UNNEST. In practice:
+
+- fetch the payloads only through a SEMI join (`= ANY(list)` or `IN`
+  with a subquery), whose output is its probe side, the payload scan;
+- take every column that is unnested or passed through from the payload
+  scan itself;
+- do every other lookup (axis lengths, names) after the unnest.
+
+The self-join form `k JOIN value_array p ON p.array_id = k.array_id`
+with `k`'s columns passed through, which `value_array_cells` (and through
+it `value_cells`, `value_rows` and `read_parameter`) uses, is excluded
+for new code.
+
+**Why.** DuckDB 2.0 has a bug in which a join whose build side is
+emitted as a global dictionary (the `array_id` self-join runs as a
+perfect hash join, because the ids are dense), followed by an UNNEST of
+lists longer than 2 048 elements whose length is not a multiple of
+2 048 (8 760 hourly values), followed by a selective filter, raises
+`INTERNAL Error: dict-surviving cache: global dictionary column 0
+changed identity …` and invalidates the database instance. It needs
+several hundred such arrays, so small files hide it. No data is
+damaged. A time window (`WHERE idx1_ts BETWEEN …`) or a threshold
+(`WHERE v_float > …`) on `read_parameter` is enough to trigger it. The
+point-read macros follow this rule and are not affected, which is why the
+user docs recommend them as the workaround for such reads. Turning
+`debug_enable_caching_operators` off also avoids it.
+
+**Guards.**
+[`crates/nodal-db-core/tests/point_read_index_scan.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/point_read_index_scan.rs):
+
+- a structural check over the macros' `EXPLAIN` plans: below every
+  UNNEST, the only joins on the column path are SEMI, ANTI or MARK (only
+  their probe side is followed; aggregates and CTE scans are barriers).
+  It flags `value_array_cells` as a self-check;
+- a data guard on a 1 000 x 8 760-cell fixture with dense ids, on a raw
+  DuckDB connection with default settings (never the core's open, which
+  may turn caching off): the macros return the exact counts under both
+  failing filters, while `read_parameter` under the same filter still
+  raises (the positive control);
+- a canary: the bug's minimal repro, without nodal-db, still raises on
+  the bundled DuckDB. When an upgrade fixes the bug, the canary and the
+  positive control fail on purpose: re-evaluate this rule and the user
+  docs' workaround note then.

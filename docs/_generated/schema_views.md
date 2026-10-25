@@ -51,9 +51,12 @@ From `schema/080_views_read.sql`.
 | `read_parameter(class_name, parameter_name)` | macro | Canonical bulk read |
 | `read_parameter_dense(class_name, parameter_name)` | macro | Hot-path bulk read, dense form |
 | `read_parameter_scalar(class_name, parameter_name)` | macro | Hot-path bulk read, scalar form |
+| `read_value(class_name, parameter_name, entity_name, alternative_name)` | macro | Point read of one value by name, in read_parameter's columns (one entity in every current alternative when the alternative is omitted) |
+| `read_values(class_name, parameter_name, entity_names, alternative_names)` | macro | Point read of a few values by name, in read_parameter's columns |
 | `value_array_cells` | view | Array tier decoded to cells |
 | `value_cells` | view | The tier-unifying cell view |
 | `value_rows` | view | Fully rendered long rows |
+| `value_rows_for(pd_id_arg, entity_ids, alternative_ids)` | macro | Point read by ids, in value_rows' columns |
 
 ### Scenario resolution in SQL
 

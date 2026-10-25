@@ -354,6 +354,80 @@ fn b<T: duckdb::ToSql + Copy + 'static>(v: T) -> Box<dyn duckdb::ToSql> {
     Box::new(v)
 }
 
+/// A rendered point / few-key read through the point-read macros
+/// (`read_value`, `read_values`; fast_point_reads_PLAN §6): 5 warm-up and
+/// `reps` timed executions on `conn`, the sample is the median per
+/// execution. Every execution must return `want` rows. With `reference`
+/// (the same rows through `read_parameter`, read once, untimed), the last
+/// result's digest must equal the reference's: the macros are a second
+/// copy of `value_rows`' rendering.
+fn rendered(
+    conn: &Connection,
+    what: &str,
+    sql: &str,
+    want: usize,
+    reference: Option<&str>,
+    reps: usize,
+) -> Result<Sample, duckdb::Error> {
+    for _ in 0..5 {
+        check_rows(what, rows(&query(conn, sql, &[])?), want);
+    }
+    let mut ms = Vec::with_capacity(reps);
+    let mut last = vec![];
+    for _ in 0..reps {
+        let t = Instant::now();
+        let b = query(conn, sql, &[])?;
+        ms.push(elapsed_ms(t));
+        check_rows(what, rows(&b), want);
+        last = b;
+    }
+    let got = RowHash::of(&last);
+    if let Some(r) = reference {
+        let want_hash = RowHash::of(&query(conn, r, &[])?);
+        check(
+            got == want_hash,
+            &format!(
+                "{what}: the macro's rows differ from read_parameter's ({got:?} vs {want_hash:?})"
+            ),
+        );
+    }
+    Ok(Sample::new(median(ms)).hash("read", &got))
+}
+
+/// `rendered` on one warm RO connection through the core's open.
+fn rendered_core(
+    what: &str,
+    sql: &str,
+    want: usize,
+    reference: Option<&str>,
+    reps: usize,
+) -> Sample {
+    with_read(&synth_path(), |conn| {
+        Ok(rendered(conn, what, sql, want, reference, reps)?)
+    })
+    .unwrap_or_else(|e| crate::check::query_failed(&format!("{what}: {e}")))
+}
+
+/// `rendered` on a RAW read-only DuckDB connection with default settings
+/// (caching operators on), not the core's open: the dict-cache bug shape is
+/// a direct-SQL user's configuration, and a core-side mitigation must not
+/// turn this metric into a no-op (fast_point_reads_PLAN D7).
+fn rendered_raw(what: &str, sql: &str, want: usize, reps: usize) -> Sample {
+    let open = || -> Result<Sample, duckdb::Error> {
+        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+        let conn = Connection::open_with_flags(synth_path(), config)?;
+        let s = rendered(&conn, what, sql, want, None, reps)?;
+        conn.close().map_err(|(_, e)| e)?;
+        Ok(s)
+    };
+    open().unwrap_or_else(|e| crate::check::query_failed(&format!("{what}: {e}")))
+}
+
+fn quoted(names: &[String]) -> String {
+    let v: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    format!("[{}]", v.join(", "))
+}
+
 pub const LONG_SCAN_SQL: &str = "SELECT vl.entity_id, vl.i1_pos, vl.i1_dt, vl.v_int \
      FROM value_long vl \
      WHERE vl.parameter_definition_id = ? AND vl.valid_to_commit IS NULL";
@@ -415,6 +489,67 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
             k(5, 5),
         ),
         "rd_long_scan_17pct" => bulk(mode, LONG_SCAN_SQL, s.longs * CELLS, true, k(25, 9)),
+        // The point-read macros (fast_point_reads_PLAN §6): one rendered
+        // array value, one scalar (the empty array-key path), the
+        // dict-cache bug shape (a 6-hour window, raw connection), and 20
+        // series in one call.
+        "rd_point_value_array" => {
+            let (_, _, an) = names(s);
+            rendered_core(
+                mode,
+                &format!("SELECT * FROM read_value('bench_array', 'p_series', '{an}', 'Base')"),
+                CELLS,
+                Some(&format!(
+                    "SELECT * FROM read_parameter('bench_array', 'p_series') \
+                     WHERE entity = '{an}' AND alternative = 'Base'"
+                )),
+                k(60, 40),
+            )
+        }
+        "rd_point_value_scalar" => {
+            let (sn, _, _) = names(s);
+            rendered_core(
+                mode,
+                &format!("SELECT * FROM read_value('bench_scalar', 'p_scalar', '{sn}', 'Base')"),
+                1,
+                Some(&format!(
+                    "SELECT * FROM read_parameter('bench_scalar', 'p_scalar') \
+                     WHERE entity = '{sn}' AND alternative = 'Base'"
+                )),
+                k(60, 40),
+            )
+        }
+        "rd_point_value_window" => {
+            let (_, _, an) = names(s);
+            rendered_raw(
+                mode,
+                &format!(
+                    "SELECT * FROM read_value('bench_array', 'p_series', '{an}', 'Base') \
+                     WHERE idx1_ts BETWEEN TIMESTAMP '2025-03-01 00:00' \
+                       AND TIMESTAMP '2025-03-01 05:00'"
+                ),
+                6,
+                k(60, 40),
+            )
+        }
+        "rd_values_20" => {
+            let first = s.arrays / 2 - 10;
+            let picked: Vec<String> = (first..first + 20).map(|i| format!("a{i:04}")).collect();
+            rendered_core(
+                mode,
+                &format!(
+                    "SELECT * FROM read_values('bench_array', 'p_series', {}, ['Base'])",
+                    quoted(&picked)
+                ),
+                20 * CELLS,
+                Some(&format!(
+                    "SELECT * FROM read_parameter('bench_array', 'p_series') \
+                     WHERE entity IN ({}) AND alternative = 'Base'",
+                    in_list(&picked)
+                )),
+                k(25, 15),
+            )
+        }
         "wr_replace_scalar_cycle_ckpt" => cycle(dir, s, Tier::Scalar),
         "wr_replace_array_cycle_ckpt" => cycle(dir, s, Tier::Array),
         "wr_replace_long_cycle_ckpt" => cycle(dir, s, Tier::Long),

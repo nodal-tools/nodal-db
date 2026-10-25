@@ -156,7 +156,8 @@ FROM value_array_cells;
 -- Stated non-goal (VMP Part 3): this view cannot push predicates into LIST
 -- cells — engines wanting raw speed use the client library's bulk reader
 -- (or the read_parameter_dense macro below). Point reads of array values
--- go through read_parameter_dense or value_cells, which fetch the payload by
+-- go through read_value / read_values / value_rows_for (rendered, below),
+-- read_parameter_dense or value_cells, which fetch the payload by
 -- array_id; this view's rank branches keep a full scan of the array payload
 -- even for a point read.
 CREATE VIEW value_rows AS
@@ -293,6 +294,141 @@ JOIN pd_pick ON pd_pick.id = vs.parameter_definition_id
 JOIN entity e ON e.id = vs.entity_id AND e.valid_to_commit IS NULL
 JOIN alternative al ON al.id = vs.alternative_id AND al.valid_to_commit IS NULL
 WHERE vs.valid_to_commit IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Point and few-key reads (fast_point_reads_PLAN): the current rows of ONE
+-- parameter for a small key set, rendered exactly like value_rows /
+-- read_parameter, without scanning the array payload of the whole table.
+-- read_parameter / value_rows cannot do this: a filter written outside a
+-- macro or view never reaches its tier scans. One body (value_rows_for),
+-- two name-level entry points (read_values, read_value).
+--
+-- How the payload is fetched (docs/dev/engine_rules.md §2 and §6; both are
+-- optimizer behaviour, guarded by tests/point_read_index_scan.rs):
+--   * keys are resolved on narrow columns first, then folded into ONE
+--     scalar list: `array_id = ANY(coalesce((SELECT list(DISTINCT …)), [-1]))`.
+--     That is an index scan of the payload for 0 to 50 keys. [-1] stands in
+--     only for an EMPTY list (a scalar/long parameter, a miss): a sentinel
+--     appended to a non-empty list takes one of the 50 dynamic-filter slots.
+--     Never a `UNION ALL SELECT -1` sentinel: inside this macro it falls
+--     back to a full payload scan. Above 50 value hits (existing arrays,
+--     i.e. entities x alternatives, not names) the scan is sequential.
+--   * no column produced by a join's build side passes through the UNNEST
+--     (the DuckDB 2.0 dict-cache bug, engine_rules §6): the payload scan
+--     meets its key list in a SEMI join, which emits probe-side columns
+--     only, and the axis-length lookups run after the unnest.
+--   * axis_position is evaluated only for the value's own axes (`ap`): the
+--     unfiltered view costs in proportion to every axis in the file.
+-- Input keys are deduplicated (kk is DISTINCT): a repeated id must neither
+-- duplicate scalar/long rows nor take extra dynamic-filter slots.
+-- Row order is unspecified, as for read_parameter.
+
+-- Point read by ids, in value_rows' columns: the current rows of one
+-- parameter for lists of entity and alternative ids (every pair).
+CREATE MACRO value_rows_for(pd_id_arg, entity_ids, alternative_ids) AS TABLE
+WITH kk AS (
+  SELECT DISTINCT pd_id_arg::BIGINT AS pd_id, e.id AS e_id, a.id AS al_id
+  FROM (SELECT unnest(entity_ids) AS id) e CROSS JOIN (SELECT unnest(alternative_ids) AS id) a
+), cells AS MATERIALIZED (
+  SELECT vs.entity_id, vs.alternative_id, 'scalar' AS tier, vs.value_kind,
+         NULL::BIGINT AS axis1_id, NULL::BIGINT AS axis2_id, NULL::BIGINT AS axis3_id, NULL::BIGINT AS axis4_id,
+         0 AS i1_pos, 0 AS i2_pos, 0 AS i3_pos, 0 AS i4_pos,
+         vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime, vs.v_dur_months, vs.v_dur_micros
+  FROM value_scalar vs
+  JOIN kk ON vs.entity_id = kk.e_id AND vs.parameter_definition_id = kk.pd_id AND vs.alternative_id = kk.al_id
+  WHERE vs.valid_to_commit IS NULL
+  UNION ALL
+  SELECT vl.entity_id, vl.alternative_id, 'long', vl.value_kind, vl.axis1_id, vl.axis2_id, vl.axis3_id, vl.axis4_id,
+         vl.i1_pos, vl.i2_pos, vl.i3_pos, vl.i4_pos,
+         vl.v_float, vl.v_int, vl.v_bool, vl.v_str, vl.v_datetime, vl.v_dur_months, vl.v_dur_micros
+  FROM value_long vl
+  JOIN kk ON vl.entity_id = kk.e_id AND vl.parameter_definition_id = kk.pd_id AND vl.alternative_id = kk.al_id
+  WHERE vl.valid_to_commit IS NULL
+  UNION ALL
+  -- array leg: the payload is fetched by array_id through the scalar key
+  -- list (index scan), and every column that is unnested or passed through
+  -- comes from the payload scan itself (engine_rules §6).
+  SELECT x.entity_id, x.alternative_id, 'array', CASE WHEN x.is_float THEN 'float' ELSE 'int' END,
+         x.axis1_id, x.axis2_id, x.axis3_id, x.axis4_id,
+         (x.flat_pos // (n2 * n3 * n4))::INTEGER, ((x.flat_pos // (n3 * n4)) % n2)::INTEGER,
+         ((x.flat_pos // n4) % n3)::INTEGER, (x.flat_pos % n4)::INTEGER,
+         x.vf, x.vi, NULL, NULL, NULL, NULL, NULL
+  FROM (
+    SELECT p.entity_id, p.alternative_id, p.axis1_id, p.axis2_id, p.axis3_id, p.axis4_id,
+           p.values IS NOT NULL AS is_float,
+           unnest(p.values) AS vf, unnest(p.values_int) AS vi,
+           unnest(range(coalesce(len(p.values), len(p.values_int)))) AS flat_pos
+    FROM value_array p
+    WHERE p.array_id = ANY(coalesce(
+            (SELECT list(DISTINCT va.array_id) FROM value_array va
+             JOIN kk ON va.entity_id = kk.e_id AND va.parameter_definition_id = kk.pd_id
+                    AND va.alternative_id = kk.al_id),
+            [-1]))
+  ) x,
+  LATERAL (SELECT coalesce((SELECT length FROM axis WHERE id = x.axis2_id), 1) AS n2,
+                  coalesce((SELECT length FROM axis WHERE id = x.axis3_id), 1) AS n3,
+                  coalesce((SELECT length FROM axis WHERE id = x.axis4_id), 1) AS n4)
+), ax AS (
+  SELECT DISTINCT a FROM (SELECT unnest([axis1_id, axis2_id, axis3_id, axis4_id]) AS a
+                          FROM (SELECT DISTINCT axis1_id, axis2_id, axis3_id, axis4_id FROM cells))
+  WHERE a IS NOT NULL
+), ap AS MATERIALIZED (
+  -- the value's own axes only (a runtime join filter reaches the axis scans)
+  SELECT * FROM axis_position WHERE axis_id IN (SELECT a FROM ax)
+)
+SELECT c.entity_id, pd_id_arg::BIGINT AS parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
+       c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
+       p1.label AS idx1_text, p1.ts AS idx1_ts, p1.end_ts AS idx1_end_ts, p1.num AS idx1_num, p1.ordinal AS idx1_ordinal, p1.coord AS idx1_coord,
+       p2.label AS idx2_text, p2.ts AS idx2_ts, p2.end_ts AS idx2_end_ts, p2.num AS idx2_num, p2.ordinal AS idx2_ordinal, p2.coord AS idx2_coord,
+       p3.label AS idx3_text, p3.ts AS idx3_ts, p3.end_ts AS idx3_end_ts, p3.num AS idx3_num, p3.ordinal AS idx3_ordinal, p3.coord AS idx3_coord,
+       p4.label AS idx4_text, p4.ts AS idx4_ts, p4.end_ts AS idx4_end_ts, p4.num AS idx4_num, p4.ordinal AS idx4_ordinal, p4.coord AS idx4_coord,
+       c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
+FROM cells c
+LEFT JOIN ap p1 ON p1.axis_id = c.axis1_id AND p1.pos = c.i1_pos
+LEFT JOIN ap p2 ON p2.axis_id = c.axis2_id AND p2.pos = c.i2_pos
+LEFT JOIN ap p3 ON p3.axis_id = c.axis3_id AND p3.pos = c.i3_pos
+LEFT JOIN ap p4 ON p4.axis_id = c.axis4_id AND p4.pos = c.i4_pos;
+
+-- Point read of a few values by name, in read_parameter's columns: lists
+-- of entity and alternative names (every pair). Names match
+-- case-insensitively (lower()), like the class and parameter arguments.
+-- alternative_names NULL (the default) = every current alternative;
+-- [] = none.
+CREATE MACRO read_values(class_name, parameter_name, entity_names, alternative_names := NULL) AS TABLE
+WITH pd_pick AS (
+  SELECT pd.id, pd.entity_class_id FROM parameter_definition pd
+  JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL
+  WHERE pd.valid_to_commit IS NULL
+    AND lower(ec.name) = lower(class_name) AND lower(pd.name) = lower(parameter_name)
+), e_pick AS (
+  SELECT e.id, e.name FROM entity e JOIN pd_pick ON e.entity_class_id = pd_pick.entity_class_id
+  WHERE e.valid_to_commit IS NULL AND lower(e.name) IN (SELECT lower(unnest(entity_names)))
+), al_pick AS (
+  SELECT al.id, al.name FROM alternative al
+  WHERE al.valid_to_commit IS NULL
+    AND (alternative_names IS NULL
+         OR lower(al.name) IN (SELECT lower(unnest(alternative_names))))
+)
+SELECT e.name AS entity, al.name AS alternative, vr.tier, vr.value_kind,
+       vr.idx1_text, vr.idx2_text, vr.idx3_text, vr.idx4_text,
+       vr.idx1_ts, vr.idx2_ts, vr.idx3_ts, vr.idx4_ts,
+       vr.idx1_num, vr.idx2_num, vr.idx3_num, vr.idx4_num,
+       vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
+       vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
+       vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime, vr.v_dur_months, vr.v_dur_micros
+FROM value_rows_for(coalesce((SELECT id FROM pd_pick), -1),
+                    coalesce((SELECT list(id) FROM e_pick), []),
+                    coalesce((SELECT list(id) FROM al_pick), [])) vr
+JOIN e_pick e ON e.id = vr.entity_id
+JOIN al_pick al ON al.id = vr.alternative_id;
+
+-- Point read of one value by name, in read_parameter's columns (one entity
+-- in every current alternative when the alternative is omitted). [NULL] is
+-- not NULL, so an omitted alternative is passed through as NULL rather
+-- than wrapped, or it would silently match nothing.
+CREATE MACRO read_value(class_name, parameter_name, entity_name, alternative_name := NULL) AS TABLE
+SELECT * FROM read_values(class_name, parameter_name, [entity_name],
+                          CASE WHEN alternative_name IS NULL THEN NULL ELSE [alternative_name] END);
 
 -- Effective unit = override if present, else definition default; no
 -- per-value replication anywhere (Decision 9).

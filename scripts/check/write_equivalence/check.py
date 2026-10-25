@@ -17,8 +17,11 @@ the literal WORKTREE, the uncommitted working tree. Each revision is
 extracted with `git archive` and this directory (the workload of the
 current checkout, not of the revision) is copied into it, so both arms
 run the same workload. Both build in release mode in one shared target
-directory (`--work`/target), so the bundled DuckDB compiles once; the
-binaries are cached per commit id and workload hash. Exit status 0 when
+directory (`--work`/target), so the bundled DuckDB compiles once. The
+workload's Cargo.lock is seeded from the revision's root Cargo.lock, so
+it builds with the dependency versions that revision pins; binaries are
+cached per commit id, workload hash, resolved lock and `rustc -Vv`
+(scripts/lib/revbuild.py; WORKTREE is always rebuilt). Exit status 0 when
 every seed matches, 1 otherwise (the first differing lines are printed;
 the full outputs stay in the work directory).
 
@@ -57,7 +60,6 @@ finding OLD lacks (an audit view only NEW has must be empty).
 
 import argparse
 import difflib
-import hashlib
 import os
 import shutil
 import subprocess
@@ -68,81 +70,19 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 REL = os.path.relpath(HERE, REPO)
-
-
-def git(*args):
-    return subprocess.run(
-        ["git", "-C", REPO, *args], check=True, capture_output=True, text=True
-    ).stdout.strip()
-
-
-def tree_id(rev):
-    """A cache key for the revision's source: the commit id, or a hash of
-    the working tree's diff for WORKTREE."""
-    if rev == "WORKTREE":
-        diff = subprocess.run(
-            ["git", "-C", REPO, "diff", "HEAD", "--", "crates", "schema"],
-            check=True, capture_output=True,
-        ).stdout
-        return "wt-" + git("rev-parse", "--short=12", "HEAD") + "-" + hashlib.sha1(diff).hexdigest()[:8]
-    return git("rev-parse", "--short=12", rev + "^{commit}")
-
-
-def extract(rev, dest):
-    shutil.rmtree(dest, ignore_errors=True)
-    os.makedirs(dest)
-    if rev == "WORKTREE":
-        for part in ("Cargo.toml", "Cargo.lock", "crates", "schema"):
-            src = os.path.join(REPO, part)
-            if os.path.isdir(src):
-                shutil.copytree(src, os.path.join(dest, part),
-                                ignore=shutil.ignore_patterns("target", "__pycache__"))
-            elif os.path.exists(src):
-                shutil.copy2(src, dest)
-    else:
-        archive = subprocess.run(
-            ["git", "-C", REPO, "archive", rev], check=True, capture_output=True
-        ).stdout
-        subprocess.run(["tar", "-x", "-C", dest], input=archive, check=True)
-    tool = os.path.join(dest, REL)
-    shutil.rmtree(tool, ignore_errors=True)
-    shutil.copytree(HERE, tool, ignore=shutil.ignore_patterns("target", "__pycache__", "Cargo.lock"))
-    return tool
-
-
-def workload_id():
-    """A hash of the workload crate (this directory), which is built into
-    every binary: a cached binary is reused only for the same workload."""
-    h = hashlib.sha1()
-    for root, dirs, files in os.walk(HERE):
-        dirs[:] = sorted(d for d in dirs if d not in ("target", "__pycache__"))
-        for name in sorted(files):
-            if name == "Cargo.lock":
-                continue
-            path = os.path.join(root, name)
-            h.update(os.path.relpath(path, HERE).encode() + b"\0")
-            with open(path, "rb") as f:
-                h.update(f.read() + b"\0")
-    return h.hexdigest()[:8]
+sys.path.insert(0, os.path.join(REPO, "scripts", "lib"))
+import revbuild  # noqa: E402
 
 
 def build(rev, work):
-    tid = tree_id(rev) + "-w" + workload_id()
-    binary = os.path.join(work, "bin", f"write_equivalence-{tid}")
-    if rev != "WORKTREE" and os.path.exists(binary):
-        print(f"{rev} ({tid}): cached binary", flush=True)
-        return binary
-    tool = extract(rev, os.path.join(work, "src", tid))
-    target = os.path.join(work, "target")
-    t0 = time.time()
-    print(f"{rev} ({tid}): building ...", flush=True)
-    subprocess.run(
-        ["cargo", "build", "--release", "--quiet"],
-        cwd=tool, check=True, env={**os.environ, "CARGO_TARGET_DIR": target},
+    """Build the workload against `rev`'s core (scripts/lib/revbuild.py:
+    the tool's Cargo.lock is seeded from the revision's root lock; the
+    cache key covers the tree, the workload, the resolved lock and
+    `rustc -Vv`). WORKTREE is never served from the cache."""
+    binary, _, _ = revbuild.build_tool(
+        REPO, rev, HERE, REL, work, "write_equivalence",
+        use_cache=rev != "WORKTREE", log=lambda m: print(m, flush=True),
     )
-    os.makedirs(os.path.dirname(binary), exist_ok=True)
-    shutil.copy2(os.path.join(target, "release", "write_equivalence"), binary)
-    print(f"{rev} ({tid}): built in {time.time() - t0:.0f} s", flush=True)
     return binary
 
 

@@ -2312,6 +2312,51 @@ pub fn read_parameter(
     })
 }
 
+/// The statement behind [`read_values`]: the `read_values` SQL macro with
+/// the name lists bound as parameters (`?1` class, `?2` parameter, `?3`
+/// entity names, `?4` alternative names or NULL). The explicit `::VARCHAR[]`
+/// casts are load-bearing: an empty bound list carries no element type.
+/// Exposed so the plan guard (`tests/point_read_index_scan.rs`) checks the
+/// production text.
+pub const READ_VALUES_SQL: &str = "SELECT * FROM read_values(?, ?, ?::VARCHAR[], ?::VARCHAR[])";
+
+/// Read a few values of one parameter: the current rows of every
+/// (entity, alternative) pair of `entities` x `alternatives` (all current
+/// alternatives when `None`), through the `read_values` SQL macro, in
+/// `read_parameter`'s columns. One fresh RO connection, opened and closed
+/// per call (CLAUDE.md invariant 1).
+///
+/// This is the editor's per-entity read: it fetches only the arrays it
+/// needs (by `array_id`, an index scan) instead of every array of the
+/// parameter, so it costs milliseconds where [`read_parameter`] scans the
+/// whole array table. Up to 50 value hits (arrays that exist for the
+/// requested pairs) per call stay on the index; above that the macro scans
+/// every array, as `read_parameter` does. Names match case-insensitively;
+/// a name that does not resolve contributes no rows (no error). Row order
+/// is unspecified.
+///
+/// No Rust-side rendering: the macro is the one renderer of axes
+/// (CLAUDE.md invariant 2 applied to reads).
+pub fn read_values(
+    db: &Path,
+    class: &str,
+    parameter: &str,
+    entities: &[&str],
+    alternatives: Option<&[&str]>,
+) -> Result<RecordBatch, DbError> {
+    use duckdb::types::Value;
+    let list = |xs: &[&str]| Value::List(xs.iter().map(|x| Value::Text(x.to_string())).collect());
+    let ents = list(entities);
+    let alts = alternatives.map_or(Value::Null, list);
+    with_read(db, |conn| {
+        let mut stmt = conn.prepare(READ_VALUES_SQL)?;
+        let arrow = stmt.query_arrow(params![class, parameter, ents, alts])?;
+        let schema = arrow.get_schema();
+        let batches: Vec<RecordBatch> = arrow.collect();
+        Ok(concat_batches(&schema, &batches)?)
+    })
+}
+
 /// The database's head commit id: `COALESCE(max(commit.id), 0)`, read on one
 /// per-operation RO connection (CLAUDE.md invariant 1). Quote it to
 /// [`WriteOptions::expect_commit`] for an atomic read → compute → write-only-

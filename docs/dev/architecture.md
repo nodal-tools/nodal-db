@@ -42,7 +42,10 @@ One DuckDB file is the database. Around it:
   with the `duckdb` package.
 - **egui editor** — developed in a separate repository, so that it
   cannot reach core internals. It depends on `nodal-db-core`, reads
-  through the SQL views and writes through the core API. *In
+  through the SQL views and writes through the core API. Its
+  per-entity reads (one entity, a few, in one or all alternatives) go
+  through `api::read_values` (the `read_values` macro); the bulk display
+  of a whole parameter goes through `read_parameter`. *In
   development.*
 
 The API rule is **Arrow in, Arrow out**: values cross the API as Arrow
@@ -190,7 +193,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `conn` | Connection discipline: open-work-close, a per-path in-process lock, bounded-backoff retry, write transactions that stamp the commit row. |
 | `axis` | Content-verified axis deduplication (the hash narrows, byte equality decides). |
 | `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; one set-based writer per tier and the set-based delete (rounds per commit). |
-| `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `db_identity`. |
+| `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `read_values`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
 | `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, and entity / class / parameter creation. |
 | `verbs` | Idempotent single-purpose write verbs (`ensure_entity`, `set_scenario_alternatives`, …) used by template migration programs and importers; thin wrappers over the `structural` and `api` paths. |
@@ -592,14 +595,18 @@ results recorded in
 it is re-run at each DuckDB upgrade. Dense-array point reads go through
 the `array_id` index: `read_parameter_dense` and `value_cells` resolve
 the key triple to `array_id` on narrow columns, then fetch the list
-payload by an index scan. Reads of a value that does not exist, and
-reads of more than 50 values at once, still scan the payload of the
-whole table (as before the key existed), as do point reads through
-`value_rows`, `read_parameter` and `value_array_asof`. The index-scan
-choice is made at run time and depends on engine heuristics, so
-`crates/nodal-db-core/tests/array_id_index_scan.rs` checks it with
-`EXPLAIN ANALYZE` on every `cargo test`, including a negative control
-that shows the fallback for dense ids.
+payload by an index scan. The rendered point reads `read_value`,
+`read_values` and `value_rows_for` fold the resolved ids into one list
+first, so they stay on the index for 0 to 50 value hits, including a
+value that does not exist and a parameter with no arrays. Reads of more
+than 50 values at once still scan the payload of the whole table, as do
+point reads through `value_rows`, `read_parameter` and
+`value_array_asof`, whose outer filters never reach their scans. The
+index-scan choice is made at run time and depends on engine heuristics,
+so `crates/nodal-db-core/tests/array_id_index_scan.rs` and
+`point_read_index_scan.rs` check it with `EXPLAIN ANALYZE` on every
+`cargo test`, including negative controls that show the fallback for
+dense ids and for 51 keys ([engine rules](engine_rules.md) §2 and §5).
 
 CI runs `cargo test --workspace` and the schema smoke suite.
 

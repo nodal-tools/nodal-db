@@ -506,7 +506,15 @@ The Python package also offers reads that manage the connection for you:
 db = nodal_db.open("demo.duckdb")
 batch = db.read_parameter("unit", "capacity", "Base")    # pyarrow.RecordBatch
 table = db.query("SELECT * FROM audit_health").read_all()  # pyarrow.Table
+# a few values (the read_values macro): one entity in every alternative,
+# then two entities in one alternative
+coal = db.read_values("unit", "capacity", ["coal"])
+pair = db.read_values("unit", "capacity", ["coal", "wind"], ["Base"])
 ```
+
+`db.read_values(class, parameter, entities, alternatives=None)` follows
+the rules of [Reading one value or a few](#reading-one-value-or-a-few);
+Rust code calls `api::read_values` the same way.
 
 For interactive browsing, the DuckDB CLI works too, provided it is
 version 2.0 or newer: `duckdb -readonly demo.duckdb`, or `duckdb -ui

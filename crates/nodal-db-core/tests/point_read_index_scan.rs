@@ -55,7 +55,8 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 use serde_json::Value as Json;
 
-use nodal_db_core::api::{delete_objects, write_parameter};
+use duckdb::types::Value;
+use nodal_db_core::api::{delete_objects, write_parameter, READ_VALUES_SQL};
 use nodal_db_core::canon::LabelDomain;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
@@ -410,6 +411,17 @@ fn assert_index(conn: &Connection, label: &str, sql: &str) {
     assert_index_in(conn, label, sql, &explain(conn, sql));
 }
 
+/// `EXPLAIN (ANALYZE, FORMAT json)` of a prepared statement with bound values.
+fn explain_bound(conn: &Connection, sql: &str, args: &[Value]) -> Json {
+    let mut st = conn
+        .prepare(&format!("EXPLAIN (ANALYZE, FORMAT json) {sql}"))
+        .unwrap();
+    let raw: String = st
+        .query_row(duckdb::params_from_iter(args.iter()), |r| r.get(1))
+        .unwrap_or_else(|e| panic!("EXPLAIN ANALYZE failed for {sql} {args:?}: {e}"));
+    serde_json::from_str(&raw).expect("plan JSON")
+}
+
 fn assert_index_in(conn: &Connection, label: &str, sql: &str, plan: &Json) {
     let scans = payload_scans(plan, "value_array");
     let ver = engine_version(conn);
@@ -582,6 +594,63 @@ fn point_read_macros_fetch_payloads_by_index() {
          limit of read_values (docs/usage.md, engine_rules §2) can be revisited; \
          re-evaluate array_id plan D15 rather than deleting this control."
     );
+    conn.close().unwrap();
+}
+
+/// The core's prepared statement (`api::READ_VALUES_SQL`) with the name lists
+/// BOUND as parameters, as `api::read_values` runs it: the payload scan stays
+/// an index scan for a hit, the omitted-alternative default (NULL), a scalar
+/// parameter and empty lists.
+#[test]
+fn prepared_read_values_with_bound_lists_uses_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(dir.path());
+    let conn = guard_conn(&db);
+    let list = |xs: &[&str]| Value::List(xs.iter().map(|x| Value::Text(x.to_string())).collect());
+    let t = |s: &str| Value::Text(s.into());
+    let twenty: Vec<String> = (10..30).map(ent).collect();
+    let twenty: Vec<&str> = twenty.iter().map(String::as_str).collect();
+    for (label, args, want) in [
+        (
+            "bound: 1 key",
+            vec![t("node"), t("profile"), list(&["n10"]), list(&["Base"])],
+            STEPS,
+        ),
+        (
+            "bound: alternatives NULL",
+            vec![t("node"), t("profile"), list(&["N10"]), Value::Null],
+            3 * STEPS,
+        ),
+        (
+            "bound: 20 keys",
+            vec![t("node"), t("profile"), list(&twenty), list(&["base"])],
+            20 * STEPS,
+        ),
+        (
+            "bound: scalar parameter",
+            vec![t("node"), t("cap"), list(&["n10"]), Value::Null],
+            3,
+        ),
+        (
+            "bound: empty lists",
+            vec![t("node"), t("profile"), list(&[]), list(&[])],
+            0,
+        ),
+    ] {
+        let mut st = conn.prepare(READ_VALUES_SQL).unwrap();
+        let mut rows = st.query(duckdb::params_from_iter(args.iter())).unwrap();
+        let mut n = 0;
+        while rows.next().unwrap().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, want, "{label}: row count");
+        assert_index_in(
+            &conn,
+            label,
+            READ_VALUES_SQL,
+            &explain_bound(&conn, READ_VALUES_SQL, &args),
+        );
+    }
     conn.close().unwrap();
 }
 

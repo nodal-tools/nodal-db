@@ -241,6 +241,41 @@ impl Database {
         batch.to_pyarrow(py)
     }
 
+    /// Read a few values of one parameter (mirrors `api::read_values`): the
+    /// current rows of every (entity, alternative) pair of `entities` x
+    /// `alternatives`, through the `read_values` SQL macro, as a
+    /// `pyarrow.RecordBatch` in `read_parameter`'s shape.
+    ///
+    /// `alternatives=None` (the default) reads every current alternative,
+    /// so `db.read_values("unit", "capacity", ["coal"])` is one entity in
+    /// all its alternatives; `[]` reads none. Names match
+    /// case-insensitively; a name that does not resolve contributes no rows.
+    /// Fast for a few values: up to 50 value hits (arrays that exist for the
+    /// requested pairs) are fetched by index; above that the read scans every
+    /// array of the parameter, as `read_parameter` does. Row order is
+    /// unspecified.
+    #[pyo3(signature = (class_name, parameter, entities, alternatives = None))]
+    fn read_values<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: String,
+        parameter: String,
+        entities: Vec<String>,
+        alternatives: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let path = self.path.clone();
+        let batch = py
+            .detach(move || {
+                let ents: Vec<&str> = entities.iter().map(String::as_str).collect();
+                let alts: Option<Vec<&str>> = alternatives
+                    .as_ref()
+                    .map(|v| v.iter().map(String::as_str).collect());
+                api::read_values(&path, &class_name, &parameter, &ents, alts.as_deref())
+            })
+            .map_err(db_err)?;
+        batch.to_pyarrow(py)
+    }
+
     /// Write one parameter (one class/parameter/alternative target) from a
     /// logical-long Arrow batch (`pyarrow.RecordBatch`, `pyarrow.Table`, or
     /// any Arrow PyCapsule producer): column 0 = entity names (utf8), then

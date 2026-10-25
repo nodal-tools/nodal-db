@@ -28,7 +28,9 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{delete_objects, delete_values, write_parameter, DeleteKey};
+use nodal_db_core::api::{
+    delete_objects, delete_values, read_parameter, read_values, write_parameter, DeleteKey,
+};
 use nodal_db_core::canon::LabelDomain;
 use nodal_db_core::erasure::{erase_alternative, EraseOpts};
 use nodal_db_core::schema_init::init_schema_with_default;
@@ -767,4 +769,78 @@ fn value_rows_for_equals_value_rows() {
         "SELECT * FROM value_rows WHERE false",
     );
     conn.close().unwrap();
+}
+
+/// `api::read_values` (fast_point_reads_PLAN §5.4) is the macro on a
+/// per-operation connection: the same rows as the SQL call, the columns of
+/// `api::read_parameter`, `None` = every current alternative, and empty
+/// lists or misses read nothing without an error.
+#[test]
+fn api_read_values_is_the_macro() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(dir.path());
+    let reference = read_parameter(&db, "unit", "series", "Base").expect("read_parameter");
+
+    let got = read_values(
+        &db,
+        "UNIT",
+        "series",
+        &["u0", "U1"],
+        Some(&["base", "Alt1"]),
+    )
+    .expect("read_values");
+    assert_eq!(
+        got.schema(),
+        reference.schema(),
+        "read_parameter's columns and types"
+    );
+    assert_eq!(got.num_rows(), 24);
+    let conn = Connection::open(&db).unwrap();
+    assert_eq!(
+        got.num_rows() as i64,
+        n(
+            &conn,
+            "SELECT count(*) FROM read_values('unit', 'series', ['u0', 'u1'], ['Base', 'Alt1'])"
+        )
+    );
+    conn.close().unwrap();
+
+    let all = read_values(&db, "unit", "series", &["u0"], None).expect("all alternatives");
+    assert_eq!(all.num_rows(), 18, "None = every current alternative");
+    let names: std::collections::BTreeSet<&str> = all
+        .column_by_name("entity")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .iter()
+        .flatten()
+        .collect();
+    assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["u0"]);
+    let empty: &[&str] = &[];
+    for (ents, alts) in [
+        (empty, None),
+        (&["u0"][..], Some(empty)),
+        (&["nope"][..], None),
+        (&["u0"][..], Some(&["nope"][..])),
+    ] {
+        let b = read_values(&db, "unit", "series", ents, alts).expect("an empty read");
+        assert_eq!(b.num_rows(), 0, "{ents:?} {alts:?}");
+        assert_eq!(b.schema(), reference.schema());
+    }
+    assert_eq!(
+        read_values(&db, "nope", "series", &["u0"], None)
+            .expect("a missing class reads nothing")
+            .num_rows(),
+        0
+    );
+    let scalar = read_values(&db, "unit", "s_float", &["U_Mixed"], Some(&["alt2"])).unwrap();
+    let v = scalar
+        .column_by_name("v_float")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!((scalar.num_rows(), v), (1, 9.0));
 }

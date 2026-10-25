@@ -104,6 +104,63 @@ def test_indexed_timestamp_roundtrip(db):
     assert rb.column("v_float").to_pylist() == [1.0, 2.0, 3.0]
 
 
+def _series(entity, values):
+    n = len(values)
+    return pa.record_batch(
+        {
+            "entity": pa.array([entity] * n, pa.string()),
+            "time": pa.array(
+                [1_700_000_000_000_000 + i * 3_600_000_000 for i in range(n)],
+                pa.timestamp("us"),
+            ),
+            "value": pa.array(values, pa.float64()),
+        }
+    )
+
+
+def _sorted_rows(rb):
+    return sorted(rb.to_pylist(), key=repr)
+
+
+def test_read_values_matches_filtered_read_parameter(db):
+    # fast_point_reads_PLAN D4 (a'): the skin mirrors api::read_values.
+    for alt, k in [("Base", 1.0), ("high", 2.0), ("low", 3.0)]:
+        for e in ["u1", "u2", "u3"]:
+            db.write_parameter("unit", "flow", alt, _series(e, [k, k + 1, k + 2]), user="t")
+    full = {
+        alt: db.read_parameter("unit", "flow", alt) for alt in ["Base", "high", "low"]
+    }
+
+    rb = db.read_values("unit", "flow", ["U1", "u3"], ["base", "LOW"])
+    assert rb.schema == full["Base"].schema
+    want = [
+        r for alt in ["Base", "low"] for r in full[alt].to_pylist() if r["entity"] in ("u1", "u3")
+    ]
+    assert _sorted_rows(rb) == sorted(want, key=repr)
+
+    # alternatives=None (the default): one entity in every alternative.
+    rb = db.read_values("unit", "flow", ["u2"])
+    want = [r for alt in full for r in full[alt].to_pylist() if r["entity"] == "u2"]
+    assert rb.num_rows == 9
+    assert _sorted_rows(rb) == sorted(want, key=repr)
+
+    # Empty lists and misses read nothing (no error), with the same columns.
+    for args in [(["u1"], []), ([], None), (["nope"], None), (["u1"], ["nope"])]:
+        rb = db.read_values("unit", "flow", *args)
+        assert rb.num_rows == 0 and rb.schema == full["Base"].schema
+    assert db.read_values("nope", "flow", ["u1"]).num_rows == 0
+
+    # A scalar parameter reads through the same call.
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1", "u2"], [5.0, 6.0]), user="t")
+    rb = db.read_values("unit", "capacity", ["u2"], ["Base"])
+    assert rb.column("v_float").to_pylist() == [6.0]
+    assert rb.column("tier").to_pylist() == ["scalar"]
+
+    # A bare string is not a list of names.
+    with pytest.raises(TypeError):
+        db.read_values("unit", "flow", "u1")
+
+
 def test_table_input_via_capsule_stream(db):
     # pyarrow.Table travels the __arrow_c_stream__ path (multiple batches in
     # one Segment).

@@ -384,7 +384,9 @@ def read_baseline():
 
 
 def worktree_clean():
-    return revbuild.git(REPO, "status", "--porcelain", "--untracked-files=normal") == ""
+    """No uncommitted change in what the arms build (revbuild.CORE_PATHS)."""
+    return revbuild.git(REPO, "status", "--porcelain", "--untracked-files=normal", "--",
+                        *revbuild.CORE_PATHS) == ""
 
 
 def advance_baseline(out, code, a):

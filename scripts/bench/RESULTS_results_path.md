@@ -923,6 +923,39 @@ long one cell 0.85 / 0.82 ms, whole series 0.77 / 0.76 ms, 20 series
 43.03; A0 68.83 / 66.48 / 86.67; L 4.19 / 2.36 / 4.24). The sizes are
 deterministic and the schema's long tier has not changed since §7.3.
 
+## 12. Point-read macros (2026-10-26, DuckDB 2.0.0)
+
+`specs/fast_point_reads_PLAN.md`: `read_value`, `read_values`,
+`value_rows_for` (and `value_array_asof_for`) read one value, or a few,
+without scanning the array payload of the whole table. Before/after on
+a copy of the A/B gate's full-scale synthetic fixture (10⁵ scalars,
+1 000 × 8 760-cell arrays, 140 × 8 760-cell long values), with the
+macros of this change installed into the copy; Python `duckdb` 2.0.0,
+results fetched as Arrow, one warm connection, each row's two forms
+measured back to back (today: 5 executions, new: 21). Shared host, load
+average 4.7-5.0 (other sessions running), governor `powersave`, 32
+threads. Information only: the A/B gate cannot measure the change,
+because the baseline lacks the macros.
+
+| Read | Today (ms, min / median) | New (ms, min / median) | Rows |
+|---|---|---|---|
+| array point, rendered: `read_parameter … WHERE entity = … AND alternative = …` → `read_value` | 532.5 / 581.4 | 27.7 / 30.0 | 8 760 |
+| array point by ids: `value_rows WHERE <triple>` → `value_rows_for` | 53.4 / 83.5 | 18.4 / 21.0 | 8 760 |
+| long point, rendered | 505.4 / 525.8 | 24.6 / 26.6 | 8 760 |
+| scalar point (the class has 10⁵ entities) | 522.3 / 562.5 | 21.6 / 23.5 | 1 |
+| 20 series, one call (`read_values`, 20 names) | 605.6 / 618.7 | 99.8 / 106.6 | 175 200 |
+| miss (unknown entity) | 231.2 / 231.4 | 16.8 / 19.2 | 0 |
+
+- A rendered point read drops by ×20 to ×25 for every tier: the scalar
+  and long reads no longer pay for the scan of the array payloads.
+- The new reads cost 17-30 ms, not the 2.5 ms of the dense point read
+  (`rd_point_array_dense`): they render the axis positions in SQL and
+  plan a larger statement. The scalar point includes a scan of the
+  class's 10⁵ entity rows for the name (plan R7).
+- Above 50 value hits the list form falls back to a sequential payload
+  scan (the plan's critique measured 50 keys 197 ms, 51 keys 233 ms, 100
+  keys 400 ms on this fixture); the limit is documented, not a target.
+
 ## Mapping to the earlier Set B figures
 
 The earlier figures came from the same harness (restored here unchanged

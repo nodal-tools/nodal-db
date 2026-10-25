@@ -182,7 +182,7 @@ fixtures = ["synth"]
 scaled = true
 needs = ["read_value_macro"]
 check = "every execution returns 6 rows (a 6-hour window of one series); digest of the rows"
-note = "raw DuckDB connection with default settings (caching operators on), not the core's open: the dict-cache bug shape (read_parameter with the same filter raises on the full fixture)"
+note = "raw DuckDB connection with default settings (caching operators on), not the core's open: the dict-cache bug shape (value_rows with the same filter raises on the full fixture)"
 
 [metric.rd_asof_point_head]
 class = "hot"

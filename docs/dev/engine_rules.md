@@ -261,7 +261,8 @@ lists longer than 2 048 elements whose length is not a multiple of
 changed identity …` and invalidates the database instance. It needs
 several hundred such arrays, so small files hide it. No data is
 damaged. A time window (`WHERE idx1_ts BETWEEN …`) or a threshold
-(`WHERE v_float > …`) on `read_parameter` is enough to trigger it. The
+(`WHERE v_float > …`) on `value_rows` (or on `read_parameter`, which
+reads through it) is enough to trigger it. The
 point-read macros follow this rule and are not affected, which is why the
 user docs recommend them as the workaround for such reads. Turning
 `debug_enable_caching_operators` off also avoids it.
@@ -276,7 +277,7 @@ user docs recommend them as the workaround for such reads. Turning
 - a data guard on a 1 000 x 8 760-cell fixture with dense ids, on a raw
   DuckDB connection with default settings (never the core's open, which
   may turn caching off): the macros return the exact counts under both
-  failing filters, while `read_parameter` under the same filter still
+  failing filters, while `value_rows` under the same filter still
   raises (the positive control);
 - a canary: the bug's minimal repro, without nodal-db, still raises on
   the bundled DuckDB. When an upgrade fixes the bug, the canary and the

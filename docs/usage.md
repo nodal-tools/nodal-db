@@ -455,6 +455,26 @@ ORDER BY entity, idx1_ts;
 `north` takes its demand from `high_demand` (rank 2); `south` has no
 value there and falls back to `Base`.
 
+The Python package also offers reads that manage the connection for you:
+
+```python
+db = nodal_db.open("demo.duckdb")
+batch = db.read_parameter("unit", "capacity", "Base")    # pyarrow.RecordBatch
+table = db.query("SELECT * FROM audit_health").read_all()  # pyarrow.Table
+# a few values (the read_values macro): one entity in every alternative,
+# then two entities in one alternative
+coal = db.read_values("unit", "capacity", ["coal"])
+pair = db.read_values("unit", "capacity", ["coal", "wind"], ["Base"])
+```
+
+`db.read_values(class, parameter, entities, alternatives=None)` follows
+the rules of [Reading one value or a few](#reading-one-value-or-a-few);
+Rust code calls `api::read_values` the same way.
+
+For interactive browsing, the DuckDB CLI works too, provided it is
+version 2.0 or newer: `duckdb -readonly demo.duckdb`, or `duckdb -ui
+demo.duckdb` for the browser UI.
+
 #### Reading one value or a few
 
 `read_parameter` reads a whole parameter: a filter written outside it
@@ -500,26 +520,6 @@ SELECT * FROM read_values('node', 'demand', ['north', 'south'], ['Base', 'high_d
     open the connection with caching operators turned off:
     `duckdb.connect(path, read_only=True,
     config={"debug_enable_caching_operators": "false"})`.
-
-The Python package also offers reads that manage the connection for you:
-
-```python
-db = nodal_db.open("demo.duckdb")
-batch = db.read_parameter("unit", "capacity", "Base")    # pyarrow.RecordBatch
-table = db.query("SELECT * FROM audit_health").read_all()  # pyarrow.Table
-# a few values (the read_values macro): one entity in every alternative,
-# then two entities in one alternative
-coal = db.read_values("unit", "capacity", ["coal"])
-pair = db.read_values("unit", "capacity", ["coal", "wind"], ["Base"])
-```
-
-`db.read_values(class, parameter, entities, alternatives=None)` follows
-the rules of [Reading one value or a few](#reading-one-value-or-a-few);
-Rust code calls `api::read_values` the same way.
-
-For interactive browsing, the DuckDB CLI works too, provided it is
-version 2.0 or newer: `duckdb -readonly demo.duckdb`, or `duckdb -ui
-demo.duckdb` for the browser UI.
 
 ### Read history
 

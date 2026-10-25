@@ -17,7 +17,12 @@
 //!   unused axes): every `value_array` scan that projects a payload column is
 //!   an `Index Scan`, for a hit, 0 keys (scalar, long, miss, wrong class),
 //!   20 and 50 keys, 50 ids each listed twice, the omitted-alternative
-//!   default, and the point wrapper under a time-window filter.
+//!   default, and the point wrapper under a time-window filter; and for the
+//!   core's prepared statement (`api::READ_VALUES_SQL`) with the name lists
+//!   bound as parameters.
+//! - **As of a commit.** `value_array_asof_for`: the current leg is an index
+//!   fetch and, for a head-near read, the history leg's payload scan reads
+//!   no row.
 //! - **Negative control.** 51 keys must still be a sequential scan: it
 //!   documents the cliff and proves the fixture can produce a fallback. If it
 //!   flips, the 50-key limit in the docs can be revisited (array_id plan D15).
@@ -32,9 +37,10 @@
 //! - **The dict-cache data guard**: on a fixture with 1 000 arrays of 8 760
 //!   cells and dense ids, a RAW DuckDB connection with default settings (caching
 //!   operators on, NOT the core's open) runs the macros under the two
-//!   failing filters and gets the exact counts, while `read_parameter`
-//!   under the same filter still raises the INTERNAL error (the positive
-//!   control; if it stops raising, the fixture no longer triggers the bug).
+//!   failing filters and gets the exact counts, while `value_rows` (which
+//!   keeps the self-join shape) under the same filter still raises the
+//!   INTERNAL error (the positive control; if it stops raising, the fixture
+//!   no longer triggers the bug).
 //! - **The canary**: the minimal repro of the bug still raises on the
 //!   bundled engine. When an upgrade fixes it, this test fails on purpose:
 //!   the engine_rules §6 rule and the docs' workaround note can be revisited.
@@ -908,8 +914,9 @@ const BUG_ARRAYS: i64 = 1000;
 const BUG_CELLS: i64 = 8760;
 
 /// 1 000 arrays of 8 760 cells with dense (stride-2) ids (the A/B gate's
-/// full-scale shape; 600 did not trigger the bug through read_parameter): one array written
-/// through the core (class, parameter, axis, alternative), then cloned by SQL.
+/// full-scale shape; 600 did not trigger the bug through read_parameter): one
+/// array written through the core (class, parameter, axis, alternative), then
+/// cloned by SQL.
 fn bug_fixture(dir: &Path) -> PathBuf {
     let db = dir.join("dictbug.duckdb");
     init_schema_with_default(&db, Some("Base")).expect("init");
@@ -1021,13 +1028,12 @@ fn point_read_macros_are_immune_to_the_dict_cache_bug() {
     let all: Vec<i64> = (0..BUG_ARRAYS).collect();
 
     // Positive control first: the fixture triggers the bug through the
-    // self-join form (read_parameter -> value_rows -> value_array_cells).
+    // self-join form (value_rows -> value_cells -> value_array_cells). It is
+    // value_rows, not read_parameter: read_parameter may be rewritten off
+    // that shape, value_rows keeps it.
     expect_bug(
-        raw_count(
-            &db,
-            &format!("SELECT * FROM read_parameter('bench_array', 'p_series') {window}"),
-        ),
-        "positive control (read_parameter, time window)",
+        raw_count(&db, &format!("SELECT * FROM value_rows {window}")),
+        "positive control (value_rows, time window)",
     );
 
     let names: Vec<String> = all.iter().map(|i| format!("'a{i:04}'")).collect();

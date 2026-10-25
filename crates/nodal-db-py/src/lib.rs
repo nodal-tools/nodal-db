@@ -331,8 +331,9 @@ impl Database {
     /// anything is written. With `covered_writes="delete_wins"` it is not:
     /// each such write is dropped before anything runs and reported as a
     /// `"dropped_by_delete"` warning (with `segment_index`, `by` =
-    /// `"deletes"` or `"object_deletes"`, and that list's `key_index`), the
-    /// deletes run as usual and the other writes proceed. A write is
+    /// `"deletes"` or `"object_deletes"`, and that list's `key_index`, of a
+    /// covering delete that took effect), the deletes run as usual and the
+    /// other writes proceed. A write is
     /// dropped only when a covering delete takes effect; if none does (a
     /// `cascade=False` delete blocked by other dependents), the call raises
     /// `ApiError` and commits nothing. A dropped write is not a write: if

@@ -752,6 +752,47 @@ fn a_restricted_covering_delete_refuses_the_call() {
     assert_eq!(live(&db, "node", "ps", "A", "n2"), 0);
 }
 
+/// Two object deletes cover one write: the first ends `Restricted`, the
+/// second takes effect. The write is dropped, and the warning's `by` names
+/// the delete that took effect, not the first covering one.
+#[test]
+fn the_warning_names_a_covering_delete_that_took_effect() {
+    let (_d, db) = seeded();
+    let r = commit_changes(
+        &db,
+        vec![seg("node", "ps", "A", scalar_batch(&["n2"], 8.0))],
+        vec![],
+        vec![],
+        vec![
+            // n2 has values and containers, so RESTRICT ends `Restricted`.
+            (okey(ObjectKind::Entity, Some("node"), "n2"), cascade(false)),
+            (
+                okey(ObjectKind::Parameter, Some("node"), "ps"),
+                cascade(true),
+            ),
+        ],
+        "t",
+        "two covering deletes",
+        DELETE_WINS,
+    )
+    .unwrap();
+    assert!(r.commit_id > 0);
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Restricted { .. }
+    ));
+    assert!(matches!(
+        r.object_deletes[1].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
+    assert_eq!(dropped(&r), vec![(0, "node:ps/A/n2".into(), object(1))]);
+    assert_eq!(live(&db, "node", "ps", "A", "n2"), 0);
+    assert!(
+        live(&db, "node", "pl", "A", "n2") > 0,
+        "n2 and its other values survive"
+    );
+}
+
 /// A RESTRICT delete that does take effect (its object has no other
 /// dependents) still drops the writes it covers, and the call commits.
 #[test]

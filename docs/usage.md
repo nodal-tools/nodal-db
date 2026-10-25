@@ -310,8 +310,8 @@ dependents block, the core refuses the whole call and commits nothing,
 because dropping the write would lose it while the object stays. Each
 dropped write is listed in the report as a
 `dropped_by_delete` warning, with the segment's index and the index of
-one delete that covers it (`by` names the list, `deletes` or
-`object_deletes`):
+one covering delete that took effect (`by` names the list, `deletes` or
+`object_deletes`; a value delete is named first if there is one):
 
 ```python
 report = db.commit_changes(

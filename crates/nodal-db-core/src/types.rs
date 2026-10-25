@@ -248,10 +248,11 @@ pub enum WarningKind {
     /// A value write was dropped because a delete in the same call covers
     /// it ([`CoveredWrites::DeleteWins`]): nothing was written for it.
     /// `segment_index` is the segment's position in the caller's `segments`
-    /// vec; `by` names one covering delete (the first, value deletes
-    /// before object deletes, each by index). `object_type` is `"value"`,
-    /// `name` is `class:parameter/alternative/entity` in the segment's
-    /// spelling and `id` is 0.
+    /// vec; `by` names one covering delete that took effect (a value delete
+    /// if any, else the lowest-index object delete that took effect).
+    /// `object_type` is `"value"`, `name` is
+    /// `class:parameter/alternative/entity` in the segment's spelling and
+    /// `id` is 0.
     DroppedByDelete {
         segment_index: usize,
         by: CoveringDelete,

@@ -424,6 +424,8 @@ pub fn commit_changes(
         };
         // `DeleteWins`: the dropped writes, checked after the deletes ran.
         let mut dropped: Vec<Dropped> = Vec::new();
+        // The index in `report.warnings` of each dropped write's warning.
+        let mut dropped_at: Vec<usize> = Vec::new();
         for (i, p) in prepared.iter().enumerate() {
             let kept;
             let p = match &plan {
@@ -431,6 +433,9 @@ pub fn commit_changes(
                 Some(plan) => {
                     let covered = plan.covered(conn, p)?;
                     for (j, by) in &covered {
+                        // Provisional `by`: re-pointed to a delete that took
+                        // effect once the deletes ran (`check_effective`).
+                        dropped_at.push(report.warnings.len());
                         report.warnings.push(dropped_warning(i, p, *j, by[0]));
                     }
                     let drop: Vec<usize> = covered.iter().map(|(j, _)| *j).collect();
@@ -515,9 +520,15 @@ pub fn commit_changes(
             apply_object_delete(conn, commit_id, p, &mut report)?;
         }
         // `DeleteWins`: a write is dropped only for a delete that took
-        // effect; otherwise the whole call is refused (rolled back).
+        // effect; otherwise the whole call is refused (rolled back). Each
+        // warning's `by` then names a covering delete that took effect.
         if let Some(plan) = &plan {
-            plan.check_effective(&dropped, &prepared, &report)?;
+            let effective = plan.check_effective(&dropped, &prepared, &report)?;
+            for (&w, by) in dropped_at.iter().zip(effective) {
+                if let WarningKind::DroppedByDelete { by: b, .. } = &mut report.warnings[w].kind {
+                    *b = by;
+                }
+            }
         }
         // `tiers` lists the tiers written; the canonicalization noted every
         // value's tier, unchanged ones included.
@@ -973,13 +984,15 @@ impl DropPlan {
     /// RESTRICT delete that ended `Restricted`, or one that found nothing to
     /// close although its target existed, leaves the object live: dropping
     /// the write would lose it silently, so the whole call is refused
-    /// (rolled back, nothing committed).
+    /// (rolled back, nothing committed). On success, returns for each
+    /// dropped write (in order) its first covering delete that took effect:
+    /// a value delete if any, else the lowest-index effective object delete.
     fn check_effective(
         &self,
         dropped: &[Dropped],
         prepared: &[PreparedSegment],
         report: &WriteReport,
-    ) -> Result<(), DbError> {
+    ) -> Result<Vec<CoveringDelete>, DbError> {
         let deleted: HashSet<usize> = report
             .object_deletes
             .iter()
@@ -997,7 +1010,12 @@ impl DropPlan {
             .filter(|(_, _, by)| !by.iter().any(effective))
             .collect();
         if lost.is_empty() {
-            return Ok(());
+            // `by` is sorted, value deletes first, then object deletes by
+            // index; every list holds an effective delete.
+            return Ok(dropped
+                .iter()
+                .filter_map(|(_, _, by)| by.iter().copied().find(|d| effective(d)))
+                .collect());
         }
         let outcome = |k: usize| {
             report

@@ -26,14 +26,101 @@ candidate commits, host and load, per-metric ratio [95 % CI] and verdict,
 and the reason of every `--allow`. The full results are in the run's
 `target-ab/runs/*/results.json`.
 
-<!-- RELEASE-RUNS -->
+### 2026-10-25: `25ef921` (BASELINE) -> `9b62603`, full scale, exit 2
+
+Host: AMD Ryzen 9 5900XT 16-Core Processor, 32 threads, governor `powersave`, kernel 6.14.0-37-generic; 1-min load 2.2-36.0 while measuring (the host was shared with other build and test jobs). Looks (6, 11, 21); builds + fixtures 281 s, pairs 2198 s. Capabilities: lookup_const, skip_unchanged.
+
+| metric | T | ratio [95 % CI] | n | verdict |
+|---|---|---|---|---|
+| `rd_point_scalar` | 1.05 | 1.009 [0.974, 1.041] | 6 | PASS |
+| `rd_point_long` | 1.05 | 0.993 [0.978, 1.018] | 6 | PASS |
+| `rd_point_array_dense` | 1.05 | 0.998 [0.982, 1.023] | 6 | PASS |
+| `rd_point_array_by_id` | 1.05 | 0.993 [0.963, 1.033] | 11 | PASS |
+| `rd_scalars_loader` | 1.05 | 0.992 [0.728, 1.049] | 6 | PASS |
+| `rd_dense` | 1.05 | 0.997 [0.982, 1.032] | 6 | PASS |
+| `rd_model_load_long` | 1.05 | 0.917 [0.865, 1.040] | 6 | PASS |
+| `rd_long_scan_17pct` | 1.05 | 1.008 [0.933, 1.016] | 6 | PASS |
+| `wr_scalar_100_new_100k` | 1.10 | 1.003 [0.951, 1.024] | 6 | PASS |
+| `wr_scalar_1_replace_100k` | 1.10 | 0.996 [0.949, 1.021] | 6 | PASS |
+| `wr_20x1_scalars_100k` | 1.10 | 0.996 [0.975, 1.072] | 6 | PASS |
+| `wr_long_1000x24_new` | 1.10 | 1.024 [0.989, 1.075] | 11 | PASS |
+| `wr_long_10x8760_replace` | 1.10 | 0.994 [0.986, 1.018] | 6 | PASS |
+| `wr_array_1000x24_new` | 1.10 | 1.011 [0.930, 1.071] | 6 | PASS |
+| `wr_array_1000x24_replace_big` | 1.10 | 0.999 [0.949, 1.028] | 6 | PASS |
+| `wr_delete_1000_scalar_big` | 1.10 | 0.969 [0.958, 1.036] | 6 | PASS |
+| `wr_delete_1000_long_big` | 1.10 | 0.985 [0.963, 1.047] | 11 | PASS |
+| `wr_delete_500_array_big` | 1.10 | 1.017 [0.981, 1.043] | 6 | PASS |
+| `wr_1_delete_big` | 1.10 | 1.003 [0.910, 1.053] | 6 | PASS |
+| `wr_editor_save` | 1.10 | 1.015 [0.988, 1.041] | 11 | PASS |
+| `wr_replace_scalar_cycle_ckpt` | 1.10 | 0.982 [0.911, 1.042] | 6 | PASS |
+| `wr_replace_array_cycle_ckpt` | 1.10 | 0.951 [0.783, 1.014] | 11 | LOAD-DRIFT |
+| `wr_replace_long_cycle_ckpt` | 1.10 | 0.985 [0.811, 0.997] | 6 | PASS |
+| `wr_unchanged_scalar_10k` | 1.10 | 0.996 [0.910, 1.088] | 11 | PASS |
+| `wr_longbig_1cell` | 1.10 | 0.994 [0.961, 1.008] | 6 | PASS |
+| `rd_editor_reload` | 1.10 | 0.995 [0.981, 1.044] | 6 | PASS |
+| `lk_core_sql_100k` | 1.05 | 1.018 [0.905, 1.037] | 6 | PASS |
+| `lk_ensure_entity_100k` | 1.10 | 0.985 [0.958, 1.026] | 6 | PASS |
+| `imp_ipc_dense` | 1.10 | 1.004 [0.966, 1.043] | 6 | PASS |
+| `mt_compact_history_heavy` | 1.10 | 1.025 [1.003, 1.029] | 6 | PASS |
+| `mt_extract_head` | 1.10 | 1.014 [0.884, 1.076] | 6 | PASS |
+| `sz_compacted_bytes` | 1.02 | 1.000 | 3 | PASS |
+| `sz_extract_bytes` | 1.02 | 1.000 | 3 | PASS |
+
+`wr_replace_array_cycle_ckpt` ended LOAD-DRIFT (the 1-min load went 2.2 ->
+13.4 during its run, and again on the rerun), so the run exited 2 and
+BASELINE stayed at `25ef921`. Sizes were deterministic (three equal
+samples per arm). An earlier attempt the same day stopped on that
+metric's read-back: on the full-scale file after the array replace
+cycles, `read_parameter('bench_array', 'p_series') WHERE entity = 'a0500'
+AND v_float = CAST('-143.80000000000007' AS DOUBLE)` raises a DuckDB
+2.0.0 internal error ("dict-surviving cache: global dictionary column 0
+changed identity after being seeded for dictionary caching") that
+invalidates the instance, in the Python client too. The check now reads
+the cell and compares outside SQL; the engine error itself is open.
 
 ## Latest absolute medians (informational, host recorded)
 
 The candidate's median per metric from the latest release-gate run, with
 its host and load. Information only: no target column, no verdict.
 
-<!-- LATEST-MEDIANS -->
+From the 2026-10-25 release-gate run (candidate `9b62603`, the host above).
+Milliseconds per operation as each metric defines it (`scripts/bench/ab/metrics.toml`), sizes in MiB.
+
+| metric | candidate median | baseline median |
+|---|---|---|
+| `rd_point_scalar` | 0.851 ms | 0.849 ms |
+| `rd_point_long` | 1.196 ms | 1.200 ms |
+| `rd_point_array_dense` | 2.556 ms | 2.554 ms |
+| `rd_point_array_by_id` | 0.595 ms | 0.599 ms |
+| `rd_scalars_loader` | 22.479 ms | 23.314 ms |
+| `rd_dense` | 231.216 ms | 232.342 ms |
+| `rd_model_load_long` | 1041.626 ms | 1142.937 ms |
+| `rd_long_scan_17pct` | 17.004 ms | 17.014 ms |
+| `wr_scalar_100_new_100k` | 0.922 ms | 0.922 ms |
+| `wr_scalar_1_replace_100k` | 85.208 ms | 86.709 ms |
+| `wr_20x1_scalars_100k` | 145.751 ms | 146.415 ms |
+| `wr_long_1000x24_new` | 199.052 ms | 195.629 ms |
+| `wr_long_10x8760_replace` | 941.329 ms | 943.165 ms |
+| `wr_array_1000x24_new` | 101.244 ms | 102.333 ms |
+| `wr_array_1000x24_replace_big` | 166.924 ms | 167.594 ms |
+| `wr_delete_1000_scalar_big` | 124.349 ms | 127.374 ms |
+| `wr_delete_1000_long_big` | 333.717 ms | 334.730 ms |
+| `wr_delete_500_array_big` | 123.286 ms | 122.295 ms |
+| `wr_1_delete_big` | 107.666 ms | 107.101 ms |
+| `wr_editor_save` | 124.528 ms | 122.673 ms |
+| `wr_replace_scalar_cycle_ckpt` | 475.416 ms | 479.236 ms |
+| `wr_replace_array_cycle_ckpt` | 906.869 ms | 983.256 ms |
+| `wr_replace_long_cycle_ckpt` | 640.984 ms | 646.541 ms |
+| `wr_unchanged_scalar_10k` | 95.794 ms | 95.624 ms |
+| `wr_longbig_1cell` | 3307.274 ms | 3360.707 ms |
+| `rd_editor_reload` | 275.225 ms | 273.850 ms |
+| `lk_core_sql_100k` | 0.508 ms | 0.507 ms |
+| `lk_ensure_entity_100k` | 51.362 ms | 52.467 ms |
+| `imp_ipc_dense` | 6769.355 ms | 6800.370 ms |
+| `mt_compact_history_heavy` | 13616.429 ms | 13384.663 ms |
+| `mt_extract_head` | 1502.403 ms | 1478.953 ms |
+| `sz_compacted_bytes` | 100.26 MiB | 100.26 MiB |
+| `sz_extract_bytes` | 16.76 MiB | 16.76 MiB |
 
 ## Recorded history
 

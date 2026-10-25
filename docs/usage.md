@@ -696,6 +696,42 @@ The last entry is a choice, not necessarily what the author of the
 source meant. Fix the source so that each key appears once, then
 import again.
 
+**Names with leading or trailing whitespace.** A nodal-db name must be
+non-empty, have no leading or trailing whitespace, and contain no
+control characters. Spine allows names such as `"coal "`, so the
+importer removes the leading and trailing whitespace from the name of
+every class, parameter, entity, alternative, scenario and value list,
+and imports it under the trimmed name. Every reference uses the trimmed
+name too: the dimensions of a class, the elements of an entity, the
+alternatives of a scenario, activation rows, parameter values, and a
+parameter's value list.
+
+Only names are trimmed. Map keys (index labels), string values and value
+list members are data and are imported exactly as they are.
+
+Each trimmed name is reported as a warning, in the same places as a
+duplicate key: in `report.trimmed_names`, in `report.summary()`, and
+through the `nodal_spine_import` logger. The warning names the kind of
+name, its class (for a parameter or an entity), the name as written in
+the source, and the name it was imported as:
+
+```text
+trimmed names: 1 (imported without leading/trailing whitespace)
+  trimmed name: entity 'g1 ' in class 'gadget' has leading or trailing whitespace; imported as 'g1'. Names in nodal-db are trimmed: fix the source name to stop this warning.
+```
+
+Trimming does not fix every name. The import stops with an error, and
+leaves no database behind, when:
+
+- trimming would give two names of the same kind the same name, for
+  example the entities `"g1"` and `"g1 "` in one class, or the
+  alternatives `"high"` and `" HIGH"` (names are compared without
+  regard to case). The error lists the colliding names as written in
+  the source;
+- a name is empty once trimmed, for example `"  "`;
+- a name contains a control character, such as a tab or a line break,
+  anywhere but at its start or end.
+
 ## For integrators
 
 Tools that read or write nodal-db databases must respect a few

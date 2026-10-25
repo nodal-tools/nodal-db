@@ -1,3 +1,47 @@
+# Benchmark records (core)
+
+## How performance is judged
+
+Since 2026-10-25, performance is judged only by **paired A/B ratios on one
+host**: the perf gate (`scripts/bench/ab/`, CONTRIBUTING "Performance
+gates") builds the baseline and the candidate, runs both on the same
+fixtures, interleaved, and gates the median per-pair ratio's 95 % interval
+against a threshold per metric class (1.05 in-process reads and lookups,
+1.10 anything with a commit, an open or a CHECKPOINT, 1.02 file sizes).
+`just perf-gate` before merging a perf-sensitive branch; `just full` runs
+it at full scale against `scripts/bench/ab/BASELINE`, the last passing
+release run, and advances BASELINE when every metric passes.
+
+The absolute millisecond budgets of VMP Part 6 (point read < 5 ms, 10^5
+scalars < 25 ms, 70 MB dense < 300 ms, model load < 3 s) are no longer
+gates and no longer verdicts. They are kept as information about the
+interactive-latency requirements that motivated them, which are a product
+question for release review, not a measurement verdict. Absolute numbers
+move with the machine and its load; compare them only within one run.
+
+## A/B gate runs
+
+One block per release-gate run (`just full`; append-only): base and
+candidate commits, host and load, per-metric ratio [95 % CI] and verdict,
+and the reason of every `--allow`. The full results are in the run's
+`target-ab/runs/*/results.json`.
+
+<!-- RELEASE-RUNS -->
+
+## Latest absolute medians (informational, host recorded)
+
+The candidate's median per metric from the latest release-gate run, with
+its host and load. Information only: no target column, no verdict.
+
+<!-- LATEST-MEDIANS -->
+
+## Recorded history
+
+Everything below is the record as it stood on 2026-10-25, kept verbatim.
+Its PASS / RECORDED-OVER / AT BUDGET verdicts were judged against the
+millisecond budgets, which are no longer gates; its "recording gate" is
+the criterion bench `cargo bench` (`just bench`), now informational.
+
 # Pre-freeze benchmark gate — recorded results
 
 > **Re-baseline note (2026-10-24).** The 1.5.5 column was recorded on

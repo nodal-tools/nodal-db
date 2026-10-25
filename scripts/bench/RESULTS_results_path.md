@@ -5,7 +5,11 @@ Bulk result ingest and read paths at solver-output scale (10 parameters ×
 through the nodal-db core, plus two raw-DuckDB companions that separate
 storage-format effects from nodal-db's own schema. This is the "Set B"
 benchmark of the design rationale, now reproducible from the repository.
-It is a recording benchmark: nothing here gates a build.
+It is a recording benchmark: nothing here gates a build. Code changes are
+judged by the A/B perf gate (`just perf-gate`, CONTRIBUTING "Performance
+gates"), whose `imp_ipc_dense` metric covers the Arrow-IPC import at 1 000
+dense series; the `cellsgate` phase below stays an in-process A/B of two
+SQL forms.
 
 | Harness | What it measures | Run |
 |---|---|---|

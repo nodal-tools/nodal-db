@@ -1,7 +1,9 @@
-//! The pre-freeze benchmark gate (rust_implementation_plan.md Part 5
-//! deliverable 4). RECORDING gate: measurements land in `benches/RESULTS.md`
-//! against the VMP Part 6 budgets — nothing here fails the build (Q6
-//! gating-scope deliberately open).
+//! The pre-freeze benchmark (rust_implementation_plan.md Part 5
+//! deliverable 4), now a RECORDING bench (informational): measurements
+//! land in `benches/RESULTS.md`; nothing here fails the build. Performance
+//! is judged by the paired A/B perf gate (`just perf-gate`,
+//! `scripts/bench/ab/`); the VMP Part 6 millisecond numbers in the comments
+//! below are requirement context, not gates.
 //!
 //! Run with `cargo bench` (release opt; `cargo test` never runs this — the
 //! `[[bench]] test = false` in Cargo.toml is load-bearing, the synthetic DB
@@ -27,7 +29,7 @@ use criterion::{criterion_group, Criterion};
 
 use support::*;
 
-// --- 1. point reads (VMP budget: < 5 ms, any tier) ---------------------------
+// --- 1. point reads (VMP Part 6 context, not a gate: < 5 ms, any tier) -------
 
 fn bench_point_reads(c: &mut Criterion) {
     let s = synthetic();
@@ -150,7 +152,7 @@ fn bench_bulk_reads(c: &mut Criterion) {
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(10));
 
-    // 10^5 scalar rows, budget path (< 25 ms; 20 ms until 2026-10-25, owner
+    // 10^5 scalar rows, budget path (VMP context, not a gate: < 25 ms; 20 ms until 2026-10-25, owner
     // decision, see RESULTS.md): the columns a model loader
     // reads, here the nodal-editor's scalar-sheet load (`model.rs`: entity,
     // alternative, value_kind and the four value columns).
@@ -180,7 +182,8 @@ fn bench_bulk_reads(c: &mut Criterion) {
         })
     });
 
-    // 1 000 × 8 760 (~70 MB), dense budget path (< 300 ms warm; §10: 219 ms).
+    // 1 000 × 8 760 (~70 MB), dense budget path (VMP context, not a gate: < 300 ms
+    // warm; §10: 219 ms).
     g.bench_function("arrays_70mb_read_parameter_dense", |b| {
         b.iter(|| {
             let rows = arrow_rows(

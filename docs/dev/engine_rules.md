@@ -16,6 +16,10 @@ exists, and the test that guards it.
   [DuckDB upgrades](https://github.com/nodal-tools/nodal-db/blob/main/CONTRIBUTING.md#duckdb-upgrades)
   in `CONTRIBUTING.md`).
 
+A change to any of these is also performance-sensitive: run the A/B perf
+gate (`just perf-gate`, see "Performance gates" in `CONTRIBUTING.md`)
+before merging it.
+
 The rules describe DuckDB 2.0. Several of them depend on optimizer or
 storage behaviour that DuckDB does not document as a contract, so the
 guard tests are the real contract: if a DuckDB upgrade changes the

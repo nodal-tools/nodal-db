@@ -3,7 +3,8 @@
 # Tiered testing (see README "Testing tiers"):
 #   just            quick gate  — every push: workspace tests (slow ones skipped) + schema smoke
 #   just t <args>   targeted    — pass cargo-test args, e.g. `just t -p nodal-db-core canon`
-#   just full       release gate — everything incl. #[ignore] slow tests + benches
+#   just full       release gate — everything incl. #[ignore] slow tests + the A/B perf
+#                   gate against the last passing release run (scripts/bench/ab/BASELINE)
 #
 # DB inspection commands live in the README ("Inspecting a database").
 
@@ -26,22 +27,28 @@ test:
 t *ARGS:
     cargo test {{ARGS}}
 
-# Release gate (pre-release only): everything, including the #[ignore] slow tests,
-# the schema smoke suite, and the benchmark gate (long — builds a ~150 MB DB).
+# Everything, including the #[ignore] slow tests, the schema smoke suite, the
+# criterion benches compiled (not run: they record, they do not gate), the
+# index-scan guards, and last the A/B perf gate at full scale against
+# scripts/bench/ab/BASELINE, which advances to HEAD when every metric passes
+# (commit it with the run's block in benches/RESULTS.md).
+# Release gate (pre-release only): slow tests + smoke + A/B perf gate vs BASELINE.
 full:
     cargo test --workspace -- --include-ignored --skip helper_
     {{py}} schema/smoke_test.py
-    cargo bench
+    python3 -m unittest discover -s scripts/bench/ab/tests
+    cargo bench --no-run
     # The index-scan guards (array_id; entity lower(name) + axis_hash behind
     # the OFFSET 0 fence) in a release build: debug-built DuckDB compresses
     # join keys and needs an optimizer override in those tests, so only a
     # release run checks the engine as shipped.
     cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan
+    python3 scripts/bench/ab/ab.py --release --full --advance-baseline
 
-# Opt-in, being introduced (CONTRIBUTING "Performance gates"): BASE (default:
-# merge-base with main) vs CAND (default: the working tree), paired ratios on
-# this host. e.g. `just perf-gate --quick`, `just perf-gate 88c0c5b HEAD
-# --metrics 'wr_*'`, `just perf-gate HEAD HEAD --aa`.
+# Pre-merge, expected for perf-sensitive branches (CONTRIBUTING "Performance
+# gates"): BASE (default: merge-base with main) vs CAND (default: the working
+# tree), paired ratios on this host. e.g. `just perf-gate`, `just perf-gate
+# 88c0c5b HEAD --metrics 'wr_*'`, `just perf-gate HEAD HEAD --aa` (A/A).
 # A/B perf gate (exit 0 pass, 1 fail, 2 inconclusive, 3 error, 4 wrong result).
 perf-gate *ARGS:
     python3 scripts/bench/ab/ab.py {{ARGS}}
@@ -50,11 +57,17 @@ perf-gate *ARGS:
 perf-gate-test:
     python3 -m unittest discover -s scripts/bench/ab/tests
 
+# Builds and runs a few metrics with injected slowdowns and wrong results
+# (minutes; wants a quiet host): the whole pipeline must catch them.
+# The perf gate's integration self-test (A/A, injection, wrong result, old baseline).
+perf-gate-selftest *ARGS:
+    python3 scripts/bench/ab/selftest.py {{ARGS}}
+
 # DuckDB schema smoke suite alone (234 checks).
 smoke:
     {{py}} schema/smoke_test.py
 
-# Benchmark gate alone (long; results in benches/RESULTS.md).
+# Criterion benches, recording only (informational; long; results in benches/RESULTS.md).
 bench:
     cargo bench
 

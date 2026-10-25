@@ -26,8 +26,10 @@ access paths, index key order) are listed with their guards in
 [`docs/dev/engine_rules.md`](docs/dev/engine_rules.md); read it before
 changing the schema, core SQL, indexes, sequences, storage or compaction,
 and re-check it after a bump. After one:
-- Run `just full`. Besides the slow tests and the benchmark gate, it
-  runs the index-scan guards (`array_id_index_scan`,
+- Run `just perf-gate PRE_BUMP_MAIN WORKTREE` before merging (a bump is
+  the canonical perf-sensitive change; both arms compile their own
+  DuckDB), then `just full`. Besides the slow tests and the release perf
+  gate, it runs the index-scan guards (`array_id_index_scan`,
   `entity_name_index_scan`) on a release-built engine. They check
   optimizer behaviour, not a documented contract, and fail loudly when it
   changes; their failure messages say what to re-evaluate.
@@ -88,6 +90,96 @@ An as-of row may be a content-less stub in one arm only (the arms version
 different spans): an old-arm stub matches any content, a new-arm stub
 only when the old arm shows at most one distinct content across that
 stub's whole span and a stub somewhere in it. See `check.py`.
+
+## Performance gates
+Performance is judged by **paired A/B
+ratios on one host**, never against absolute milliseconds recorded on
+another machine. The millisecond numbers in `benches/RESULTS.md` and the
+criterion benches (`just bench`) are information only. The gate builds the code before your change
+(BASE) and with it (CAND), runs both on the same fixtures, interleaved, and
+compares their times.
+
+**When to run it.** Before merging a branch that touches the write path,
+the read macros, the schema or its indexes, SQL in the core, compaction or
+extract, or bumps DuckDB (the canonical perf-sensitive change: BASE =
+pre-bump main):
+
+```
+just perf-gate                      # BASE = merge-base with main, CAND = working tree, --quick
+just perf-gate BASE CAND --quick    # any two revisions (CAND may be WORKTREE)
+just perf-gate --metrics 'wr_*'     # a subset (comma-separated globs; --list shows all)
+```
+
+The first run compiles the bundled DuckDB once (minutes); arms, fixtures
+and binaries are cached under `target-ab/` (gitignored). `--full` uses the
+criterion gate's fixture sizes instead of a tenth of them.
+
+**The release gate** (`just full`) runs `ab.py --release --full
+--advance-baseline`: BASE is the commit in `scripts/bench/ab/BASELINE` (the
+last passing release run), CAND is HEAD (a clean tree; with uncommitted
+changes, the working tree, and nothing advances). When every metric
+passes, BASELINE moves to HEAD: commit it together with the run's block in
+`crates/nodal-db-core/benches/RESULTS.md` ("A/B gate runs"), so the chain
+of release-to-release ratios stays visible. Each pre-merge gate tolerates
+a few percent; the release gate is what catches several of them adding up.
+
+**How a metric is judged.** Each metric (`scripts/bench/ab/metrics.toml`)
+is one harness mode, run in its own process per sample. After a warm-up
+sample per arm, pairs of samples run in counterbalanced order, and the
+statistic is the median of the per-pair ratios CAND / BASE with its exact
+order-statistic 95 % interval. A metric stops at the first pre-fixed look
+(6, 11, 21 pairs) that decides it: PASS when the interval's upper bound is
+at most the metric's threshold, FAIL when its lower bound is above it.
+Thresholds: 1.05 for in-process reads and lookups, 1.10 for anything with
+a commit, an open or a CHECKPOINT, 1.02 for file sizes. A speed-up is
+reported but never gates. A FAIL is re-measured by an independent run and
+stays a FAIL only if that run fails too. Every sample also checks its
+result (row counts, read-back of written keys) and prints a digest of the
+logical result; the two arms' digests must be equal.
+
+**Verdicts and exit status** (the table and `target-ab/runs/*/results.json`):
+
+| exit | verdict | meaning |
+|---|---|---|
+| 0 | PASS / ALLOWED / SKIPPED | no regression above the thresholds |
+| 1 | FAIL | a confirmed regression |
+| 2 | INCONCLUSIVE / FLAKY / LOAD-DRIFT | undecided after 21 pairs; a FAIL the rerun did not confirm; the host load changed > 2x twice. Look, rerun on a quieter host |
+| 3 | ERROR | a build or harness error, or a refused start |
+| 4 | WRONG RESULT | a result check failed or the arms' results differ; overrides everything |
+
+`SKIPPED (base lacks X)`: the metric needs an API one of the revisions does
+not have (`scripts/bench/ab/capabilities.toml`, detected in the source).
+
+**Accepting a regression.** `--allow METRIC="reason"` turns that metric's
+FAIL (or INCONCLUSIVE, FLAKY, LOAD-DRIFT) into ALLOWED with the reason in
+the table and `results.json`; copy the reason into the PR. `--allow` never
+covers WRONG RESULT.
+
+**The host.** The gate refuses to start when the 1-minute load average is
+above nproc/4 and warns above nproc/8; `--force` runs anyway and marks the
+results FORCED. Under load the per-pair noise rises from ~2 % to 8-15 %,
+and 1.05 metrics then end INCONCLUSIVE. It records the CPU governor and
+boost flag and warns when the governor is not `performance` (it changes
+nothing). `--cpus LIST` runs both arms under `taskset`, but DuckDB sizes
+its thread pool from the machine, not the affinity mask (32 threads even
+on one pinned CPU), so pinning oversubscribes; use it only on a host you
+cannot quiet.
+
+**A/A calibration.** `just perf-gate HEAD HEAD --aa` builds one revision
+twice with different salts (two binaries, two fixture sets) and must PASS
+every metric; `--aa-salt K` draws another pair. Its ratios are the host's
+noise and code-layout floor. Run it when the host, the toolchain or the
+bundled DuckDB changes, or when a FAIL looks spurious; not on every gate
+run.
+
+**Adding a metric.** Add a harness mode (`scripts/bench/ab/harness/`,
+public API only, setup untimed) that checks its result and returns a
+`Sample` with a digest of the logical result, then a `metrics.toml` entry
+with its class, fixtures and `check` (the runner refuses a metric without
+one). If the mode needs an API a baseline may lack, add a capability with
+a source probe. `just perf-gate-test` runs the tool's own tests;
+`ab.py --self-test --inject METRIC=1.15|wrong|wrongvalue` checks that the
+whole pipeline catches a slowdown or a wrong result.
 
 ## PR checklist
 To be defined with the first release process.

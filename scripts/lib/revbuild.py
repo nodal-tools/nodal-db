@@ -26,7 +26,12 @@ The cache key of a built binary covers everything that goes into it
   tool builds with the dependency versions the revision pins, and the
   lock as resolved (seeded entries plus tool-only ones) is hashed;
 - an optional **salt** (the A/A calibration builds one commit twice:
-  two salts give two extract directories, two binaries, two keys).
+  two salts give two extract directories, two binaries, two keys);
+- the **build environment** that changes code generation without touching
+  any file (`RUSTFLAGS` and friends, `CARGO_PROFILE_*`, the C/C++ compiler
+  and flags the bundled DuckDB builds with), when any is set.
+  (Cargo config files outside the tree, e.g. `~/.cargo/config.toml`, are
+  not keyed: clear `--work` after changing one.)
 
 Stdlib only.
 """
@@ -91,7 +96,10 @@ def tree_id(repo, rev, paths=CORE_PATHS):
     if rev != "WORKTREE":
         return commit_id(repo, rev)
     h = hashlib.sha1()
-    h.update(git(repo, "diff", "HEAD", "--binary", "--", *paths, text=False))
+    # No external diff driver or textconv filter: the key must see the raw
+    # bytes, whatever the user's git configuration.
+    h.update(git(repo, "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--binary", "--",
+                 *paths, text=False))
     for name in untracked_files(repo, paths):
         h.update(b"\0untracked\0" + name.encode() + b"\0")
         with open(os.path.join(repo, name), "rb") as f:
@@ -183,14 +191,36 @@ def lock_versions(lock_bytes):
     return out
 
 
-def build_key(tree, tool_hash, features, rustc, lock_bytes, salt=""):
+# Environment variables that change the built binary without changing a
+# file (exact names, and prefixes ending in `_`).
+BUILD_ENV = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS",
+             "CARGO_BUILD_TARGET", "RUSTC", "CARGO_PROFILE_", "CC", "CXX", "CFLAGS",
+             "CXXFLAGS", "LDFLAGS", "DUCKDB_")
+
+
+def build_env(environ=None):
+    """The `BUILD_ENV` part of `environ` (default: os.environ) as one
+    string; empty when none is set."""
+    environ = os.environ if environ is None else environ
+    keep = sorted(
+        (k, v) for k, v in environ.items()
+        if any(k.startswith(p) if p.endswith("_") else k == p for p in BUILD_ENV)
+    )
+    return "\0".join(f"{k}={v}" for k, v in keep)
+
+
+def build_key(tree, tool_hash, features, rustc, lock_bytes, salt="", env=None):
     """The binary cache key (module docs). `features` is None for the
-    crate's default features, else the exact list."""
+    crate's default features, else the exact list; `env` is the
+    `build_env()` string (default: from os.environ)."""
     h = hashlib.sha1()
     feat = "<default>" if features is None else ",".join(sorted(features))
     for part in (feat, rustc, salt):
         h.update(part.encode() + b"\0")
     h.update(lock_bytes)
+    env = build_env() if env is None else env
+    if env:  # unset: the key of a plain build stays what it was
+        h.update(b"\0env\0" + env.encode())
     return f"{tree}-w{tool_hash}-{h.hexdigest()[:10]}"
 
 

@@ -96,6 +96,17 @@ class TreeIdTest(unittest.TestCase):
         write(self.repo.p("schema/a.sql"), "CREATE TABLE t (x BIGINT);\n")
         self.assertNotEqual(base, self.wt())
 
+    def test_diff_drivers_do_not_hide_an_edit(self):
+        # A textconv filter (or an external diff) in the user's git config
+        # must not reach the key: two different edits, two different ids.
+        write(self.repo.p(".git/info/attributes"), "*.rs diff=blind\n")
+        self.repo.run("config", "diff.blind.textconv", "sh -c 'echo same' --")
+        self.repo.run("config", "diff.external", "true")
+        write(self.repo.p("crates/core/src/lib.rs"), "pub fn f() { 1; }\n")
+        one = self.wt()
+        write(self.repo.p("crates/core/src/lib.rs"), "pub fn f() { 2; }\n")
+        self.assertNotEqual(one, self.wt())
+
     def test_ignored_and_outside_files_do_not(self):
         base = self.wt()
         write(self.repo.p("crates/core/target/release/junk"), "x")
@@ -131,7 +142,7 @@ class BuildKeyTest(unittest.TestCase):
     def key(self, **kw):
         tree, tool, feats, rustc, lock = self.ARGS
         args = dict(tree=tree, tool_hash=tool, features=feats, rustc=rustc,
-                    lock_bytes=lock, salt="")
+                    lock_bytes=lock, salt="", env="")
         args.update(kw)
         return revbuild.build_key(**args)
 
@@ -148,6 +159,13 @@ class BuildKeyTest(unittest.TestCase):
 
     def test_lock_changes_it(self):
         self.assertNotEqual(self.key(), self.key(lock_bytes=LOCK + b"\n# x\n"))
+
+    def test_build_env_changes_it(self):
+        self.assertNotEqual(self.key(), self.key(env="RUSTFLAGS=-Ctarget-cpu=native"))
+        env = revbuild.build_env({"RUSTFLAGS": "-Cx", "CARGO_PROFILE_RELEASE_LTO": "fat",
+                                  "CC": "clang", "HOME": "/h", "CARGO_TARGET_DIR": "/t"})
+        self.assertEqual(env, "CARGO_PROFILE_RELEASE_LTO=fat\0CC=clang\0RUSTFLAGS=-Cx")
+        self.assertEqual(revbuild.build_env({"HOME": "/h"}), "")
 
     def test_aa_salts_give_two_keys_for_one_commit(self):
         a, b = self.key(salt="aa1a"), self.key(salt="aa1b")

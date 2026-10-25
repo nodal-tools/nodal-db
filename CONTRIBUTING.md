@@ -20,7 +20,12 @@ A DuckDB bump is a matched bump: the bundled engine (`duckdb` in the
 root `Cargo.toml`) and the Python pins (`dev-requirements.txt`,
 `docs-requirements.txt`) move together; when the bump changes the arrow
 version duckdb-rs re-exports, so do the `arrow` and `arrow-pyarrow` pins
-(and through them `pyo3`; see the comments in `Cargo.toml`). After one:
+(and through them `pyo3`; see the comments in `Cargo.toml`). The engine
+behaviours the code relies on (storage format, `array_id` parity, index
+access paths, index key order) are listed with their guards in
+[`docs/dev/engine_rules.md`](docs/dev/engine_rules.md); read it before
+changing the schema, core SQL, indexes, sequences, storage or compaction,
+and re-check it after a bump. After one:
 - Run `just full`. Besides the slow tests and the benchmark gate, it
   runs the index-scan guards (`array_id_index_scan`,
   `entity_name_index_scan`) on a release-built engine. They check

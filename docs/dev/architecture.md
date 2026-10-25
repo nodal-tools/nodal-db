@@ -14,6 +14,7 @@ For what nodal-db does from a user's point of view, see
 [Features](../features.md) and [Using nodal-db](../usage.md). For the
 rules a client tool must follow, see
 [Building against nodal-db](building_against_nodal-db.md).
+Before changing the schema, core SQL, indexes, sequences, storage or compaction, read [Engine rules](engine_rules.md).
 
 ## 1. System shape
 

@@ -26,6 +26,7 @@ nav = [
   { "Schema" = "schema.md" },
   { "Developer docs" = [
     { "Architecture" = "dev/architecture.md" },
+    { "Engine rules: DuckDB storage, ids and indexes" = "dev/engine_rules.md" },
     { "Design rationale: value storage" = "dev/design_rationale.md" },
     { "Building against nodal-db" = "dev/building_against_nodal-db.md" },
     { "Arrow-IPC import format" = "dev/arrow_import_format.md" },

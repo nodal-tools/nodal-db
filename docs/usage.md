@@ -865,7 +865,9 @@ use a nodal-db build that matches the file.
     can fail with `INTERNAL Error: dict-surviving cache: …` on a
     database with several hundred long arrays (for example 8760 hourly
     values each). This is a DuckDB bug, not damaged data. The error also
-    invalidates the connection: open a new one.
+    invalidates the database in your process: close every connection to
+    the file, then connect again (a new connection opened while an old one
+    is still open fails with "database has been invalidated").
 
     The core and the Python package (`db.query`, `db.read_parameter`)
     avoid it already. On your own DuckDB connection, turn off the
@@ -881,7 +883,9 @@ use a nodal-db build that matches the file.
     SET debug_enable_caching_operators = false;
     ```
 
-    For the DuckDB CLI, run the `SET` statement first. Unfiltered reads,
+    If the file is already open in the same process, `config=` fails
+    with a "different configuration" error: use `SET` on that connection
+    instead. For the DuckDB CLI, run the `SET` statement first. Unfiltered reads,
     aggregates over a whole parameter and `read_parameter_dense` are
     not affected.
 

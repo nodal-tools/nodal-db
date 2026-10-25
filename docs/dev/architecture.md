@@ -292,7 +292,13 @@ refusals with `WriteOptions::covered_writes = DeleteWins`: the deletes
 are then resolved inside the transaction before the first segment and
 every write they cover is dropped before it is resolved or buffered
 (reported as a `DroppedByDelete` warning, which the no-op check treats
-as a no-op), so the cascade never meets a row this commit wrote. Direct `history`
+as a no-op), so the cascade never meets a row this commit wrote. The
+drop stands only if a covering delete takes effect (a value delete, or
+an object delete that ends `Deleted` or whose target did not exist);
+otherwise, as for a RESTRICT delete that ends `Restricted`, the call is
+refused and rolled back. Under either policy an object delete that
+reaches an object a structural change of the same call created is
+refused, since the same-commit guard would leave that object live. Direct `history`
 callers in their own transaction still commit.
 
 Canonical encodings: axes and values serialize to a pinned byte layout

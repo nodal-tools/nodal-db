@@ -302,8 +302,13 @@ Python, or set `covered_writes: CoveredWrites::DeleteWins` in the
 `WriteOptions` in Rust. The core then drops every write that a delete in
 the call covers before anything is written (a dropped write creates no
 entity, parameter or alternative either), runs the deletes as usual and
-writes the rest. For the covered values the result is what the deletes
-alone would leave. Each dropped write is listed in the report as a
+writes the rest. A covered write is dropped only when a delete that
+covers it takes effect: a value delete, or an object delete that
+actually deletes its object (or whose object does not exist). If none
+does, for example a delete with `cascade` off that the object's other
+dependents block, the core refuses the whole call and commits nothing,
+because dropping the write would lose it while the object stays. Each
+dropped write is listed in the report as a
 `dropped_by_delete` warning, with the segment's index and the index of
 one delete that covers it (`by` names the list, `deletes` or
 `object_deletes`):
@@ -326,6 +331,11 @@ delete covers everything its cascade would reach (an entity's
 containers, a class's entities and parameters), whatever its `cascade`
 option. A dropped write is not a change: if the deletes in the call find
 nothing to delete either, the call makes no commit.
+
+Under either setting, a call may not create an object with a structural
+change and delete that object (or the class it belongs to, or an entity
+it is built from) with an object delete; the core refuses it. Create and
+delete in separate calls.
 
 ### Build a scenario
 

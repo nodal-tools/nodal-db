@@ -1448,7 +1448,7 @@ pub(crate) fn written_value_covered(
     // O(written) per object delete); the covered key is looked up only on
     // a hit, for the refusal message.
     let mut hit = (HashSet::new(), HashSet::new(), HashSet::new());
-    for (k, id) in cascade_scope(conn, key)? {
+    for (k, id) in cascade_scope(conn, key)?.unwrap_or_default() {
         match k {
             ObjectKind::Entity if written.entities.contains(&id) => hit.0.insert(id),
             ObjectKind::Parameter if written.params.contains(&id) => hit.1.insert(id),
@@ -1470,22 +1470,42 @@ pub(crate) fn written_value_covered(
 
 /// Every object an object delete would reach through its FULL cascade
 /// closure, whatever its `cascade` option: the resolved target plus its
-/// recursively reachable containers and children, as `(kind, id)` items.
-/// Empty when the target does not resolve (it would be `NotFound`) or the
-/// kind has no leg set (it reaches no value). The scope of the D10 checks
-/// ([`written_value_covered`]) and of the `CoveredWrites::DeleteWins`
-/// pre-filter (`api::DropPlan`).
+/// recursively reachable containers and children, as `(kind, id)` items
+/// (just the target for a kind with no leg set, which reaches no value).
+/// `None` when the target does not resolve (it would be `NotFound`). The
+/// scope of the D10 checks ([`written_value_covered`]), of the
+/// `CoveredWrites::DeleteWins` pre-filter (`api::DropPlan`) and of the
+/// create-and-delete guard ([`reaches_created`]).
 pub(crate) fn cascade_scope(
     conn: &Connection,
     key: &ObjectDeleteKey,
-) -> Result<Vec<(ObjectKind, i64)>, DbError> {
-    if object_legs(key.kind).is_none() {
-        return Ok(Vec::new());
-    }
+) -> Result<Option<Vec<(ObjectKind, i64)>>, DbError> {
     let Some(target) = resolve_target(conn, key)? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
-    cascade_closure(conn, key.kind, target.id)
+    if object_legs(key.kind).is_none() {
+        return Ok(Some(vec![(key.kind, target.id)]));
+    }
+    cascade_closure(conn, key.kind, target.id).map(Some)
+}
+
+/// The first object in `created` (objects a structural change of this
+/// commit created) that this object delete would reach: its target or an
+/// object in its full cascade closure. The same-commit guard never closes a
+/// row this commit created, so such a delete would leave the created object
+/// (or a child of the deleted one) live; `commit_changes` refuses it.
+pub(crate) fn reaches_created(
+    conn: &Connection,
+    key: &ObjectDeleteKey,
+    created: &HashSet<(ObjectKind, i64)>,
+) -> Result<Option<(ObjectKind, i64)>, DbError> {
+    if created.is_empty() {
+        return Ok(None);
+    }
+    Ok(cascade_scope(conn, key)?
+        .unwrap_or_default()
+        .into_iter()
+        .find(|x| created.contains(x)))
 }
 
 /// The value keys a call wrote, indexed by each id column, for the D10

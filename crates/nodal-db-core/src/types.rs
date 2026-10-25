@@ -110,8 +110,12 @@ pub enum CoveredWrites {
     /// The delete wins: every covered write is dropped before anything runs
     /// (it is not resolved, canonicalized, auto-created or written) and
     /// reported as a [`WarningKind::DroppedByDelete`] warning; the deletes
-    /// then run as usual and the uncovered writes proceed normally. For the
-    /// covered keys the end state is that of the deletes alone. Coverage is
+    /// then run as usual and the uncovered writes proceed normally. A write
+    /// is dropped only when a covering delete takes effect: a value delete,
+    /// or an object delete that ends `Deleted` (or whose target did not
+    /// exist). If every delete covering some write fails to take effect (a
+    /// RESTRICT delete that ends `Restricted`), the whole call is refused as
+    /// [`crate::error::DbError::Api`] and nothing is committed. Coverage is
     /// decided as the database resolves names (DuckDB's `lower()` fold) and,
     /// for an object delete, over its full cascade closure whatever its
     /// `cascade` option.
@@ -244,7 +248,8 @@ pub enum WarningKind {
     /// A value write was dropped because a delete in the same call covers
     /// it ([`CoveredWrites::DeleteWins`]): nothing was written for it.
     /// `segment_index` is the segment's position in the caller's `segments`
-    /// vec; `by` names one covering delete. `object_type` is `"value"`,
+    /// vec; `by` names one covering delete (the first, value deletes
+    /// before object deletes, each by index). `object_type` is `"value"`,
     /// `name` is `class:parameter/alternative/entity` in the segment's
     /// spelling and `id` is 0.
     DroppedByDelete {
@@ -254,7 +259,7 @@ pub enum WarningKind {
 }
 
 /// The delete that covers a dropped write ([`WarningKind::DroppedByDelete`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CoveringDelete {
     /// A value delete of the same key; `key_index` is its position in the
     /// caller's `deletes` vec.

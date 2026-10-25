@@ -7,12 +7,18 @@
 //! dropped before anything runs and reported as a
 //! `WarningKind::DroppedByDelete` warning, the deletes run as usual and the
 //! uncovered writes proceed. A dropped write is not a write (the no-op
-//! commit rule), and it auto-creates nothing.
+//! commit rule), and it auto-creates nothing. The delete wins only when it
+//! takes effect: a write whose every covering delete fails to (a RESTRICT
+//! delete that ends `Restricted`) makes the whole call refused, with
+//! nothing committed. An object delete that reaches an object a structural
+//! change of the same call creates is refused under both policies.
 //!
 //! The randomized test checks the defining property: a `DeleteWins` call
-//! leaves every table exactly as the same call without its covered writes
-//! does under the default policy (which must then accept it), and drops
-//! exactly the writes a model of the coverage predicts.
+//! that commits leaves every table exactly as the same call without its
+//! covered writes does under the default policy (which must then accept
+//! it), and drops exactly the writes a model of the coverage predicts; a
+//! call with a covered write whose covering deletes all fail to take effect
+//! is refused and changes nothing.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -28,7 +34,7 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
     CoveredWrites, CoveringDelete, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult,
-    ObjectKind, ObjectRef, WarningKind, WriteOptions, WriteReport,
+    ObjectKind, ObjectRef, StructuralChange, WarningKind, WriteOptions, WriteReport,
 };
 
 const DELETE_WINS: WriteOptions = WriteOptions {
@@ -329,6 +335,36 @@ fn object(i: usize) -> CoveringDelete {
     CoveringDelete::Object { key_index: i }
 }
 
+/// Run a call under `DeleteWins` and expect the "did not take effect"
+/// refusal with nothing written.
+fn assert_not_effective(
+    db: &Path,
+    segments: Vec<Segment>,
+    deletes: Vec<DeleteKey>,
+    object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
+) -> String {
+    let before = dump(db);
+    let head = head_commit(db).unwrap();
+    let err = commit_changes(
+        db,
+        segments,
+        vec![],
+        deletes,
+        object_deletes,
+        "t",
+        "not effective",
+        DELETE_WINS,
+    )
+    .expect_err("a covered write whose deletes do not take effect is refused");
+    let DbError::Api(m) = &err else {
+        panic!("expected DbError::Api, got {err:?}")
+    };
+    assert!(m.contains("did not take effect"), "{m}");
+    assert_eq!(dump(db), before, "a refused call writes nothing");
+    assert_eq!(head_commit(db).unwrap(), head, "no commit");
+    m.clone()
+}
+
 /// Run `call` under the default policy and expect the D9/D10 refusal with
 /// nothing written.
 fn assert_refused_by_default(
@@ -486,6 +522,12 @@ fn d10_default_refuses_and_delete_wins_drops_the_covered_writes() {
             let dir = tempfile::tempdir().unwrap();
             let db = copy_of(&seed, dir.path(), "dw.duckdb");
             assert_refused_by_default(&db, writes(), vec![], vec![(od.clone(), cascade(c))]);
+            if !c {
+                // Every target has dependents, so RESTRICT ends `Restricted`:
+                // the delete does not take effect and the call is refused.
+                assert_not_effective(&db, writes(), vec![], vec![(od.clone(), cascade(c))]);
+                continue;
+            }
             let r = commit_changes(
                 &db,
                 writes(),
@@ -641,13 +683,10 @@ fn dropped_writes_plus_deletes_that_find_nothing_make_no_commit() {
 }
 
 /// The same dropped write beside a delete that does delete something
-/// commits (the delete). Beside a RESTRICT object delete that closes
-/// nothing, the call behaves as the object delete alone does.
+/// commits (the delete).
 #[test]
 fn dropped_writes_beside_an_effective_delete_commit_the_delete() {
-    let (_d, seed) = seeded();
-    let dir = tempfile::tempdir().unwrap();
-    let db = copy_of(&seed, dir.path(), "dw.duckdb");
+    let (_d, db) = seeded();
     let r = commit_changes(
         &db,
         vec![seg("node", "ps", "Base", scalar_batch(&["n1"], 1.0))],
@@ -662,41 +701,212 @@ fn dropped_writes_beside_an_effective_delete_commit_the_delete() {
     assert!(r.commit_id > 0);
     assert_eq!(r.rows_closed, 1);
     assert_eq!(live(&db, "node", "ps", "Base", "n1"), 0);
+}
 
-    // RESTRICT: n2 has values and containers, so nothing is closed.
-    let db = copy_of(&seed, dir.path(), "dw2.duckdb");
-    let ref_db = copy_of(&seed, dir.path(), "ref.duckdb");
+/// A RESTRICT object delete that ends `Restricted` keeps its object: the
+/// writes it covers must not be dropped, so the call is refused and rolled
+/// back (nothing committed, the uncovered write included). A covering value
+/// delete beside it takes effect, so a write it also covers is dropped.
+#[test]
+fn a_restricted_covering_delete_refuses_the_call() {
+    let (_d, db) = seeded();
+    // n2 has values and containers, so RESTRICT ends `Restricted`.
     let od = || vec![(okey(ObjectKind::Entity, Some("node"), "n2"), cascade(false))];
+    let m = assert_not_effective(
+        &db,
+        vec![
+            seg("node", "ps", "A", scalar_batch(&["n2"], 8.0)),
+            seg("unit", "ps", "A", scalar_batch(&["u1"], 8.0)),
+        ],
+        vec![],
+        od(),
+    );
+    assert!(m.contains("node:ps/A/n2"), "{m}");
+    assert!(m.contains("object-delete key 0 (restricted)"), "{m}");
+    assert_eq!(live(&db, "node", "ps", "A", "n2"), 1);
+
+    // A value delete covers the same write too: it takes effect, so the
+    // write is dropped and the call commits (the object delete still ends
+    // `Restricted`, as alone).
     let r = commit_changes(
         &db,
         vec![seg("node", "ps", "A", scalar_batch(&["n2"], 8.0))],
         vec![],
-        vec![],
+        vec![dkey("node", "ps", "A", "n2")],
         od(),
         "t",
-        "restrict",
+        "value delete covers too",
         DELETE_WINS,
     )
     .unwrap();
+    assert!(r.commit_id > 0);
+    assert_eq!(
+        dropped(&r),
+        vec![(0, "node:ps/A/n2".into(), value(0))],
+        "the warning names the value delete first"
+    );
     assert!(matches!(
         r.object_deletes[0].result,
         ObjectDeleteResult::Restricted { .. }
     ));
-    assert_eq!(dropped(&r).len(), 1);
-    assert_eq!(live(&db, "node", "ps", "A", "n2"), 1);
-    let rr = commit_changes(
-        &ref_db,
+    assert_eq!(live(&db, "node", "ps", "A", "n2"), 0);
+}
+
+/// A RESTRICT delete that does take effect (its object has no other
+/// dependents) still drops the writes it covers, and the call commits.
+#[test]
+fn an_effective_restrict_delete_drops_its_writes() {
+    let (_d, db) = seeded();
+    // Alternative `C` exists but holds nothing.
+    commit_changes(
+        &db,
+        vec![],
+        vec![StructuralChange::CreateAlternative {
+            name: "C".into(),
+            description: None,
+        }],
         vec![],
         vec![],
-        vec![],
-        od(),
         "t",
-        "restrict",
+        "create C",
         WriteOptions::default(),
     )
     .unwrap();
-    assert_eq!(without_drops(&r), rr);
-    assert_eq!(dump(&db), dump(&ref_db));
+    let r = commit_changes(
+        &db,
+        vec![
+            seg("node", "ps", "C", scalar_batch(&["n1", "n2"], 8.0)),
+            seg("node", "ps", "Base", scalar_batch(&["n3"], 8.0)),
+        ],
+        vec![],
+        vec![],
+        vec![(okey(ObjectKind::Alternative, None, "c"), cascade(false))],
+        "t",
+        "restrict C",
+        DELETE_WINS,
+    )
+    .unwrap();
+    assert!(r.commit_id > 0);
+    assert!(matches!(
+        r.object_deletes[0].result,
+        ObjectDeleteResult::Deleted { .. }
+    ));
+    assert_eq!(
+        dropped(&r),
+        vec![
+            (0, "node:ps/C/n1".into(), object(0)),
+            (0, "node:ps/C/n2".into(), object(0)),
+        ]
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM alternative WHERE cur_name = 'c' AND valid_to_commit IS NULL"
+        ),
+        0
+    );
+    assert_eq!(live(&db, "node", "ps", "Base", "n3"), 1);
+    assert_eq!(r.values_written, 1);
+}
+
+/// A structural create plus an object delete of the same object (the
+/// review's C2 repro): the same-commit guard would leave the created object
+/// live while the covered write is dropped. Refused under both policies,
+/// by name before the transaction and on the resolved ids after the
+/// structural changes (a created container in a deleted entity's cascade).
+#[test]
+fn a_structural_create_and_an_object_delete_of_it_are_refused() {
+    let (_d, db) = seeded();
+    let before = dump(&db);
+    for opts in [WriteOptions::default(), DELETE_WINS] {
+        for (what, segments, change, od) in [
+            (
+                "create alternative C, delete C, write to C",
+                vec![seg("node", "ps", "C", scalar_batch(&["n1"], 5.0))],
+                StructuralChange::CreateAlternative {
+                    name: "C".into(),
+                    description: None,
+                },
+                okey(ObjectKind::Alternative, None, "C"),
+            ),
+            (
+                "create alternative C, delete c, no write",
+                vec![],
+                StructuralChange::CreateAlternative {
+                    name: "C".into(),
+                    description: None,
+                },
+                okey(ObjectKind::Alternative, None, "c"),
+            ),
+            (
+                "create entity u5, delete class unit",
+                vec![],
+                StructuralChange::CreateEntity {
+                    class: "unit".into(),
+                    name: Some("u5".into()),
+                    elements: vec![],
+                },
+                okey(ObjectKind::Class, None, "Unit"),
+            ),
+            (
+                "create entity u5, delete u5",
+                vec![],
+                StructuralChange::CreateEntity {
+                    class: "unit".into(),
+                    name: Some("u5".into()),
+                    elements: vec![],
+                },
+                okey(ObjectKind::Entity, Some("unit"), "U5"),
+            ),
+            (
+                "create class k, delete k",
+                vec![],
+                StructuralChange::CreateEntityClass {
+                    name: "k".into(),
+                    dims: vec![],
+                },
+                okey(ObjectKind::Class, None, "K"),
+            ),
+        ] {
+            let err = commit_changes(
+                &db,
+                segments,
+                vec![change],
+                vec![],
+                vec![(od, cascade(true))],
+                "t",
+                "create + delete",
+                opts,
+            )
+            .expect_err(what);
+            assert!(
+                matches!(&err, DbError::Api(m) if m.contains("object-deleted in one commit")),
+                "{what}: {err:?}"
+            );
+        }
+        // No name in the call connects them: the new link l13 = (n1, n3)
+        // is a container of n1, which the entity delete cascades over.
+        let err = commit_changes(
+            &db,
+            vec![seg("link", "cap", "B", scalar_batch(&["n1__n3"], 5.0))],
+            vec![StructuralChange::CreateEntity {
+                class: "link".into(),
+                name: None,
+                elements: vec!["n1".into(), "n3".into()],
+            }],
+            vec![],
+            vec![(okey(ObjectKind::Entity, Some("node"), "n1"), cascade(true))],
+            "t",
+            "create container + delete element",
+            opts,
+        )
+        .expect_err("resolved create-and-delete");
+        assert!(
+            matches!(&err, DbError::Api(m) if m.contains("structural change of this call creates")),
+            "{err:?}"
+        );
+    }
+    assert_eq!(dump(&db), before, "nothing written");
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +964,11 @@ enum Od {
 }
 
 impl Od {
+    /// The target does not exist in the seed (the delete is `NotFound`).
+    fn absent(&self) -> bool {
+        matches!(self, Od::Entity(_, "n9"))
+    }
+
     fn covers(&self, c: &str, p: &str, a: &str, e: &str) -> bool {
         match self {
             Od::Alt(x) => x.eq_ignore_ascii_case(a),
@@ -869,6 +1084,8 @@ fn delete_wins_equals_the_call_without_its_covered_writes() {
         Od::Elements("l12"),
     ];
     let mut covered_total = 0;
+    let mut refused = 0;
+    let seed_dump = dump(&seed);
     for round in 0..30 {
         // Writes: some (class, parameter, alternative) targets, each with
         // some of its entities and maybe a new one.
@@ -945,26 +1162,12 @@ fn delete_wins_equals_the_call_without_its_covered_writes() {
             .collect();
         let okeys: Vec<(ObjectDeleteKey, ObjectDeleteOpts)> = picked
             .iter()
-            .map(|&i| (ods[i].key(&mut rng), cascade(rng.chance(70))))
+            .map(|&i| (ods[i].key(&mut rng), cascade(rng.chance(60))))
             .collect();
 
         let dir = tempfile::tempdir().unwrap();
         let db = copy_of(&seed, dir.path(), "dw.duckdb");
         let ref_db = copy_of(&seed, dir.path(), "ref.duckdb");
-        let r = commit_changes(
-            &db,
-            writes.iter().map(segment_of).collect(),
-            vec![],
-            spellings.clone(),
-            okeys.clone(),
-            "t",
-            "random",
-            DELETE_WINS,
-        )
-        .unwrap_or_else(|e| panic!("round {round}: {e:?}"));
-        let got: BTreeSet<String> = dropped(&r).into_iter().map(|(_, n, _)| n).collect();
-        assert_eq!(got, covered, "round {round}: dropped writes");
-
         let kept: Vec<Segment> = writes
             .iter()
             .map(segment_of)
@@ -973,22 +1176,89 @@ fn delete_wins_equals_the_call_without_its_covered_writes() {
         if kept.is_empty() && spellings.is_empty() && okeys.is_empty() {
             continue;
         }
+        // The reference: the call without its covered writes, default
+        // policy. Its object-delete outcomes are those of the deletes in
+        // the full call (every dependent an uncovered write could add is
+        // itself covered), so they predict which deletes take effect.
         let rr = commit_changes(
             &ref_db,
             kept,
             vec![],
-            spellings,
-            okeys,
+            spellings.clone(),
+            okeys.clone(),
             "t",
             "random",
             WriteOptions::default(),
         )
         .unwrap_or_else(|e| panic!("round {round}: the reference call: {e:?}"));
+        let took_effect = |j: usize| {
+            ods[picked[j]].absent()
+                || rr.object_deletes.iter().any(|o| {
+                    o.key_index == j && matches!(o.result, ObjectDeleteResult::Deleted { .. })
+                })
+        };
+        let lost = writes.iter().any(|w| {
+            w.4.iter().any(|e| {
+                let by_value = vdels.contains(&(w.0, w.1, w.3, *e));
+                let by_object: Vec<usize> = (0..picked.len())
+                    .filter(|&j| ods[picked[j]].covers(w.0, w.1, w.3, e))
+                    .collect();
+                !by_value && !by_object.is_empty() && !by_object.iter().any(|&j| took_effect(j))
+            })
+        });
+
+        let call = commit_changes(
+            &db,
+            writes.iter().map(segment_of).collect(),
+            vec![],
+            spellings,
+            okeys,
+            "t",
+            "random",
+            DELETE_WINS,
+        );
+        if lost {
+            refused += 1;
+            let err = call.expect_err(&format!("round {round}: a lost write is refused"));
+            assert!(
+                matches!(&err, DbError::Api(m) if m.contains("did not take effect")),
+                "round {round}: {err:?}"
+            );
+            assert_eq!(dump(&db), seed_dump, "round {round}: nothing written");
+            continue;
+        }
+        let r = call.unwrap_or_else(|e| panic!("round {round}: {e:?}"));
+        let got: BTreeSet<String> = dropped(&r).into_iter().map(|(_, n, _)| n).collect();
+        assert_eq!(got, covered, "round {round}: dropped writes");
+        // Each warning's segment and `by` name a write of that segment and
+        // a delete that covers it.
+        for (si, name, by) in dropped(&r) {
+            let w = &writes[si];
+            let e = name.rsplit('/').next().unwrap().to_string();
+            assert_eq!(
+                name,
+                format!("{}:{}/{}/{e}", w.0, w.1, w.3),
+                "round {round}"
+            );
+            let ok = match by {
+                CoveringDelete::Value { key_index } => {
+                    vdels[key_index] == (w.0, w.1, w.3, e.as_str())
+                }
+                CoveringDelete::Object { key_index } => {
+                    ods[picked[key_index]].covers(w.0, w.1, w.3, &e)
+                }
+            };
+            assert!(ok, "round {round}: {name} by {by:?}");
+        }
         assert_eq!(without_drops(&r), rr, "round {round}: report");
         assert_eq!(dump(&db), dump(&ref_db), "round {round}: state");
     }
     assert!(
         covered_total > 30,
         "the rounds exercise coverage: {covered_total}"
+    );
+    assert!(
+        refused > 0,
+        "some rounds hit a delete that does not take effect"
     );
 }

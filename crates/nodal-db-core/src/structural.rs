@@ -1002,8 +1002,13 @@ pub(crate) fn prepare_structural(
 
     // Cross-channel object-delete guard (critique M2): a commit that both
     // structurally references an object AND object-deletes it by folded name
-    // would leave a live orphan under the same-commit guard.
+    // would leave a live orphan under the same-commit guard. That includes
+    // creating it (Create*), or creating an entity, parameter or class under
+    // a deleted class (the class cascade skips rows this commit created).
+    // `commit_changes` repeats the create check on the resolved ids.
     let mut del_alts: HashSet<String> = HashSet::new();
+    let mut del_classes: HashSet<String> = HashSet::new();
+    let mut del_params: HashSet<(String, String)> = HashSet::new();
     let mut del_scens: HashSet<String> = HashSet::new();
     let mut del_entities: HashSet<(String, String)> = HashSet::new();
     for (key, _) in object_deletes {
@@ -1015,6 +1020,14 @@ pub(crate) fn prepare_structural(
                 ObjectKind::Scenario => {
                     del_scens.insert(fold(n));
                 }
+                ObjectKind::Class => {
+                    del_classes.insert(fold(n));
+                }
+                ObjectKind::Parameter => {
+                    if let Some(cls) = &key.class {
+                        del_params.insert((fold(cls), fold(n)));
+                    }
+                }
                 ObjectKind::Entity => {
                     // Element-tuple-addressed (`ObjectRef::Elements`) entity
                     // deletes are intentionally NOT matched by this name-level
@@ -1024,13 +1037,13 @@ pub(crate) fn prepare_structural(
                         del_entities.insert((fold(cls), fold(n)));
                     }
                 }
-                _ => {}
             }
         }
     }
     let clash_alt = |name: &str| del_alts.contains(&fold(name));
     let clash_scen = |name: &str| del_scens.contains(&fold(name));
     let clash_entity = |class: &str, name: &str| del_entities.contains(&(fold(class), fold(name)));
+    let clash_class = |name: &str| del_classes.contains(&fold(name));
     let orphan = |kind: &str, name: &str| {
         DbError::Api(format!(
             "structural: {kind} {name:?} is both structurally referenced and object-deleted in \
@@ -1094,6 +1107,38 @@ pub(crate) fn prepare_structural(
                 current, new_name, ..
             } if (clash_scen(current) || clash_scen(new_name)) => {
                 return Err(orphan("scenario", current));
+            }
+            StructuralChange::CreateAlternative { name, .. } if clash_alt(name) => {
+                return Err(orphan("alternative", name));
+            }
+            StructuralChange::CreateScenario { name, .. } if clash_scen(name) => {
+                return Err(orphan("scenario", name));
+            }
+            StructuralChange::CreateEntityClass { name, dims } => {
+                if clash_class(name) {
+                    return Err(orphan("class", name));
+                }
+                if let Some(d) = dims.iter().find(|d| clash_class(d)) {
+                    return Err(orphan("class", d));
+                }
+            }
+            StructuralChange::CreateEntity { class, name, .. } => {
+                if clash_class(class) {
+                    return Err(orphan("class", class));
+                }
+                if let Some(n) = name {
+                    if clash_entity(class, n) {
+                        return Err(orphan("entity", n));
+                    }
+                }
+            }
+            StructuralChange::CreateParameter { class, name, .. } => {
+                if clash_class(class) {
+                    return Err(orphan("class", class));
+                }
+                if del_params.contains(&(fold(class), fold(name))) {
+                    return Err(orphan("parameter", name));
+                }
             }
             _ => {}
         }

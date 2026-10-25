@@ -49,14 +49,15 @@ use crate::history::{
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
 };
 use crate::object_delete::{
-    apply_object_delete, cascade_scope, prepare_object_deletes, preview_one, written_value_covered,
-    PreparedObjectDelete, WrittenIds,
+    apply_object_delete, cascade_scope, prepare_object_deletes, preview_one, reaches_created,
+    written_value_covered, PreparedObjectDelete, WrittenIds,
 };
 use crate::structural::{apply_structural, prepare_structural};
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
     ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, ShapedData, StructuralChange,
-    StructuralEffect, Tier, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
+    StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind, Warning, WarningKind,
+    WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -219,10 +220,20 @@ pub struct DeleteKey {
 /// it is resolved, canonicalized or buffered (so a dropped write
 /// auto-creates nothing), each reported as a
 /// [`WarningKind::DroppedByDelete`] warning. The deletes then run as usual
-/// and the uncovered writes proceed normally, so for the covered keys the
-/// end state is that of the deletes alone, and no covered value can be left
-/// partly closed by a cascade. A dropped write is not a write: a call whose
-/// writes are all dropped and whose deletes delete nothing makes no commit.
+/// and the uncovered writes proceed normally, and no covered value can be
+/// left partly closed by a cascade. The delete wins only when it takes
+/// effect: after the deletes ran, every dropped write needs a covering
+/// delete that did (a value delete; an object delete that ended `Deleted`
+/// or whose target did not exist), else the whole call is refused as
+/// [`DbError::Api`] and rolled back (a RESTRICT delete that ended
+/// `Restricted` would otherwise lose the write while the object survives).
+/// A dropped write is not a write: a call whose writes are all dropped and
+/// whose deletes delete nothing makes no commit.
+///
+/// Under either policy, an object delete that reaches an object a
+/// structural change of the same call creates (or a child of it) is
+/// refused: by name before the transaction (`prepare_structural`), and on
+/// the resolved ids after the structural changes ran.
 #[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
@@ -362,6 +373,39 @@ pub fn commit_changes(
         for (i, ch) in structural.iter().enumerate() {
             apply_structural(conn, commit_id, i, ch, &mut report)?;
         }
+        // An object delete may not reach an object a structural change of
+        // this call created (under either policy): the same-commit guard
+        // would leave it live. The resolved-id repeat of the name-level
+        // guard in `prepare_structural`; it also sees cascade children.
+        let created: HashSet<(ObjectKind, i64)> = report
+            .structural
+            .iter()
+            .filter(|o| o.effect == StructuralEffect::Created)
+            .filter_map(|o| {
+                let kind = match o.kind {
+                    StructuralKind::Alternative => ObjectKind::Alternative,
+                    StructuralKind::Scenario => ObjectKind::Scenario,
+                    StructuralKind::Entity => ObjectKind::Entity,
+                    StructuralKind::EntityClass => ObjectKind::Class,
+                    StructuralKind::Parameter => ObjectKind::Parameter,
+                    _ => return None,
+                };
+                Some((kind, o.object_id))
+            })
+            .collect();
+        for p in &prepared_object_deletes {
+            if let Some((kind, id)) = reaches_created(conn, &p.key, &created)? {
+                return Err(DbError::Api(format!(
+                    "object-delete key {} ({} {}) reaches the {} id {id} that a \
+                     structural change of this call creates: create and delete an \
+                     object in separate calls",
+                    p.key_index,
+                    p.key.kind.tag(),
+                    object_target_label(&p.key),
+                    kind.tag()
+                )));
+            }
+        }
         // `DeleteWins`: what the deletes cover, resolved after the
         // structural changes (a delete may name a referent one of them
         // created or renamed) and before any write.
@@ -378,23 +422,27 @@ pub fn commit_changes(
         } else {
             None
         };
+        // `DeleteWins`: the dropped writes, checked after the deletes ran.
+        let mut dropped: Vec<Dropped> = Vec::new();
         for (i, p) in prepared.iter().enumerate() {
             let kept;
             let p = match &plan {
                 None => p,
                 Some(plan) => {
                     let covered = plan.covered(conn, p)?;
-                    for &(j, by) in &covered {
-                        report.warnings.push(dropped_warning(i, p, j, by));
+                    for (j, by) in &covered {
+                        report.warnings.push(dropped_warning(i, p, *j, by[0]));
                     }
-                    if covered.is_empty() {
+                    let drop: Vec<usize> = covered.iter().map(|(j, _)| *j).collect();
+                    dropped.extend(covered.into_iter().map(|(j, by)| (i, j, by)));
+                    if drop.is_empty() {
                         p
-                    } else if covered.len() == p.names.len() {
+                    } else if drop.len() == p.names.len() {
                         // Every write of the segment dropped: it resolves
                         // (and auto-creates) nothing.
                         continue;
                     } else {
-                        kept = p.without(&covered);
+                        kept = p.without(&drop);
                         &kept
                     }
                 }
@@ -465,6 +513,11 @@ pub fn commit_changes(
         // this commit created is never closed (would trip the span CHECK).
         for p in &prepared_object_deletes {
             apply_object_delete(conn, commit_id, p, &mut report)?;
+        }
+        // `DeleteWins`: a write is dropped only for a delete that took
+        // effect; otherwise the whole call is refused (rolled back).
+        if let Some(plan) = &plan {
+            plan.check_effective(&dropped, &prepared, &report)?;
         }
         // `tiers` lists the tiers written; the canonicalization noted every
         // value's tier, unchanged ones included.
@@ -647,6 +700,14 @@ fn reject_write_and_object_delete(
 
 /// The D10 refusal; `ids` names the covered (entity, parameter definition,
 /// alternative) when the commit-time check found it.
+/// An object-delete key's target as written: its name or element tuple.
+fn object_target_label(k: &ObjectDeleteKey) -> String {
+    match &k.target {
+        ObjectRef::Name(n) => n.clone(),
+        ObjectRef::Elements(es) => format!("({})", es.join(", ")),
+    }
+}
+
 fn object_delete_covers_write_error(
     i: usize,
     k: &ObjectDeleteKey,
@@ -688,29 +749,39 @@ fn object_delete_covers_write_error(
 ///     ([`cascade_scope`], whatever `cascade` says), which adds containers,
 ///     element-tuple targets and a class's children (D10).
 ///
-/// Each covered key maps to the first covering delete in caller order.
+/// Each covered key collects EVERY covering delete: the drop stands only if
+/// at least one of them takes effect ([`DropPlan::check_effective`], after
+/// the deletes ran), else the call is refused.
 /// The commit-time D9/D10 checks still run after the writes as a backstop;
 /// with every covered write dropped they find nothing.
 struct DropPlan {
     /// DuckDB folds of every segment and delete name (exact spelling).
     folds: HashMap<String, String>,
     /// Value deletes by folded (class, parameter, alternative, entity).
-    value_keys: HashMap<(String, String, String, String), usize>,
+    value_keys: HashMap<(String, String, String, String), Vec<usize>>,
     /// The folded (class, parameter, alternative) of every value delete.
     value_targets: HashSet<(String, String, String)>,
     /// Named object deletes by folded name: alternatives, classes,
     /// (class, parameter) and (class, entity).
-    alts: HashMap<String, usize>,
-    classes: HashMap<String, usize>,
-    params: HashMap<(String, String), usize>,
-    entities: HashMap<(String, String), usize>,
+    alts: HashMap<String, Vec<usize>>,
+    classes: HashMap<String, Vec<usize>>,
+    params: HashMap<(String, String), Vec<usize>>,
+    entities: HashMap<(String, String), Vec<usize>>,
     /// The folded classes of the named entity deletes.
     entity_classes: HashSet<String>,
     /// The ids in the cascade closures, by kind.
-    entity_ids: HashMap<i64, usize>,
-    param_ids: HashMap<i64, usize>,
-    alt_ids: HashMap<i64, usize>,
+    entity_ids: HashMap<i64, Vec<usize>>,
+    param_ids: HashMap<i64, Vec<usize>>,
+    alt_ids: HashMap<i64, Vec<usize>>,
+    /// The object deletes (caller indices) whose target did not resolve when
+    /// the plan was built: nothing of theirs exists, so a write they cover
+    /// by name is dropped with nothing left behind.
+    absent: HashSet<usize>,
 }
+
+/// One dropped write: (segment index, name index, every covering delete,
+/// sorted, value deletes first).
+type Dropped = (usize, usize, Vec<CoveringDelete>);
 
 impl DropPlan {
     fn build(
@@ -753,34 +824,38 @@ impl DropPlan {
             entity_ids: HashMap::new(),
             param_ids: HashMap::new(),
             alt_ids: HashMap::new(),
+            absent: HashSet::new(),
         };
         for (i, k) in deletes {
             let (c, p, a) = (f(&k.class), f(&k.parameter), f(&k.alternative));
             plan.value_targets.insert((c.clone(), p.clone(), a.clone()));
-            plan.value_keys.entry((c, p, a, f(&k.entity))).or_insert(*i);
+            plan.value_keys
+                .entry((c, p, a, f(&k.entity)))
+                .or_default()
+                .push(*i);
         }
         for od in object_deletes {
             let i = od.key_index;
             if let ObjectRef::Name(n) = &od.key.target {
                 let n = f(n);
                 match (od.key.kind, od.key.class.as_deref().map(f)) {
-                    (ObjectKind::Alternative, _) => {
-                        plan.alts.entry(n).or_insert(i);
-                    }
-                    (ObjectKind::Class, _) => {
-                        plan.classes.entry(n).or_insert(i);
-                    }
+                    (ObjectKind::Alternative, _) => plan.alts.entry(n).or_default().push(i),
+                    (ObjectKind::Class, _) => plan.classes.entry(n).or_default().push(i),
                     (ObjectKind::Parameter, Some(c)) => {
-                        plan.params.entry((c, n)).or_insert(i);
+                        plan.params.entry((c, n)).or_default().push(i)
                     }
                     (ObjectKind::Entity, Some(c)) => {
                         plan.entity_classes.insert(c.clone());
-                        plan.entities.entry((c, n)).or_insert(i);
+                        plan.entities.entry((c, n)).or_default().push(i);
                     }
                     _ => {}
                 }
             }
-            for (k, id) in cascade_scope(conn, &od.key)? {
+            let Some(scope) = cascade_scope(conn, &od.key)? else {
+                plan.absent.insert(i);
+                continue;
+            };
+            for (k, id) in scope {
                 let ids = match k {
                     ObjectKind::Entity => &mut plan.entity_ids,
                     ObjectKind::Parameter => &mut plan.param_ids,
@@ -789,7 +864,7 @@ impl DropPlan {
                     // entities and parameters (both in the closure).
                     _ => continue,
                 };
-                ids.entry(id).or_insert(i);
+                ids.entry(id).or_default().push(i);
             }
         }
         plan.folds = folds;
@@ -797,39 +872,48 @@ impl DropPlan {
     }
 
     /// The names of segment `p` (indices into `p.names`, ascending) that the
-    /// deletes cover, each with one covering delete. Lookup-only.
+    /// deletes cover, each with EVERY covering delete (sorted, deduped,
+    /// value deletes first). Lookup-only.
     fn covered(
         &self,
         conn: &Connection,
         p: &PreparedSegment,
-    ) -> Result<Vec<(usize, CoveringDelete)>, DbError> {
-        let obj = |i: &usize| CoveringDelete::Object { key_index: *i };
+    ) -> Result<Vec<(usize, Vec<CoveringDelete>)>, DbError> {
+        let obj = |v: &Vec<usize>| {
+            v.iter()
+                .map(|&i| CoveringDelete::Object { key_index: i })
+                .collect::<Vec<_>>()
+        };
         let (c, pa, a) = (
             &self.folds[&p.class],
             &self.folds[&p.parameter],
             &self.folds[&p.alternative],
         );
         // The whole segment: its alternative, class or parameter is deleted.
-        let mut whole = self
-            .alts
-            .get(a)
-            .or_else(|| self.classes.get(c))
-            .or_else(|| self.params.get(&(c.clone(), pa.clone())))
-            .map(obj);
+        let mut whole: Vec<CoveringDelete> = Vec::new();
+        for v in [
+            self.alts.get(a),
+            self.classes.get(c),
+            self.params.get(&(c.clone(), pa.clone())),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            whole.extend(obj(v));
+        }
         let class_id = lookup_entity_class(conn, &p.class)?;
-        if whole.is_none() && !(self.param_ids.is_empty() && self.alt_ids.is_empty()) {
+        if !(self.param_ids.is_empty() && self.alt_ids.is_empty()) {
             let pd = match class_id {
                 Some(cid) => lookup_parameter(conn, cid, &p.parameter)?,
                 None => None,
             };
             let alt = lookup_alternative(conn, &p.alternative)?;
-            whole = pd
-                .and_then(|id| self.param_ids.get(&id))
-                .or_else(|| alt.and_then(|id| self.alt_ids.get(&id)))
-                .map(obj);
-        }
-        if let Some(by) = whole {
-            return Ok((0..p.names.len()).map(|i| (i, by)).collect());
+            if let Some(v) = pd.and_then(|id| self.param_ids.get(&id)) {
+                whole.extend(obj(v));
+            }
+            if let Some(v) = alt.and_then(|id| self.alt_ids.get(&id)) {
+                whole.extend(obj(v));
+            }
         }
         // Entity by entity: a value delete of the key, a named entity
         // delete, or an entity in a cascade closure.
@@ -838,8 +922,14 @@ impl DropPlan {
             .contains(&(c.clone(), pa.clone(), a.clone()));
         let by_name = self.entity_classes.contains(c);
         let by_id = class_id.is_some() && !self.entity_ids.is_empty();
+        let mut out = Vec::new();
         if !(by_value || by_name || by_id) {
-            return Ok(Vec::new());
+            if !whole.is_empty() {
+                whole.sort();
+                whole.dedup();
+                out.extend((0..p.names.len()).map(|i| (i, whole.clone())));
+            }
+            return Ok(out);
         }
         let names: Vec<&str> = p.names.iter().map(String::as_str).collect();
         let looked: Vec<(String, Option<i64>)> = match class_id {
@@ -849,28 +939,110 @@ impl DropPlan {
                 .map(|f| (f, None))
                 .collect(),
         };
-        let mut out = Vec::new();
         for (i, (fe, id)) in looked.into_iter().enumerate() {
-            let value = by_value
-                .then(|| {
+            let mut by = whole.clone();
+            if by_value {
+                if let Some(v) =
                     self.value_keys
                         .get(&(c.clone(), pa.clone(), a.clone(), fe.clone()))
-                })
-                .flatten()
-                .map(|k| CoveringDelete::Value { key_index: *k });
-            let by = value
-                .or_else(|| {
-                    by_name
-                        .then(|| self.entities.get(&(c.clone(), fe.clone())))
-                        .flatten()
-                        .map(obj)
-                })
-                .or_else(|| id.and_then(|id| self.entity_ids.get(&id)).map(obj));
-            if let Some(by) = by {
+                {
+                    by.extend(v.iter().map(|&k| CoveringDelete::Value { key_index: k }));
+                }
+            }
+            if by_name {
+                if let Some(v) = self.entities.get(&(c.clone(), fe.clone())) {
+                    by.extend(obj(v));
+                }
+            }
+            if let Some(v) = id.and_then(|id| self.entity_ids.get(&id)) {
+                by.extend(obj(v));
+            }
+            if !by.is_empty() {
+                by.sort();
+                by.dedup();
                 out.push((i, by));
             }
         }
         Ok(out)
+    }
+
+    /// "Delete wins" only when the delete takes effect: every dropped write
+    /// needs at least one covering delete that did — a value delete (the
+    /// key ends absent either way), or an object delete that ended
+    /// `Deleted` or whose target did not exist when the plan was built. A
+    /// RESTRICT delete that ended `Restricted`, or one that found nothing to
+    /// close although its target existed, leaves the object live: dropping
+    /// the write would lose it silently, so the whole call is refused
+    /// (rolled back, nothing committed).
+    fn check_effective(
+        &self,
+        dropped: &[Dropped],
+        prepared: &[PreparedSegment],
+        report: &WriteReport,
+    ) -> Result<(), DbError> {
+        let deleted: HashSet<usize> = report
+            .object_deletes
+            .iter()
+            .filter(|o| matches!(o.result, ObjectDeleteResult::Deleted { .. }))
+            .map(|o| o.key_index)
+            .collect();
+        let effective = |d: &CoveringDelete| match *d {
+            CoveringDelete::Value { .. } => true,
+            CoveringDelete::Object { key_index } => {
+                deleted.contains(&key_index) || self.absent.contains(&key_index)
+            }
+        };
+        let lost: Vec<&Dropped> = dropped
+            .iter()
+            .filter(|(_, _, by)| !by.iter().any(effective))
+            .collect();
+        if lost.is_empty() {
+            return Ok(());
+        }
+        let outcome = |k: usize| {
+            report
+                .object_deletes
+                .iter()
+                .find(|o| o.key_index == k)
+                .map(|o| match o.result {
+                    ObjectDeleteResult::Deleted { .. } => "deleted",
+                    ObjectDeleteResult::Restricted { .. } => "restricted",
+                    ObjectDeleteResult::NotFound => "not found",
+                })
+                .unwrap_or("not run")
+        };
+        let mut lines: Vec<String> = Vec::new();
+        for (s, j, by) in lost.iter().take(5) {
+            let p = &prepared[*s];
+            let deletes: Vec<String> = by
+                .iter()
+                .map(|d| match *d {
+                    CoveringDelete::Value { key_index } => format!("delete key {key_index}"),
+                    CoveringDelete::Object { key_index } => {
+                        format!("object-delete key {key_index} ({})", outcome(key_index))
+                    }
+                })
+                .collect();
+            lines.push(format!(
+                "{}:{}/{}/{} (segment {s}; covered by {})",
+                p.class,
+                p.parameter,
+                p.alternative,
+                p.names[*j],
+                deletes.join(", ")
+            ));
+        }
+        let more = if lost.len() > 5 {
+            format!(" and {} more", lost.len() - 5)
+        } else {
+            String::new()
+        };
+        Err(DbError::Api(format!(
+            "covered_writes = DeleteWins: {} write(s) covered only by deletes that did not \
+             take effect, so dropping them would lose them: {}{more}; nothing was committed",
+            lost.len(),
+            lines.join("; ")
+        )))
     }
 }
 
@@ -1435,8 +1607,8 @@ impl PreparedSegment {
     /// This segment without the names `dropped` lists (indices into
     /// `names`; `CoveredWrites::DeleteWins`). The row indices of the kept
     /// names still point into the shared `sub_all`.
-    fn without(&self, dropped: &[(usize, CoveringDelete)]) -> PreparedSegment {
-        let drop: HashSet<usize> = dropped.iter().map(|&(i, _)| i).collect();
+    fn without(&self, dropped: &[usize]) -> PreparedSegment {
+        let drop: HashSet<usize> = dropped.iter().copied().collect();
         let (names, rows) = self
             .names
             .iter()

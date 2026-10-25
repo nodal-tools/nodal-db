@@ -240,6 +240,9 @@ def parse_sample(arm, metric, proc):
     if proc.returncode == gatelib.CHECK_FAILED_EXIT:
         why = [ln for ln in proc.stderr.splitlines() if ln.startswith("CHECK FAILED")]
         raise gatelib.WrongResult(f"{arm}: " + (why[-1] if why else "result check failed"))
+    if proc.returncode == gatelib.QUERY_FAILED_EXIT:
+        why = [ln for ln in proc.stderr.splitlines() if ln.startswith("QUERY FAILED")]
+        raise gatelib.HarnessError(f"{arm}: " + (why[-1] if why else "a query failed")[:600])
     if proc.returncode != 0:
         tail = " | ".join(proc.stderr.strip().splitlines()[-3:])
         raise gatelib.HarnessError(f"{arm}: {metric.mode} exited {proc.returncode}: {tail}")

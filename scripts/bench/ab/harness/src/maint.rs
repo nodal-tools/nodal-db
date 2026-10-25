@@ -31,7 +31,7 @@ use nodal_db_core::extract::{extract, ExtractOpts};
 use nodal_db_core::schema_init::{init_schema, init_schema_with_default};
 use nodal_db_core::types::WriteOptions;
 
-use crate::check::{check, check_rows, elapsed_ms, fail, read_hash, scalar_i64, Sample};
+use crate::check::{check, check_rows, elapsed_ms, read_hash, scalar_i64, Sample};
 
 fn scale_name() -> String {
     std::env::var("NODAL_AB_SCALE").unwrap_or_else(|_| "quick".into())
@@ -211,7 +211,7 @@ fn compact_once(dir: &Path) -> (f64, u64, Sample) {
         cells as usize,
     );
     let t = Instant::now();
-    compact(&db).unwrap_or_else(|e| fail(&format!("compact: {e}")));
+    compact(&db).unwrap_or_else(|e| crate::check::query_failed(&format!("compact: {e}")));
     let ms = elapsed_ms(t);
     let after = read_hash(&db, HHEAVY_CURRENT);
     check(after == before, "compaction changed the current state");
@@ -249,7 +249,7 @@ fn extract_once(dir: &Path) -> (f64, u64, Sample) {
             note: None,
         },
     )
-    .unwrap_or_else(|e| fail(&format!("extract: {e}")));
+    .unwrap_or_else(|e| crate::check::query_failed(&format!("extract: {e}")));
     let ms = elapsed_ms(t);
     let mut s = Sample::new(0.0);
     for (i, sql) in XSRC_CURRENT.iter().enumerate() {

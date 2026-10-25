@@ -26,8 +26,8 @@ use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::WriteOptions;
 
 use crate::check::{
-    check, check_commits, check_rows, elapsed_ms, fail, head, in_list, mean, median, read_hash,
-    rows, RowHash, Sample,
+    check, check_commits, check_rows, elapsed_ms, head, in_list, mean, median, read_hash, rows,
+    RowHash, Sample,
 };
 
 pub const CELLS: usize = 8760;
@@ -322,7 +322,7 @@ fn point(what: &str, sql: &str, args: impl Fn(&Keys) -> Vec<Box<dyn duckdb::ToSq
         }
         Ok(Sample::new(median(ms)).hash("read", &RowHash::of(&last)))
     })
-    .unwrap_or_else(|e| fail(&format!("{what}: {e}")))
+    .unwrap_or_else(|e| crate::check::query_failed(&format!("{what}: {e}")))
 }
 
 /// Bulk read: 1 warm-up, then the median of `reps` timed executions on one
@@ -347,7 +347,7 @@ fn bulk(what: &str, sql: &str, want_rows: usize, pd_arg: bool, reps: usize) -> S
         }
         Ok(Sample::new(median(ms)).hash("read", &RowHash::of(&last)))
     })
-    .unwrap_or_else(|e| fail(&format!("{what}: {e}")))
+    .unwrap_or_else(|e| crate::check::query_failed(&format!("{what}: {e}")))
 }
 
 fn b<T: duckdb::ToSql + Copy + 'static>(v: T) -> Box<dyn duckdb::ToSql> {
@@ -478,27 +478,40 @@ fn cycle(dir: &Path, s: Scale, tier: Tier) -> Sample {
     };
     let h = read_hash(&db, &sql);
     check_rows("read-back", h.rows as usize, want);
-    // The last write's content, not an older version's.
-    let probe = match tier {
-        Tier::Scalar => format!(
-            "SELECT count(*) FROM read_parameter_scalar('bench_scalar', 'p_scalar') \
-             WHERE entity = '{sn}' AND v_float = CAST('{:?}' AS DOUBLE)",
-            1e6 + 2.0
+    // The last write's content, not an older version's: the first cell.
+    // (Read the value and compare here: the equivalent `WHERE v_float = x`
+    // filter trips a DuckDB 2.0.0 internal error on the full-scale file
+    // after the array replace cycles, "dict-surviving cache: global
+    // dictionary column 0 changed identity", which invalidates the
+    // instance; reproduced in the Python client too.)
+    let (sql1, want1) = match tier {
+        Tier::Scalar => (
+            format!(
+                "SELECT v_float FROM read_parameter_scalar('bench_scalar', 'p_scalar') \
+                 WHERE entity = '{sn}'"
+            ),
+            1e6 + 2.0,
         ),
-        Tier::Array => format!(
-            "SELECT count(*) FROM read_parameter('bench_array', 'p_series') \
-             WHERE entity = '{an}' AND v_float = CAST('{:?}' AS DOUBLE)",
-            float_series(20_002)[0]
+        Tier::Array => (
+            format!(
+                "SELECT v_float FROM read_parameter('bench_array', 'p_series') \
+                 WHERE entity = '{an}' ORDER BY idx1_ts LIMIT 1"
+            ),
+            float_series(20_002)[0],
         ),
-        Tier::Long => format!(
-            "SELECT count(*) FROM read_parameter('bench_long', 'p_long') \
-             WHERE entity = '{ln}' AND v_int = {}",
-            int_series(30_002)[0]
+        Tier::Long => (
+            format!(
+                "SELECT v_int::DOUBLE FROM read_parameter('bench_long', 'p_long') \
+                 WHERE entity = '{ln}' ORDER BY idx1_ts LIMIT 1"
+            ),
+            int_series(30_002)[0] as f64,
         ),
     };
+    let got: f64 = with_read(&db, |c| Ok(c.query_row(&sql1, [], |r| r.get(0))?))
+        .unwrap_or_else(|e| crate::check::query_failed(&format!("{sql1}: {e}")));
     check(
-        crate::check::scalar_i64(&db, &probe) >= 1,
-        "read-back: the last cycle's value is not current",
+        got == want1,
+        &format!("read-back: the first cell is {got}, the last cycle wrote {want1}"),
     );
     Sample::new(mean(&spans)).hash("readback", &h)
 }

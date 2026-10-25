@@ -277,7 +277,6 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
 
 #[cfg(feature = "lookup_const")]
 fn lookup_core_sql(dir: &Path) -> Sample {
-    use crate::check::fail;
     use nodal_db_core::conn::with_read;
     use nodal_db_core::duckdb;
     let db = copy_base(dir);
@@ -301,7 +300,7 @@ fn lookup_core_sql(dir: &Path) -> Sample {
         }
         Ok((elapsed_ms(t) / 200.0, ids))
     })
-    .unwrap_or_else(|e| fail(&format!("lookup: {e}")));
+    .unwrap_or_else(|e| crate::check::query_failed(&format!("lookup: {e}")));
     let ids_sql = ids
         .iter()
         .map(|i| i.to_string())

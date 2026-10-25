@@ -8,7 +8,8 @@
 //!
 //! A failed fixed check prints `CHECK FAILED: ...` and exits with
 //! [`CHECK_FAILED_EXIT`]; the runner turns that into WRONG RESULT (exit 4),
-//! never a ratio.
+//! never a ratio. A query or core call that errors instead prints
+//! `QUERY FAILED: ...` and exits with [`QUERY_FAILED_EXIT`] (ERROR, exit 3).
 //!
 //! `NODAL_AB_INJECT=<mode>:<spec>` (set by the runner for the candidate arm
 //! in `--self-test` only): `<factor>` (e.g. `1.15`) busy-spins (factor - 1)
@@ -32,8 +33,23 @@ use nodal_db_core::duckdb;
 use nodal_db_core::duckdb::Connection;
 
 pub const CHECK_FAILED_EXIT: i32 = 86;
+/// A query, API call or the CLI failed (an error, not a wrong result).
+pub const QUERY_FAILED_EXIT: i32 = 87;
 
 static MODE: OnceLock<String> = OnceLock::new();
+static SAMPLE_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// The sample's temp directory: removed before an early exit (an exit
+/// skips the `TempDir` destructor and would leak fixture copies).
+pub fn set_sample_dir(dir: &std::path::Path) {
+    let _ = SAMPLE_DIR.set(dir.to_path_buf());
+}
+
+fn cleanup() {
+    if let Some(d) = SAMPLE_DIR.get() {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
 
 pub fn set_mode(mode: &str) {
     let _ = MODE.set(mode.to_string());
@@ -48,7 +64,16 @@ pub fn injection() -> Option<String> {
 
 pub fn fail(msg: &str) -> ! {
     eprintln!("CHECK FAILED: {msg}");
+    cleanup();
     std::process::exit(CHECK_FAILED_EXIT)
+}
+
+/// A read-back query, a core call or the CLI errored: the result cannot be
+/// checked. The runner reports it as ERROR (exit 3), with this message.
+pub fn query_failed(msg: &str) -> ! {
+    eprintln!("QUERY FAILED: {msg}");
+    cleanup();
+    std::process::exit(QUERY_FAILED_EXIT)
 }
 
 /// A fixed check on a row (or value) count; `wrong` injection adds one.
@@ -295,13 +320,13 @@ pub fn head(db: &std::path::Path) -> i64 {
 /// A single integer from `sql`, on its own RO connection.
 pub fn scalar_i64(db: &std::path::Path, sql: &str) -> i64 {
     nodal_db_core::conn::with_read(db, |c| Ok(c.query_row(sql, [], |r| r.get::<_, i64>(0))?))
-        .unwrap_or_else(|e| fail(&format!("{sql}: {e}")))
+        .unwrap_or_else(|e| query_failed(&format!("{sql}: {e}")))
 }
 
 /// The digest of `sql`'s result, on its own RO connection.
 pub fn read_hash(db: &std::path::Path, sql: &str) -> RowHash {
     nodal_db_core::conn::with_read(db, |c| Ok(RowHash::of(&batches(c, sql)?)))
-        .unwrap_or_else(|e| fail(&format!("{sql}: {e}")))
+        .unwrap_or_else(|e| query_failed(&format!("{sql}: {e}")))
 }
 
 /// `'a', 'b', ...` for an `IN (...)` list (names are plain ASCII here).

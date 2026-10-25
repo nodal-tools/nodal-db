@@ -221,7 +221,7 @@ pub fn gate_1cell(dir: &Path) -> crate::check::Sample {
             ))
         })?)
     })
-    .unwrap_or_else(|e| crate::check::fail(&format!("read-back: {e}")));
+    .unwrap_or_else(|e| crate::check::query_failed(&format!("read-back: {e}")));
     check_rows("current cells", count as usize, cells);
     crate::check::check(hit >= 1, "the changed cell does not read back");
     Sample::new(ms)

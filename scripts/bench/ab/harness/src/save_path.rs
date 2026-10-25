@@ -606,7 +606,7 @@ pub fn gate_editor_save(dir: &Path) -> crate::check::Sample {
 /// fixture. Checks: every reload reads the same rows and content, 5
 /// classes; the digest covers everything read.
 pub fn gate_editor_reload(dir: &Path) -> crate::check::Sample {
-    use crate::check::{check, fail, Sample};
+    use crate::check::{check, Sample};
     let db = dir.join("save.duckdb");
     build_fixture(&db);
     let mut epoch = head(&db);
@@ -615,8 +615,8 @@ pub fn gate_editor_reload(dir: &Path) -> crate::check::Sample {
     }
     let once = || {
         let t = Instant::now();
-        let r =
-            with_read(&db, model_slurp_digest).unwrap_or_else(|e| fail(&format!("reload: {e}")));
+        let r = with_read(&db, model_slurp_digest)
+            .unwrap_or_else(|e| crate::check::query_failed(&format!("reload: {e}")));
         (ms(t), r)
     };
     let (_, first) = once();

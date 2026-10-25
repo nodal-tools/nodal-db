@@ -16,7 +16,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use nodal_db_core::schema_init::init_schema;
 
-use crate::check::{check_commits, check_rows, elapsed_ms, fail, head, read_hash, Sample};
+use crate::check::{check_commits, check_rows, elapsed_ms, head, read_hash, Sample};
 
 const IPC_CLASS: &str = "res_dense";
 const IPC_PARAM: &str = "flow00";
@@ -138,7 +138,7 @@ pub fn import_dense(dir: &Path) -> Sample {
         .expect("run nodal-db import");
     let ms = elapsed_ms(t);
     if !out.status.success() {
-        fail(&format!(
+        crate::check::query_failed(&format!(
             "nodal-db import failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));

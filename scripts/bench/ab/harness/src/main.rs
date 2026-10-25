@@ -492,6 +492,7 @@ fn main() {
     }
     check::set_mode(mode);
     let dir = tempfile::tempdir().unwrap();
+    check::set_sample_dir(dir.path());
     if let Some(sample) = gate::run(mode, dir.path()) {
         sample.emit();
         return;

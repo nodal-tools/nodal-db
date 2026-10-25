@@ -33,6 +33,9 @@ EXIT_PASS, EXIT_FAIL, EXIT_UNSURE, EXIT_ERROR, EXIT_WRONG = 0, 1, 2, 3, 4
 # The harness exits with this code when a result check fails (the fixed
 # assert of §3.4 item 1); any other non-zero exit is a harness error.
 CHECK_FAILED_EXIT = 86
+# ... and with this one when a query, core call or the CLI errored, so the
+# result could not be checked: an ERROR (exit 3), not a WRONG RESULT.
+QUERY_FAILED_EXIT = 87
 
 
 class ConfigError(Exception):

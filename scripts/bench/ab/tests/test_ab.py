@@ -32,6 +32,12 @@ class ParseSample(unittest.TestCase):
             ab.parse_sample("cand", M, proc(g.CHECK_FAILED_EXIT, "", "CHECK FAILED: rows 11 != 10\n"))
         self.assertIn("rows 11", str(cm.exception))
 
+    def test_query_failure_is_an_error_not_a_wrong_result(self):
+        with self.assertRaises(g.HarnessError) as cm:
+            ab.parse_sample("base", M, proc(g.QUERY_FAILED_EXIT, "",
+                                            "QUERY FAILED: SELECT ...: INTERNAL Error: x\n"))
+        self.assertIn("INTERNAL Error", str(cm.exception))
+
     def test_crash_is_harness_error(self):
         with self.assertRaises(g.HarnessError):
             ab.parse_sample("cand", M, proc(101, "", "thread 'main' panicked\n"))

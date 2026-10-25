@@ -332,8 +332,11 @@ impl Database {
     /// each such write is dropped before anything runs and reported as a
     /// `"dropped_by_delete"` warning (with `segment_index`, `by` =
     /// `"deletes"` or `"object_deletes"`, and that list's `key_index`), the
-    /// deletes run as usual and the other writes proceed. A dropped write
-    /// is not a write: if nothing else changes, nothing is committed.
+    /// deletes run as usual and the other writes proceed. A write is
+    /// dropped only when a covering delete takes effect; if none does (a
+    /// `cascade=False` delete blocked by other dependents), the call raises
+    /// `ApiError` and commits nothing. A dropped write is not a write: if
+    /// nothing else changes, nothing is committed.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
                         object_deletes = None, user, message = String::new(),
                         force_replace = false, retain_override = None, expect_commit = None,

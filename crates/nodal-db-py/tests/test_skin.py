@@ -237,6 +237,23 @@ def test_commit_changes_covered_writes_delete_wins(db):
     assert db.head_commit() == head
 
 
+def test_delete_wins_refuses_when_the_delete_does_not_take_effect(db):
+    # A cascade=False delete blocked by the entity's value does not take
+    # effect: dropping the write would lose it, so the call is refused.
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    head = db.head_commit()
+    with pytest.raises(nodal_db.ApiError, match="did not take effect"):
+        db.commit_changes(
+            segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
+                       "batch": scalar_batch(["u1"], [2.0])}],
+            object_deletes=[{"kind": "entity", "class": "unit", "name": "u1",
+                             "cascade": False}],
+            user="t",
+            covered_writes="delete_wins",
+        )
+    assert db.head_commit() == head
+
+
 def test_object_delete_preview_and_commit(db):
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
     key = {"kind": "entity", "class": "unit", "name": "u1"}

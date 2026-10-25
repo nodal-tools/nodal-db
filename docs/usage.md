@@ -335,7 +335,19 @@ nothing to delete either, the call makes no commit.
 Under either setting, a call may not create an object with a structural
 change and delete that object (or the class it belongs to, or an entity
 it is built from) with an object delete; the core refuses it. Create and
-delete in separate calls.
+delete in separate calls. The core checks this twice, and each check has
+an edge worth knowing:
+
+- Before anything runs, it compares names. A create and a delete of the
+  same name are refused even when the object already exists and the
+  create would change nothing.
+- After the structural changes ran, it compares the objects the delete
+  would reach with the objects this call actually created (an existing
+  object that a create left as it was does not count). The delete
+  reaches everything its cascade would, whatever its `cascade` option:
+  creating an entity built from `north` and deleting `north` with
+  `cascade` off is refused, although that delete alone would only be
+  blocked.
 
 ### Build a scenario
 

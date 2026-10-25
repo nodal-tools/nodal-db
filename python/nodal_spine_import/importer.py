@@ -26,7 +26,9 @@ Mechanics
    ("declared X, observed Y — chain will repair"). Zero silent drops.
    A key repeated within one map level (or a repeated time stamp) keeps its
    LAST entry and is reported as a warning in ``duplicate_keys`` (and
-   logged), at every map level.
+   logged), at every map level. A name with leading or trailing whitespace
+   is imported trimmed and reported as a warning in ``trimmed_names`` (and
+   logged); every reference to it uses the trimmed name.
 
 The whole import builds into a temporary directory next to the target and
 is moved into place only on success: a failed import leaves no database at
@@ -60,8 +62,24 @@ log = logging.getLogger("nodal_spine_import")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+#: The whitespace the Rust writer's ``str::trim`` removes (Unicode
+#: White_Space). Python's ``str.strip()`` differs: it also strips
+#: U+001C..U+001F, which Rust keeps, so the set is spelled out.
+_WHITESPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0 "
+    + "".join(chr(c) for c in range(0x2000, 0x200B))
+    + "    　"
+)
+
+
+def _trim(name):
+    """``name`` without leading/trailing whitespace (as the Rust writer's
+    ``str::trim``); non-strings pass through."""
+    return name.strip(_WHITESPACE) if isinstance(name, str) else name
+
+
 def _name_ok(name: str) -> bool:
-    return bool(name) and name == name.strip() and _CONTROL_RE.search(name) is None
+    return bool(name) and name == _trim(name) and _CONTROL_RE.search(name) is None
 
 #: The spinedb_api open contract, pinned by test: never create, never upgrade.
 OPEN_KWARGS = {"create": False, "upgrade": False}
@@ -177,6 +195,121 @@ class DuplicateKey:
             f"({entries}); kept the last, entry {self.kept}. A map holds one "
             "value per key: fix the source so the key appears once."
         )
+
+
+@dataclass
+class TrimmedName:
+    """A source name with leading or trailing whitespace.
+
+    nodal-db names are trimmed, so the importer imports the name without the
+    whitespace, and every reference to it (class dimensions, entity
+    elements, scenario alternatives, activation rows, values, list bindings)
+    uses the trimmed name."""
+
+    #: ``entity_class``, ``parameter_definition``, ``entity``,
+    #: ``alternative``, ``scenario`` or ``value_list``
+    kind: str
+    #: the (trimmed) class of a parameter or entity name, else ``None``
+    scope: str | None
+    original: str
+    imported_as: str
+
+    def describe(self) -> str:
+        where = f" in class {self.scope!r}" if self.scope is not None else ""
+        return (
+            f"{self.kind} {self.original!r}{where} has leading or trailing "
+            f"whitespace; imported as {self.imported_as!r}. Names in nodal-db "
+            "are trimmed: fix the source name to stop this warning."
+        )
+
+
+#: The name kinds the importer trims: (kind, source section, the field
+#: naming the class the name belongs to, or ``None`` for one namespace).
+_NAME_KINDS = (
+    ("entity_class", "classes", None),
+    ("parameter_definition", "defs", "entity_class_name"),
+    ("entity", "entities", "entity_class_name"),
+    ("alternative", "alternatives", None),
+    ("scenario", "scenarios", None),
+    ("value_list", "value_lists", None),
+)
+
+#: Source fields that REFER to a name (one name or a tuple of names); they
+#: are trimmed in every row that has them, with the same rule, so each
+#: lands on the trimmed name it refers to.
+_NAME_REFS = (
+    "entity_class_name", "parameter_definition_name", "entity_name",
+    "alternative_name", "scenario_name", "parameter_value_list_name",
+    "dimension_name_list", "element_name_list", "entity_byname",
+)
+
+
+def _trim_names(sections: dict, report) -> dict:
+    """Trim the names in the source rows and every reference to them.
+
+    ``sections`` maps a section to its rows (extended item dicts); the
+    sections named in :data:`_NAME_KINDS` have their ``name`` trimmed, and
+    every section has its :data:`_NAME_REFS` fields trimmed. Records one
+    :class:`TrimmedName` per trimmed name in ``report.trimmed_names`` (and
+    logs it). Raises :class:`ImportError_` when a name is empty after
+    trimming, or when trimming makes names of one kind and scope equal
+    (case-insensitively, as nodal-db resolves names). Returns new rows; the
+    input rows are left as they are."""
+    collisions = []
+    for kind, section, scope_field in _NAME_KINDS:
+        groups: dict[tuple, list] = {}
+        for row in sections[section]:
+            original = row["name"]
+            if not isinstance(original, str):
+                continue
+            trimmed = _trim(original)
+            scope = _trim(row[scope_field]) if scope_field else None
+            where = f" in class {scope!r}" if scope is not None else ""
+            if original and not trimmed:
+                raise ImportError_(
+                    f"{kind} name {original!r}{where} is empty once its "
+                    "whitespace is trimmed — refusing to import an empty name"
+                )
+            groups.setdefault((scope, trimmed.lower()), []).append(original)
+            if trimmed != original:
+                t = TrimmedName(kind, scope, original, trimmed)
+                report.trimmed_names.append(t)
+                log.warning("trimmed name: %s", t.describe())
+        for (scope, _), originals in groups.items():
+            if len(originals) > 1 and any(o != _trim(o) for o in originals):
+                where = f" in class {scope!r}" if scope is not None else ""
+                same = {_trim(o) for o in originals}
+                collisions.append(
+                    f"{kind} names " + ", ".join(repr(o) for o in originals)
+                    + where + " are the same name once trimmed ("
+                    + (repr(next(iter(same))) if len(same) == 1
+                       else "case-insensitively, as nodal-db resolves names")
+                    + ")"
+                )
+    if collisions:
+        raise ImportError_(
+            "trimming leading/trailing whitespace would merge distinct source "
+            "names: " + "; ".join(collisions) + ". Rename them in the source "
+            "so each name is distinct once trimmed."
+        )
+
+    def trim_row(row, has_name):
+        out = dict(row)
+        if has_name:
+            out["name"] = _trim(out["name"])
+        for f in _NAME_REFS:
+            v = out.get(f)
+            if isinstance(v, str):
+                out[f] = _trim(v)
+            elif isinstance(v, (tuple, list)):
+                out[f] = type(v)(_trim(x) for x in v)
+        return out
+
+    named = {section for _, section, _ in _NAME_KINDS}
+    return {
+        section: [trim_row(r, section in named) for r in rows]
+        for section, rows in sections.items()
+    }
 
 
 def _show_key(key) -> str:
@@ -306,6 +439,9 @@ class ImportReport:
     #: :class:`DuplicateKey` per repeated key: the import kept the last
     #: entry; each describes the problem in the source data.
     duplicate_keys: list = field(default_factory=list)
+    #: source names with leading or trailing whitespace, one
+    #: :class:`TrimmedName` per name: the import used the trimmed name.
+    trimmed_names: list = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
@@ -315,7 +451,11 @@ class ImportReport:
             f"drift rows: {len(self.drift_table)}",
             f"residue items: {len(self.residue)}",
             f"duplicate keys: {len(self.duplicate_keys)} (last entry kept)",
+            f"trimmed names: {len(self.trimmed_names)} (imported without "
+            "leading/trailing whitespace)",
         ]
+        for t in self.trimmed_names[:50]:
+            lines.append(f"  trimmed name: {t.describe()}")
         for d in self.duplicate_keys[:50]:
             lines.append(f"  duplicate key: {d.describe()}")
         for r in self.residue[:50]:
@@ -448,6 +588,22 @@ class SpineImporter:
             ent_alts = ext(src.find_entity_alternatives())
             values = ext(src.find_parameter_values())
             declared_types = ext(src.find_parameter_types())
+
+            # nodal-db names are trimmed: import whitespace-padded names
+            # trimmed (a warning per name), and every reference with them.
+            trimmed = _trim_names({
+                "classes": classes, "defs": defs, "value_lists": value_lists,
+                "list_values": list_values, "alternatives": alternatives,
+                "scenarios": scenarios, "scen_alts": scen_alts,
+                "entities": entities, "ent_alts": ent_alts, "values": values,
+                "declared_types": declared_types,
+            }, rep)
+            classes, defs = trimmed["classes"], trimmed["defs"]
+            value_lists, list_values = trimmed["value_lists"], trimmed["list_values"]
+            alternatives, scenarios = trimmed["alternatives"], trimmed["scenarios"]
+            scen_alts, entities = trimmed["scen_alts"], trimmed["entities"]
+            ent_alts, values = trimmed["ent_alts"], trimmed["values"]
+            declared_types = trimmed["declared_types"]
 
             # nodal-db name resolution is case-insensitive; Spine's is not.
             # Case-colliding names cannot import faithfully — refuse loudly.

@@ -19,7 +19,10 @@ Covered:
   metadata items, non-literal defaults, ragged multi-shape values;
 - structural sections (alternatives, scenarios, entities incl. 2-D,
   activation) and value fidelity read back against the Spine source;
-- case-colliding names refuse loudly.
+- case-colliding names refuse loudly;
+- names with leading/trailing whitespace import trimmed with a warning per
+  name, and every reference follows; trimming into another name, or to
+  nothing, refuses.
 
 Run (project venv carries spinedb_api, pytest and the ``nodal_db`` skin;
 rebuild the skin with ``maturin develop`` in ``crates/nodal-db-py`` after core
@@ -701,3 +704,184 @@ def test_existing_target_is_refused_and_left_untouched(tmp_path):
         run_import(tmp_path, spine)
     assert target.read_bytes() == b"not mine to overwrite"
     assert _leftovers(tmp_path) == ["out.duckdb"]
+
+
+# ---------------------------------------------------------------------------
+# Names with leading/trailing whitespace: imported trimmed, with a warning
+# ---------------------------------------------------------------------------
+
+
+def make_padded_spine(tmp_path):
+    """The basic source plus one whitespace-padded name of every kind, each
+    referenced the way the source refers to it: a 2-D class and entity over
+    a padded class and entity, a scenario over a padded alternative, an
+    activation row and values on the padded entity, a list binding to the
+    padded list."""
+    from spinedb_api import DatabaseMapping, Map, to_database
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("alternative", name=" peak")
+        db.add_update_item("entity_class", name="gadget ")
+        db.add_update_item("entity_class", name="gadget__hub",
+                           dimension_name_list=("gadget ", "hub"))
+        db.add_update_item("parameter_value_list", name="speeds\t")
+        for i, member in enumerate(("slow", "fast")):
+            v, t = to_database(member)
+            db.add_update_item("list_value", parameter_value_list_name="speeds\t",
+                               value=v, type=t, index=i)
+        db.add_update_item("parameter_definition", entity_class_name="gadget ",
+                           name=" power")
+        db.add_update_item("parameter_definition", entity_class_name="gadget ",
+                           name="speed", parameter_value_list_name="speeds\t")
+        db.add_update_item("parameter_definition", entity_class_name="gadget__hub",
+                           name="weight")
+        db.add_update_item("entity", entity_class_name="gadget ",
+                           entity_byname=("g1 ",))
+        db.add_update_item("entity", entity_class_name="gadget__hub",
+                           entity_byname=("g1 ", "h1"), name="g1-h1")
+        _value(db, "gadget ", ["g1 "], " power", "Base", 3.0)
+        _value(db, "gadget ", ["g1 "], " power", " peak", 7.0)
+        _value(db, "gadget ", ["g1 "], "speed", "Base", "fast")
+        _value(db, "gadget__hub", ["g1 ", "h1"], "weight", " peak",
+               Map(["a ", "b"], [1.0, 2.0], index_name="slot"))
+        db.add_update_item("scenario", name="sc_peak ")
+        db.add_update_item("scenario_alternative", scenario_name="sc_peak ",
+                           alternative_name="Base", rank=1)
+        db.add_update_item("scenario_alternative", scenario_name="sc_peak ",
+                           alternative_name=" peak", rank=2)
+        db.add_update_item("entity_alternative", entity_class_name="gadget ",
+                           entity_byname=("g1 ",), alternative_name=" peak",
+                           active=False)
+        db.commit_session("padded names")
+    return spine
+
+
+def test_padded_names_import_trimmed_with_a_warning_each(tmp_path, caplog):
+    spine = make_padded_spine(tmp_path)
+    with caplog.at_level("WARNING", logger="nodal_spine_import"):
+        rep, out = run_import(tmp_path, spine)
+
+    got = sorted((t.kind, t.scope or "", t.original, t.imported_as)
+                 for t in rep.trimmed_names)
+    assert got == sorted([
+        ("alternative", "", " peak", "peak"),
+        ("entity_class", "", "gadget ", "gadget"),
+        ("value_list", "", "speeds\t", "speeds"),
+        ("parameter_definition", "gadget", " power", "power"),
+        ("entity", "gadget", "g1 ", "g1"),
+        ("scenario", "", "sc_peak ", "sc_peak"),
+    ]), rep.summary()
+    entity_warning = next(t for t in rep.trimmed_names if t.kind == "entity")
+    text = entity_warning.describe()
+    assert text == (
+        "entity 'g1 ' in class 'gadget' has leading or trailing whitespace; "
+        "imported as 'g1'. Names in nodal-db are trimmed: fix the source name "
+        "to stop this warning."
+    )
+    assert "trimmed names: 6 (imported without leading/trailing whitespace)" in (
+        rep.summary())
+    assert f"  trimmed name: {text}" in rep.summary()
+    for t in rep.trimmed_names:
+        assert any(t.describe() in r.getMessage() for r in caplog.records), t
+    assert rep.residue == [], rep.summary()
+
+    db = _nodal(out)
+    assert "peak" in {r["name"] for r in _rows(db, "SELECT name FROM alternative_current")}
+    assert {"gadget", "gadget__hub"} <= {
+        r["name"] for r in _rows(db, "SELECT name FROM entity_class_current")}
+    assert {"g1", "g1-h1"} <= {r["name"] for r in _rows(db, "SELECT name FROM entity_current")}
+    assert "sc_peak" in {r["name"] for r in _rows(db, "SELECT name FROM scenario_current")}
+    assert "speeds" in {
+        r["name"] for r in _rows(db, "SELECT name FROM parameter_value_list_current")}
+    assert _declared(db, "gadget", "power"), "parameter declared under its trimmed name"
+
+
+def test_references_to_padded_names_use_the_trimmed_names(tmp_path):
+    _rep, out = run_import(tmp_path, make_padded_spine(tmp_path))
+    db = _nodal(out)
+
+    # scenario -> the trimmed alternative, in rank order
+    assert _rows(db, (
+        "SELECT a.name FROM scenario_alternative_current sa "
+        "JOIN scenario_current s ON s.id = sa.scenario_id "
+        "JOIN alternative_current a ON a.id = sa.alternative_id "
+        "WHERE s.name = 'sc_peak' ORDER BY sa.rank")) == [
+            {"name": "Base"}, {"name": "peak"}]
+    # values on the trimmed entity, parameter and alternative
+    assert _nodal_values(db, "gadget", "power") == {
+        ("g1", "Base"): ("scalar", 3.0), ("g1", "peak"): ("scalar", 7.0)}
+    assert _nodal_values(db, "gadget", "speed") == {("g1", "Base"): ("scalar", "fast")}
+    # the 2-D class over the trimmed class; map labels are data and keep
+    # their whitespace
+    assert _rows(db, (
+        "SELECT c.name FROM entity_class_dimension d "
+        "JOIN entity_class_current o ON o.id = d.entity_class_id "
+        "JOIN entity_class_current c ON c.id = d.dimension_class_id "
+        "WHERE d.valid_to_commit IS NULL AND o.name = 'gadget__hub' "
+        "ORDER BY d.position")) == [{"name": "gadget"}, {"name": "hub"}]
+    assert _cells(db, "gadget__hub", "weight", 1) == [(("a ",), 1.0), (("b",), 2.0)]
+    # the activation row on the trimmed entity and alternative
+    assert _rows(db, (
+        "SELECT ea.active FROM entity_alternative_current ea "
+        "JOIN entity_current e ON e.id = ea.entity_id "
+        "JOIN alternative_current a ON a.id = ea.alternative_id "
+        "WHERE e.name = 'g1' AND a.name = 'peak'")) == [{"active": False}]
+    # the list binding to the trimmed list
+    assert _rows(db, (
+        "SELECT l.name FROM parameter_definition_current pd "
+        "JOIN parameter_value_list_current l ON l.id = pd.parameter_value_list_id "
+        "WHERE pd.name = 'speed'")) == [{"name": "speeds"}]
+
+
+def test_trimming_into_an_existing_name_refuses(tmp_path):
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("entity", entity_class_name="widget",
+                           entity_byname=("w1 ",))
+        db.add_update_item("alternative", name=" HIGH")
+        db.commit_session("collisions")
+    with pytest.raises(ImportError_) as err:
+        run_import(tmp_path, spine)
+    msg = str(err.value)
+    assert "would merge distinct source names" in msg
+    assert ("entity names 'w1', 'w1 ' in class 'widget' are the same name once "
+            "trimmed ('w1')") in msg
+    assert ("alternative names 'high', ' HIGH' are the same name once trimmed "
+            "(case-insensitively, as nodal-db resolves names)") in msg
+    assert _leftovers(tmp_path) == []
+
+
+def test_name_empty_after_trimming_refuses(tmp_path):
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("parameter_definition", entity_class_name="hub", name="  ")
+        db.commit_session("blank name")
+    with pytest.raises(ImportError_, match=(
+            r"parameter_definition name '  ' in class 'hub' is empty once its "
+            r"whitespace is trimmed")):
+        run_import(tmp_path, spine)
+    assert _leftovers(tmp_path) == []
+
+
+def test_interior_control_character_still_refuses(tmp_path):
+    """Trimming covers leading/trailing whitespace only: the other name
+    rules stay errors."""
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("alternative", name=" bad\x01name ")
+        db.commit_session("control character")
+    with pytest.raises(ImportError_, match="free of control characters"):
+        run_import(tmp_path, spine)
+
+
+def test_clean_source_reports_no_trimmed_names(tmp_path):
+    rep, _out = run_import(tmp_path, make_basic_spine(tmp_path))
+    assert rep.trimmed_names == []
+    assert "trimmed names: 0" in rep.summary()

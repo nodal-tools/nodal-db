@@ -448,7 +448,9 @@ open excluded; n = 15 warm, 5 cold).
   On 1.5.5 with the composite key (§2) the same reads took 110-118 ms.
 - The 51-key read, which falls back to a sequential scan, measured 24 ms
   warm here against 88 ms in §4b; its cold figure (179 ms) matches §4b
-  (195 ms). The warm gain is not explained here.
+  (195 ms). The warm gain is not explained here. (Re-measured
+  2026-10-26: not reproducible. Six bench runs on this code and on
+  current `main`, on files built by either, gave 90-114 ms; see §11.2.)
 - (d) and the whole-parameter `read_parameter` remain the slow path
   (3-4 s): the canonical long form at 8.76 M rows, as in §4b.
 
@@ -828,10 +830,17 @@ Empty-schema baseline for "net": 2 109 440 B, as in §6.
   sizes (30.5 and 26.8 MiB; the API-loop file is 0.2 MiB smaller here).
   §6 → now combines the set-based long write (§8) and the index reorder
   (§7.3).
-- The dense ingests are 0.53-0.77 of §6. This run does not attribute that
-  gain to a particular change; the set-based array write is the one that
-  touches this path (`crates/nodal-db-core/benches/RESULTS.md`, set-based
-  long, array and delete write).
+- The dense ingests are 0.53-0.77 of §6. Attributed 2026-10-26 by paired
+  `dense1k` runs on per-commit builds (full scale, 3 rounds, load 2-11).
+  Three changes account for the gain; the others in between are flat:
+  - `6030c6d`, set-based entity resolution (one lookup per segment
+    instead of a sequential-scan name lookup per entity): API
+    11.6 → 9.4 s, IPC 10.0 → 8.2 s.
+  - `a66732b`, set-based long write: its axis dedup drops the two
+    `count(*) FROM axis` probes per value, arrays included. API
+    9.4 → 8.9 s, IPC 8.2 → 7.6 s.
+  - `fc9629e`, set-based array write: API 8.9 → 6.5 s, IPC
+    7.6 → 5.3 s.
 - The 10k API loop's per-100-entity commit runs 0.44-1.29 s (median
   0.89 s, first 0.44 s, last 1.29 s), against 0.81-1.55 s (median 1.18 s)
   in §6. It still grows with table size.
@@ -875,8 +884,19 @@ comparison.
 - The 51-key read (the sequential-scan fallback) is 89.6 ms warm here,
   against 24.0 ms in §6 and 88 ms in §4b; its cold figure (192 ms)
   matches both. §6 called its 24 ms "not explained"; this run agrees with
-  §4b, so the §6 warm figure looks like the outlier rather than this one
-  a regression. Not diagnosed further.
+  §4b, so the §6 warm figure is the outlier, not a regression in this
+  run. Re-measured 2026-10-26: the binaries of `eaf2551` (§6) and
+  `1507cf5` built their own 10k IPC files, and four more `reads` runs used
+  one of those files. All six gave 90-114 ms warm min for the 51-key
+  read (load 3.7-21). Python duckdb 2.0.0 on the same file gave 84-93 ms
+  for the macro and 85 ms for a plain `array_id BETWEEN` scan of the
+  same 51 rows.
+  The scan is single-threaded (one row group; 1, 4 and 8 threads give
+  the same time), so ~89 ms is the reproducible figure. Earlier logs show
+  24-25 ms in two whole runs (§6 and one on 2026-10-23) and 88-90 ms in
+  two others on nearly the same code. In §6 the API-built file was fast
+  too (48.8 against 103 ms here). So the fast reads depended on the
+  run's state, not on code or file. The DuckDB mechanism was not found.
 
 **`value_array_cells` gate** (`cellsgate`, threads = 8, 21 randomized
 pairs, threshold 1.10): old view median 7 534 ms, new 7 915 ms; per-pair

@@ -691,8 +691,14 @@ Compaction 2.6 s, extract 1.6 s; 31 141 rows left out, no axis dropped
 16.8 MiB (36.9 ms); long scan 1.2 / 1.4 / 1.2 ms, array point read
 2.3 / 2.2 / 2.5 ms; compaction 2.1 s, extract 1.4 s; the same 31 141
 rows left out, extract 2.6× smaller than the compacted source. The
-compacted and extract sizes are unchanged; the source is 1.8 MiB larger
-(not diagnosed here).
+compacted and extract sizes are unchanged; the source is 1.8 MiB larger.
+Bisected 2026-10-26 (the sizes are deterministic): it comes from
+`65d5484`, which only lengthens the `value_timeline` view's DDL. The table
+data blocks are identical (136). The file has 1 more used block and 8
+more free blocks: the slightly larger catalog changes how blocks are
+allocated across the build's checkpoints. Compaction removes the
+difference. Earlier, `226d817` (four unused indexes dropped) had made the
+source 0.5 MiB smaller (73.0 MiB).
 
 Reading, honestly scoped:
 

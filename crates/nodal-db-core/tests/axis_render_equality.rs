@@ -23,7 +23,7 @@
 //! kind (parametric hourly and monthly datetime, irregular datetime,
 //! parametric and irregular integer, parametric and irregular float through
 //! `history::write_value`, labels with a declared order, float and int
-//! arrays, ranks 1 to 4, history, a delete), plus raw SQL for what it cannot
+//! arrays, ranks 1 to 4, history of every tier, deletes), plus raw SQL for what it cannot
 //! (periods, time patterns, mixed months+micros steps, adversarial
 //! datetime steps, out-of-range and negative positions, unused axes of
 //! every kind, a scenario). The conformance-vector-21 float axis (the FMA
@@ -414,6 +414,31 @@ fn fixture(dir: &Path) -> PathBuf {
         WriteOptions::default(),
     )
     .expect("delete");
+    // closed-out long and scalar rows (the new read_parameter filters each
+    // tier scan itself): replace two long values (on a new stored axis) and
+    // two scalars, delete one long value
+    write(
+        &db,
+        "node",
+        "ragged",
+        "Base",
+        int_series(&NAMES[..2], &[0, 2, 5, 12], true),
+        &[],
+    );
+    write(&db, "node", "cap", "Base", scalars(&NAMES[..2], 99.0), &[]);
+    delete_values(
+        &db,
+        vec![DeleteKey {
+            class: "node".into(),
+            parameter: "ragged".into(),
+            alternative: "Base".into(),
+            entity: "n3".into(),
+        }],
+        "tester",
+        "delete one long",
+        WriteOptions::default(),
+    )
+    .expect("delete long");
 
     core_float_axes(&db);
     raw_sql_additions(&db);
@@ -901,6 +926,8 @@ fn rewritten_reads_render_bit_identically_to_the_frozen_oracle() {
     }
     for (what, sql) in [
         ("closed-out value rows", "SELECT count(*) FROM value_array_hist"),
+        ("closed-out long rows", "SELECT count(*) FROM value_long WHERE valid_to_commit IS NOT NULL"),
+        ("closed-out scalar rows", "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NOT NULL"),
         ("a rank-4 value", "SELECT count(*) FROM value_long WHERE axis4_id IS NOT NULL"),
         ("int arrays", "SELECT count(*) FROM value_array WHERE values_int IS NOT NULL"),
         ("negative positions", "SELECT count(*) FROM value_long WHERE i1_pos < 0"),

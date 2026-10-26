@@ -1839,16 +1839,29 @@ def main():
           f" expression ({d[2]} random (start, micros step, pos))", d[0] == 0 and d[1] == 0
           and d[2] > 100000, str(d))
     # The in-use set: unused axes contribute no stored positions.
+    # An unused stored axis is added in a rolled-back transaction, so the
+    # filter has something to drop. (The NULL axis ids of lower ranks are
+    # dropped from the NOT IN list: one NULL there makes the predicate NULL
+    # for every row, and the check vacuous.)
+    con.execute("BEGIN")
+    con.execute("""INSERT INTO axis (id, kind, length, content_hash) VALUES (990001, 'datetime', 2, 990001);
+                   INSERT INTO axis_datetime VALUES (990001, 0, TIMESTAMP '1990-01-01'),
+                                                    (990001, 1, TIMESTAMP '1991-01-01')""")
     n_unused = one("""SELECT count(*) FROM axis_position_stored_in_use(NULL)
-                      WHERE axis_id NOT IN (SELECT axis1_id FROM value_long WHERE valid_to_commit IS NULL
+                      WHERE axis_id NOT IN (SELECT a FROM (
+                          SELECT axis1_id AS a FROM value_long WHERE valid_to_commit IS NULL
                           UNION SELECT axis2_id FROM value_long WHERE valid_to_commit IS NULL
                           UNION SELECT axis3_id FROM value_long WHERE valid_to_commit IS NULL
                           UNION SELECT axis4_id FROM value_long WHERE valid_to_commit IS NULL
                           UNION SELECT axis1_id FROM value_array UNION SELECT axis2_id FROM value_array
-                          UNION SELECT axis3_id FROM value_array UNION SELECT axis4_id FROM value_array)""")[0]
+                          UNION SELECT axis3_id FROM value_array UNION SELECT axis4_id FROM value_array)
+                        WHERE a IS NOT NULL)""")[0]
+    n_stored = one("SELECT count(*) FROM axis_position_stored")[0]
     n_in_use = one("SELECT count(*) FROM axis_position_stored_in_use(NULL)")[0]
+    con.execute("ROLLBACK")
     check("axis rendering: axis_position_stored_in_use(NULL) holds only axes current values use",
-          n_unused == 0 and n_in_use > 0, f"unused={n_unused} in_use={n_in_use}")
+          n_unused == 0 and 0 < n_in_use < n_stored,
+          f"unused={n_unused} in_use={n_in_use} stored={n_stored}")
 
     # =======================================================================
     # Erasure marker + the as-of guard (erasure_compaction_plan §1, decisions

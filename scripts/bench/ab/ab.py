@@ -362,7 +362,7 @@ def check_arm_caps(arms, caps, threads_used):
                     f"{arm.name}: the DuckDB caps did not take effect: {why}. A DuckDB bump "
                     "may have changed its SLURM_* detection (CONTRIBUTING \"DuckDB upgrades\")")
     log(f"DuckDB caps verified in both arms: threads {sorted(set(threads_used))}, "
-        f"memory {caps.memory_mb} MB (limit {0.8 * caps.memory_mb / 1024:.1f} GiB)")
+        f"memory {caps.memory_mb} MB (limit {0.8 * caps.memory_mb * 1e6 / 1024 ** 3:.1f} GiB)")
 
 
 def size_lines(stdout):

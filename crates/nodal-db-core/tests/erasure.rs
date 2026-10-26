@@ -722,19 +722,28 @@ fn shapes_of(call: &str) -> Vec<String> {
     ]
 }
 
+/// The key `(definition, entity, alternative)` of the one array value under
+/// `alt` (`Node.profile` of n1).
+fn point_asof_key(conn: &Connection, alt: &str) -> (i64, i64, i64) {
+    conn.query_row(
+        "SELECT va.parameter_definition_id, va.entity_id, va.alternative_id \
+         FROM value_array va JOIN alternative al ON al.id = va.alternative_id \
+         WHERE al.name = ?",
+        [alt],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+
+fn point_asof_call_for(key: (i64, i64, i64), c: i64) -> String {
+    let (pd, e, a) = key;
+    format!("{}({c}, {pd}, {e}, {a})", ASOF_POINT_MACROS[0])
+}
+
 /// The point as-of call for runB's `Node.profile` array of n1: a key whose
 /// content survives the erase of runA, so only the guard can make it raise.
 fn point_asof_call(conn: &Connection, c: i64) -> String {
-    let (pd, e, a): (i64, i64, i64) = conn
-        .query_row(
-            "SELECT va.parameter_definition_id, va.entity_id, va.alternative_id \
-             FROM value_array va JOIN alternative al ON al.id = va.alternative_id \
-             WHERE al.name = 'runB'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    format!("{}({c}, {pd}, {e}, {a})", ASOF_POINT_MACROS[0])
+    point_asof_call_for(point_asof_key(conn, "runB"), c)
 }
 
 fn run_shape(conn: &Connection, sql: &str) -> Result<(), duckdb::Error> {
@@ -751,8 +760,10 @@ fn guard_consumer_shape_sweep_all_31_macros() {
 
     // Control direction: pre-erase, every macro is silent in every shape.
     let pre_commit = scalar(&db, "SELECT max(id) FROM \"commit\"");
+    let erased_key;
     {
         let conn = Connection::open(&db).unwrap();
+        erased_key = point_asof_key(&conn, "runA");
         for m in ASOF_MACROS {
             for sql in shapes(m, pre_commit) {
                 run_shape(&conn, &sql)
@@ -792,9 +803,14 @@ fn guard_consumer_shape_sweep_all_31_macros() {
                 .unwrap_or_else(|e| panic!("as-of at the marker commit must succeed: {sql}: {e}"));
         }
     }
-    // The point as-of macro, on a key the erase did not touch: the same two
-    // directions in every shape.
-    for sql in shapes_of(&point_asof_call(&conn, c_erase - 1)) {
+    // The point as-of macro, on a key the erase did not touch and on the
+    // erased key itself (no row left in either leg, so only the guard's
+    // uncorrelated EXISTS can raise): the same two directions in every shape.
+    let before = [
+        point_asof_call(&conn, c_erase - 1),
+        point_asof_call_for(erased_key, c_erase - 1),
+    ];
+    for sql in before.iter().flat_map(|call| shapes_of(call)) {
         match run_shape(&conn, &sql) {
             Ok(()) => panic!("guard FAILED to fire (silent partial history): {sql}"),
             Err(e) => {
@@ -806,7 +822,11 @@ fn guard_consumer_shape_sweep_all_31_macros() {
             }
         }
     }
-    for sql in shapes_of(&point_asof_call(&conn, c_erase)) {
+    let at = [
+        point_asof_call(&conn, c_erase),
+        point_asof_call_for(erased_key, c_erase),
+    ];
+    for sql in at.iter().flat_map(|call| shapes_of(call)) {
         run_shape(&conn, &sql)
             .unwrap_or_else(|e| panic!("as-of at the marker commit must succeed: {sql}: {e}"));
     }

@@ -237,7 +237,8 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// copied. A view or macro change bumps the READ-SURFACE revision instead
 /// (`schema/130_read_surface.sql`; the DDL hash test forces it), which is
 /// what brings it to existing files: a write refreshes an older file's
-/// surface (`read_surface` module, `docs/dev/engine_rules.md` §8). Precedents: the DB-identity metadata row (20fe969) added bootstrap
+/// surface (`read_surface` module, `docs/dev/engine_rules.md` §9).
+/// Precedents: the DB-identity metadata row (20fe969) added bootstrap
 /// data — no bump; the `erasure_marker` base table (0.3) changed the table set
 /// — bump; the `array_id` surrogate key on `value_array` / `value_array_hist`
 /// (this version) changed two tables' insertable columns — bump. Consequence of a bump (erasure_compaction_plan §9 step
@@ -506,7 +507,9 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         .filter(|c| c.status == crate::read_surface::SurfaceStatus::Newer)
         .map(|c| {
             format!(
-                "the read surface of {} ({}) is newer than this nodal-db's ({}); the                  compacted file carries this build's views and macros (a newer nodal-db                  refreshes them on its next write)",
+                "the read surface of {} ({}) is newer than this nodal-db's ({}); the \
+                 compacted file carries this build's views and macros (a newer nodal-db \
+                 refreshes them on its next write)",
                 db_path.display(),
                 c.found_label(),
                 c.expected

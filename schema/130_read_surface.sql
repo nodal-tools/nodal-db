@@ -14,7 +14,7 @@
 -- revision: bumped on every change to the normalized text of 070-120
 --   (comments other than the `@surface:` tags and whitespace do not count).
 -- ddl_hash: the xxh3-64 hash (16 hex digits) of that normalized text. A
---   test (crates/nodal-db-core/tests/read_surface_contract.rs) recomputes it
+--   test (crates/nodal-db-core/tests/read_surface.rs) recomputes it
 --   and fails, printing the new value, when the DDL changed without a bump.
 --
 -- The core reads this macro before a write and replaces the views and

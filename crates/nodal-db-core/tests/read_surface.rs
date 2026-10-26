@@ -472,13 +472,35 @@ fn a_write_refreshes_an_old_file_and_keeps_user_views() {
         .is_err());
     c.close().unwrap();
 
-    let r = write(&db, "Node", "capacity", "High", scalars(&["n1"], 99.0));
+    // the write that refreshes is pinned to the head it read: the refresh
+    // writes no commit row, so the precondition still holds
+    let head = api::head_commit(&db).unwrap();
+    let r = write_parameter(
+        &db,
+        "Node",
+        "capacity",
+        "High",
+        scalars(&["n1"], 99.0),
+        &[],
+        WriteOptions {
+            expect_commit: Some(head),
+            ..WriteOptions::default()
+        },
+        "tester",
+        "",
+    )
+    .expect("expect_commit holds across the refresh");
     assert!(
         r.read_surface_warning.is_none(),
         "{:?}",
         r.read_surface_warning
     );
     assert_eq!(status(&db), SurfaceStatus::Current);
+    assert_eq!(
+        api::head_commit(&db).unwrap(),
+        head + 1,
+        "one commit: the write's"
+    );
 
     let c = raw(&db);
     let after: i64 = c
@@ -638,6 +660,20 @@ fn a_newer_file_is_never_downgraded_and_reads_use_its_surface() {
         let closure = read_parameter(&db, "Node", "demand", alt).unwrap();
         assert_eq!(rows(&full), rows(&closure), "{alt}");
         assert_eq!(full.num_rows(), if alt == "Base" { 144 } else { 96 });
+        let full = with_read(&db, |c| {
+            let mut st = c.prepare(
+                "SELECT * FROM read_values('Node', 'demand', ['n1', 'N2', 'nx']::VARCHAR[], [?]::VARCHAR[])",
+            )?;
+            let arrow = st.query_arrow([alt])?;
+            let schema = arrow.get_schema();
+            let batches: Vec<RecordBatch> = arrow.collect();
+            Ok(duckdb::arrow::compute::concat_batches(&schema, &batches)?)
+        })
+        .unwrap();
+        let closure =
+            read_values(&db, "Node", "demand", &["n1", "N2", "nx"], Some(&[alt])).unwrap();
+        assert_eq!(rows(&full), rows(&closure), "read_values {alt}");
+        assert_eq!(full.num_rows(), 96);
     }
     // --force downgrades (development only)
     let r = api::refresh_read_surface(&db, true).unwrap();

@@ -71,7 +71,7 @@ read-surface revision in `schema/130_read_surface.sql` (the
 listing and reference with `just docs-gen`, which refuses a breaking
 change without a contract-major bump. The procedure, and why it is what
 brings a fix to existing files, is in
-[`docs/dev/engine_rules.md` §8](docs/dev/engine_rules.md). Two local
+[`docs/dev/engine_rules.md` §9](docs/dev/engine_rules.md#9-changing-a-read-surface-object). Two local
 builds whose surface DDL differs at the same revision refresh each
 other's files on every write (about 0.2 s each): bump the revision in a
 branch as soon as its DDL changes.

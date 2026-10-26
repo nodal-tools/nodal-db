@@ -984,6 +984,81 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), b"new");
     }
 
+    /// The derived-view self-check is not vacuous: the source side reads
+    /// the SOURCE's rows through this build's definitions (if the temp
+    /// copies bound to the default catalog instead, both sides would read
+    /// the extract and a source with a value the other file lacks would
+    /// pass), and the copies are gone and the extract is the default
+    /// catalog again when the check returns.
+    #[test]
+    fn derived_view_check_compares_the_two_files() {
+        use duckdb::arrow::array::{ArrayRef, Float64Array, StringArray};
+        use duckdb::arrow::datatypes::{DataType, Field, Schema};
+        use duckdb::arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.duckdb");
+        let other = dir.path().join("other.duckdb");
+        for p in [&src, &other] {
+            crate::schema_init::init_schema_with_default(p, Some("Base")).unwrap();
+        }
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("entity", DataType::Utf8, false),
+                Field::new("value", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["n1"])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        crate::api::write_parameter(
+            &src,
+            "Node",
+            "capacity",
+            "Base",
+            batch,
+            &[],
+            crate::types::WriteOptions::default(),
+            "t",
+            "",
+        )
+        .unwrap();
+        let check_against = |dest: &Path| -> Result<Option<String>, DbError> {
+            let conn = open_with_retry(dest, AccessMode::ReadWrite).unwrap();
+            attach_source_ro(&conn, &src).unwrap();
+            let r = self_check_derived_views(&conn);
+            let temps: i64 = conn
+                .query_row(
+                    "SELECT (SELECT count(*) FROM duckdb_views() WHERE temporary AND NOT internal) \
+                          + (SELECT count(*) FROM duckdb_functions() \
+                             WHERE database_name = 'temp' AND NOT internal \
+                               AND function_type IN ('macro', 'table_macro'))",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(temps, 0, "the overlay is dropped after the source side");
+            let db: String = conn
+                .query_row("SELECT current_database()", [], |r| r.get(0))
+                .unwrap();
+            assert_ne!(db, SRC, "switched back to the extract side");
+            conn.close().unwrap();
+            r
+        };
+        let e = check_against(&other).expect_err("a value only the source has must fail");
+        assert!(e.to_string().contains("value_keys"), "{e}");
+        let copy = dir.path().join("copy.duckdb");
+        fs::copy(&src, &copy).unwrap();
+        assert_eq!(
+            check_against(&copy).unwrap(),
+            None,
+            "identical content passes"
+        );
+    }
+
     /// Every base table is classed, and the classes fit the live catalog.
     #[test]
     fn selection_covers_the_catalog() {

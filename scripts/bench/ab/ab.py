@@ -47,8 +47,10 @@ rerun (FAIL again -> FAIL, else FLAKY). A run whose foreign load (below)
 drifts > 2x (the median of its first 3 pairs vs its last 3, floored at
 nproc/16 cores) is rerun once, then marked LOAD-DRIFT. Sizes take 3
 samples per arm and gate max(C) / min(B). Every sample's result check must
-pass in both arms and the arms' result digests must be equal; otherwise
-WRONG RESULT, and no ratio.
+pass in both arms and the arms' result digests must be equal (a row
+digest over the logical columns both arms have, so a column appended to a
+read macro in one arm is not a difference); otherwise WRONG RESULT, and no
+ratio.
 
 Exit status: 0 every metric PASS / ALLOWED / SKIPPED; 1 a FAIL; 2 an
 INCONCLUSIVE / FLAKY / LOAD-DRIFT and no FAIL; 3 a build or harness error

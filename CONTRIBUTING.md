@@ -216,7 +216,10 @@ a commit, an open or a CHECKPOINT, 1.02 for file sizes. A speed-up is
 reported but never gates. A FAIL is re-measured by an independent run and
 stays a FAIL only if that run fails too. Every sample also checks its
 result (row counts, read-back of written keys) and prints a digest of the
-logical result; the two arms' digests must be equal.
+logical result; the two arms' digests must be equal. A row digest is
+compared over the columns both arms have, by position, so a column
+appended to a read macro (a read-surface revision) is not a wrong result;
+a changed value in an existing column still is.
 
 **Verdicts and exit status** (the table and `target-ab/runs/*/results.json`):
 

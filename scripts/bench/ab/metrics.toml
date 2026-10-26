@@ -4,7 +4,9 @@
 # CHECK (`check`, required: the runner refuses a metric without one,
 # critique M4). Every sample's fixed check runs in the harness; the arms'
 # result digests must be equal (`digest_exclude` lists digest fields a
-# metric may legitimately differ in). Gate metrics use only the public
+# metric may legitimately differ in; row digests, `*_phash`, are compared
+# over the logical columns both arms have, so an appended column is not a
+# difference). Gate metrics use only the public
 # surface: api::*, the SQL read macros and tables, the nodal-db CLI.
 #
 # Thresholds apply to the upper bound of the median ratio's 95 % CI.

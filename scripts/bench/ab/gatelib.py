@@ -420,11 +420,36 @@ def load_ends(loads, k=3):
 
 # ------------------------------------------------------------- measuring
 
+PREFIX_SUFFIX = "_phash"
+
+
+def prefix_digest_equal(b, c):
+    """Two `_phash` digest values (the harness's `RowHash::prefix_digest`:
+    comma-separated per-column prefix sums, `-` for no column) agree on the
+    columns both arms have: compared at the longest common prefix, so a
+    column appended in one arm (a read-surface revision that appends to a
+    stable object) is not a wrong result, while a changed value in any
+    common column still is. A missing field never agrees."""
+    if b is None or c is None:
+        return b == c
+    pb = [] if b == "-" else b.split(",")
+    pc = [] if c == "-" else c.split(",")
+    k = min(len(pb), len(pc))
+    return k == 0 or pb[k - 1] == pc[k - 1]
+
+
 def compare_digests(metric, b, c):
     """Raise WrongResult unless the two digests agree on every field not
-    excluded by the metric (§3.4 item 2)."""
+    excluded by the metric (§3.4 item 2); `*_phash` fields over the columns
+    both arms have (`prefix_digest_equal`)."""
     keys = (set(b) | set(c)) - metric.digest_exclude
-    diff = sorted(k for k in keys if b.get(k) != c.get(k))
+
+    def same(k):
+        if k.endswith(PREFIX_SUFFIX):
+            return prefix_digest_equal(b.get(k), c.get(k))
+        return b.get(k) == c.get(k)
+
+    diff = sorted(k for k in keys if not same(k))
     if diff:
         raise WrongResult(
             "arm digests differ: " + "; ".join(f"{k}: base {b.get(k)} cand {c.get(k)}" for k in diff)

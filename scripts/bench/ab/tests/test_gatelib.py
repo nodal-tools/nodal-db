@@ -526,6 +526,40 @@ class ResultChecks(unittest.TestCase):
         self.assertIn("hash", r["error"])
         self.assertEqual(g.exit_code([r]), 4)
 
+    def test_prefix_digest_compares_the_common_columns(self):
+        # an appended column (cand has 3 prefixes, base 2) is not a wrong result
+        s = Script([1.0] * 30, digests={"base": {"read_rows": "10", "read_phash": "aa,bb"},
+                                        "cand": {"read_rows": "10", "read_phash": "aa,bb,cc"}})
+        r = g.gate_metric(metric(), s, PLAN, random.Random(1), flat_load)
+        self.assertEqual(r["verdict"], g.PASS)
+        # a changed value in a common column is
+        s = Script([1.0] * 30, digests={"base": {"read_rows": "10", "read_phash": "aa,bb"},
+                                        "cand": {"read_rows": "10", "read_phash": "aa,bx,cc"}})
+        r = g.gate_metric(metric(), s, PLAN, random.Random(1), flat_load)
+        self.assertEqual(r["verdict"], g.WRONG)
+        self.assertIn("read_phash", r["error"])
+        # the row count stays exact
+        s = Script([1.0] * 30, digests={"base": {"read_rows": "10", "read_phash": "aa"},
+                                        "cand": {"read_rows": "11", "read_phash": "aa"}})
+        r = g.gate_metric(metric(), s, PLAN, random.Random(1), flat_load)
+        self.assertEqual(r["verdict"], g.WRONG)
+
+    def test_prefix_digest_equal(self):
+        eq = g.prefix_digest_equal
+        self.assertTrue(eq("aa,bb", "aa,bb"))
+        self.assertTrue(eq("aa,bb", "aa,bb,cc"))
+        self.assertTrue(eq("aa,bb,cc", "aa,bb"))
+        self.assertFalse(eq("aa,bb", "aa,bc"))
+        self.assertFalse(eq("aa,bb", "aa,bb~injected"))  # the self-test's wrongvalue
+        self.assertTrue(eq("-", "aa,bb"))  # no common column: nothing to compare
+        self.assertFalse(eq(None, "aa"))
+        self.assertTrue(eq(None, None))
+        # a non-prefix field keeps exact comparison
+        m = metric()
+        with self.assertRaises(g.WrongResult):
+            g.compare_digests(m, {"read_hash": "aa,bb"}, {"read_hash": "aa,bb,cc"})
+        g.compare_digests(m, {"read_phash": "aa,bb"}, {"read_phash": "aa,bb,cc"})
+
     def test_excluded_digest_field_may_differ(self):
         s = Script([1.0] * 30, digests={"base": {"rows": "10", "phys": "1"},
                                         "cand": {"rows": "10", "phys": "2"}})

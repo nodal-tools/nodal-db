@@ -110,9 +110,15 @@ impl Sample {
         self
     }
 
+    /// A result digest: `{key}_rows` (exact) and `{key}_phash`, the
+    /// comma-separated prefix sums (one per logical column, the last over
+    /// the whole row). The runner compares `_phash` fields over the columns
+    /// both arms have (`gatelib.compare_digests`), so a column APPENDED in
+    /// one arm (a read-surface revision) is not a wrong result, while a
+    /// changed value in a common column still is.
     pub fn hash(self, key: &str, h: &RowHash) -> Self {
         self.with(&format!("{key}_rows"), h.rows)
-            .with(&format!("{key}_hash"), format!("{:016x}", h.sum))
+            .with(&format!("{key}_phash"), h.prefix_digest())
     }
 
     /// Print the digest line and the value (last line), applying any
@@ -176,10 +182,17 @@ pub fn mean(v: &[f64]) -> f64 {
 /// wrapping sum of per-row hashes over the *logical* columns (every column
 /// except `id`, `*_id`, `*_commit` and `version`: surrogate ids and
 /// physical versions may legitimately differ between the arms' fixtures).
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// `prefix[k]` is the same sum over each row's first `k + 1` logical
+/// columns (the row hash is a chain, so each prefix is one more `mix`), and
+/// `prefix.last()` is `sum`. The runner compares two arms' digests at the
+/// longest prefix both have: an arm whose read surface appends columns
+/// still matches on the columns the other arm has.
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
 pub struct RowHash {
     pub rows: u64,
     pub sum: u64,
+    pub prefix: Vec<u64>,
 }
 
 fn logical(name: &str) -> bool {
@@ -279,11 +292,15 @@ impl RowHash {
                 .filter(|(k, _)| logical(schema.field(*k).name()))
                 .map(|(_, c)| c)
                 .collect();
+            if self.prefix.len() < cols.len() {
+                self.prefix.resize(cols.len(), 0);
+            }
             for i in 0..b.num_rows() {
                 let mut h = FNV;
                 for (k, col) in cols.iter().enumerate() {
                     h = fnv(h, &(k as u64).to_le_bytes());
                     h = fnv(h, &cell(col, i).to_le_bytes());
+                    self.prefix[k] = self.prefix[k].wrapping_add(mix(h));
                 }
                 self.sum = self.sum.wrapping_add(mix(h));
                 self.rows += 1;
@@ -295,6 +312,19 @@ impl RowHash {
         let mut h = RowHash::default();
         h.add(batches);
         h
+    }
+
+    /// `prefix` as the `_phash` digest value: 16-hex-digit sums joined by
+    /// commas (`-` when the result has no logical column).
+    pub fn prefix_digest(&self) -> String {
+        if self.prefix.is_empty() {
+            return "-".into();
+        }
+        self.prefix
+            .iter()
+            .map(|p| format!("{p:016x}"))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -350,4 +380,52 @@ pub fn check_commits(db: &std::path::Path, before: i64, n: i64) {
         after - before == n,
         &format!("expected {n} new commit(s), head went {before} -> {after}"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use duckdb::arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn batch(cols: &[(&str, Vec<i64>)]) -> RecordBatch {
+        let schema = Schema::new(
+            cols.iter()
+                .map(|(n, _)| Field::new(*n, DataType::Int64, false))
+                .collect::<Vec<_>>(),
+        );
+        let arrays: Vec<ArrayRef> = cols
+            .iter()
+            .map(|(_, v)| Arc::new(Int64Array::from(v.clone())) as ArrayRef)
+            .collect();
+        RecordBatch::try_new(Arc::new(schema), arrays).unwrap()
+    }
+
+    /// An appended column leaves every earlier prefix unchanged; a changed
+    /// value changes the prefixes from its column on; the last prefix is
+    /// the whole-row sum; surrogate columns are not counted.
+    #[test]
+    fn prefix_sums_follow_logical_columns() {
+        let a = RowHash::of(&[batch(&[("x", vec![1, 2]), ("y", vec![3, 4])])]);
+        let wide = RowHash::of(&[batch(&[
+            ("x", vec![1, 2]),
+            ("y", vec![3, 4]),
+            ("z", vec![5, 6]),
+        ])]);
+        let changed = RowHash::of(&[batch(&[("x", vec![1, 2]), ("y", vec![3, 9])])]);
+        let with_id = RowHash::of(&[batch(&[
+            ("x", vec![1, 2]),
+            ("entity_id", vec![7, 8]),
+            ("y", vec![3, 4]),
+        ])]);
+        assert_eq!(a.prefix.len(), 2);
+        assert_eq!(*a.prefix.last().unwrap(), a.sum);
+        assert_eq!(wide.prefix[..2], a.prefix[..]);
+        assert_ne!(wide.sum, a.sum);
+        assert_eq!(changed.prefix[0], a.prefix[0]);
+        assert_ne!(changed.prefix[1], a.prefix[1]);
+        assert_eq!(with_id, a);
+        assert_eq!(a.prefix_digest().split(',').count(), 2);
+        assert_eq!(RowHash::default().prefix_digest(), "-");
+    }
 }

@@ -715,7 +715,9 @@ def gate(a):
         t0 = time.time()
         sm = scale_of(m)
         r = None
-        if m.size_from in done:
+        # An injection into the size metric itself needs its own mode (the
+        # source's samples never carry it).
+        if m.size_from in done and not (inject and inject[0] == m.id):
             r = gatelib.size_from_samples(m, *done[m.size_from])
         if r is None:
             sampler = make_sampler(m, arms, sm, a.cpus, inject, dcaps)

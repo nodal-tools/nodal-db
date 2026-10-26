@@ -1,0 +1,16 @@
+[env]
+# Every test, bench and `cargo run` process in this repo runs bounded
+# (perf_gate_footprint_PLAN D6; CONTRIBUTING "Machine budget"):
+# - DuckDB sizes each instance from these (its own SLURM detection): 4
+#   threads and a memory_limit of 80 % of 8 000 MB, instead of every core
+#   and 80 % of RAM per instance. 4, not 1: DuckDB's parallel operators
+#   (where the dict-cache bug and order nondeterminism live) keep running.
+#   Guarded by crates/nodal-db-core/tests/duckdb_env_caps.rs.
+# - RUST_TEST_THREADS: at most 8 tests at once per test binary.
+# A value set in the caller's environment wins (force = false), e.g.
+# `SLURM_CPUS_ON_NODE=8 cargo test` or `RUST_TEST_THREADS=32 cargo test`; an
+# empty SLURM_* value runs DuckDB uncapped (`just full`'s release-build
+# guard step does that).
+SLURM_CPUS_ON_NODE = { value = "4", force = false }
+SLURM_MEM_PER_NODE = { value = "8000", force = false }
+RUST_TEST_THREADS = { value = "8", force = false }

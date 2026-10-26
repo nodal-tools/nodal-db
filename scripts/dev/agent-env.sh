@@ -14,6 +14,9 @@ _root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 _slot="${1:-1}"
 case "$_slot" in [1-8]) ;; *) echo "agent-env: SLOT must be 1-8" >&2; return 1 2>/dev/null || exit 1;; esac
 
+# The DuckDB and test-thread caps of cargo test / run / bench come from the
+# repo's .cargo/config.toml [env] (CONTRIBUTING "Machine budget"), for
+# everyone; this script adds the build side.
 # Budget: ~8 cores per job. Cargo passes this to the cc crate (NUM_JOBS), so
 # it also caps DuckDB's C++ compile, whose peak is roughly 1-1.5 GB per job.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"

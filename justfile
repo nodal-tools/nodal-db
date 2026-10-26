@@ -14,6 +14,9 @@ py := ".venv/bin/python"
 default:
     @just --list
 
+# cargo test runs under the .cargo/config.toml [env] caps (DuckDB 4 threads
+# and an 8 000 MB memory basis per instance, 8 tests at once per binary; a
+# value in your environment wins).
 # Quick gate (every-push tier): workspace tests with slow #[ignore] tests skipped,
 # the DuckDB schema smoke suite, then the perf-gate tool's own unit tests
 # (stdlib, seconds, no builds). Needs the .venv (see `just venv`).
@@ -27,23 +30,52 @@ test:
 t *ARGS:
     cargo test {{ARGS}}
 
+# The release gate's kernel memory ceiling (systemd user scope; "off" = none).
+full_memory_max := env_var_or_default("NODAL_FULL_MEMORY_MAX", "14G")
+
 # Everything, including the #[ignore] slow tests, the schema smoke suite, the
 # criterion benches compiled (not run: they record, they do not gate), the
-# index-scan guards, and last the A/B perf gate at full scale against
-# scripts/bench/ab/BASELINE, which advances to HEAD when every metric passes
-# (commit it with the run's block in benches/RESULTS.md).
+# index-scan guards, and last the A/B perf gate against
+# scripts/bench/ab/BASELINE (each metric at its release_scale: quick for
+# most, full where cost depends on file size), which advances to HEAD when
+# every metric passes (commit it with the run's block in benches/RESULTS.md).
+# Bounded (CONTRIBUTING "Machine budget"): cargo builds at 8 jobs unless
+# CARGO_BUILD_JOBS is set; cargo test under the .cargo/config.toml caps
+# (DuckDB 4 threads, 8 tests at once); the perf gate under its own caps; and
+# the whole run inside a systemd user scope with MemoryMax=14G and no swap
+# (NODAL_FULL_MEMORY_MAX=20G or =off to change it), so a runaway is killed
+# instead of swapping the machine. Without a working `systemd-run --user`
+# it runs without the ceiling and says so.
 # Release gate (pre-release only): slow tests + smoke + A/B perf gate vs BASELINE.
 full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
+    inner=("{{just_executable()}}" --justfile "{{justfile()}}" _full)
+    mem="{{full_memory_max}}"
+    if [ "$mem" != "off" ] && command -v systemd-run >/dev/null 2>&1 \
+        && systemd-run --user --scope --quiet -p MemoryMax=64M true >/dev/null 2>&1; then
+        echo "just full: in a systemd user scope, MemoryMax=$mem, no swap" >&2
+        exec systemd-run --user --scope --quiet -p MemoryMax="$mem" -p MemorySwapMax=0 "${inner[@]}"
+    fi
+    [ "$mem" = "off" ] || echo "just full: systemd-run --user unavailable; no memory ceiling" >&2
+    exec "${inner[@]}"
+
+[private]
+_full:
     cargo test --workspace -- --include-ignored --skip helper_
     {{py}} schema/smoke_test.py
     python3 -m unittest discover -s scripts/bench/ab/tests
     cargo bench --no-run
     # The index-scan guards (array_id; the point-read macros and their
     # dict-cache bug guards; entity lower(name) + axis_hash behind the
-    # OFFSET 0 fence) in a release build: debug-built DuckDB compresses
-    # join keys and needs an optimizer override in those tests, so only a
-    # release run checks the engine as shipped.
-    cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan --test point_read_index_scan
+    # OFFSET 0 fence) and the dict-cache tripwire in a release build:
+    # debug-built DuckDB compresses join keys and needs an optimizer
+    # override in those tests, so only a release run checks the engine as
+    # shipped. Uncapped (empty SLURM_* values: DuckDB sizes itself from the
+    # machine, as in production), so plan shapes and the dict-cache bug are
+    # checked at the engine's production thread count too.
+    SLURM_CPUS_ON_NODE= SLURM_MEM_PER_NODE= cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan --test point_read_index_scan --test duckdb_dict_cache_guard
     python3 scripts/bench/ab/ab.py --release --advance-baseline
 
 # Pre-merge, expected for perf-sensitive branches (CONTRIBUTING "Performance

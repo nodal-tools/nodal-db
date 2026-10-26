@@ -184,24 +184,59 @@ class LoadRules(unittest.TestCase):
             return last[0]
         return f
 
+    # A load_fn call returns the foreign cores since the previous call
+    # (ab.HostLoad): each run = one reset call before its warm-up, then one
+    # call per pair; start/end = the medians of the first and last 3 pairs.
     def test_drift_twice_is_load_drift_never_pass(self):
-        # Each measure: start, N pair loads, end. Drift in both runs.
-        n = 6
-        run = [1.0] + [1.0] * n + [5.0]
+        run = [0.0] + [1.0, 1.0, 1.0, 5.0, 5.0, 5.0]
         load = self.loads(run + run)
         s = Script([1.0] * 100)
         r = g.measure_with_load_rule(metric(), s, PLAN, random.Random(1), load)
         self.assertEqual(r["verdict"], g.LOAD_DRIFT)
         self.assertEqual(r["verdict_unadjusted"], g.PASS)
+        self.assertEqual((r["load_start"], r["load_end"]), (1.0, 5.0))
         self.assertIn("drift_rerun_of", r)
 
     def test_drift_once_reruns_and_keeps_the_rerun(self):
-        n = 6
-        load = self.loads([1.0] + [1.0] * n + [5.0] + [5.0] + [5.0] * n + [5.0])
+        load = self.loads([0.0] + [1.0, 1.0, 1.0, 5.0, 5.0, 5.0] + [0.0] + [5.0] * 6)
         s = Script([1.0] * 100)
         r = g.measure_with_load_rule(metric(), s, PLAN, random.Random(1), load)
         self.assertEqual(r["verdict"], g.PASS)
         self.assertIn("drift_rerun_of", r)
+
+    def test_below_the_floor_is_no_drift(self):
+        # 0.3 -> 1.9 foreign cores: under the nproc/16 = 2 floor.
+        load = self.loads([9.0] + [0.3, 0.3, 0.3, 1.9, 1.9, 1.9])
+        r = g.measure_with_load_rule(metric(), Script([1.0] * 100), PLAN, random.Random(1), load)
+        self.assertEqual(r["verdict"], g.PASS)
+        self.assertNotIn("drift_rerun_of", r)
+        # ... but a floor of 1 core sees it.
+        load = self.loads(([9.0] + [0.3, 0.3, 0.3, 1.9, 1.9, 1.9]) * 2)
+        plan = g.Plan(drift_floor=0.5)
+        r = g.measure_with_load_rule(metric(), Script([1.0] * 100), plan, random.Random(1), load)
+        self.assertEqual(r["verdict"], g.LOAD_DRIFT)
+
+    def test_one_slow_pair_is_not_a_drift(self):
+        # A medians-of-3 rule: one busy pair at either end does not trip it.
+        load = self.loads([0.0] + [1.0, 9.0, 1.0, 1.0, 1.0, 9.0])
+        r = g.measure_with_load_rule(metric(), Script([1.0] * 100), PLAN, random.Random(1), load)
+        self.assertEqual(r["verdict"], g.PASS)
+
+    def test_pairs_carry_the_meter_detail(self):
+        class Meter:
+            last = None
+
+            def __call__(self):
+                self.last = {"foreign": 1.5, "gate": 1.0}
+                return 1.5
+        pairs = g.take_pairs(metric(), Script([1.0] * 10), 3, random.Random(1), Meter())
+        self.assertEqual(pairs[0]["host"], {"foreign": 1.5, "gate": 1.0})
+        self.assertEqual(pairs[0]["load"], 1.5)
+
+    def test_load_ends(self):
+        self.assertEqual(g.load_ends([1, 2, 3, 4, 5, 6, 7]), (2, 6))
+        self.assertEqual(g.load_ends([4.0]), (4.0, 4.0))
+        self.assertEqual(g.load_ends([]), (0.0, 0.0))
 
 
 class DuckdbCaps(unittest.TestCase):

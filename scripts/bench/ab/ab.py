@@ -39,20 +39,26 @@ order-statistic 95 % CI. At each look: PASS if the CI's upper bound <= the
 metric's threshold, FAIL if its lower bound is above it, else the next
 look; after the last, INCONCLUSIVE. (At 6 pairs the CI is the range: all
 six ratios <= T passes at once.) A FAIL is confirmed by an independent
-rerun (FAIL again -> FAIL, else FLAKY). A run whose 1-min load drifts > 2x
-is rerun once, then marked
-LOAD-DRIFT. Sizes take 3 samples per arm and gate max(C) / min(B). Every
-sample's result check must pass in both arms and the arms' result digests
-must be equal; otherwise WRONG RESULT, and no ratio.
+rerun (FAIL again -> FAIL, else FLAKY). A run whose foreign load (below)
+drifts > 2x (the median of its first 3 pairs vs its last 3, floored at
+nproc/16 cores) is rerun once, then marked LOAD-DRIFT. Sizes take 3
+samples per arm and gate max(C) / min(B). Every sample's result check must
+pass in both arms and the arms' result digests must be equal; otherwise
+WRONG RESULT, and no ratio.
 
 Exit status: 0 every metric PASS / ALLOWED / SKIPPED; 1 a FAIL; 2 an
 INCONCLUSIVE / FLAKY / LOAD-DRIFT and no FAIL; 3 a build or harness error
 (or a refused start); 4 WRONG RESULT, which overrides every other code and
 which --allow cannot cover.
 
-The host: the run refuses to start when the 1-min load exceeds nproc/4
-and warns above nproc/8 (--force runs anyway; results are marked FORCED);
-the CPU governor and boost flag are recorded.
+The host: the load rules use the *foreign* load, the busy cores of every
+other process (/proc/stat busy CPU minus the gate's own and its children's
+CPU; `HostLoad`), so the gate's own samples and builds never count. The
+run refuses to start when the foreign load over 5 s exceeds nproc/4 and
+warns above nproc/8 (--force runs anyway; results are marked FORCED); the
+same check repeats after the builds, with no wait. Per pair, the foreign
+and gate cores, PSI cpu `some avg10` and the 1-min load average
+(information only) are recorded; the CPU governor and boost flag too.
 
 `--aa` (A/A calibration): BASE and CAND may be the same revision; each arm
 gets its own salt (`--aa-salt K` picks a different pair), so two extract
@@ -124,19 +130,76 @@ def host_info():
     }
 
 
-def load1():
-    return os.getloadavg()[0]
+def proc_stat_busy(text):
+    """Busy jiffies of all CPUs from /proc/stat's `cpu` line: user, nice,
+    system, irq, softirq, steal (guest time is inside user; idle and
+    iowait are not busy)."""
+    for line in text.splitlines():
+        if line.startswith("cpu "):
+            v = [int(x) for x in line.split()[1:]]
+            v += [0] * (8 - len(v))
+            return v[0] + v[1] + v[2] + v[5] + v[6] + v[7]
+    raise ValueError("/proc/stat: no cpu line")
 
 
-def settle(nproc, max_wait=180, step=10):
-    """Wait (up to `max_wait` s) for the 1-min load to fall to nproc/8;
-    returns the load then."""
-    t0 = time.time()
-    while load1() > nproc / 8 and time.time() - t0 < max_wait:
-        time.sleep(step)
-    if time.time() - t0 >= step:
-        log(f"waited {time.time() - t0:.0f} s for the load to settle: {load1():.1f}")
-    return load1()
+def psi_cpu_some_avg10(text):
+    """`some avg10` of /proc/pressure/cpu, or None."""
+    for line in (text or "").splitlines():
+        if line.startswith("some "):
+            for kv in line.split()[1:]:
+                k, _, v = kv.partition("=")
+                if k == "avg10":
+                    return float(v)
+    return None
+
+
+START_WINDOW_S = 5.0
+
+
+def make_meter():
+    return HostLoad()
+
+
+class HostLoad:
+    """The foreign load meter (perf_gate_footprint_PLAN D3). Each call
+    returns the busy cores of every *other* process since the previous
+    call: (Δ host busy jiffies / HZ - Δ CPU of this process and its waited
+    children) / Δ wall. The gate's samples are waited children, so their
+    CPU (and their own children's, e.g. the arm's CLI) is subtracted; the
+    1-min load average counted it. Kernel work our IO triggers counts as
+    foreign (small; the drift floor absorbs it). `last` holds the detail of
+    the latest call: foreign and gate cores, PSI cpu `some avg10`, and the
+    1-min load average (information only)."""
+
+    def __init__(self, stat_path="/proc/stat", psi_path="/proc/pressure/cpu"):
+        self.stat_path = stat_path
+        self.psi_path = psi_path
+        self.hz = os.sysconf("SC_CLK_TCK")
+        self.last = None
+        self._prev = self._snap()
+
+    def _snap(self):
+        t = os.times()
+        return (time.monotonic(), proc_stat_busy(read_text(self.stat_path) or ""),
+                t.user + t.system + t.children_user + t.children_system)
+
+    def __call__(self):
+        now = self._snap()
+        (t0, b0, g0), (t1, b1, g1) = self._prev, now
+        self._prev = now
+        wall = max(t1 - t0, 1e-6)
+        host = (b1 - b0) / self.hz / wall
+        gate = (g1 - g0) / wall
+        self.last = {"foreign": round(max(host - gate, 0.0), 3), "gate": round(gate, 3),
+                     "psi_some_avg10": psi_cpu_some_avg10(read_text(self.psi_path)),
+                     "load1": os.getloadavg()[0]}
+        return self.last["foreign"]
+
+    def window(self, seconds=5.0):
+        """The foreign busy cores over the next `seconds` (the gate idle)."""
+        self()
+        time.sleep(seconds)
+        return self()
 
 
 # ----------------------------------------------------------------- arms
@@ -521,14 +584,19 @@ def gate(a):
     plan = cfg.plan(scale)
 
     host = host_info()
-    decision, msg = gatelib.load_gate(host["load_start"][0], host["nproc"], a.force)
+    plan.drift_floor = host["nproc"] / 16
+    meter = make_meter()
+    host["foreign_start"] = meter.window(START_WINDOW_S)
+    log(f"foreign load: {host['foreign_start']:.1f} busy cores over {START_WINDOW_S:g} s "
+        f"(1-min load average {host['load_start'][0]:.1f}, information only)")
+    decision, msg = gatelib.load_gate(host["foreign_start"], host["nproc"], a.force)
     forced = False
     if decision == "refuse":
         log(f"refusing to start: {msg}. Wait for a quieter host or pass --force.")
         return gatelib.EXIT_ERROR
     if msg:
         log(f"warning: {msg}")
-        forced = a.force and host["load_start"][0] > host["nproc"] / 4
+        forced = a.force and host["foreign_start"] > host["nproc"] / 4
     if host["governor"] and host["governor"] != "performance":
         log(f"warning: CPU governor is {host['governor']!r}, not 'performance' (not changed)")
 
@@ -592,9 +660,11 @@ def gate(a):
         return gatelib.EXIT_ERROR
     build_s = time.time() - t_build
 
-    # Our own compile and fixture builds load the host: let the 1-min load
-    # settle before the first pair, then apply the refusal rule again.
-    load_pairs = settle(host["nproc"])
+    # The refusal rule again after the builds, on the foreign load (our own
+    # compile and fixture builds do not count, so there is nothing to wait
+    # out).
+    load_pairs = meter.window(START_WINDOW_S)
+    log(f"foreign load before the pairs: {load_pairs:.1f} busy cores")
     decision, msg = gatelib.load_gate(load_pairs, host["nproc"], a.force)
     if decision == "refuse":
         log(f"refusing to measure: {msg} (after the builds). Pass --force to run anyway.")
@@ -608,7 +678,7 @@ def gate(a):
     for m in runnable:
         t0 = time.time()
         sampler = make_sampler(m, arms, scale, a.cpus, inject, dcaps)
-        r = gatelib.gate_metric(m, sampler, plan, rng, load1, log=log)
+        r = gatelib.gate_metric(m, sampler, plan, rng, meter, log=log)
         r["wall_s"] = time.time() - t0
         r["scale"] = scale if m.scaled else "fixed"
         r["threads"] = dcaps.for_metric(m)
@@ -639,7 +709,7 @@ def gate(a):
         "looks": list(plan.looks),
         "first_look_margin": plan.first_margin,
         "capabilities": {"shared": sorted(shared), "features": features, "lacking": lacking},
-        "host": {**host, "load_before_pairs": load_pairs, "load_end": os.getloadavg()},
+        "host": {**host, "foreign_before_pairs": load_pairs, "load_end": os.getloadavg()},
         "forced": forced,
         "aa": a.aa,
         "aa_binaries_identical": identical,

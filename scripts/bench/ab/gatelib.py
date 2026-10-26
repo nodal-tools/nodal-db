@@ -322,13 +322,16 @@ class Plan:
     offset; 0 by default), FAIL if its lower bound > T, else extend to the
     next look; after the last look, INCONCLUSIVE."""
 
-    def __init__(self, looks=DEFAULT_LOOKS, first_margin=0.0):
+    def __init__(self, looks=DEFAULT_LOOKS, first_margin=0.0, drift_floor=2.0):
         self.looks = tuple(int(x) for x in looks)
         if not self.looks or any(b <= a for a, b in zip(self.looks, self.looks[1:])):
             raise ConfigError(f"looks must be increasing pair counts, got {looks!r}")
         if self.looks[0] < 6:
             raise ConfigError("the first look needs at least 6 pairs (the smallest exact 95 % CI)")
         self.first_margin = float(first_margin)
+        # Foreign cores below which a load change is not a drift (nproc/16:
+        # a desktop's own bursts stay below it; perf_gate_footprint_PLAN D3).
+        self.drift_floor = float(drift_floor)
 
     @property
     def cap(self):
@@ -354,26 +357,41 @@ def balanced_orders(n, rng):
 
 # ------------------------------------------------------------------ load
 
-def load_gate(load1, nproc, force):
-    """('refuse' | 'warn' | 'ok', message) for the 1-min load at start
-    (§6.4 as tightened by critique T2: refuse above nproc/4, warn above
-    nproc/8)."""
+# The load is the *foreign* load (perf_gate_footprint_PLAN D3): busy cores
+# of every other process on the host (/proc/stat busy CPU minus the gate's
+# own and its waited children's CPU, per wall second; ab.HostLoad), so the
+# gate's own samples and builds never count against it. The 1-min load
+# average, which mixed both, is recorded for information only.
+
+def load_gate(foreign, nproc, force):
+    """('refuse' | 'warn' | 'ok', message) for the foreign busy cores at
+    start (§6.4 as tightened by critique T2: refuse above nproc/4, warn
+    above nproc/8)."""
     refuse, warn = nproc / 4, nproc / 8
-    if load1 > refuse:
-        msg = (f"1-min load {load1:.1f} > nproc/4 = {refuse:g}: 1.05 metrics are "
-               "unreachable at this noise level")
+    if foreign > refuse:
+        msg = (f"other processes keep {foreign:.1f} cores busy > nproc/4 = {refuse:g}: "
+               "1.05 metrics are unreachable at this noise level")
         return ("warn" if force else "refuse"), msg + (" (--force: results marked FORCED)" if force else "")
-    if load1 > warn:
-        return "warn", (f"1-min load {load1:.1f} > nproc/8 = {warn:g}: expect "
-                        "INCONCLUSIVE on 1.05 metrics")
+    if foreign > warn:
+        return "warn", (f"other processes keep {foreign:.1f} cores busy > nproc/8 = {warn:g}: "
+                        "expect INCONCLUSIVE on 1.05 metrics")
     return "ok", ""
 
 
 def drifted(l0, l1, factor=2.0, floor=1.0):
-    """Did the 1-min load change more than `factor`x across a run? Loads
-    are floored at `floor` so an idle host's 0.1 -> 0.3 is not a drift."""
+    """Did the load change more than `factor`x across a run? Loads are
+    floored at `floor` so an idle host's 0.1 -> 0.3 is not a drift (the
+    gate uses nproc/16 foreign cores, `Plan.drift_floor`)."""
     a, b = max(l0, floor), max(l1, floor)
     return max(a, b) / min(a, b) > factor
+
+
+def load_ends(loads, k=3):
+    """(start, end) of a run's load: the medians of its first and last `k`
+    per-pair loads (the warm-up counts into the first pair's, D3)."""
+    if not loads:
+        return 0.0, 0.0
+    return statistics.median(loads[:k]), statistics.median(loads[-k:])
 
 
 # ------------------------------------------------------------- measuring
@@ -401,7 +419,11 @@ def take_pairs(metric, sampler, n, rng, load_fn):
         b, c = got["base"][0], got["cand"][0]
         if b <= 0 or c <= 0:
             raise HarnessError(f"non-positive sample (base {b}, cand {c})")
-        pairs.append({"b": b, "c": c, "ratio": c / b, "b_first": b_first, "load": load_fn()})
+        pair = {"b": b, "c": c, "ratio": c / b, "b_first": b_first, "load": load_fn()}
+        host = getattr(load_fn, "last", None)  # ab.HostLoad's detail, if any
+        if host:
+            pair["host"] = host
+        pairs.append(pair)
     return pairs
 
 
@@ -427,7 +449,7 @@ def measure_ratio(metric, sampler, plan, rng, load_fn):
     """One independent run: a warm-up sample per arm (discarded, digests
     still compared), then pairs up to each look of the plan (pooled),
     stopping at the first decided look. Returns a run dict."""
-    l0 = load_fn()
+    load_fn()  # start the meter: the warm-up counts into the first pair
     warm = {arm: sampler(arm) for arm in ("base", "cand")}
     compare_digests(metric, warm["base"][1], warm["cand"][1])
     pairs = []
@@ -436,16 +458,16 @@ def measure_ratio(metric, sampler, plan, rng, load_fn):
         s = summarize(pairs, metric.threshold, plan.first_margin if i == 0 else 0.0)
         if s["verdict"] != INCONCLUSIVE:
             break
-    s.update(looks=i + 1, load_start=l0, load_end=load_fn(),
-             pairs=pairs, digest=warm["cand"][1])
+    l0, l1 = load_ends([p["load"] for p in pairs])
+    s.update(looks=i + 1, load_start=l0, load_end=l1, pairs=pairs, digest=warm["cand"][1])
     return s
 
 
 def measure_size(metric, sampler, rng, load_fn, samples=3):
     """Sizes: `samples` interleaved measurements per arm; the gate ratio is
     max(C) / min(B) (critique T3), exact when both arms are deterministic."""
-    l0 = load_fn()
-    bs, cs, digest = [], [], None
+    load_fn()
+    bs, cs, loads, digest = [], [], [], None
     for b_first in balanced_orders(samples, rng):
         got = {}
         for arm in (("base", "cand") if b_first else ("cand", "base")):
@@ -453,10 +475,12 @@ def measure_size(metric, sampler, rng, load_fn, samples=3):
         compare_digests(metric, got["base"][1], got["cand"][1])
         bs.append(got["base"][0])
         cs.append(got["cand"][0])
+        loads.append(load_fn())
         digest = got["cand"][1]
     if min(bs) <= 0:
         raise HarnessError(f"non-positive base size {min(bs)}")
     ratio = max(cs) / min(bs)
+    l0, l1 = load_ends(loads)
     return {
         "n_pairs": samples,
         "base_median": statistics.median(bs),
@@ -471,7 +495,7 @@ def measure_size(metric, sampler, rng, load_fn, samples=3):
         "verdict": PASS if ratio <= metric.threshold else FAIL,
         "looks": 1,
         "load_start": l0,
-        "load_end": load_fn(),
+        "load_end": l1,
         "digest": digest,
     }
 
@@ -483,17 +507,19 @@ def measure_once(metric, sampler, plan, rng, load_fn):
 
 
 def measure_with_load_rule(metric, sampler, plan, rng, load_fn, log=None):
-    """§6.4: a run whose 1-min load drifts > 2x is rerun once; a second
-    drift keeps the result marked LOAD-DRIFT, which never passes."""
+    """§6.4 restated in foreign cores (D3): a run whose foreign load (the
+    median of its first 3 pairs vs its last 3) drifts > 2x, floored at
+    `plan.drift_floor`, is rerun once; a second drift keeps the result
+    marked LOAD-DRIFT, which never passes."""
     run = measure_once(metric, sampler, plan, rng, load_fn)
-    if not drifted(run["load_start"], run["load_end"]):
+    if not drifted(run["load_start"], run["load_end"], floor=plan.drift_floor):
         return run
     if log:
         log(f"  {metric.id}: load drifted {run['load_start']:.1f} -> {run['load_end']:.1f}, rerunning once")
     first = run
     run = measure_once(metric, sampler, plan, rng, load_fn)
     run["drift_rerun_of"] = _strip(first)
-    if drifted(run["load_start"], run["load_end"]):
+    if drifted(run["load_start"], run["load_end"], floor=plan.drift_floor):
         run["verdict_unadjusted"] = run["verdict"]
         run["verdict"] = LOAD_DRIFT
     return run

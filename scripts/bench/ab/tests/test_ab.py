@@ -72,13 +72,17 @@ class StartupRefusals(unittest.TestCase):
         self.assertEqual(code, g.EXIT_ERROR)
         self.assertIn("--self-test", text)
 
-    def test_high_load_refuses_without_force(self):
+    def test_high_foreign_load_refuses_without_force(self):
+        meter = mock.Mock()
+        meter.window.return_value = 20.0
         with mock.patch.object(ab, "host_info", return_value={
                 "nproc": 32, "cpu": "x", "kernel": "k", "governor": "performance",
-                "boost": "1", "load_start": (20.0, 20.0, 20.0)}):
+                "boost": "1", "load_start": (1.0, 1.0, 1.0)}), \
+                mock.patch.object(ab, "make_meter", return_value=meter):
             code, text = self.run_main(["HEAD~1", "HEAD"])
         self.assertEqual(code, g.EXIT_ERROR)
         self.assertIn("refusing to start", text)
+        self.assertIn("20.0 cores busy", text)
 
     def test_unknown_allow_metric(self):
         code, text = self.run_main(["HEAD~1", "HEAD", "--allow", "nope=x"])
@@ -94,6 +98,55 @@ class StartupRefusals(unittest.TestCase):
         code, text = self.run_main(["--list"])
         self.assertEqual(code, 0)
         self.assertIn("check:", text)
+
+
+class ForeignLoad(unittest.TestCase):
+    """The foreign-load meter (perf_gate_footprint_PLAN D3): host busy CPU
+    from /proc/stat minus the gate's own and its children's CPU."""
+
+    STAT = "cpu  {u} 0 {s} 9000 50 0 0 0 0 0\ncpu0 1 0 1 1 0 0 0 0 0 0\n"
+
+    def test_proc_stat_busy_skips_idle_and_iowait(self):
+        self.assertEqual(ab.proc_stat_busy("cpu  10 1 5 100 7 2 3 4 0 0\n"), 10 + 1 + 5 + 2 + 3 + 4)
+        with self.assertRaises(ValueError):
+            ab.proc_stat_busy("intr 1\n")
+
+    def test_psi(self):
+        text = "some avg10=1.25 avg60=0.50 avg300=0.10 total=1\nfull avg10=0.00 avg60=0 avg300=0 total=0\n"
+        self.assertEqual(ab.psi_cpu_some_avg10(text), 1.25)
+        self.assertIsNone(ab.psi_cpu_some_avg10(None))
+
+    def test_meter_subtracts_the_gate(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="ab-load-")
+        stat = os.path.join(d, "stat")
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+
+        def write(u, s):
+            with open(stat, "w") as f:
+                f.write(self.STAT.format(u=u, s=s))
+        hz = os.sysconf("SC_CLK_TCK")
+        clock = [100.0]
+        cpu = [0.0]
+
+        def times():
+            return os.times_result((cpu[0], 0.0, 0.0, 0.0, 0.0))
+        write(0, 0)
+        with mock.patch.object(ab.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(ab.os, "times", side_effect=times):
+            m = ab.HostLoad(stat_path=stat, psi_path=os.path.join(d, "none"))
+            # 2 s: the host was 10 cores busy, the gate (its children) 4.
+            clock[0] += 2.0
+            cpu[0] += 8.0
+            write(10 * 2 * hz, 0)
+            self.assertAlmostEqual(m(), 6.0, places=2)
+            self.assertAlmostEqual(m.last["gate"], 4.0, places=2)
+            self.assertIn("load1", m.last)
+            # The gate alone busy: no foreign load, never negative.
+            clock[0] += 1.0
+            cpu[0] += 3.0
+            write(10 * 2 * hz + 2 * hz, hz)
+            self.assertEqual(m(), 0.0)
 
 
 class CapsCheck(unittest.TestCase):

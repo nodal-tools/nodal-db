@@ -115,3 +115,19 @@ fn edge_cases() {
         check(s);
     }
 }
+
+/// The normalization tables are Unicode 16.0.0, the version spec §3.4.1.1
+/// pins (plan §4, P2). `unicode-normalization = "=0.1.24"` is what gives
+/// 16.0.0 (0.1.23 is 15.1.0, 0.1.25 is 17.0.0): a crate bump in either
+/// direction changes NFC for characters assigned in between, which is a
+/// rehash-class change (spec §2.4), so it must fail here first.
+#[test]
+fn normalization_tables_are_unicode_16_0_0() {
+    assert_eq!(nodal_db_core::text::UNICODE_VERSION, (16, 0, 0));
+    assert_eq!(unicode_normalization::UNICODE_VERSION, (16, 0, 0));
+    // The plan §1.4 strings whose NFC differs between 15.x, 16.0 and 17.0:
+    // new 16.0 composites, and a 17.0 reorder that 16.0 does not do.
+    assert_eq!(nfc("\u{11382}\u{113c9}"), "\u{11383}");
+    assert_eq!(nfc("\u{105d2}\u{307}"), "\u{105c9}");
+    assert_eq!(nfc("a\u{1acf}\u{323}"), "a\u{1acf}\u{323}");
+}

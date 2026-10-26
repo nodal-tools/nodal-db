@@ -53,7 +53,8 @@ thiserror = "2.0.20"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 # NFC normalization. Pinned to =0.1.24 because that release's tables are
 # Unicode 16.0.0 — the version spec §3.4.1.1 pins. (0.1.25 bumped to Unicode
-# 17.0.0.) A version bump here is a rehash-class change (spec §2.4).
+# 17.0.0.) A version bump here is a rehash-class change (spec §2.4);
+# crates/nodal-db-core/tests/text_nfc.rs fails when the tables move.
 unicode-normalization = "=0.1.24"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

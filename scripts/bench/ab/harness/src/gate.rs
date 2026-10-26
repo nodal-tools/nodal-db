@@ -271,7 +271,11 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
         }
         "lk_core_sql_100k" => lookup_core_sql(dir),
         "imp_ipc_dense" => crate::import::import_dense(dir),
-        _ => return crate::synth::run(mode, dir).or_else(|| crate::maint::run(mode, dir)),
+        _ => {
+            return crate::synth::run(mode, dir)
+                .or_else(|| crate::axes::run(mode))
+                .or_else(|| crate::maint::run(mode, dir))
+        }
     })
 }
 

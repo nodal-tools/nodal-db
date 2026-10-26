@@ -83,6 +83,14 @@ shared = true
 [fixture.cli]
 env = "NODAL_AB_CLI"
 
+# synth plus K x 8 760-step series on their own axes (axis_position_cost_PLAN
+# §7; harness axes.rs): K unused parametric, K unused stored, K parametric
+# in use by another parameter, K stored in use (K = 500 full, 50 quick).
+[fixture.synth_axes]
+env = "NODAL_AB_SYNTH_AXES"
+build = "build_synth_axes"
+scaled = true
+
 # ----------------------------------------------------------------- reads
 # Synthetic-fixture reads (the criterion gate's point and bulk groups) on
 # one warm RO connection, Arrow end to end. Point reads: 20 warm-up and
@@ -197,6 +205,69 @@ fixtures = ["synth"]
 scaled = true
 needs = ["read_value_macro"]
 check = "every execution returns 20 x 8 760 rows; the digest equals read_parameter's for the same 20 entities"
+
+# Axis rendering (axis_position_cost_PLAN §7): reads that used to pay for
+# every axis in the file (an unfiltered axis expansion joined per
+# dimension). On `synth_axes` (see the fixture). The plain-synth
+# `rd_vr_point_long` is the one-axis control of value_rows' own cost
+# (plan R1: the in-use axis set scans the long tier's key columns once per
+# call). No layout floor yet (no A/A calibration).
+
+[metric.rd_vr_point_long]
+class = "hot"
+fixtures = ["synth"]
+scaled = true
+check = "every execution returns 8 760 rows; digest of the rendered rows"
+note = "value_rows WHERE <one long value's triple>, ids resolved untimed"
+
+[metric.rd_axes_rp_scalar]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+check = "row count = the scalar entities; digest of the rows"
+note = "read_parameter of a scalar parameter: paid for every array cell and axis before the plan"
+
+[metric.rd_axes_rp_long]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+check = "row count = long entities x 8 760; digest of the rows"
+
+[metric.rd_axes_rp_array]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+scales = ["full"]
+check = "row count = array entities x 8 760; digest of the rows"
+
+[metric.rd_axes_rp_irr]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+check = "row count = K x 8 760; digest of the rows"
+note = "read_parameter of the parameter whose values own the stored axes (plan R7)"
+
+[metric.rd_axes_vr_point_long]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+check = "every execution returns 8 760 rows; digest of the rendered rows"
+note = "value_rows WHERE <one long value's triple>"
+
+[metric.rd_axes_vr_point_stored]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+check = "every execution returns 8 760 rows; digest of the rendered rows"
+note = "value_rows point read of a value on a stored axis, with K stored axes in use (plan §11 C2)"
+
+[metric.rd_axes_point_irr]
+class = "hot"
+fixtures = ["synth_axes"]
+scaled = true
+needs = ["read_value_macro"]
+check = "every execution returns 8 760 rows; digest of the rendered rows"
+note = "read_value of one stored-axis value: a point read must stay key-scoped (plan D12)"
 
 # ---------------------------------------------------------------- writes
 

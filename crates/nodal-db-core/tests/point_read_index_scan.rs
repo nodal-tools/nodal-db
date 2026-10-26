@@ -757,9 +757,10 @@ fn point_read_axis_positions_are_limited_to_the_values_axes() {
              every axis in the file (fast_point_reads_PLAN critique M4).\n{sql}"
         );
     }
-    // Control: value_rows evaluates axis_position unfiltered, so the same walk
-    // sees every parametric position in the file. Proves the check can see
-    // the fixture's unused axes.
+    // Control: the same cells joined to axis_position WITHOUT the `ap`
+    // pre-filter (the shape value_rows had before axis_position_cost_PLAN)
+    // expand every parametric axis in the file, and the walk sees them.
+    // Proves the check can see the fixture's unused axes.
     let (pd, e, a): (i64, i64, i64) = conn
         .query_row(
             "SELECT va.parameter_definition_id, va.entity_id, va.alternative_id \
@@ -774,14 +775,15 @@ fn point_read_axis_positions_are_limited_to_the_values_axes() {
         )
         .unwrap();
     let sql = format!(
-        "SELECT * FROM value_rows WHERE parameter_definition_id = {pd} \
-         AND entity_id = {e} AND alternative_id = {a}"
+        "SELECT c.*, p.ts FROM value_cells c \
+         LEFT JOIN axis_position p ON p.axis_id = c.axis1_id AND p.pos = c.i1_pos \
+         WHERE c.parameter_definition_id = {pd} AND c.entity_id = {e} AND c.alternative_id = {a}"
     );
     let (_, unfiltered) = axis_unnest_rows(&explain(&conn, &sql));
     assert!(
         unfiltered as usize > 50 * STEPS,
-        "control: value_rows emitted only {unfiltered} axis positions (file total \
-         {total}); the walker or the fixture no longer shows the unfiltered cost \
+        "control: the unfiltered join emitted only {unfiltered} axis positions (file \
+         total {total}); the walker or the fixture no longer shows the unfiltered cost \
          (DuckDB {ver})"
     );
     conn.close().unwrap();

@@ -45,7 +45,10 @@ From `schema/080_views_read.sql`.
 
 | Name | Kind | Purpose |
 | --- | --- | --- |
-| `axis_position` | view | One row per (axis, position) |
+| `axis_parametric` | view | One row per parametric axis, with its kind as flags |
+| `axis_position` | view | One row per (axis, position), for audits, extract and users |
+| `axis_position_stored` | view | Stored (child-table) positions of every axis |
+| `axis_position_stored_in_use(pd_id)` | macro | Stored positions of the axes that CURRENT value rows reference |
 | `entity_class_display(mode_name)` | macro | Resolved per-mode class presentation (Spine-Toolbox #2492) |
 | `parameter_effective_unit` | view | Effective unit = override if present, else definition default |
 | `read_parameter(class_name, parameter_name)` | macro | Canonical bulk read |

@@ -608,6 +608,18 @@ so `crates/nodal-db-core/tests/array_id_index_scan.rs` and
 `cargo test`, including negative controls that show the fallback for
 dense ids and for 51 keys ([engine rules](engine_rules.md) §2 and §6).
 
+Coordinates are rendered without expanding axes: a read computes a
+parametric coordinate from the cell's own position with the scalar
+macros `axis_param_ts`, `axis_param_num` and `axis_param_coord`, and
+joins stored (child-table) positions only for the axes current values
+use (`axis_position_stored_in_use`). `axis_position`, every position of
+every axis, is built from the same blocks and serves audits, extract and
+users. Before this, every `value_rows` and `read_parameter` call paid for
+every axis in the file. `crates/nodal-db-core/tests/axis_render_scaling.rs`
+checks that the work of each read does not grow with axis positions, and
+`axis_render_equality.rs` that the rendering is bit-identical to the
+expansion it replaced ([engine rules](engine_rules.md) §7).
+
 CI runs `cargo test --workspace` and the schema smoke suite.
 
 ## 10. Status

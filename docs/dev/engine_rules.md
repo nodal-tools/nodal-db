@@ -279,3 +279,77 @@ correct when the §5 workaround is removed after an upgrade.
   raises (the positive control). When an upgrade fixes the bug, the
   positive control fails together with §5's tripwire: re-evaluate this
   rule then (it costs nothing to keep).
+
+## 7. Read paths never expand parametric axes
+
+**Rule.** A read path (`value_rows`, `read_parameter`, the point-read
+macros, anything that renders coordinates) never joins an expansion of
+every axis in the file. In practice:
+
+- render a parametric dimension through its one `axis_parametric` row
+  and the scalar macros `axis_param_ts`, `axis_param_num` and
+  `axis_param_coord`, applied to the cell's own position, with the
+  expansion's range as a join condition
+  (`pos >= 0 AND pos < length`, so an out-of-range position renders
+  NULL and the row is kept);
+- join stored (child-table) positions only through
+  `axis_position_stored_in_use(pd_id)`, which filters the `axis` scan and
+  the child-table scan to the axes current values reference (of one
+  parameter, or of every parameter with `NULL`);
+- never put a pre-filter in front of an `unnest(range(length))` and rely
+  on it reaching the axis scan;
+- `axis_position` (every position of every axis) is for audits, extract
+  and users, not for read paths.
+
+The scalar macros are the only definition of the parametric arithmetic;
+`encoding.rs` mirrors them and `roundtrip_duckdb.rs` pins the two
+bit-for-bit through `axis_position`.
+
+**Why.** `axis_position` expands every parametric axis with
+`unnest(range(length))` and unions every stored position. `value_rows`
+joined it once per dimension, and DuckDB 2.0's `common_subplan`
+optimizer materialized the expansion once and built five hash tables of
+it, whatever the read touched: with 500 extra 8 760-step axes (unused, or
+used by another parameter) every `value_rows` or `read_parameter` call
+cost 0.5 to 1.5 s more, scalar reads included. A pre-filter in front of
+the expansion (`WHERE axis_id IN (…)`) is pushed below the UNNEST only
+when the optimizer estimates the UNNEST as large; in one measured plan it
+was not, and the expansion ran in full. The numbers are in
+`specs/axis_position_cost_PLAN.md`.
+
+**What it costs.** `value_rows` is a view and cannot see the caller's
+filter, so its in-use axis set covers every current value: each call
+scans the long and array tiers' key columns once (the set is evaluated
+once per query) and hash-builds the stored positions of every axis in
+use. On a one-axis file that is a few tens of milliseconds per call, and
+it grows with the current long tier (about one key-column scan of it per
+call). On a file whose values own many stored axes (irregular series,
+each with its own axis) a `value_rows` point read pays for all of their
+positions: slower than the expansion it replaced in that one shape.
+Engine reads go through `read_parameter` (parameter-scoped) and the
+point-read macros (key-scoped), not `value_rows`.
+
+**Exception: the point-read macros' `ap`.** `value_rows_for` (behind
+`read_value` and `read_values`) still filters `axis_position` by the
+read value's own axes (`ap`). The filter is key-scoped, which a point
+read needs; it works through a runtime join filter that reaches the
+`axis` scans, which is an optimizer outcome, so it is guarded:
+`point_read_axis_positions_are_limited_to_the_values_axes` in
+`point_read_index_scan.rs` fails when the expansion stops being limited
+to the value's axes. Moving it to the arithmetic blocks with a key-scoped
+stored filter is a measured follow-up (plan §6, D12); a parameter-scoped
+set (`axis_position_stored_in_use(pd)`) is not an option there, it made
+point reads 2.5 to 19 times slower.
+
+**Guards.**
+[`crates/nodal-db-core/tests/axis_render_scaling.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/axis_render_scaling.rs)
+(work counters of each read before and after adding 200 x 2 000-position
+axes of each sort: unused parametric, unused stored, parametric in use;
+no read plan contains an UNNEST over `axis`) and
+[`crates/nodal-db-core/tests/axis_render_equality.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/axis_render_equality.rs)
+(the rendering, bit for bit, against the pre-change text frozen in
+`tests/fixtures/axis_render_oracle.sql`; it also covers the two copies
+of the stored-position legs, in `axis_position_stored` and
+`axis_position_stored_in_use`, which must not drift apart). The perf
+gate's `synth_axes` metrics measure the same reads on a file with 500
+axes of each sort.

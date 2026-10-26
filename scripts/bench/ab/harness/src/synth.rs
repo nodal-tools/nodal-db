@@ -33,8 +33,8 @@ use crate::check::{
 pub const CELLS: usize = 8760;
 const ALT: &str = "Base";
 const USER: &str = "bench";
-const T0_US: i64 = 1_735_689_600 * 1_000_000;
-const HOUR_US: i64 = 3_600 * 1_000_000;
+pub(crate) const T0_US: i64 = 1_735_689_600 * 1_000_000;
+pub(crate) const HOUR_US: i64 = 3_600 * 1_000_000;
 
 #[derive(Clone, Copy)]
 pub struct Scale {
@@ -66,7 +66,7 @@ pub fn env_scale() -> Scale {
     scale(&std::env::var("NODAL_AB_SCALE").unwrap_or_else(|_| "quick".into()))
 }
 
-fn synth_path() -> PathBuf {
+pub(crate) fn synth_path() -> PathBuf {
     PathBuf::from(
         std::env::var("NODAL_AB_SYNTH").expect("set NODAL_AB_SYNTH to a build_synth file"),
     )
@@ -87,7 +87,7 @@ fn scalar_batch(names: &[String], vals: &[f64]) -> RecordBatch {
     .unwrap()
 }
 
-fn series_batch(
+pub(crate) fn series_batch(
     names: &[String],
     float_vals: Option<&[f64]>,
     int_vals: Option<&[i64]>,
@@ -132,7 +132,7 @@ fn series_batch(
     .unwrap()
 }
 
-fn float_series(seed: usize) -> Vec<f64> {
+pub(crate) fn float_series(seed: usize) -> Vec<f64> {
     (0..CELLS)
         .map(|h| ((seed * 8760 + h) % 977) as f64 * 1.7 - 800.0)
         .collect()
@@ -144,7 +144,7 @@ fn int_series(seed: usize) -> Vec<i64> {
         .collect()
 }
 
-fn write(db: &Path, class: &str, param: &str, batch: RecordBatch, msg: &str) {
+pub(crate) fn write(db: &Path, class: &str, param: &str, batch: RecordBatch, msg: &str) {
     write_parameter(
         db,
         class,
@@ -179,7 +179,7 @@ fn write_long_entity(db: &Path, name: &str, seed: usize) {
     write(db, "bench_long", "p_long", b, "long");
 }
 
-fn checkpoint(db: &Path) {
+pub(crate) fn checkpoint(db: &Path) {
     let conn = Connection::open(db).expect("RW open");
     conn.execute_batch("CHECKPOINT").expect("checkpoint");
     conn.close().map_err(|(_, e)| e).expect("close");
@@ -238,7 +238,7 @@ struct Keys {
     long_pd: i64,
 }
 
-fn names(s: Scale) -> (String, String, String) {
+pub(crate) fn names(s: Scale) -> (String, String, String) {
     (
         format!("s{:06}", s.scalars / 2),
         format!("l{:04}", s.longs / 2),
@@ -287,7 +287,7 @@ fn keys(conn: &Connection, s: Scale) -> Result<Keys, duckdb::Error> {
     })
 }
 
-fn query(
+pub(crate) fn query(
     conn: &Connection,
     sql: &str,
     args: &[&dyn duckdb::ToSql],

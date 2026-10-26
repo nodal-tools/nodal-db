@@ -22,7 +22,8 @@ root `Cargo.toml`) and the Python pins (`dev-requirements.txt`,
 version duckdb-rs re-exports, so do the `arrow` and `arrow-pyarrow` pins
 (and through them `pyo3`; see the comments in `Cargo.toml`). The engine
 behaviours the code relies on (storage format, `array_id` parity, index
-access paths, index key order, the caching-operators workaround) are listed with their guards in
+access paths, index key order, the caching-operators workaround, axis
+rendering in read paths) are listed with their guards in
 [`docs/dev/engine_rules.md`](docs/dev/engine_rules.md); read it before
 changing the schema, core SQL, indexes, sequences, storage or compaction,
 and re-check it after a bump. After one:

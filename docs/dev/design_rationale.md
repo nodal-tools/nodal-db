@@ -297,6 +297,46 @@ As a result, a dense array stores no timestamps at all, and a thousand
 hourly series on the same year share one three-number axis. Long rows
 point to the same axes.
 
+**Rendering coordinates when reading.** A read computes each cell's
+coordinate from its own position (`start + position × step`, through the
+scalar macros `axis_param_ts`, `axis_param_num` and `axis_param_coord`)
+and joins stored coordinates only for the axes current values use. It
+used to join `axis_position`, which lists every position of every axis
+in the file, once per dimension. A file with 500 extra hourly axes then
+paid 0.5 to 1.5 s more on every `value_rows` and `read_parameter` call,
+scalar reads included, whether or not anything used those axes. Two
+choices follow:
+
+- *Arithmetic, not a filtered expansion.* Filtering the expansion to the
+  axes in use first (`WHERE axis_id IN (…)` in front of
+  `unnest(range(length))`) only works when the optimizer pushes the
+  filter below the UNNEST, which it did not in one measured plan.
+  Computing the coordinate per cell costs a little more than probing a
+  small expanded table, but it does not depend on the axis count or on
+  the optimizer. There is no accumulation: each position is computed
+  from the start, exactly as the expansion did, so the result is
+  bit-identical (a test compares every rendering surface, floats by bit
+  pattern, against the old text). A side effect, in the safe
+  direction: the expansion evaluated every position of every
+  parametric axis, so one axis whose arithmetic overflowed at a high
+  position made every read fail; now only rendered positions are
+  evaluated, and such a file reads where it used to fail.
+- *The stored-position legs are written twice*, once unfiltered
+  (`axis_position_stored`, behind `axis_position`) and once filtered to
+  the axes in use (`axis_position_stored_in_use`). The spellings with one
+  text (an axis-id list argument, or a filter on the unfiltered view)
+  were measured and fell apart on a file with 500 stored axes. The
+  equality test covers both copies, so they cannot drift apart silently.
+
+The remaining cost is in `value_rows`: a view cannot see the caller's
+filter, so it joins the stored positions of every axis any current value
+uses, and finds them with one scan of the long tier's key columns per
+call. On a one-axis file that makes a `value_rows` point read a few tens
+of milliseconds slower than before, growing with the long tier; on a
+file whose values own hundreds of irregular axes it is slower than the
+expansion was. Engine reads use `read_parameter` and the point-read
+macros instead ([engine rules](engine_rules.md) §7).
+
 ### Canonical form
 
 Before the tier decision, every value goes through one canonicalization

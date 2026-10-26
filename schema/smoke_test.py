@@ -393,10 +393,46 @@ def horizon_and_binding_checks(workdir):
     for name in ("x", "y", "z"):
         a.execute("INSERT INTO alternative (id, name, valid_from_commit)"
                   " VALUES (nextval('seq_alternative'), ?, ?)", [name, ca])
+    # rendered values on a parametric and a stored axis (the views below use
+    # the axis_param_* scalar macros and the axis_position_stored_in_use table
+    # macro, axis_position_cost_PLAN)
+    a.execute(f"""
+        INSERT INTO entity_class (name, valid_from_commit) VALUES ('k', {ca});
+        INSERT INTO entity (entity_class_id, name, valid_from_commit)
+          SELECT id, 'e', {ca} FROM entity_class WHERE name = 'k';
+        INSERT INTO parameter_definition (entity_class_id, name, valid_from_commit)
+          SELECT id, 'p', {ca} FROM entity_class WHERE name = 'k';
+        INSERT INTO axis (id, kind, length, content_hash, p_start_ts, p_step_months, p_step_micros)
+          VALUES (901, 'datetime', 3, 901, TIMESTAMP '2025-01-31', 1, 0);
+        INSERT INTO axis (id, kind, length, content_hash) VALUES (902, 'datetime', 2, 902);
+        INSERT INTO axis_datetime VALUES (902, 0, TIMESTAMP '2020-01-01'), (902, 1, TIMESTAMP '2021-06-01');
+        INSERT INTO value_long (entity_id, parameter_definition_id, alternative_id, valid_from_commit,
+                                version, axis1_id, axis2_id, i1_pos, i2_pos, value_kind, v_float)
+          SELECT e.id, pd.id, 1, {ca}, 1, 901, 902, x, y, 'float', x * 10 + y
+          FROM entity e, parameter_definition pd, range(3) t(x), range(2) u(y)
+          WHERE e.name = 'e' AND pd.name = 'p';""")
     a.execute("COMMIT")
+    want_rows = a.execute("SELECT idx1_ts, idx2_ts, v_float FROM value_rows ORDER BY ALL").fetchall()
+    want_ap = a.execute("SELECT * FROM axis_position ORDER BY ALL").fetchall()
     a.close()
     b = duckdb.connect(str(b_path))
     b.execute(f"ATTACH '{a_path}' AS src (READ_ONLY)")
+    # same-named macros in the caller's catalog that would render wrongly if
+    # the attached views bound them (b is a scratch file). Not covered: TEMP
+    # objects of the caller shadow every name an attached view uses (a temp
+    # table `axis` too), as before this change.
+    b.execute("""
+        CREATE OR REPLACE MACRO main.axis_param_ts(a, b, c, d) AS TIMESTAMP '1900-01-01';
+        CREATE OR REPLACE MACRO main.axis_position_stored_in_use(pd_id) AS TABLE
+          SELECT * FROM axis_position_stored WHERE false;""")
+    got_rows = b.execute("SELECT idx1_ts, idx2_ts, v_float FROM src.value_rows ORDER BY ALL").fetchall()
+    got_ap = b.execute("SELECT * FROM src.axis_position ORDER BY ALL").fetchall()
+    check("macro binding: views using scalar and table macros, read through an attached"
+          " catalog from a connection with same-named macros, use their own catalog's",
+          got_rows == want_rows and len(want_rows) == 6 and got_ap == want_ap
+          and any(r[0].month == 2 and r[0].day == 28 for r in want_rows)
+          and all(r[1] is not None for r in want_rows),
+          f"{got_rows} vs {want_rows}")
     n_view = b.execute("SELECT count(*) FROM src.alternative_current").fetchone()[0]
     n_macro = b.execute(f"SELECT count(*) FROM src.alternative_asof({ca})").fetchone()[0]
     n_qual = b.execute(f"SELECT count(*) FROM src.main.alternative_asof({ca})").fetchone()[0]
@@ -1763,6 +1799,56 @@ def main():
           not bad_vr, str(bad_vr))
     check(f"point reads: read_value == read_parameter filtered, for each of the"
           f" {n_points} current values", not bad_pt and n_points >= 15, str(bad_pt))
+
+    # =======================================================================
+    # Axis rendering (axis_position_cost_PLAN; engine_rules §7): read paths
+    # compute parametric coordinates with the axis_param_* scalar macros and
+    # join stored positions only for the axes in use. The full drift guard
+    # (bit-level, against the frozen pre-change text) is
+    # crates/nodal-db-core/tests/axis_render_equality.rs; the shape guards are
+    # tests/axis_render_scaling.rs.
+    # =======================================================================
+    have = {r[0]: r[1] for r in allrows(
+        "SELECT DISTINCT function_name, function_type FROM duckdb_functions() WHERE NOT internal"
+        " AND function_name IN ('axis_param_ts', 'axis_param_num', 'axis_param_coord',"
+        " 'axis_position_stored_in_use')")}
+    views = {r[0] for r in allrows(
+        "SELECT view_name FROM duckdb_views() WHERE NOT internal"
+        " AND view_name IN ('axis_parametric', 'axis_position_stored', 'axis_position')")}
+    check("axis rendering: the scalar macros, the in-use table macro and the helper views exist",
+          have == {"axis_param_ts": "macro", "axis_param_num": "macro",
+                   "axis_param_coord": "macro", "axis_position_stored_in_use": "table_macro"}
+          and len(views) == 3, f"{have} {views}")
+    # The step_months = 0 fast path of axis_param_ts drops only `+ to_months(0)`:
+    # bit-identical to the general expression over random starts (years 1 to
+    # ~9000), steps (+-5e11 us, incl. sub-second and negative) and positions.
+    d = one("""
+        WITH r AS (
+          SELECT TIMESTAMP '0001-01-01' + to_microseconds((hash(i, 1) % 280000000000000000)::BIGINT) AS st,
+                 ((hash(i, 2) % 1000000000001)::BIGINT - 500000000000) // (1 + (hash(i, 3) % 1000)::BIGINT) AS mu,
+                 (hash(i, 4) % 20000)::INTEGER AS pos
+          FROM range(200000) t(i))
+        SELECT count(*) FILTER (WHERE axis_param_ts(st, 0, mu, pos)
+                                IS DISTINCT FROM st + to_months(0 * pos) + to_microseconds(mu * pos)),
+               count(*) FILTER (WHERE axis_param_ts(st, 0, mu, pos)
+                                IS DISTINCT FROM st + to_months(0) + to_microseconds(mu * pos)),
+               count(*)
+        FROM r
+        WHERE st + to_microseconds(mu * pos) BETWEEN TIMESTAMP '0001-01-01' AND TIMESTAMP '9999-12-31'""")
+    check("axis rendering: the step_months = 0 fast path is bit-identical to the general"
+          f" expression ({d[2]} random (start, micros step, pos))", d[0] == 0 and d[1] == 0
+          and d[2] > 100000, str(d))
+    # The in-use set: unused axes contribute no stored positions.
+    n_unused = one("""SELECT count(*) FROM axis_position_stored_in_use(NULL)
+                      WHERE axis_id NOT IN (SELECT axis1_id FROM value_long WHERE valid_to_commit IS NULL
+                          UNION SELECT axis2_id FROM value_long WHERE valid_to_commit IS NULL
+                          UNION SELECT axis3_id FROM value_long WHERE valid_to_commit IS NULL
+                          UNION SELECT axis4_id FROM value_long WHERE valid_to_commit IS NULL
+                          UNION SELECT axis1_id FROM value_array UNION SELECT axis2_id FROM value_array
+                          UNION SELECT axis3_id FROM value_array UNION SELECT axis4_id FROM value_array)""")[0]
+    n_in_use = one("SELECT count(*) FROM axis_position_stored_in_use(NULL)")[0]
+    check("axis rendering: axis_position_stored_in_use(NULL) holds only axes current values use",
+          n_unused == 0 and n_in_use > 0, f"unused={n_unused} in_use={n_in_use}")
 
     # =======================================================================
     # Erasure marker + the as-of guard (erasure_compaction_plan §1, decisions

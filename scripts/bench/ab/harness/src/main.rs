@@ -11,8 +11,9 @@
 //! compared across the arms) before the value on the last line; a failed
 //! result check exits with code 86 (`check.rs`). Fixture builders:
 //! `build_100k`, `build_big`, `build_longbig`, `build_synth <path>
-//! <quick|full>`, `build_hheavy <path> <quick|full>`, `build_xsrc <path>
-//! <quick|full>`, `build_ipc_dense <path> <entities>`. `threads` prints the
+//! <quick|full>`, `build_synth_axes <path> <quick|full>` (`axes.rs`),
+//! `build_hheavy <path> <quick|full>`, `build_xsrc <path> <quick|full>`,
+//! `build_ipc_dense <path> <entities>`. `threads` prints the
 //! DuckDB default thread count (pinning study, plan §6.2).
 //!
 //! **Diagnostic modes** (below; not gated, no digest, the value only) keep
@@ -81,6 +82,7 @@
 //! `txn_1_scalar_replace`, `growth_session`, `build_m1k`). The new arm is
 //! built with `--features save_api`.
 
+mod axes;
 mod check;
 mod gate;
 mod import;
@@ -472,6 +474,7 @@ fn main() {
     let scale = || args.get(3).map(String::as_str).unwrap_or("quick");
     match mode {
         "build_synth" => return synth::build(Path::new(&args[2]), scale()),
+        "build_synth_axes" => return axes::build(Path::new(&args[2]), scale()),
         "build_hheavy" => return maint::build_hheavy(Path::new(&args[2]), scale()),
         "build_xsrc" => return maint::build_xsrc(Path::new(&args[2]), scale()),
         "build_ipc_dense" => {

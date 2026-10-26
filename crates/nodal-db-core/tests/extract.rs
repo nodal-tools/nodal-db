@@ -447,6 +447,8 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
 /// exclusions (each asserted separately in T1).
 const T1_EXCLUDED_VIEWS: &[&str] = &[
     "axis_position",          // only the carried axes (asserted restricted)
+    "axis_parametric",        // rendering helper over every axis: the same (asserted)
+    "axis_position_stored",   // rendering helper over every axis: the same (asserted)
     "dataset_version",        // E (asserted)
     "metadata_current",       // the identity row differs (asserted)
     "value_timeline",         // history view: only the surviving versions (asserted)
@@ -529,24 +531,28 @@ fn t1_head_extract_reads_identically() {
     }
 
     // The exclusions, each asserted.
-    assert_eq!(
-        except_count(
-            &dest,
-            &fx.db,
-            "main.axis_position",
-            "src.axis_position WHERE axis_id IN (SELECT id FROM main.axis)"
-        ),
-        0
-    );
-    assert_eq!(
-        except_count(
-            &dest,
-            &fx.db,
-            "src.axis_position WHERE axis_id IN (SELECT id FROM main.axis)",
-            "main.axis_position"
-        ),
-        0
-    );
+    for v in ["axis_position", "axis_parametric", "axis_position_stored"] {
+        assert_eq!(
+            except_count(
+                &dest,
+                &fx.db,
+                &format!("main.{v}"),
+                &format!("src.{v} WHERE axis_id IN (SELECT id FROM main.axis)")
+            ),
+            0,
+            "{v}"
+        );
+        assert_eq!(
+            except_count(
+                &dest,
+                &fx.db,
+                &format!("src.{v} WHERE axis_id IN (SELECT id FROM main.axis)"),
+                &format!("main.{v}")
+            ),
+            0,
+            "{v}"
+        );
+    }
     assert_eq!(
         scalar(&dest, "SELECT version FROM dataset_version"),
         report.extract_commit

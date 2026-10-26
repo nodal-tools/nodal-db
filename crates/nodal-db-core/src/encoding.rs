@@ -11,7 +11,6 @@
 //! (spec §9) is deferred — see the `// deferred: OPEN-7` note at the bottom.
 
 use serde::{Deserialize, Serialize};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::types::{ScalarValue, ValueKey, ValueKind};
 
@@ -134,9 +133,10 @@ impl CanonicalAxis {
     }
 }
 
-/// A string, NFC-normalized (Unicode 16.0.0), `u32`-length-prefixed (spec §3.4).
+/// A string, NFC-normalized (Unicode 16.0.0) by the core's one NFC
+/// function (`text::nfc`), `u32`-length-prefixed (spec §3.4).
 fn push_string(out: &mut Vec<u8>, s: &str) {
-    let nfc: String = s.nfc().collect();
+    let nfc = crate::text::nfc(s);
     let bytes = nfc.as_bytes();
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);

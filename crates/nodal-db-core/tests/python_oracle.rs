@@ -26,6 +26,48 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The oracle must stay a second implementation: it may never call the
+/// core it checks. The Python skin (`nodal_db`, which exposes the core) is
+/// installed in the same `.venv`, so the shortcut is one import away; this
+/// fails if any oracle file imports it (plan T5,
+/// `specs/unicode_text_rule_PLAN.md` §3: the oracle normalizes text with
+/// its own code, never the core's `text::nfc`).
+#[test]
+fn oracle_never_imports_the_core() {
+    fn py_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read oracle dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                py_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "py") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    py_files(&repo_root().join("conformance/oracle"), &mut files);
+    assert!(!files.is_empty(), "no oracle files found");
+    let mut offenders = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).expect("read oracle file");
+        for (n, line) in text.lines().enumerate() {
+            let l = line.trim_start();
+            let is_import = l.starts_with("import ")
+                || l.starts_with("from ")
+                || l.contains("import_module")
+                || l.contains("__import__");
+            if is_import && l.contains("nodal_db") {
+                offenders.push(format!("{}:{}: {line}", f.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the conformance oracle must not import the core it checks (nodal_db):\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn independent_python_oracle_reproduces_every_vector() {
     let root = repo_root();

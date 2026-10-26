@@ -25,6 +25,9 @@ pub const MINIMUM_DUCKDB: (u32, u32) = (2, 0);
 /// Plain FFI-friendly data types for the pipeline (Phase 2).
 pub mod types;
 
+/// Unicode text normalization: the core's one NFC function (plan T5).
+pub mod text;
+
 /// Canonical byte encoding + 64-bit content hash (Phase 1) + value encoding
 /// (Phase 2, spec §9 / OPEN-7).
 pub mod encoding;

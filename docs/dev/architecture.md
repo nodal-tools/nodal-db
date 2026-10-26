@@ -372,6 +372,20 @@ and
   (`0x7ff8000000000000`), using the same function the canonical encoding
   uses, so stored bits and content hashes cannot disagree. NaN is a legal
   *value* but never a legal axis coordinate.
+- **Text normalization**: identifiers are NFC, data text is bytes. Names
+  (classes, entities, parameters, alternatives, scenarios, value lists,
+  units, class sets) and index labels are converted to Unicode NFC
+  (Unicode 16.0.0) at the writer boundary, before any comparison,
+  lookup or store, by the one function `text::nfc` that the encoder also
+  uses; NFC-equal spellings are one identifier and read back in NFC.
+  String values, list members, descriptions and messages are stored and
+  compared byte for byte. A write that normalized something carries a
+  `TextNormalized` warning. The axis writer refuses an axis with a
+  non-NFC or repeated label (a path that bypassed canon). The
+  normalization data is vendored (`conformance/unicode/`): a test checks
+  the pinned `unicode-normalization` crate against it for every code
+  point, and the Python oracle normalizes with its own code over it, so
+  neither depends on a platform's Unicode version.
 - The rank cap is 4.
 
 ## 6. Concurrency and connection discipline
@@ -638,12 +652,6 @@ following:
 - **Not planned for now** (design left open, no code): a serving
   process, value inheritance, symbols, structured units, in-place
   reshape.
-- **Known debt before the encoding freezes**: the encoding pins Unicode
-  16.0.0 NFC normalization of identifier strings (labels and tags;
-  string values are encoded as their raw bytes). This is currently held
-  only by an exact `unicode-normalization = "=0.1.24"` pin, which a test
-  asserts, while the Python oracle uses CPython's own Unicode tables; the
-  normalization tables need to be vendored.
 
 ## 11. Naming note
 

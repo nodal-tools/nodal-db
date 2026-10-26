@@ -349,6 +349,60 @@ an edge worth knowing:
   `cascade` off is refused, although that delete alone would only be
   blocked.
 
+### Names, labels and Unicode
+
+Some characters can be written in more than one way in Unicode. `é`, for
+example, is either the single character U+00E9 or `e` followed by the
+combining accent U+0301. The two look the same and Unicode defines them
+as the same text, but their bytes differ. macOS file names, some
+editors and text copied from some PDFs use the decomposed form.
+
+nodal-db treats the two kinds of text differently:
+
+- **Names and index labels are stored in Unicode Normalization Form C
+  (NFC).** This covers the names of classes, entities, parameters,
+  alternatives, scenarios, value lists, units and class sets, and every
+  index label (map keys and label domains). The core converts each one to
+  NFC before it compares, looks up or stores it, so two spellings that
+  differ only in this way are one name or one label. You read back the
+  NFC form, which can differ in bytes from what you wrote, in the way
+  `-0.0` is read back as `0.0`. Names are also compared without regard
+  to case, as before.
+- **String values are stored exactly as written.** This covers string
+  values, value-list members, descriptions and commit messages. Two
+  string values whose bytes differ are different values, even when they
+  look the same.
+
+The normalization uses the tables of Unicode 16.0.0, whatever Unicode
+version your platform has. When a write changes any names or labels, the
+report carries one `text_normalized` warning per segment and kind, with
+the number of changed spellings and the first one, as written and as
+stored:
+
+```text
+{'kind': 'text_normalized', 'what': 'label', 'count': 1,
+ 'written': 'é', 'stored': 'é', 'object_type': 'segment',
+ 'name': 'node:mode_cost/Base', 'id': 0}
+```
+
+Lookups (reads through the core, deletes, renames) convert their
+arguments too, so either spelling finds the object. Some consequences:
+
+- A label domain that lists both spellings of one label repeats it, and
+  is refused; so is a value that has two rows whose index tuples differ
+  only in this way (a duplicate index tuple). The error message shows
+  both spellings with their code points, because they look identical.
+- Two entity names in one batch that differ only in this way are one
+  entity.
+- **Direct SQL** sees the stored NFC text. A query whose literal is in
+  another form misses it; normalize the literal with DuckDB's
+  `nfc_normalize('...')`, or in Python with
+  `nodal_db.normalize_identifier(s)`, which is the core's own function.
+  Use the latter in code that compares names the way the database does
+  (a search box, an importer's duplicate check): Python's `unicodedata`
+  follows the interpreter's Unicode version (15.0 on Python 3.12), which
+  disagrees with 16.0.0 on a few recently added characters.
+
 ### Build a scenario
 
 A scenario is an ordered list of alternatives; later entries take
@@ -767,7 +821,16 @@ alternatives of a scenario, activation rows, parameter values, and a
 parameter's value list.
 
 Only names are trimmed. Map keys (index labels), string values and value
-list members are data and are imported exactly as they are.
+list members are data and are imported as they are, except that nodal-db
+stores names and map keys in Unicode NFC (see
+[Names, labels and Unicode](#names-labels-and-unicode)). The importer does
+not convert anything itself; the core does, and the import report counts
+what it converted (`normalized identifiers` in `report.summary()`). Two
+names of one kind that differ only in Unicode normalization (or in it
+and case) stop the import, like a case collision. Two keys of one map
+that differ only in this way are one label to nodal-db, so the core
+refuses that value as a duplicate (or its label domain as a repeat) and
+the import stops; fix the source.
 
 Each trimmed name is reported as a warning, in the same places as a
 duplicate key: in `report.trimmed_names`, in `report.summary()`, and

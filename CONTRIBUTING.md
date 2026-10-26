@@ -76,6 +76,40 @@ builds whose surface DDL differs at the same revision refresh each
 other's files on every write (about 0.2 s each): bump the revision in a
 branch as soon as its DDL changes.
 
+## Unicode version bumps
+Names and index labels are stored in NFC under **Unicode 16.0.0**, the
+version the canonical encoding pins (spec `canonical_encoding.md`
+§3.4.1.1). Three things hold it: the exact
+`unicode-normalization = "=0.1.24"` pin (the crate's tables;
+`tests/text_nfc.rs` asserts the version), the vendored data in
+`conformance/unicode/` (`nfc_table_16.0.0.txt` and the official
+`NormalizationTest-16.0.0.txt.gz`, written by `gen_nfc_table.py` from
+the UCD files), and the oracle's own normalizer
+(`conformance/oracle/nfc16.py`), which reads that table. Never normalize
+with another implementation (CPython's `unicodedata`, DuckDB's
+`nfc_normalize`): their Unicode versions follow the interpreter or the
+engine.
+
+A bump is a rehash-class change (spec §2.4), deliberate and in one
+branch:
+
+1. Download the new release's `UnicodeData.txt`,
+   `DerivedNormalizationProps.txt`, `CompositionExclusions.txt` and
+   `NormalizationTest.txt` from `https://www.unicode.org/Public/<V>/ucd/`,
+   set `VERSION` in `gen_nfc_table.py`, run it, and rename the table and
+   test file references (`text_nfc.rs`, `nfc16.py`).
+2. Move the `unicode-normalization` pin to the release with those
+   tables and update the asserted `UNICODE_VERSION`. `text_nfc.rs` then
+   checks the crate against the new table for every code point.
+3. Update the version-guard encoding vectors 22-24 by hand (their
+   expected bytes are the old version's on purpose) and add guards for
+   the new version, computed independently of both implementations.
+4. Existing databases: re-normalize every stored name and label with the
+   new tables (only strings with characters unassigned in the old
+   version can change), recompute the affected axis hashes, and report
+   names or labels that now collide. No tool does this yet; write it
+   with the bump.
+
 ## Testing rules (binding once code exists)
 Adopted from flextool-engine's hard-won lessons:
 

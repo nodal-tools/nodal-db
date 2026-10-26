@@ -469,3 +469,34 @@ the CLI's kill test in
 [`crates/nodal-db-cli/tests/refresh_views_cli.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-cli/tests/refresh_views_cli.rs),
 `just docs-check` (the listing and the reference are current) and the
 contract-gate check in `schema/smoke_test.py`.
+
+## 10. Identifiers reach SQL in NFC; SQL never normalizes
+
+**Rule.** Names and index labels are stored in Unicode NFC (Unicode
+16.0.0), and every name bound into a lookup (`cur_name = lower(?)`,
+`lower(name) = lower(?)`, the `read_values` name lists) is NFC before it
+is bound. Both are done in Rust by `text::nfc`, at the API entry points
+(`commit_changes` and its wrappers, the verbs, erasure, the template
+loader, `read_parameter`, `read_values`). Never normalize in SQL: no
+`nfc_normalize` (or another DuckDB string function) in the schema, a
+view, a macro or a core statement. String values are not identifiers and
+are never normalized.
+
+**Why.** Name identity is `lower()` over the stored bytes (§8): if a
+stored name and a lookup argument differ only in Unicode normalization,
+the lookup misses and the write path auto-creates a second, identical-
+looking object. NFC on both sides makes the spellings one name.
+DuckDB's `nfc_normalize` uses the bundled engine's own Unicode tables,
+which are not pinned to 16.0.0 and move with an engine bump; a
+canonical path that used it could split a name the Rust side treats as
+one (characters added in recent Unicode versions normalize differently,
+`specs/unicode_text_rule_PLAN.md` §1.4). Direct-SQL users may use
+`nfc_normalize` for ad-hoc queries (the usage guide says so), never the
+core.
+
+**Guards.** `crates/nodal-db-core/tests/unicode_text_rule.rs` (an NFD
+name is stored in NFC and found by both spellings through every lookup
+path; NFD labels read back in NFC; stored label bytes do not depend on
+write order) and `crates/nodal-db-core/tests/text_nfc.rs` (the crate's
+tables against the vendored Unicode 16.0.0 data for every code point,
+and `text::nfc` against the official NormalizationTest).

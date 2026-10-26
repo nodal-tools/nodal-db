@@ -600,8 +600,9 @@ payload by an index scan. The rendered point reads `read_value`,
 first, so they stay on the index for 0 to 50 value hits, including a
 value that does not exist and a parameter with no arrays. Reads of more
 than 50 values at once still scan the payload of the whole table, as do
-point reads through `value_rows`, `read_parameter` and
-`value_array_asof`, whose outer filters never reach their scans. The
+point reads through `value_rows` and `value_array_asof`, whose outer
+filters never reach their scans; a point read through `read_parameter`
+reads every array of its parameter. The
 index-scan choice is made at run time and depends on engine heuristics,
 so `crates/nodal-db-core/tests/array_id_index_scan.rs` and
 `point_read_index_scan.rs` check it with `EXPLAIN ANALYZE` on every

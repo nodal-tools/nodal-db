@@ -304,7 +304,7 @@ and joins stored coordinates only for the axes current values use. It
 used to join `axis_position`, which lists every position of every axis
 in the file, once per dimension. A file with 500 extra hourly axes then
 paid 0.5 to 1.5 s more on every `value_rows` and `read_parameter` call,
-scalar reads included, whether or not anything used those axes. Two
+scalar reads included, whether or not anything used those axes. Three
 choices follow:
 
 - *Arithmetic, not a filtered expansion.* Filtering the expansion to the
@@ -327,6 +327,11 @@ choices follow:
   text (an axis-id list argument, or a filter on the unfiltered view)
   were measured and fell apart on a file with 500 stored axes. The
   equality test covers both copies, so they cannot drift apart silently.
+- *`read_parameter` reads one parameter's rows only.* It no longer joins
+  the parameter to `value_rows` above the tier union, where the filter
+  never reached the array tier: every call unnested every array in the
+  file (8.76 million cells on the gate's fixture), even for a scalar
+  parameter.
 
 The remaining cost is in `value_rows`: a view cannot see the caller's
 filter, so it joins the stored positions of every axis any current value
@@ -887,8 +892,9 @@ once and report the second as nothing to delete.
   values at once and a filter on the key triple applied directly to
   `value_array` (both measured at about 35–100 ms warm and about
   180–200 ms on a fresh connection in the results-scale benchmark), a read of a value that does not
-  exist, and point reads through `read_parameter`, `value_rows` and
-  `value_array_asof` (not measured separately). A fast path for those is planned. The index
+  exist, and point reads through `value_rows` and `value_array_asof`
+  (not measured separately); a point read through `read_parameter`
+  reads every array of its parameter. A fast path for those is planned. The index
   lookup depends on DuckDB's planner heuristics, so a test checks the
   plan shape on every build.
 - **Long-tier size.** Done: the unique index that guarantees at most

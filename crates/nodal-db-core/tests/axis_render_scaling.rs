@@ -16,10 +16,12 @@
 //!
 //! The contract (D1-D3): after batches 1-3 every counter of every read grew
 //! by at most a small multiple of the axis and value rows added, never by
-//! the positions (400 000 per batch). Batch 4 is the shape where
-//! `value_rows` is NOT axis-count independent: it hash-builds the stored
-//! positions of every axis in use (plan §11 C2, R1); its growth is printed,
-//! not asserted. Also pinned: `value_rows` evaluates its in-use axis set once
+//! the positions (400 000 per batch); after batch 4 the same holds for
+//! `read_parameter` of the other parameters (it is parameter-scoped).
+//! Batch 4 is the shape where `value_rows` is NOT axis-count independent:
+//! it joins the stored positions of every axis in use (plan §11 C2, R1);
+//! its growth is printed, not asserted. The `value_long` rows each read
+//! scans are printed with the counters (plan R3). Also pinned: `value_rows` evaluates its in-use axis set once
 //! (`value_long` scanned at most 4x its current rows per call; the
 //! per-dimension form scanned it ~7x).
 //!
@@ -364,17 +366,17 @@ fn reads(conn: &Connection) -> Vec<(&'static str, String, bool)> {
         (
             "read_parameter scalar",
             "SELECT * FROM read_parameter('bench_scalar', 'p_scalar')".into(),
-            false,
+            true,
         ),
         (
             "read_parameter long",
             "SELECT * FROM read_parameter('bench_long', 'p_long')".into(),
-            false,
+            true,
         ),
         (
             "read_parameter array",
             "SELECT * FROM read_parameter('bench_array', 'p_series')".into(),
-            false,
+            true,
         ),
         (
             "value_rows point long",
@@ -450,7 +452,11 @@ fn read_work_does_not_grow_with_axis_positions() {
         let before = measure(&db);
         add_batch(&db, which);
         let after = measure(&db);
-        let allowed = 8 * (BATCH_AXES as u64 + extra_rows) + 64;
+        // per added axis or value row: an `axis` row may be built into each
+        // of the six stored legs of each of four dimension joins, the
+        // axis_parametric joins and the array length lookups (37 measured);
+        // the positions added are 2 000 per axis, so this cannot hide them
+        let allowed = 64 * (BATCH_AXES as u64 + extra_rows) + 64;
         for ((label, sql, asserted4, b), (_, _, _, a)) in before.iter().zip(&after) {
             let grew = |x: u64, y: u64| y.saturating_sub(x);
             let g = [

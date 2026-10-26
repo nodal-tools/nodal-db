@@ -8,8 +8,11 @@
 //! elements whose length is not a multiple of 2048, then a selective filter
 //! (a caching operator) throws `INTERNAL Error: dict-surviving cache: global
 //! dictionary column 0 changed identity …` and invalidates the database
-//! instance. In nodal-db that is `read_parameter` on 8760-long array values
-//! with a time-window or rare-value filter. No data is damaged.
+//! instance. In nodal-db that is `value_rows` (or `value_cells`) on
+//! 8760-long array values with a time-window or rare-value filter.
+//! `read_parameter` had the shape too until it got a parameter-scoped body
+//! that fetches payloads by a key list (axis_position_cost_PLAN; engine_rules
+//! §6). No data is damaged.
 //!
 //! - [`raw_duckdb_still_has_the_bug`] is a deliberate TRIPWIRE: it asserts the
 //!   bug is still present on the bundled DuckDB with caching operators on.
@@ -165,14 +168,27 @@ fn fixture(dir: &Path, n_entities: usize) -> std::path::PathBuf {
 }
 
 /// A six-hour window starting at hour `H0` (2025-03-01 00:00), through the
-/// public `read_parameter` macro: the realistic trigger from the findings.
+/// public `value_rows` view: the realistic trigger from the findings (it
+/// was `read_parameter` until that macro got its own parameter-scoped body,
+/// which no longer has the bug's shape; `point_read_index_scan.rs` checks it
+/// returns the right rows on a raw connection).
+/// Every column is fetched and the rows are counted and summed here: a
+/// `count(*)` wrapper over `value_rows` lets the optimizer prune the
+/// pass-through columns, and with them the bug shape.
 const H0: i64 = 59 * 24;
-const WINDOW_QUERY: &str = "SELECT count(*), sum(v_float) \
-     FROM read_parameter('node', 'inflow') \
+const WINDOW_QUERY: &str = "SELECT * FROM value_rows \
      WHERE idx1_ts BETWEEN TIMESTAMP '2025-03-01 00:00' AND TIMESTAMP '2025-03-01 05:00'";
 
 fn window_query(conn: &Connection) -> Result<(i64, f64), DuckError> {
-    conn.query_row(WINDOW_QUERY, [], |r| Ok((r.get(0)?, r.get(1)?)))
+    let mut st = conn.prepare(WINDOW_QUERY)?;
+    let mut rows = st.query([])?;
+    let col = rows.as_ref().expect("statement").column_index("v_float")?;
+    let (mut n, mut sum) = (0i64, 0.0f64);
+    while let Some(r) = rows.next()? {
+        n += 1;
+        sum += r.get::<_, f64>(col)?;
+    }
+    Ok((n, sum))
 }
 
 #[test]

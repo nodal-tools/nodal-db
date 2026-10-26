@@ -190,9 +190,11 @@ bare `Config::default()` or `Connection::open` in library code.
 that hits it is a join over dense ids that DuckDB runs as a perfect hash
 join, then `unnest` of a list longer than 2048 elements whose length is
 not a multiple of 2048, then a selective filter. In nodal-db that is
-`read_parameter` or `value_rows` on 8760-long array values with a time
+`value_rows` (or `value_cells`) on 8760-long array values with a time
 window (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`),
-on a file with several hundred such arrays. The query fails with
+on a file with several hundred such arrays. (`read_parameter` had the
+shape too until it got its own parameter-scoped body, which fetches
+payloads as §6 requires.) The query fails with
 `INTERNAL Error: dict-surviving cache: global dictionary column 0
 changed identity …`, and the error invalidates the whole database
 instance, so every other connection on it fails too. No data is
@@ -220,7 +222,7 @@ the upgrade has to deal with it.
   DuckDB dict-cache bug appears fixed; remove the
   debug_enable_caching_operators workaround".
 - `core_connection_reads_filtered_arrays_correctly` builds a file with
-  800 arrays of 8760 values, checks that a time-window `read_parameter`
+  800 arrays of 8760 values, checks that a time-window `value_rows` read
   fails on a plain connection, then checks the exact result through the
   core's read connection and that the core's read and write
   connections carry the setting.
@@ -249,8 +251,9 @@ by a join's build side may pass through the UNNEST. In practice:
 
 The self-join form `k JOIN value_array p ON p.array_id = k.array_id`
 with `k`'s columns passed through, which `value_array_cells` (and through
-it `value_cells`, `value_rows` and `read_parameter`) uses, is excluded
-for new code.
+it `value_cells` and `value_rows`) uses, is excluded for new code.
+`read_parameter` follows the rule: it fetches its parameter's payloads
+through the same key-list SEMI join as the point-read macros.
 
 **Why.** This is the shape of the DuckDB 2.0 dict-cache bug of §5: the
 `array_id` self-join runs as a perfect hash join (the ids are dense) and
@@ -268,14 +271,16 @@ correct when the §5 workaround is removed after an upgrade.
 **Guards.**
 [`crates/nodal-db-core/tests/point_read_index_scan.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/point_read_index_scan.rs):
 
-- a structural check over the macros' `EXPLAIN` plans: below every
+- a structural check over the plans of the point-read macros and
+  `read_parameter`: below every
   UNNEST, the only joins on the column path are SEMI, ANTI or MARK (only
   their probe side is followed; aggregates and CTE scans are barriers).
   It flags `value_array_cells` as a self-check;
 - a data guard on a 1 000 x 8 760-cell fixture with dense ids, on a raw
   DuckDB connection with default settings (never the core's open, which
-  turns caching off, §5): the macros return the exact counts under both
-  failing filters, while `value_rows` under the same filter still
+  turns caching off, §5): the macros and `read_parameter` return the
+  exact counts under both failing filters, while `value_rows` under the
+  same filter still
   raises (the positive control). When an upgrade fixes the bug, the
   positive control fails together with §5's tripwire: re-evaluate this
   rule then (it costs nothing to keep).
@@ -326,8 +331,12 @@ it grows with the current long tier (about one key-column scan of it per
 call). On a file whose values own many stored axes (irregular series,
 each with its own axis) a `value_rows` point read pays for all of their
 positions: slower than the expansion it replaced in that one shape.
-Engine reads go through `read_parameter` (parameter-scoped) and the
-point-read macros (key-scoped), not `value_rows`.
+Engine reads go through `read_parameter` and the point-read macros, not
+`value_rows`. `read_parameter` filters every tier scan by its parameter
+and passes that parameter to `axis_position_stored_in_use`, so its cost
+does not depend on other parameters' axes; it still joins the stored
+positions of all of its own axes, also for a rank-1 value in each of the
+four dimension joins (plan R7).
 
 **Exception: the point-read macros' `ap`.** `value_rows_for` (behind
 `read_value` and `read_values`) still filters `axis_position` by the

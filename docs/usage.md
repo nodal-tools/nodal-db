@@ -482,7 +482,7 @@ demo.duckdb` for the browser UI.
 has been read. To read one entity, or a few, use `read_value` or
 `read_values`. They return the same columns and rows as the filtered
 `read_parameter`, but read only the arrays they need, so a point read
-costs milliseconds instead of a scan of the whole array table:
+costs milliseconds instead of a read of every array of the parameter:
 
 ```sql
 -- one value
@@ -913,8 +913,8 @@ use a nodal-db build that matches the file.
     `duckdb --version` or `python -c "import duckdb; print(duckdb.__version__)"`.
 
 !!! warning "DuckDB 2.0: filtered reads of long arrays can fail"
-    On DuckDB 2.0.x, a query that filters `read_parameter` or
-    `value_rows` on array values, such as a time window
+    On DuckDB 2.0.x, a query that filters `value_rows` or `value_cells`
+    on array values, such as a time window
     (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`),
     can fail with `INTERNAL Error: dict-surviving cache: …` on a
     database with several hundred long arrays (for example 8760 hourly
@@ -941,9 +941,10 @@ use a nodal-db build that matches the file.
     with a "different configuration" error: use `SET` on that connection
     instead. For the DuckDB CLI, run the `SET` statement first. Unfiltered reads,
     aggregates over a whole parameter and `read_parameter_dense` are
-    not affected. Neither are `read_value` and `read_values`: to filter
-    one or a few series (one series in one time window), use them and
-    no setting is needed (see
+    not affected. Neither are `read_parameter`, `read_value` and
+    `read_values`: filter those and no setting is needed; for one or a
+    few series (one series in one time window) `read_value` and
+    `read_values` are also much faster (see
     [Reading one value or a few](#reading-one-value-or-a-few)).
 
 ### Arrow versions

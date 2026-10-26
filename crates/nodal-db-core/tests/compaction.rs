@@ -1367,19 +1367,25 @@ fn size_guard_rule_per_trigger() {
 
 /// The commit backstop on a rebuild that is strictly larger than the source
 /// keeps the original (and resets the baseline); the same source under the
-/// growth trigger keeps it too. The fixture: a few checkpointed commits after
-/// a compaction leave a source that DuckDB truncated below its rebuild
-/// (measured: 9 187 328 vs 10 498 048 bytes at DuckDB 1.5.5).
+/// growth trigger keeps it too. The fixture: a never-compacted file with a
+/// few checkpointed commits, which DuckDB keeps below the size of its
+/// rebuild (measured at DuckDB 2.0.0: 9 449 472 vs 10 760 192 bytes), and a
+/// hand-written baseline three commits back. Which side of a block boundary
+/// each file lands on depends on the catalog's size: the previous fixture (a
+/// compacted file plus three commits) stopped being smaller than its rebuild
+/// when the read macros grew (axis_position_cost_PLAN).
 #[test]
 fn commit_backstop_keeps_original_only_when_rebuild_is_larger() {
     let dir = tempfile::tempdir().unwrap();
-    let db = baselined(dir.path());
-    for i in 0..3 {
+    let db = dir.path().join("due.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    for i in 0..5 {
         write_scalar(&db, "Widget", "size", "Base", "w1", 10.0 + i as f64);
         checkpoint(&db);
     }
     let head = head_commit(&db).unwrap();
     let bytes = std::fs::metadata(&db).unwrap().len();
+    write_sidecar(&db, &format!("bytes={bytes}\ncommit={}\n", head - 3));
     let content = std::fs::read(&db).unwrap();
 
     let r = compact_if_due(&db, commits_only(3), Some(head)).unwrap();

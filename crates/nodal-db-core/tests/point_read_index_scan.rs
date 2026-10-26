@@ -36,8 +36,10 @@
 //!   `value_array_cells`, whose self-join is the bug shape.
 //! - **The dict-cache data guard**: on a fixture with 1 000 arrays of 8 760
 //!   cells and dense ids, a RAW DuckDB connection with default settings (caching
-//!   operators on, NOT the core's open) runs the macros under the two
-//!   failing filters and gets the exact counts, while `value_rows` (which
+//!   operators on, NOT the core's open) runs the macros (and
+//!   `read_parameter`, whose parameter-scoped body fetches payloads the same
+//!   way) under the two failing filters and gets the exact counts, while
+//!   `value_rows` (which
 //!   keeps the self-join shape) under the same filter still raises the
 //!   INTERNAL error (the positive control; if it stops raising, the fixture
 //!   no longer triggers the bug, or DuckDB fixed it: see the tripwire in
@@ -887,6 +889,13 @@ fn no_build_side_column_reaches_an_unnest() {
         "SELECT * FROM read_value('node', 'profile', 'n10', 'Base') \
          WHERE idx1_ts BETWEEN TIMESTAMP '2025-01-01 02:00' AND TIMESTAMP '2025-01-01 04:00'"
             .to_string(),
+        // read_parameter's parameter-scoped body (axis_position_cost_PLAN
+        // D3) fetches its payloads the same way
+        "SELECT * FROM read_parameter('node', 'profile')".to_string(),
+        "SELECT * FROM read_parameter('node', 'grid') WHERE v_float > 2000".to_string(),
+        "SELECT * FROM read_parameter('node', 'profile') \
+         WHERE idx1_ts BETWEEN TIMESTAMP '2025-01-01 02:00' AND TIMESTAMP '2025-01-01 04:00'"
+            .to_string(),
     ] {
         let v = unnest_violations(&explain(&conn, &sql));
         assert!(
@@ -1071,5 +1080,26 @@ fn point_read_macros_are_immune_to_the_dict_cache_bug() {
     assert_eq!(
         raw_count(&db, &format!("{ids_sql} {window}")),
         Ok(in_window(BUG_ARRAYS))
+    );
+    // read_parameter's parameter-scoped body (axis_position_cost_PLAN D3):
+    // the whole parameter under both failing filters, on a raw connection.
+    let rp = "SELECT * FROM read_parameter('bench_array', 'p_series')";
+    assert_eq!(
+        raw_count(&db, &format!("{rp} {window}")),
+        Ok(in_window(BUG_ARRAYS))
+    );
+    assert_eq!(
+        raw_count(&db, &format!("{rp} {rare}")),
+        Ok(rare_count(&all))
+    );
+    assert_eq!(
+        raw_count(
+            &db,
+            &format!(
+                "{rp} WHERE entity = 'a0500' AND idx1_ts \
+             BETWEEN TIMESTAMP '2025-03-01' AND TIMESTAMP '2025-03-01 05:00'"
+            )
+        ),
+        Ok(in_window(1))
     );
 }

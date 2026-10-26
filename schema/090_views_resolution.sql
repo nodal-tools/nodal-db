@@ -8,6 +8,7 @@
 -- so an alternative's value wins or loses as one unit).
 
 -- every current key triple, with its tier (also feeds the cross-tier audit):
+-- @surface: stable
 CREATE VIEW value_keys AS
 SELECT entity_id, parameter_definition_id, alternative_id, 'scalar' AS tier
 FROM value_scalar WHERE valid_to_commit IS NULL
@@ -28,6 +29,7 @@ FROM value_array;
 -- the Base value they outranked. With them, a closed-out alternative's
 -- values drop out of candidacy and the next rank wins — self-healing; the
 -- leftovers still surface in audit_dangling_ref.
+-- @surface: stable
 CREATE VIEW scenario_value_candidate AS
 SELECT sa.scenario_id, vk.entity_id, vk.parameter_definition_id,
        vk.alternative_id, sa.rank, vk.tier
@@ -38,6 +40,7 @@ JOIN alternative al ON al.id = vk.alternative_id AND al.valid_to_commit IS NULL
 JOIN scenario s ON s.id = sa.scenario_id AND s.valid_to_commit IS NULL;
 
 -- collapsed result: highest rank wins, deterministically (#2409).
+-- @surface: stable
 CREATE VIEW scenario_value_resolved AS
 SELECT scenario_id, entity_id, parameter_definition_id, alternative_id, rank, tier
 FROM scenario_value_candidate
@@ -47,6 +50,7 @@ QUALIFY row_number() OVER (
 
 -- conflicts: the same (entity, parameter) under >1 selected alternative,
 -- before last-wins collapses it — color-coded by editors, never blocked.
+-- @surface: stable
 CREATE VIEW scenario_value_conflict AS
 SELECT *, count(*) OVER (
          PARTITION BY scenario_id, entity_id, parameter_definition_id) AS n_candidates
@@ -55,6 +59,10 @@ QUALIFY n_candidates > 1;
 
 -- resolved long-shape read for one scenario (macro because views take no
 -- parameters; joins the collapsed winner back to the canonical rows).
+-- The ordinal, coordinate and period-end columns are appended after the
+-- value columns (read_surface_contract_PLAN A-D3), so the order of the
+-- earlier columns is unchanged.
+-- @surface: stable
 CREATE MACRO resolved_value_rows(scenario_name) AS TABLE
 SELECT s.name AS scenario, e.name AS entity, ec.name AS entity_class,
        pd.name AS parameter, al.name AS alternative, r.rank, vr.tier, vr.value_kind,
@@ -62,7 +70,10 @@ SELECT s.name AS scenario, e.name AS entity, ec.name AS entity_class,
        vr.idx1_ts, vr.idx2_ts, vr.idx3_ts, vr.idx4_ts,
        vr.idx1_num, vr.idx2_num, vr.idx3_num, vr.idx4_num,
        vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime,
-       vr.v_dur_months, vr.v_dur_micros
+       vr.v_dur_months, vr.v_dur_micros,
+       vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
+       vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
+       vr.idx1_end_ts, vr.idx2_end_ts, vr.idx3_end_ts, vr.idx4_end_ts
 FROM scenario_value_resolved r
 JOIN scenario s ON s.id = r.scenario_id AND s.valid_to_commit IS NULL
 JOIN value_rows vr ON vr.entity_id = r.entity_id
@@ -78,9 +89,10 @@ WHERE lower(s.name) = lower(scenario_name);
 -- Membership resolution, pass 1: base membership
 -- (alternative_id NULL, rank 0) overridden by the highest-ranked
 -- alternative-scoped row per (scenario, group, member).
+-- @surface: stable
 CREATE VIEW membership_resolved AS
 WITH cand AS (
-  SELECT s.id AS scenario_id, m.group_entity_id, m.member_entity_id, m.included, 0 AS rank
+  SELECT s.id AS scenario_id, m.group_entity_id, m.member_entity_id, m.included, 0::INTEGER AS rank
   FROM membership m
   CROSS JOIN scenario s
   WHERE m.alternative_id IS NULL AND m.valid_to_commit IS NULL AND s.valid_to_commit IS NULL
@@ -106,6 +118,7 @@ QUALIFY row_number() OVER (
 -- finite (scenario, group, member) pair set, so cycles terminate instead of
 -- recursing forever (the accepted-residual-risk guard, SDP Part 2); cycles
 -- themselves are surfaced by audit_membership_cycle (120).
+-- @surface: stable
 CREATE VIEW membership_flat AS
 WITH RECURSIVE flat(scenario_id, group_entity_id, member_entity_id) AS (
   SELECT scenario_id, group_entity_id, member_entity_id
@@ -124,6 +137,7 @@ SELECT * FROM flat;
 -- be definable "with everything on Base", and with
 -- zero scenarios the scenario-scoped views above are empty — base
 -- membership and its cycles would be invisible). Rank-0 rows only.
+-- @surface: stable
 CREATE VIEW membership_base_flat AS
 WITH RECURSIVE flat(group_entity_id, member_entity_id) AS (
   SELECT group_entity_id, member_entity_id
@@ -155,6 +169,7 @@ SELECT * FROM flat;
 -- resolution, never a value transform: capacity->P_max stays tool-side
 -- (invariant 2). Bags are left free (not guarded) — the dedicated typed
 -- class is the marker.
+-- @surface: stable
 CREATE VIEW realizes_edge AS
 SELECT ee1.element_entity_id AS coarse_id,
        ee2.element_entity_id AS fine_id
@@ -165,6 +180,7 @@ JOIN entity_element ee1 ON ee1.entity_id = r.id AND ee1.position = 1 AND ee1.val
 JOIN entity_element ee2 ON ee2.entity_id = r.id AND ee2.position = 2 AND ee2.valid_to_commit IS NULL
 WHERE r.valid_to_commit IS NULL;
 
+-- @surface: internal
 CREATE VIEW entity_activation_own AS
 SELECT sa.scenario_id, ea.entity_id, ea.active, sa.rank
 FROM entity_alternative ea
@@ -182,6 +198,7 @@ QUALIFY row_number() OVER (
 -- (structural), so they apply in every current scenario — inactive coarse
 -- deactivates fine identically in each. Both are the same edge type in the
 -- same graph (multifidelity_entity_linking §7.2).
+-- @surface: internal
 CREATE VIEW deact_edge AS
 SELECT scenario_id, group_entity_id AS from_id, member_entity_id AS to_id
 FROM membership_resolved WHERE included
@@ -190,6 +207,7 @@ SELECT sc.id, re.coarse_id, re.fine_id
 FROM realizes_edge re
 CROSS JOIN scenario sc WHERE sc.valid_to_commit IS NULL;
 
+-- @surface: stable
 CREATE VIEW entity_activation_resolved AS
 WITH RECURSIVE deact(scenario_id, entity_id) AS (
   -- seeds: entities whose own resolved row deactivates them. Note: a
@@ -233,6 +251,7 @@ WHERE e.valid_to_commit IS NULL AND s.valid_to_commit IS NULL;
 -- Resolved-scenario-contents: full flattened membership plus activation for
 -- one scenario. One row per (entity, containing-group); ungrouped entities
 -- appear with NULL group.
+-- @surface: stable
 CREATE MACRO scenario_contents(scenario_name) AS TABLE
 SELECT e.name AS entity, ec.name AS entity_class,
        act.active, act.active_source,
@@ -251,6 +270,7 @@ WHERE s.valid_to_commit IS NULL AND lower(s.name) = lower(scenario_name);
 -- (critique F8): a NULL sid previously made one side empty and rendered a
 -- typo as a plausible "everything removed" diff; now a nonexistent name
 -- yields the empty result, matching scenario_contents.
+-- @surface: stable
 CREATE MACRO scenario_diff(scenario_a, scenario_b) AS TABLE
 WITH sid AS (
   SELECT

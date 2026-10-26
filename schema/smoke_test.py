@@ -1800,6 +1800,43 @@ def main():
     check(f"point reads: read_value == read_parameter filtered, for each of the"
           f" {n_points} current values", not bad_pt and n_points >= 15, str(bad_pt))
 
+    # Period end bounds (read_surface_contract_PLAN A-D3): read_parameter /
+    # read_value(s) append idx1_end_ts..idx4_end_ts, resolved_value_rows
+    # appends the ordinal, coordinate and end columns; both equal value_rows'.
+    end_cols = ("idx1_end_ts, idx2_end_ts, idx3_end_ts, idx4_end_ts, idx1_ts, idx2_ts,"
+                " v_float, v_int, v_str")
+    bad_end, n_end = {}, 0
+    for cls, par, pd_id in params:
+        d = multiset_diff(
+            f"SELECT {end_cols} FROM read_parameter('{cls}', '{par}')",
+            f"SELECT {end_cols} FROM value_rows vr"
+            " JOIN entity e ON e.id = vr.entity_id AND e.valid_to_commit IS NULL"
+            " JOIN alternative al ON al.id = vr.alternative_id AND al.valid_to_commit IS NULL"
+            f" WHERE vr.parameter_definition_id = {pd_id}")
+        if d[:2] != (0, 0):
+            bad_end[f"{cls}.{par}"] = d
+        n_end += one(f"SELECT count(*) FROM read_parameter('{cls}', '{par}')"
+                     " WHERE idx1_end_ts IS NOT NULL OR idx2_end_ts IS NOT NULL")[0]
+    check(f"read surface: read_parameter's appended idxN_end_ts == value_rows' ({n_end}"
+          " rows with a period end)", not bad_end and n_end > 0, str(bad_end))
+    rp_cols = [c for c, _ in described("SELECT * FROM read_parameter('node', 'inflow_forecast')")]
+    rv_cols = [c for c, _ in described("SELECT * FROM resolved_value_rows('x')")]
+    check("read surface: the end bounds (and resolved_value_rows' ordinal/coord/end columns)"
+          " are appended after the value columns",
+          rp_cols[24:] == ["v_float", "v_int", "v_bool", "v_str", "v_datetime", "v_dur_months",
+                           "v_dur_micros", "idx1_end_ts", "idx2_end_ts", "idx3_end_ts",
+                           "idx4_end_ts"]
+          and rv_cols[-12:] == [f"idx{i}_{k}" for k in ("ordinal", "coord", "end_ts")
+                                for i in range(1, 5)]
+          and rv_cols[:27][-1] == "v_dur_micros", f"{rp_cols} {rv_cols}")
+    resolved_ok = one("""
+        WITH r AS (SELECT * FROM resolved_value_rows(
+                     (SELECT name FROM scenario WHERE valid_to_commit IS NULL ORDER BY id LIMIT 1)))
+        SELECT count(*), count(*) FILTER (WHERE tier <> 'scalar' AND idx1_ordinal IS NULL)
+        FROM r""")
+    check(f"read surface: resolved_value_rows carries idx1_ordinal for every indexed row"
+          f" ({resolved_ok[0]} rows)", resolved_ok[0] > 0 and resolved_ok[1] == 0, str(resolved_ok))
+
     # =======================================================================
     # Axis rendering (axis_position_cost_PLAN; engine_rules §7): read paths
     # compute parametric coordinates with the axis_param_* scalar macros and
@@ -2088,13 +2125,82 @@ def main():
     check("db_identity: single current row, unchanged across the whole suite",
           rows == [(dbid,)], str(rows))
 
+    # ---- the read-surface version marker (130_read_surface.sql) is the
+    # build's, parsed by the same code the docs generator uses.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts" / "docs"))
+    import gen_schema
+    major, revision = gen_schema.build_surface_version()
+    got = one("SELECT contract_major, revision, length(ddl_hash) FROM nodal_read_surface()")
+    check("read surface: nodal_read_surface() == 130_read_surface.sql's version",
+          got == (major, revision, 16), str(got))
+
     con.close()
 
+    contract_gate_checks(gen_schema)
     horizon_and_binding_checks(workdir)
 
     n_fail = RESULTS.count(False)
     print(f"\n{len(RESULTS)} checks, {n_fail} failures")
     sys.exit(1 if n_fail else 0)
+
+
+def contract_gate_checks(gen_schema):
+    """The read-surface contract gate (scripts/docs/gen_schema.py
+    contract_gate) on synthetic listings: a renamed stable column, a removed
+    stable object, a changed parameter list and a removed mirror need a
+    contract_major bump; a changed mirror needs a SCHEMA_VERSION bump;
+    appended columns, new objects and advisory changes pass."""
+    text = gen_schema.CONTRACT_TSV.read_text()
+    major, sv, objs = gen_schema.parse_contract(text)
+    check("contract gate: the committed listing parses (header and objects)",
+          major is not None and sv == schema_build.SCHEMA_VERSION and len(objs) > 100,
+          f"{major} {sv} {len(objs)}")
+
+    def mutate(fn):
+        new = {k: (c, kd, list(p), list(cols)) for k, (c, kd, p, cols) in objs.items()}
+        fn(new)
+        return new
+
+    def renamed(new):
+        c, k, p, cols = new["read_parameter"]
+        cols[0] = ("entity_name", cols[0][1])
+
+    def retyped(new):
+        c, k, p, cols = new["value_rows"]
+        cols[5] = (cols[5][0], "BIGINT")
+
+    def appended(new):
+        new["read_parameter"][3].append(("parameter_type_id", "BIGINT"))
+        new["brand_new_view"] = ("stable", "view", [], [("x", "INTEGER")])
+        new["audit_health"][3].pop()
+
+    def mirror_changed(new):
+        new["entity_current"][3].append(("extra", "INTEGER"))
+
+    def removed(new):
+        del new["read_values"]
+        del new["entity_asof"]
+
+    def reparam(new):
+        new["scenario_diff"] = (*new["scenario_diff"][:2], ["a"], new["scenario_diff"][3])
+
+    def gate(new, m=major):
+        return gen_schema.contract_gate(text, new, m)
+    for name, fn in (("renaming a stable column", renamed), ("retyping a stable column", retyped),
+                     ("removing stable objects and a mirror", removed),
+                     ("changing a stable parameter list", reparam)):
+        problems = gate(mutate(fn))
+        check(f"contract gate: {name} without a major bump fails",
+              any("contract_major" in p for p in problems), str(problems))
+        problems = gate(mutate(fn), major + 1)
+        check(f"contract gate: {name} with a major bump passes", not problems, str(problems))
+    problems = gate(mutate(appended))
+    check("contract gate: appended columns, a new object and an advisory change pass",
+          not problems, str(problems))
+    problems = gate(mutate(mirror_changed))
+    check("contract gate: a changed mirror without a SCHEMA_VERSION bump fails",
+          any("SCHEMA_VERSION" in p for p in problems), str(problems))
+    check("contract gate: the unchanged listing passes", not gate(objs), str(gate(objs)))
 
 
 if __name__ == "__main__":

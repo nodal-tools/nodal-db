@@ -360,6 +360,11 @@ fn read_surface_column_sets_are_unchanged() {
                 "v_datetime",
                 "v_dur_months",
                 "v_dur_micros",
+                // appended (read-surface contract: existing order kept)
+                "idx1_end_ts",
+                "idx2_end_ts",
+                "idx3_end_ts",
+                "idx4_end_ts",
             ],
         ),
     ];

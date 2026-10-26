@@ -59,6 +59,10 @@ SCHEMA_DIR = REPO / "schema"
 OUT_DIR = REPO / "docs" / "_generated"
 OUT_DIAGRAMS = OUT_DIR / "schema_diagrams.md"
 OUT_VIEWS = OUT_DIR / "schema_views.md"
+OUT_SURFACE = OUT_DIR / "read_surface.md"
+# The committed read-surface contract listing (one row per column of every
+# stable, mirror and advisory object); the contract gate diffs against it.
+CONTRACT_TSV = SCHEMA_DIR / "read_surface_contract.tsv"
 
 SCRIPT_REL = "scripts/docs/gen_schema.py"
 HEADER = (
@@ -175,11 +179,15 @@ def implied_target(col: str, src: str, tables) -> str | None:
 # DDL source text: file headers and per-object comment blocks
 
 CREATE_RE = re.compile(r"^CREATE (TABLE|VIEW|MACRO) (\w+)", re.M)
+# The read-surface classification tag, the line directly above a CREATE in
+# 070-130 (docs/dev/read_surface.md "Classes").
+TAG_RE = re.compile(r"^-- @surface: (\w+)\s*$")
 
 
 def source_index():
     """Map object name -> (file stem, kind, comment lines above its CREATE);
-    plus file stem -> header title."""
+    plus file stem -> header title. The `@surface:` tag line is not part of
+    the comment block (see surface_tags)."""
     objects: dict[str, tuple[str, str, list[str]]] = {}
     titles: dict[str, str] = {}
     for f in schema_build.sql_files():
@@ -198,6 +206,8 @@ def source_index():
             lineno = text.count("\n", 0, m.start())
             block = []
             j = lineno - 1
+            if j >= 0 and TAG_RE.match(lines[j]):  # the classification tag
+                j -= 1
             if j >= 0 and not lines[j].strip():  # tolerate one blank line
                 j -= 1
             while j >= 0 and lines[j].startswith("--"):
@@ -411,21 +421,302 @@ class InternalRefError(Exception):
     pass
 
 
-def generate() -> dict[pathlib.Path, str]:
+# --------------------------------------------------------------------------
+# The read-surface contract (docs/dev/read_surface.md): classification tags,
+# the committed listing and the gate that classifies a change to it.
+
+class SurfaceError(Exception):
+    """A tag-census, dummy-argument or contract-gate failure (one message
+    per problem)."""
+
+
+SURFACE_CLASSES = ("stable", "mirror", "advisory", "internal")
+# Files holding the read surface: every view and macro of these, and
+# nothing else (no tables, indexes or data).
+SURFACE_FIRST, SURFACE_LAST = 70, 130
+SURFACE_VERSION_FILE = SCHEMA_DIR / "130_read_surface.sql"
+
+# Explicit dummy arguments per listed table macro, for `DESCRIBE SELECT *
+# FROM macro(args)`. Macros are untyped and bind by argument type, so the
+# arguments are written out per macro, never inferred from parameter names
+# (`read_values` binds with a VARCHAR[] entity list, `value_rows_for` with
+# BIGINT[] id lists). Defaulted named parameters are omitted. Every stable,
+# mirror and advisory table macro needs an entry; a stale entry fails too.
+_ASOF_MIRRORS = (
+    "metadata", "entity_metadata", "parameter_value_metadata", "entity_class",
+    "class_set", "class_set_member", "entity_class_dimension", "entity",
+    "entity_location", "entity_element", "alternative", "scenario",
+    "scenario_alternative", "entity_alternative", "membership",
+    "units_of_measure", "parameter_value_list", "list_value",
+    "parameter_definition", "entity_parameter_unit", "parameter_type",
+    "parameter_type_dimension", "display_mode", "entity_class_display_mode",
+    "semantic_annotation", "value_scalar", "value_long", "value_array",
+    "definition_value_scalar", "definition_value_long", "definition_value_array",
+)
+DUMMY_ARGS: dict[str, str] = {
+    **{f"{t}_asof": "1::BIGINT" for t in _ASOF_MIRRORS},
+    "value_array_asof_for": "1::BIGINT, 1::BIGINT, 1::BIGINT, 1::BIGINT",
+    "read_parameter": "'c', 'p'",
+    "read_parameter_dense": "'c', 'p'",
+    "read_parameter_scalar": "'c', 'p'",
+    "value_rows_for": "1::BIGINT, [1]::BIGINT[], [1]::BIGINT[]",
+    "read_values": "'c', 'p', ['e']::VARCHAR[]",
+    "read_value": "'c', 'p', 'e'",
+    "entity_class_display": "'m'",
+    "resolved_value_rows": "'s'",
+    "scenario_contents": "'s'",
+    "scenario_diff": "'a', 'b'",
+    "nodal_read_surface": "",
+}
+
+CONTRACT_COLUMNS = ("class", "object", "kind", "parameters", "ordinal", "column", "type")
+
+
+def surface_files() -> list[pathlib.Path]:
+    return [f for f in schema_build.sql_files()
+            if SURFACE_FIRST <= int(f.name[:3]) <= SURFACE_LAST]
+
+
+def surface_tags() -> dict[str, str]:
+    """Object name -> class, from the `-- @surface:` line directly above each
+    CREATE in 070-130. Fails on an untagged object, an unknown class, a
+    tag that is not directly above a CREATE, or a table in these files."""
+    out: dict[str, str] = {}
+    problems = []
+    for f in surface_files():
+        lines = f.read_text().splitlines()
+        for i, ln in enumerate(lines):
+            m = CREATE_RE.match(ln)
+            tag = TAG_RE.match(ln)
+            if tag and not (i + 1 < len(lines) and CREATE_RE.match(lines[i + 1])):
+                problems.append(f"{f.name}:{i + 1}: @surface tag not directly above a CREATE")
+            if not m:
+                continue
+            kind, name = m.group(1), m.group(2)
+            if kind == "TABLE":
+                problems.append(f"{f.name}: table {name} in a read-surface file")
+                continue
+            prev = TAG_RE.match(lines[i - 1]) if i else None
+            if not prev:
+                problems.append(f"{f.name}: {name} has no `-- @surface: <class>` line "
+                                f"directly above its CREATE")
+            elif prev.group(1) not in SURFACE_CLASSES:
+                problems.append(f"{f.name}: {name}: unknown class {prev.group(1)!r} "
+                                f"(one of {', '.join(SURFACE_CLASSES)})")
+            else:
+                out[name] = prev.group(1)
+    if problems:
+        raise SurfaceError(problems)
+    return out
+
+
+def build_surface_version() -> tuple[int, int]:
+    """(contract_major, revision) as written in 130_read_surface.sql."""
+    text = SURFACE_VERSION_FILE.read_text()
+    major = re.search(r"CAST\((\d+) AS INTEGER\) AS contract_major", text)
+    rev = re.search(r"CAST\((\d+) AS INTEGER\) AS revision", text)
+    if not (major and rev):
+        raise SurfaceError([f"{SURFACE_VERSION_FILE.name}: cannot parse contract_major/revision"])
+    return int(major.group(1)), int(rev.group(1))
+
+
+def introspect_surface(con, tags: dict[str, str]):
+    """One entry per listed (stable, mirror, advisory) object:
+    name -> (class, kind, parameters, [(column, type)])."""
+    kinds = {r[0]: "view" for r in con.execute(
+        "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main' "
+        "AND NOT internal AND NOT temporary").fetchall()}
+    params: dict[str, list[str]] = {}
+    for name, ftype, ps in con.execute(
+            "SELECT DISTINCT function_name, function_type, parameters FROM duckdb_functions() "
+            "WHERE schema_name = 'main' AND NOT internal "
+            "AND function_type IN ('macro', 'table_macro')").fetchall():
+        kinds[name] = "table_macro" if ftype == "table_macro" else "scalar_macro"
+        params[name] = list(ps)
+    problems = []
+    missing = sorted(set(tags) - set(kinds))
+    if missing:
+        problems.append(f"tagged in the DDL but not in the catalog: {missing}")
+    untagged = sorted(set(kinds) - set(tags))
+    if untagged:
+        problems.append(f"in the catalog but not tagged in 070-130: {untagged}")
+    listed_macros = {n for n, c in tags.items()
+                     if c != "internal" and kinds.get(n) == "table_macro"}
+    for n in sorted(listed_macros - set(DUMMY_ARGS)):
+        problems.append(f"table macro {n} has no entry in DUMMY_ARGS ({SCRIPT_REL})")
+    for n in sorted(set(DUMMY_ARGS) - listed_macros):
+        problems.append(f"DUMMY_ARGS entry {n} is not a listed table macro")
+    for n, c in sorted(tags.items()):
+        if c != "internal" and kinds.get(n) == "scalar_macro":
+            problems.append(f"scalar macro {n} is {c}: the listing covers views and "
+                            f"table macros only")
+    if problems:
+        raise SurfaceError(problems)
+    out = {}
+    for name, cls in sorted(tags.items()):
+        if cls == "internal":
+            continue
+        kind = kinds[name]
+        rel = name if kind == "view" else f"{name}({DUMMY_ARGS[name]})"
+        try:
+            cols = [(r[0], r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {rel}").fetchall()]
+        except duckdb.Error as e:
+            raise SurfaceError([f"DESCRIBE {rel} failed: {e}"]) from e
+        out[name] = (cls, kind, params.get(name, []), cols)
+    return out
+
+
+def contract_header(major: int) -> list[str]:
+    return [
+        f"# GENERATED by {SCRIPT_REL} from schema/*.sql; do not edit. "
+        f"Regenerate with `just docs-gen`.",
+        f"# nodal-db read-surface contract: contract_major={major} "
+        f"schema_version={schema_build.SCHEMA_VERSION}",
+        "\t".join(CONTRACT_COLUMNS),
+    ]
+
+
+def render_contract(surface, major: int) -> str:
+    out = contract_header(major)
+    for name, (cls, kind, ps, cols) in sorted(surface.items()):
+        for i, (col, typ) in enumerate(cols, 1):
+            out.append("\t".join((cls, name, kind, ",".join(ps), str(i), col, typ)))
+    return "\n".join(out) + "\n"
+
+
+def parse_contract(text: str):
+    """(major, schema_version, {name: (class, kind, params, [(col, type)])})."""
+    major, sv, objs = None, None, {}
+    for ln in text.splitlines():
+        m = re.match(r"# nodal-db read-surface contract: contract_major=(\d+) "
+                     r"schema_version=(\S+)", ln)
+        if m:
+            major, sv = int(m.group(1)), m.group(2)
+            continue
+        if ln.startswith("#") or ln.startswith("class\t") or not ln.strip():
+            continue
+        cls, name, kind, ps, _, col, typ = ln.split("\t")
+        entry = objs.setdefault(name, (cls, kind, ps.split(",") if ps else [], []))
+        entry[3].append((col, typ))
+    return major, sv, objs
+
+
+def classify_change(old, new) -> tuple[list[str], list[str]]:
+    """Compare two listings (parse_contract's object maps). Returns the
+    changes that need a contract-major bump and those that need a
+    SCHEMA_VERSION bump (docs/dev/read_surface.md "Versioning"). Anything
+    else (appended columns, new objects, advisory changes) needs only the
+    revision bump the DDL hash gate already forces."""
+    major, schema = [], []
+    for name, (cls, kind, ps, cols) in sorted(old.items()):
+        n = new.get(name)
+        if cls == "stable":
+            if n is None or n[0] != "stable":
+                major.append(f"stable object {name} removed or reclassified")
+                continue
+            if n[1] != kind:
+                major.append(f"stable object {name}: kind {kind} -> {n[1]}")
+            if n[2] != ps:
+                major.append(f"stable object {name}: parameters {ps} -> {n[2]}")
+            if n[3][:len(cols)] != cols:
+                diff = next((f"column {i + 1}: {a} -> {b}" for i, (a, b)
+                             in enumerate(zip(cols, n[3])) if a != b),
+                            f"{len(cols) - len(n[3])} column(s) removed")
+                major.append(f"stable object {name}: existing columns changed ({diff})")
+        elif cls == "mirror":
+            if n is None:
+                major.append(f"table mirror {name} removed or renamed")
+            elif (n[1], n[2], n[3]) != (kind, ps, cols):
+                schema.append(f"table mirror {name}: columns or parameters changed")
+    return major, schema
+
+
+def contract_gate(old_text: str | None, surface, major: int) -> list[str]:
+    """The gate: a breaking change to the listing needs the matching bump.
+    Returns the problems (empty = the new listing may be written)."""
+    if old_text is None:
+        return []
+    old_major, old_sv, old = parse_contract(old_text)
+    new = {n: (c, k, p, cols) for n, (c, k, p, cols) in surface.items()}
+    need_major, need_schema = classify_change(old, new)
+    problems = []
+    if need_major and major == old_major:
+        problems += [f"needs a contract_major bump in schema/130_read_surface.sql: {m}"
+                     for m in need_major]
+    if need_schema and schema_build.SCHEMA_VERSION == old_sv:
+        problems += [f"needs a SCHEMA_VERSION bump (table mirrors follow the copy contract): {m}"
+                     for m in need_schema]
+    if problems:
+        problems.append("a stable column whose type changed with no DDL change (a DuckDB "
+                        "upgrade re-inferring a literal or an aggregate) is fixed with an "
+                        "explicit CAST in the DDL, not with a major bump")
+    return problems
+
+
+def render_surface_doc(surface, objects, major: int, revision: int) -> str:
+    out = [HEADER]
+    out.append(f"Contract version of this build: **{major}.{revision}** "
+               f"(`contract_major.revision`; schema version `{schema_build.SCHEMA_VERSION}`).\n")
+    stable = {n: v for n, v in surface.items() if v[0] == "stable"}
+    out.append("### Stable objects\n")
+    for name, (_, kind, ps, cols) in sorted(stable.items()):
+        sig = f"{name}({', '.join(ps)})" if kind == "table_macro" else name
+        what = "table macro" if kind == "table_macro" else "view"
+        out.append(f"#### `{sig}`\n")
+        out.append(f"{what.capitalize()}. {purpose(name, objects)}.\n")
+        out.append(f'??? info "Columns of {name} ({len(cols)})"\n')
+        out.append("    | # | Column | Type |")
+        out.append("    | --- | --- | --- |")
+        for i, (col, typ) in enumerate(cols, 1):
+            out.append(f"    | {i} | `{col}` | `{typ}` |")
+        out.append("")
+    out.append("### Table mirrors\n")
+    out.append("Each has the real (non-generated) columns of its base table; select "
+               "them by name.\n")
+    out.append("| Name | Kind | Purpose |")
+    out.append("| --- | --- | --- |")
+    for name, (cls, kind, ps, cols) in sorted(surface.items()):
+        if cls == "mirror":
+            sig = f"{name}({', '.join(ps)})" if kind == "table_macro" else name
+            out.append(f"| `{sig}` | {kind.replace('_', ' ')} | {purpose(name, objects)} |")
+    out.append("")
+    out.append("### Advisory reports\n")
+    out.append("A non-empty result is a finding, one row per finding (`audit_health` and "
+               "`audit_erasure` are inventories). Their columns may change in any "
+               "revision.\n")
+    out.append("| Name | Purpose |")
+    out.append("| --- | --- |")
+    for name, (cls, _, _, _) in sorted(surface.items()):
+        if cls == "advisory":
+            out.append(f"| `{name}` | {purpose(name, objects)} |")
+    out.append("")
+    return "\n".join(out)
+
+
+def generate() -> tuple[dict[pathlib.Path, str], list[str]]:
+    """The generated files, plus the contract gate's problems (empty when
+    the new listing may replace the committed one)."""
+    tags = surface_tags()
+    major, revision = build_surface_version()
     with tempfile.TemporaryDirectory() as d:
         con = build_schema(pathlib.Path(d))
         try:
             tables, pks, uks, fks, views, macros = introspect(con)
+            surface = introspect_surface(con, tags)
         finally:
             con.close()
     objects, titles = source_index()
     leaks = internal_refs(objects, titles, views, macros)
     if leaks:
         raise InternalRefError(leaks)
+    old = CONTRACT_TSV.read_text() if CONTRACT_TSV.exists() else None
+    gate = contract_gate(old, surface, major)
     return {
         OUT_DIAGRAMS: render_diagrams(tables, pks, uks, fks, objects, titles),
         OUT_VIEWS: render_views(views, macros, objects, titles),
-    }
+        OUT_SURFACE: render_surface_doc(surface, objects, major, revision),
+        CONTRACT_TSV: render_contract(surface, major),
+    }, gate
 
 
 def main() -> int:
@@ -435,11 +726,16 @@ def main() -> int:
                     help="exit 1 if the committed fragments differ from a fresh generation")
     args = ap.parse_args()
     try:
-        outputs = generate()
+        outputs, gate = generate()
     except InternalRefError as e:
         print("published schema-doc text cites internal design references "
               "(reword these SQL comment sentences for a public reader):",
               file=sys.stderr)
+        for msg in e.args[0]:
+            print(f"  {msg}", file=sys.stderr)
+        return 1
+    except SurfaceError as e:
+        print("read-surface contract check failed:", file=sys.stderr)
         for msg in e.args[0]:
             print(f"  {msg}", file=sys.stderr)
         return 1
@@ -449,9 +745,17 @@ def main() -> int:
         for p in stale:
             print(f"stale: {p.relative_to(REPO)} — run `just docs-gen` and commit",
                   file=sys.stderr)
+        for msg in gate if CONTRACT_TSV in stale else []:
+            print(f"  contract: {msg}", file=sys.stderr)
         if not stale:
             print("schema docs up to date")
         return 1 if stale else 0
+    if gate:
+        print(f"refusing to rewrite {CONTRACT_TSV.relative_to(REPO)}: the read-surface "
+              f"change is breaking without the matching version bump:", file=sys.stderr)
+        for msg in gate:
+            print(f"  {msg}", file=sys.stderr)
+        return 1
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for p, text in outputs.items():
         p.write_text(text)

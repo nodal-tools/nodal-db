@@ -853,9 +853,29 @@ fn described(conn: &Connection, sql: &str) -> Vec<(String, String)> {
 }
 
 /// `sql` contains `{S}` where the object name takes its `_old` suffix.
+///
+/// Columns appended to a read after the oracle was frozen (the read-surface
+/// contract keeps the existing columns' order and appends new ones: the
+/// period ends of `read_parameter`, the ordinal/coord/end columns of
+/// `resolved_value_rows`) are left out of the comparison, once it is checked
+/// that the oracle's columns are exactly the new read's leading columns.
 fn assert_equal(conn: &Connection, sql: &str, args: &[&dyn duckdb::ToSql]) -> usize {
-    let new_sql = sql.replace("{S}", "");
+    let mut new_sql = sql.replace("{S}", "");
     let old_sql = sql.replace("{S}", "_old");
+    if args.is_empty() {
+        let (new_cols, old_cols) = (described(conn, &new_sql), described(conn, &old_sql));
+        assert!(
+            new_cols.len() >= old_cols.len() && new_cols[..old_cols.len()] == old_cols[..],
+            "the oracle's columns are not the leading columns of {new_sql}"
+        );
+        if new_cols.len() > old_cols.len() {
+            let list: Vec<String> = old_cols.iter().map(|(c, _)| format!("\"{c}\"")).collect();
+            new_sql = format!("SELECT {} FROM ({new_sql}) appended", list.join(", "));
+        }
+    } else {
+        // the prepared read_parameter statement: the oracle's 31 columns
+        new_sql = format!("SELECT * EXCLUDE (idx1_end_ts, idx2_end_ts, idx3_end_ts, idx4_end_ts) FROM ({new_sql}) appended");
+    }
     let (a, na) = bag(conn, &new_sql, args);
     let (b, nb) = bag(conn, &old_sql, args);
     if a != b {

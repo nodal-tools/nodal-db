@@ -29,16 +29,20 @@
 -- `+ to_months(0)`, the identity on every timestamp (bit-identical; the
 -- smoke suite checks it); it saves ~35 % of the arithmetic of the common
 -- fixed-step axis.
+-- @surface: internal
 CREATE MACRO axis_param_ts(start_ts, step_months, step_micros, pos) AS
   CASE WHEN step_months = 0 THEN start_ts + to_microseconds(step_micros * pos)
        ELSE start_ts + to_months(step_months * pos) + to_microseconds(step_micros * pos) END;
+-- @surface: internal
 CREATE MACRO axis_param_num(start_int, step_int, pos) AS start_int + step_int * pos;
 -- coord = p_start_dbl + p_step_dbl*pos (THE expression the writer uses to
 -- test bit-exact regularity — parametric-first, VMP Part 4 §3.3)
+-- @surface: internal
 CREATE MACRO axis_param_coord(start_dbl, step_dbl, pos) AS start_dbl + step_dbl * pos;
 
 -- One row per parametric axis, with its kind as flags. A rendering helper,
 -- not a user surface.
+-- @surface: internal
 CREATE VIEW axis_parametric AS
 SELECT id AS axis_id, kind, length,
        (kind = 'datetime') AS is_datetime, (kind = 'integer') AS is_integer, (kind = 'float') AS is_float,
@@ -56,6 +60,7 @@ WHERE (kind = 'datetime' AND p_start_ts IS NOT NULL)
 -- materialize the whole unfiltered union. tests/axis_render_equality.rs
 -- compares both copies against the frozen pre-change rendering, so drift
 -- between them fails a test.
+-- @surface: internal
 CREATE VIEW axis_position_stored AS
 -- materialized (irregular) datetime
 SELECT a.id AS axis_id, a.kind, d.pos, d.pos AS ordinal, d.ts, NULL::TIMESTAMP AS end_ts, NULL::BIGINT AS num,
@@ -94,6 +99,7 @@ WHERE a.kind = 'float' AND a.p_start_dbl IS NULL;
 -- 4-element unnest; no join below the unnest). Cost per call: one scan of
 -- the long and array tiers' key columns (O(current long rows)), plus the
 -- stored positions of the axes in use.
+-- @surface: internal
 CREATE MACRO axis_position_stored_in_use(pd_id) AS TABLE
 WITH ax AS (
   SELECT DISTINCT a AS axis_id FROM (
@@ -148,6 +154,7 @@ WHERE a.kind = 'float' AND a.p_start_dbl IS NULL;
 -- every axis in the file. unnest(range(...)) in the SELECT list, not a
 -- lateral subquery — the lateral form measured ~5x slower per evaluation
 -- (critique F4 rework).
+-- @surface: stable
 CREATE VIEW axis_position AS
 SELECT x.axis_id, x.kind, x.pos, x.pos AS ordinal,
        CASE WHEN x.is_datetime THEN axis_param_ts(x.p_start_ts, x.p_step_months, x.p_step_micros, x.pos) END AS ts,
@@ -172,6 +179,7 @@ SELECT * FROM axis_position_stored;
 -- selective outer filter (one value's triple) then reaches the payload scan
 -- as an IN filter on array_id, which DuckDB serves by an index scan instead
 -- of scanning the list data of the whole table.
+-- @surface: internal
 CREATE VIEW value_array_cells AS
 SELECT entity_id, parameter_definition_id, alternative_id,
        axis1_id, axis2_id, axis3_id, axis4_id,
@@ -205,12 +213,13 @@ FROM (
 -- a parameter split across array and long tiers reads as one relation.
 -- The long branch carries the full VMP Part 2 scalar-kind set including
 -- date_time and duration (critique F9).
+-- @surface: stable
 CREATE VIEW value_cells AS
 SELECT entity_id, parameter_definition_id, alternative_id, 'scalar' AS tier,
        value_kind,
        NULL::BIGINT AS axis1_id, NULL::BIGINT AS axis2_id,
        NULL::BIGINT AS axis3_id, NULL::BIGINT AS axis4_id,
-       0 AS i1_pos, 0 AS i2_pos, 0 AS i3_pos, 0 AS i4_pos,
+       0::INTEGER AS i1_pos, 0::INTEGER AS i2_pos, 0::INTEGER AS i3_pos, 0::INTEGER AS i4_pos,
        v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros
 FROM value_scalar WHERE valid_to_commit IS NULL
 UNION ALL
@@ -260,6 +269,7 @@ FROM value_array_cells;
 -- read_parameter_dense or value_cells, which fetch the payload by
 -- array_id; this view's rank branches keep a full scan of the array payload
 -- even for a point read.
+-- @surface: stable
 CREATE VIEW value_rows AS
 WITH ms AS MATERIALIZED (SELECT * FROM axis_position_stored_in_use(NULL))
 SELECT * FROM (
@@ -368,6 +378,11 @@ SELECT * FROM (
 -- through the UNNEST, axis lengths looked up after it. That makes this
 -- macro immune to the DuckDB 2.0 dict-cache bug (§5), which value_rows'
 -- array leg still has. Row order is unspecified.
+-- The period end bounds (idx1_end_ts .. idx4_end_ts, the `[start, end)` of
+-- a period axis; NULL for every other kind) are appended after the value
+-- columns, so the order of the earlier columns is unchanged
+-- (read_surface_contract_PLAN A-D3).
+-- @surface: stable
 CREATE MACRO read_parameter(class_name, parameter_name) AS TABLE
 WITH pd_pick AS (
   SELECT pd.id
@@ -408,7 +423,8 @@ WITH pd_pick AS (
          NULL::BIGINT AS idx1_num, NULL::BIGINT AS idx2_num, NULL::BIGINT AS idx3_num, NULL::BIGINT AS idx4_num,
          NULL::INTEGER AS idx1_ordinal, NULL::INTEGER AS idx2_ordinal, NULL::INTEGER AS idx3_ordinal, NULL::INTEGER AS idx4_ordinal,
          NULL::DOUBLE AS idx1_coord, NULL::DOUBLE AS idx2_coord, NULL::DOUBLE AS idx3_coord, NULL::DOUBLE AS idx4_coord,
-         vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime, vs.v_dur_months, vs.v_dur_micros
+         vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime, vs.v_dur_months, vs.v_dur_micros,
+         NULL::TIMESTAMP AS idx1_end_ts, NULL::TIMESTAMP AS idx2_end_ts, NULL::TIMESTAMP AS idx3_end_ts, NULL::TIMESTAMP AS idx4_end_ts
   FROM value_scalar vs
   WHERE vs.valid_to_commit IS NULL AND vs.parameter_definition_id IN (SELECT id FROM pd_pick)
   UNION ALL
@@ -433,7 +449,8 @@ WITH pd_pick AS (
          CASE WHEN a2.is_float THEN axis_param_coord(a2.p_start_dbl, a2.p_step_dbl, c.i2_pos) ELSE m2.coord END AS idx2_coord,
          CASE WHEN a3.is_float THEN axis_param_coord(a3.p_start_dbl, a3.p_step_dbl, c.i3_pos) ELSE m3.coord END AS idx3_coord,
          CASE WHEN a4.is_float THEN axis_param_coord(a4.p_start_dbl, a4.p_step_dbl, c.i4_pos) ELSE m4.coord END AS idx4_coord,
-         c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
+         c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros,
+         m1.end_ts AS idx1_end_ts, m2.end_ts AS idx2_end_ts, m3.end_ts AS idx3_end_ts, m4.end_ts AS idx4_end_ts
   FROM cells c
   LEFT JOIN axis_parametric a1 ON a1.axis_id = c.axis1_id AND c.i1_pos >= 0 AND c.i1_pos < a1.length
   LEFT JOIN axis_position_stored_in_use(coalesce((SELECT id FROM pd_pick), -1)) m1
@@ -455,7 +472,8 @@ SELECT e.name AS entity, al.name AS alternative, vr.tier, vr.value_kind,
        vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
        vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
        vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime,
-       vr.v_dur_months, vr.v_dur_micros
+       vr.v_dur_months, vr.v_dur_micros,
+       vr.idx1_end_ts, vr.idx2_end_ts, vr.idx3_end_ts, vr.idx4_end_ts
 FROM vr
 JOIN entity e ON e.id = vr.entity_id AND e.valid_to_commit IS NULL
 JOIN alternative al ON al.id = vr.alternative_id AND al.valid_to_commit IS NULL;
@@ -467,6 +485,7 @@ JOIN alternative al ON al.id = vr.alternative_id AND al.valid_to_commit IS NULL;
 -- through name joins measured +45% wall time). This is the engine-side
 -- budget path for large series; read_parameter is the convenience/display
 -- path (critique F4c).
+-- @surface: stable
 CREATE MACRO read_parameter_dense(class_name, parameter_name) AS TABLE
 WITH pd_pick AS (
   SELECT pd.id
@@ -495,6 +514,7 @@ JOIN value_array p ON p.array_id = k.array_id;
 -- axis-machinery overhead even when the parameter is scalar; this macro
 -- reads a 10^5-row scalar parameter at raw-scan parity, VMP Part 6 second
 -- budget line).
+-- @surface: stable
 CREATE MACRO read_parameter_scalar(class_name, parameter_name) AS TABLE
 WITH pd_pick AS (
   SELECT pd.id
@@ -542,6 +562,7 @@ WHERE vs.valid_to_commit IS NULL;
 
 -- Point read by ids, in value_rows' columns: the current rows of one
 -- parameter for lists of entity and alternative ids (every pair).
+-- @surface: stable
 CREATE MACRO value_rows_for(pd_id_arg, entity_ids, alternative_ids) AS TABLE
 WITH kk AS (
   SELECT DISTINCT pd_id_arg::BIGINT AS pd_id, e.id AS e_id, a.id AS al_id
@@ -549,7 +570,7 @@ WITH kk AS (
 ), cells AS MATERIALIZED (
   SELECT vs.entity_id, vs.alternative_id, 'scalar' AS tier, vs.value_kind,
          NULL::BIGINT AS axis1_id, NULL::BIGINT AS axis2_id, NULL::BIGINT AS axis3_id, NULL::BIGINT AS axis4_id,
-         0 AS i1_pos, 0 AS i2_pos, 0 AS i3_pos, 0 AS i4_pos,
+         0::INTEGER AS i1_pos, 0::INTEGER AS i2_pos, 0::INTEGER AS i3_pos, 0::INTEGER AS i4_pos,
          vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime, vs.v_dur_months, vs.v_dur_micros
   FROM value_scalar vs
   JOIN kk ON vs.entity_id = kk.e_id AND vs.parameter_definition_id = kk.pd_id AND vs.alternative_id = kk.al_id
@@ -611,6 +632,7 @@ LEFT JOIN ap p4 ON p4.axis_id = c.axis4_id AND p4.pos = c.i4_pos;
 -- case-insensitively (lower()), like the class and parameter arguments.
 -- alternative_names NULL (the default) = every current alternative;
 -- [] = none.
+-- @surface: stable
 CREATE MACRO read_values(class_name, parameter_name, entity_names, alternative_names := NULL) AS TABLE
 WITH pd_pick AS (
   SELECT pd.id, pd.entity_class_id FROM parameter_definition pd
@@ -632,7 +654,8 @@ SELECT e.name AS entity, al.name AS alternative, vr.tier, vr.value_kind,
        vr.idx1_num, vr.idx2_num, vr.idx3_num, vr.idx4_num,
        vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
        vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
-       vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime, vr.v_dur_months, vr.v_dur_micros
+       vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime, vr.v_dur_months, vr.v_dur_micros,
+       vr.idx1_end_ts, vr.idx2_end_ts, vr.idx3_end_ts, vr.idx4_end_ts
 FROM value_rows_for(coalesce((SELECT id FROM pd_pick), -1),
                     coalesce((SELECT list(id) FROM e_pick), []),
                     coalesce((SELECT list(id) FROM al_pick), [])) vr
@@ -643,12 +666,14 @@ JOIN al_pick al ON al.id = vr.alternative_id;
 -- in every current alternative when the alternative is omitted). [NULL] is
 -- not NULL, so an omitted alternative is passed through as NULL rather
 -- than wrapped, or it would silently match nothing.
+-- @surface: stable
 CREATE MACRO read_value(class_name, parameter_name, entity_name, alternative_name := NULL) AS TABLE
 SELECT * FROM read_values(class_name, parameter_name, [entity_name],
                           CASE WHEN alternative_name IS NULL THEN NULL ELSE [alternative_name] END);
 
 -- Effective unit = override if present, else definition default; no
 -- per-value replication anywhere (Decision 9).
+-- @surface: stable
 CREATE VIEW parameter_effective_unit AS
 SELECT e.id AS entity_id, pd.id AS parameter_definition_id,
        coalesce(o.unit_id, pd.unit_id) AS unit_id,
@@ -665,6 +690,7 @@ WHERE pd.valid_to_commit IS NULL;
 -- dropped from the list). Any interface renders this without tool-specific
 -- knowledge. Views take no parameters, so this is a MACRO (cf. the *_asof
 -- macros / read_parameter).
+-- @surface: stable
 CREATE MACRO entity_class_display(mode_name) AS TABLE
 SELECT dm.name                                        AS display_mode,
        ec.id                                          AS entity_class_id,

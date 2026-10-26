@@ -60,150 +60,175 @@
 -- Cost: one probe of a tiny append-only table per as-of call.
 -- ---------------------------------------------------------------------------
 
+-- @surface: mirror
 CREATE MACRO metadata_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_metadata_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_e, cur_m) FROM entity_metadata
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO parameter_value_metadata_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_e, cur_p, cur_a, cur_m) FROM parameter_value_metadata
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_class_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM entity_class
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO class_set_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM class_set
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO class_set_member_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_s, cur_c) FROM class_set_member
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_class_dimension_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_c, cur_p) FROM entity_class_dimension
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_cls, cur_name) FROM entity
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_location_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_e) FROM entity_location
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_element_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_e, cur_p) FROM entity_element
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO alternative_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM alternative
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO scenario_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM scenario
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO scenario_alternative_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_s, cur_a, cur_r) FROM scenario_alternative
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_alternative_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_e, cur_a) FROM entity_alternative
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO membership_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_g, cur_m, cur_a) FROM membership
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO units_of_measure_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM units_of_measure
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO parameter_value_list_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM parameter_value_list
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO list_value_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_l, cur_o) FROM list_value
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO parameter_definition_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_cls, cur_name) FROM parameter_definition
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_parameter_unit_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_e, cur_p) FROM entity_parameter_unit
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO parameter_type_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id) FROM parameter_type
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO parameter_type_dimension_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_t, cur_p) FROM parameter_type_dimension
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO display_mode_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id, cur_name) FROM display_mode
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO entity_class_display_mode_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_dm, cur_ec) FROM entity_class_display_mode
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO semantic_annotation_asof(c) AS TABLE
 SELECT * EXCLUDE (cur_id) FROM semantic_annotation
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
@@ -212,12 +237,14 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 -- (no _asof macro for `run`: append-only, reconstructed by input_commit_id)
 
 -- value tiers as of commit c
+-- @surface: mirror
 CREATE MACRO value_scalar_asof(c) AS TABLE
 SELECT * EXCLUDE (ce, cp, ca) FROM value_scalar
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO value_long_asof(c) AS TABLE
 SELECT * EXCLUDE (ce, cp, ca, c1, c2, c3, c4) FROM value_long
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
@@ -231,6 +258,7 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 -- legs' WHERE clauses — either leg alone may carry rows. Kept as a plain scan:
 -- a narrow-first self-join per leg measured slower (one leg is always empty
 -- for a point read, and an empty key side still scans the payload).
+-- @surface: mirror
 CREATE MACRO value_array_asof(c) AS TABLE
 SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
        valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
@@ -261,6 +289,7 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 -- payloads, at the cost of value_array_asof; the head-near case (unchanged
 -- since c) is the fast one. Argument order as value_rows_for: definition,
 -- entity, alternative.
+-- @surface: stable
 CREATE MACRO value_array_asof_for(c, pd_id, e_id, al_id) AS TABLE
 SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
        valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
@@ -290,18 +319,21 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
                              AND valid_from_commit <= c AND valid_to_commit > c);
 
 -- definition-value mirrors (uniformly from/to, no twin — VMP Part 3)
+-- @surface: mirror
 CREATE MACRO definition_value_scalar_asof(c) AS TABLE
 SELECT * EXCLUDE (cp, cs) FROM definition_value_scalar
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO definition_value_long_asof(c) AS TABLE
 SELECT * EXCLUDE (cp, cs, c1, c2, c3, c4) FROM definition_value_long
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
+-- @surface: mirror
 CREATE MACRO definition_value_array_asof(c) AS TABLE
 SELECT * EXCLUDE (cp, cs) FROM definition_value_array
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
@@ -331,6 +363,7 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 -- value's real change points. Every boundary before E is moved to E, so
 -- no long span starts before E (the cells then valid sum into one span
 -- from E). The scalar and array legs carry their versions verbatim.
+-- @surface: stable
 CREATE VIEW value_timeline AS
 WITH long_horizon AS (
   SELECT max(at_commit) AS e FROM erasure_marker WHERE kind = 'horizon'
@@ -388,5 +421,6 @@ FROM value_array_hist;
 -- Untrusted/stubbed history spans (left by the recovery protocol or the
 -- retention policy): the viewer renders these as "changed, content not retained"
 -- or "unknown before commit c" instead of silently wrong answers.
+-- @surface: stable
 CREATE VIEW history_untrusted_span AS
 SELECT * FROM value_timeline WHERE NOT content_retained;

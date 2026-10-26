@@ -7,6 +7,7 @@
 -- ---------------------------------------------------------------------------
 -- Referential integrity (FK-intent fallback): current rows referencing ids
 -- with no current row in the target table.
+-- @surface: advisory
 CREATE VIEW audit_dangling_ref AS
 SELECT 'entity' AS src_table, 'id=' || id AS src_key,
        'entity_class' AS ref_table, entity_class_id AS ref_id
@@ -231,6 +232,7 @@ FROM run
 -- dangling term mapping is surfaced, never blocked (express-never-assert).
 -- object_type values with no clean id (e.g. 'class_dimension', keyed via
 -- object_subkey) are validated by writer convention, not here.
+-- @surface: advisory
 CREATE VIEW audit_dangling_semantic_ref AS
 SELECT 'entity_class' AS object_type, object_id, term_iri
 FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'entity_class'
@@ -258,6 +260,7 @@ FROM semantic_annotation WHERE valid_to_commit IS NULL AND object_type = 'list_v
 
 -- Entity-name uniqueness across a class-set's members (#2364 —
 -- cross-table, so a view rather than an index).
+-- @surface: advisory
 CREATE VIEW audit_class_set_entity_name_dup AS
 SELECT cs.id AS class_set_id, cs.name AS class_set, lower(e.name) AS entity_name,
        count(*) AS n, list(e.id) AS entity_ids
@@ -273,6 +276,7 @@ HAVING count(*) > 1;
 -- LEFT JOIN on the dimension (critique F6): an element at an UNDECLARED
 -- position previously dropped out of this audit — the exact malformed shape
 -- it exists to catch — and now fires instead.
+-- @surface: advisory
 CREATE VIEW audit_element_class_mismatch AS
 SELECT ee.entity_id, ee.position, ee.element_entity_id,
        el.entity_class_id AS element_class_id,
@@ -298,6 +302,7 @@ WHERE ee.valid_to_commit IS NULL
 -- equal the declared dimension positions. Reports both directions —
 -- declared-but-missing (incl. entities with zero elements) and
 -- present-but-undeclared.
+-- @surface: advisory
 CREATE VIEW audit_element_arity AS
 WITH expected AS (
   SELECT e.id AS entity_id, d.position
@@ -322,6 +327,7 @@ FULL OUTER JOIN actual a
 WHERE x.entity_id IS NULL OR a.entity_id IS NULL;
 
 -- Values whose definition belongs to a different class than the entity.
+-- @surface: advisory
 CREATE VIEW audit_value_class_mismatch AS
 SELECT vk.*
 FROM value_keys vk
@@ -335,6 +341,7 @@ WHERE e.entity_class_id <> pd.entity_class_id;
 -- axis renders values with silently-NULL index labels — the round-trip
 -- guarantee (VMP Part 1) defeated. One row per (axis, problem).
 
+-- @surface: advisory
 CREATE VIEW audit_axis_integrity AS
 WITH child_stats AS (
   SELECT axis_id, count(*) AS n, min(pos) AS pmin, max(pos) AS pmax,
@@ -404,6 +411,7 @@ WHERE (a.kind = 'datetime' AND a.p_start_ts IS NOT NULL)
 
 -- Long-tier positions must fall inside the bound axis (otherwise an
 -- out-of-range iN_pos would escape every audit and render a NULL index). Covers value_long and its definition mirror, all dims.
+-- @surface: advisory
 CREATE VIEW audit_position_range AS
 SELECT d.src_table, d.entity_id, d.parameter_definition_id, d.alternative_id,
        d.dim, d.axis_id, d.pos, a.length
@@ -442,6 +450,7 @@ WHERE d.pos < 0 OR d.pos >= a.length;
 -- Type-conformance: populated value columns must agree with value_kind
 -- (possible only for out-of-contract writers). Unknown future kinds are
 -- skipped (Decision 4 additive door).
+-- @surface: advisory
 CREATE VIEW audit_type_conformance AS
 SELECT 'value_scalar' AS src_table, entity_id, parameter_definition_id, alternative_id, value_kind
 FROM value_scalar
@@ -511,6 +520,7 @@ WHERE NOT EXISTS (
 
 -- Array-integrity: len(values) = product of axis lengths; no NULL cells
 -- (canonicalization step 1); pruning metadata honest.
+-- @surface: advisory
 CREATE VIEW audit_array_integrity AS
 SELECT va.entity_id, va.parameter_definition_id, va.alternative_id,
        coalesce(len(va.values), len(va.values_int)) AS actual_len,
@@ -533,6 +543,7 @@ WHERE coalesce(len(va.values), len(va.values_int)) <> (a1.length * coalesce(a2.l
 -- content-retained / non-stub row carrying both-or-neither payload is otherwise
 -- unguarded at rest. The live value_array XOR catches such a row the moment it
 -- would re-enter live state; this closes the at-rest hole. One row per offender.
+-- @surface: advisory
 CREATE VIEW audit_array_payload_xor AS
 SELECT 'value_array_hist' AS src_table,
        'entity=' || entity_id || ',pd=' || parameter_definition_id
@@ -552,6 +563,7 @@ WHERE content_retained AND ((values IS NULL) = (values_int IS NULL));
 -- triples. Narrow: projects only array_id and the triple, never the payload.
 -- (Per-triple version uniqueness is audit_history_tiling's job; together they
 -- imply (array_id, version) is unique in `_hist`.)
+-- @surface: advisory
 CREATE VIEW audit_array_id_coherence AS
 WITH ids AS (
   SELECT array_id, entity_id, parameter_definition_id, alternative_id FROM value_array
@@ -572,6 +584,7 @@ HAVING count(*) > 1;
 -- LEFT JOIN on axis_position (critique F3): a position with no rendering
 -- row — out of range, or a short/corrupt child table — fires here instead
 -- of vanishing from the audit.
+-- @surface: advisory
 CREATE VIEW audit_index_accelerator AS
 SELECT d.entity_id, d.parameter_definition_id, d.alternative_id, d.dim,
        d.axis_id, d.pos, d.acc_dt, d.acc_num, p.kind, p.ts, p.num
@@ -597,6 +610,7 @@ WHERE p.axis_id IS NULL   -- unrenderable position (critique F3)
 
 -- Cross-tier duplicate audit: no key triple current in more
 -- than one tier — guards buggy tier transitions.
+-- @surface: advisory
 CREATE VIEW audit_cross_tier_duplicate AS
 SELECT entity_id, parameter_definition_id, alternative_id,
        list(DISTINCT tier) AS tiers
@@ -611,6 +625,7 @@ HAVING count(DISTINCT tier) > 1;
 -- bindings would be silent elsewhere (audit_position_range checks each row
 -- against its own axis). definition_value_long is written whole and is not
 -- covered.
+-- @surface: advisory
 CREATE VIEW audit_long_value_coherence AS
 SELECT entity_id, parameter_definition_id, alternative_id,
        count(DISTINCT (axis1_id, axis2_id, axis3_id, axis4_id,
@@ -628,6 +643,7 @@ HAVING count(DISTINCT (axis1_id, axis2_id, axis3_id, axis4_id,
 -- any one declared member's expected tier is in-intent, so a multi-member
 -- declaration no longer row-multiplies into false positives. When none
 -- matches, one row per expectation-carrying member (the expected set, listed).
+-- @surface: advisory
 CREATE VIEW audit_tier_intent AS
 SELECT vk.entity_id, vk.parameter_definition_id, vk.alternative_id,
        vk.tier AS actual_tier, pt.expected_tier
@@ -647,6 +663,7 @@ WHERE vk.tier <> 'scalar'
 -- DEFAULT violating its own value list — the exact authoring typo a loader
 -- exists to catch — was previously invisible). Definition-scoped rows carry
 -- no entity/alternative; src_table names the slot instead.
+-- @surface: advisory
 CREATE VIEW audit_value_list_membership AS
 SELECT 'value_scalar' AS src_table,
        vs.entity_id, vs.parameter_definition_id, vs.alternative_id, vs.value_kind
@@ -696,6 +713,7 @@ WHERE dv.valid_to_commit IS NULL AND dv.content_retained
 -- dispatch; template identity drives Decision 6 diff/apply; the Decision 7
 -- presentation document is one slot). Writer rule: close-out-then-insert on
 -- reserved keys, never a second current row.
+-- @surface: advisory
 CREATE VIEW audit_metadata_reserved_dup AS
 SELECT lower(name) AS name, count(*) AS n, list(value) AS conflicting_values
 FROM metadata
@@ -714,6 +732,7 @@ HAVING count(*) > 1;
 -- Redundant activation rows (#3010): rows restating the class default.
 -- Advisory only — under propagation semantics an own row equal to the
 -- default can still act as a propagation barrier.
+-- @surface: advisory
 CREATE VIEW audit_entity_alternative_redundant AS
 SELECT ea.entity_id, ea.alternative_id, ea.active
 FROM entity_alternative ea
@@ -724,6 +743,7 @@ WHERE ea.valid_to_commit IS NULL AND ea.active = ec.active_by_default;
 -- Membership cycles (an accepted residual risk, surfaced).
 -- The base branch (scenario_id NULL) covers rank-0 membership so cycles are
 -- visible even before any scenario exists (critique M2).
+-- @surface: advisory
 CREATE VIEW audit_membership_cycle AS
 SELECT scenario_id, group_entity_id AS entity_id
 FROM membership_flat
@@ -737,6 +757,7 @@ WHERE group_entity_id = member_entity_id;
 -- membership-cycle audit): the coarse->fine fixpoint terminates on a cycle
 -- via the distinct UNION, but a cycle is a modelling error worth surfacing.
 -- Flattens the refinement DAG and reports any entity reachable from itself.
+-- @surface: advisory
 CREATE VIEW audit_realizes_cycle AS
 WITH RECURSIVE reach(coarse_id, fine_id) AS (
   SELECT coarse_id, fine_id FROM realizes_edge
@@ -770,6 +791,7 @@ SELECT coarse_id AS entity_id FROM reach WHERE coarse_id = fine_id;
 -- by the table CHECKs; the audit still watches for them (attached legacy
 -- files, raw writes predating the CHECK). Any hit triggers the recovery
 -- protocol (mark spans untrusted).
+-- @surface: advisory
 CREATE VIEW audit_history_tiling AS
 WITH keyed AS (
   SELECT 'scalar' AS tier, entity_id, parameter_definition_id, alternative_id,
@@ -858,6 +880,7 @@ WHERE problem IS NOT NULL;
 -- volume, file size; advisory compaction thresholds (~30% dead — measured
 -- 2.5x scan cost at 56% dead). Trigger is manual: compaction is a
 -- first-class client-library operation, not a daemon.
+-- @surface: advisory
 CREATE VIEW audit_health AS
 SELECT 'value_scalar' AS surface,
        count(*) FILTER (WHERE valid_to_commit IS NULL) AS live_rows,
@@ -934,6 +957,7 @@ FROM pragma_database_size();
 -- erase path is safe against producing that state precisely because the
 -- marker is written in the SAME transaction as the removal (atomicity: rows
 -- gone ⇒ marker present, always).
+-- @surface: advisory
 CREATE VIEW audit_erasure AS
 SELECT em.id AS marker_id,
        em.kind,

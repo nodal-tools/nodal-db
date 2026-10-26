@@ -5,6 +5,7 @@
 
 -- A scenario resolving to zero alternatives is a red-flag view result, not
 -- a crash downstream (#3036).
+-- @surface: advisory
 CREATE VIEW audit_scenario_empty AS
 SELECT s.id AS scenario_id, s.name AS scenario
 FROM scenario s
@@ -18,6 +19,7 @@ WHERE s.valid_to_commit IS NULL
 -- M3): they cannot resolve anything and are already the red flag
 -- audit_scenario_empty raises — flooding this view with every required
 -- parameter would drown the real signal.
+-- @surface: advisory
 CREATE VIEW audit_missing_required_value AS
 SELECT act.scenario_id, s.name AS scenario, e.id AS entity_id, e.name AS entity,
        pd.id AS parameter_definition_id, pd.name AS parameter
@@ -44,6 +46,7 @@ WHERE e.valid_to_commit IS NULL
                     AND d.slot = 'default_value' AND d.valid_to_commit IS NULL);
 
 -- Required classes (#3133) with no active entity in the resolved scenario.
+-- @surface: advisory
 CREATE VIEW audit_required_class_empty AS
 SELECT s.id AS scenario_id, s.name AS scenario,
        ec.id AS entity_class_id, ec.name AS entity_class

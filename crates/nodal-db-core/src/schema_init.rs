@@ -80,6 +80,10 @@ pub static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
         include_str!("../../../schema/120_views_audit.sql"),
     ),
     (
+        "130_read_surface.sql",
+        include_str!("../../../schema/130_read_surface.sql"),
+    ),
+    (
         "900_bootstrap.sql",
         include_str!("../../../schema/900_bootstrap.sql"),
     ),

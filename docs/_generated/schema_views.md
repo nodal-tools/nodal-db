@@ -163,3 +163,11 @@ From `schema/120_views_audit.sql`.
 | `audit_type_conformance` | view | Type-conformance |
 | `audit_value_class_mismatch` | view | Values whose definition belongs to a different class than the entity |
 | `audit_value_list_membership` | view | Value-list membership (writer-checked at entry, audited here) |
+
+### The version of the read surface this file carries
+
+From `schema/130_read_surface.sql`.
+
+| Name | Kind | Purpose |
+| --- | --- | --- |
+| `nodal_read_surface()` | macro | The read-surface version of this file |

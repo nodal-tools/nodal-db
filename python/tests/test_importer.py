@@ -956,3 +956,20 @@ def test_keys_differing_only_in_normalization_are_a_duplicate_key(tmp_path):
     assert [(w["what"], w["written"], w["stored"]) for w in normalized] == [
         ("label", E_NFD, E_NFC)
     ]
+
+
+def test_inner_keys_differing_only_in_normalization_share_one_domain_label(tmp_path):
+    """Two spellings of one label in different rows of a segment (here the
+    inner keys of two outer keys; likewise across entities) are not a
+    duplicate key, but they are one label to nodal-db: the label domain the
+    importer builds must list it once (in NFC), or the core refuses the
+    domain as repeating it."""
+    from spinedb_api import Map
+
+    spine = make_basic_spine(tmp_path)
+    _add_param_value(spine, "hub", "h1", "nested", Map(
+        ["a", "b"], [Map([E_NFC], [1.0]), Map([E_NFD], [2.0])]))
+    rep, out = run_import(tmp_path, spine)
+    assert rep.duplicate_keys == []
+    assert _cells(_nodal(out), "hub", "nested", 2) == [
+        (("a", E_NFC), 1.0), (("b", E_NFC), 2.0)]

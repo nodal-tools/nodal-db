@@ -930,8 +930,13 @@ class SpineImporter:
                     if dkind == "label":
                         # ordered domain: first-appearance order (the source
                         # Map's transport order; ordinals are order-only
-                        # presentation, excluded from the fingerprint)
-                        seen = dict.fromkeys(r[1 + i] for r in kept)
+                        # presentation, excluded from the fingerprint).
+                        # Listed in NFC (the core's normalize_identifier):
+                        # two spellings of one label in different rows are
+                        # one label to the core, which refuses a domain
+                        # that lists it twice.
+                        seen = dict.fromkeys(
+                            nodal_db.normalize_identifier(r[1 + i]) for r in kept)
                         domains[i + 1] = list(seen)
                 cols["value"] = pa.array(
                     [r[-1] for r in kept], _ARROW_LEAF[leaf_kind]

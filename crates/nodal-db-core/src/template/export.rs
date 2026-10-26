@@ -20,7 +20,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::conn::with_read;
+use crate::conn::with_read_plain;
 use crate::error::DbError;
 use crate::types::ScalarValue;
 
@@ -49,7 +49,7 @@ fn lit_of(v: &ScalarValue) -> Option<(Lit, &'static str)> {
 /// for anything the v1 IR cannot represent. One per-operation RO connection.
 pub fn export(db: &Path) -> Result<(Template, Vec<String>), DbError> {
     let mut warnings = Vec::new();
-    let vocab = with_read(db, |conn| read_vocab(conn, &mut warnings))?;
+    let vocab = with_read_plain(db, |conn| read_vocab(conn, &mut warnings))?;
     let t = template_of(&vocab, &mut warnings)?;
     Ok((t, warnings))
 }

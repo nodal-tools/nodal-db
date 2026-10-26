@@ -43,7 +43,9 @@ use duckdb::{params, Connection};
 
 use crate::axis::AxisCache;
 use crate::canon::{canonicalize_indexed, index_domains, CanonicalValue, DomainIndex, LabelDomain};
-use crate::conn::{head_on, with_read, with_write_txn_retrying_ends, TxnEnd, TxnOptions};
+use crate::conn::{
+    head_on, with_read_named, with_read_plain, with_write_txn_retrying_ends, TxnEnd, TxnOptions,
+};
 use crate::error::DbError;
 use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
@@ -341,7 +343,8 @@ pub fn commit_changes(
     let txn = TxnOptions {
         expect_commit: opts.expect_commit,
     };
-    with_write_txn_retrying_ends(db, user, message, txn, |conn, commit_id| {
+    crate::read_surface::clear_write_warning();
+    let mut report = with_write_txn_retrying_ends(db, user, message, txn, |conn, commit_id| {
         // One axis cache across all segments: axes are immutable and
         // content-verified, so cross-segment reuse within one txn is sound.
         let mut cache = AxisCache::new();
@@ -547,7 +550,11 @@ pub fn commit_changes(
             return Ok((report, TxnEnd::Rollback));
         }
         Ok((report, TxnEnd::Commit))
-    })
+    })?;
+    // A failed refresh of an older read surface before this write (the
+    // write itself went through): `read_surface::refresh_before_write`.
+    report.read_surface_warning = crate::read_surface::take_write_warning();
+    Ok(report)
 }
 
 /// What a `commit_changes` attempt submitted and what its deletes did, for
@@ -586,6 +593,8 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         warnings,
         object_deletes,
         structural,
+        // Not a write: the read-surface refresh runs in its own transaction.
+        read_surface_warning: _,
     } = report;
     let warnings_ok = warnings.iter().all(|w| match w.kind {
         WarningKind::AutoCreated => false,
@@ -1209,7 +1218,7 @@ pub fn preview_object_deletes(
     db: &Path,
     keys: Vec<ObjectDeleteKey>,
 ) -> Result<Vec<ObjectDeletePreview>, DbError> {
-    with_read(db, |conn| {
+    with_read_plain(db, |conn| {
         keys.iter()
             .enumerate()
             .map(|(i, k)| preview_one(conn, i, k))
@@ -2305,7 +2314,7 @@ pub fn read_parameter(
     parameter: &str,
     alternative: &str,
 ) -> Result<RecordBatch, DbError> {
-    with_read(db, |conn| {
+    with_read_named(db, &["read_parameter"], |conn| {
         let mut stmt =
             conn.prepare("SELECT * FROM read_parameter(?, ?) WHERE lower(alternative) = lower(?)")?;
         let arrow = stmt.query_arrow(params![class, parameter, alternative])?;
@@ -2314,6 +2323,10 @@ pub fn read_parameter(
         Ok(concat_batches(&schema, &batches)?)
     })
 }
+
+/// The read-surface status and refresh of a database file (the API face of
+/// the `read_surface` module; `nodal-db maintain refresh-views`).
+pub use crate::read_surface::{read_surface_status, refresh_read_surface, SurfaceReport};
 
 /// The statement behind [`read_values`]: the `read_values` SQL macro with
 /// the name lists bound as parameters (`?1` class, `?2` parameter, `?3`
@@ -2351,7 +2364,7 @@ pub fn read_values(
     let list = |xs: &[&str]| Value::List(xs.iter().map(|x| Value::Text(x.to_string())).collect());
     let ents = list(entities);
     let alts = alternatives.map_or(Value::Null, list);
-    with_read(db, |conn| {
+    with_read_named(db, &["read_values"], |conn| {
         let mut stmt = conn.prepare(READ_VALUES_SQL)?;
         let arrow = stmt.query_arrow(params![class, parameter, ents, alts])?;
         let schema = arrow.get_schema();
@@ -2367,7 +2380,7 @@ pub fn read_values(
 /// never moves the head; every commit (any writer, any process) and an
 /// erasure (its marker commit) do.
 pub fn head_commit(db: &Path) -> Result<i64, DbError> {
-    with_read(db, head_on)
+    with_read_plain(db, head_on)
 }
 
 /// The database's stable identity UUID — the `db_identity` reserved metadata
@@ -2379,7 +2392,7 @@ pub fn head_commit(db: &Path) -> Result<i64, DbError> {
 /// Plain-SQL equivalent:
 /// `SELECT value FROM metadata WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL`.
 pub fn db_identity(db: &Path) -> Result<String, DbError> {
-    with_read(db, |conn| {
+    with_read_plain(db, |conn| {
         Ok(conn.query_row(
             "SELECT value FROM metadata \
              WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",

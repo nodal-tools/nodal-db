@@ -37,7 +37,7 @@ use crate::api::{
     insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class,
     lookup_parameter, lookup_scenario, lookup_value_list,
 };
-use crate::conn::{with_read, with_write_txn_retrying};
+use crate::conn::{with_read_plain, with_write_txn_retrying};
 use crate::error::DbError;
 use crate::structural::{
     apply_create_entity, apply_create_entity_class, apply_create_parameter,
@@ -86,7 +86,7 @@ pub fn ensure_alternative(
 ) -> Result<i64, DbError> {
     require_user(user)?;
     require_name("alternative", name)?;
-    if let Some(id) = with_read(db, |conn| lookup_alternative(conn, name))? {
+    if let Some(id) = with_read_plain(db, |conn| lookup_alternative(conn, name))? {
         return Ok(id); // idempotent no-op: no commit
     }
     let msg = format!("ensure_alternative {name}");
@@ -156,7 +156,7 @@ pub fn set_scenario_alternatives(
     }
 
     // Idempotency pre-check (read-only, no commit).
-    let pre = with_read(db, |conn| {
+    let pre = with_read_plain(db, |conn| {
         let Some(sid) = lookup_scenario(conn, scenario)? else {
             return Ok(None);
         };
@@ -209,7 +209,7 @@ pub fn set_entity_activation(
 
     // Idempotency pre-check (read-only, no commit) — resolves strictly, so a
     // missing referent errors here exactly as the applier would.
-    let noop = with_read(db, |conn| {
+    let noop = with_read_plain(db, |conn| {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
             DbError::Api(format!("set_entity_activation: class {class:?} not found"))
         })?;
@@ -265,7 +265,7 @@ pub fn set_class_active_by_default(
 ) -> Result<(), DbError> {
     require_user(user)?;
     require_name("class", class)?;
-    let noop = with_read(db, |conn| {
+    let noop = with_read_plain(db, |conn| {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
             DbError::Api(format!(
                 "set_class_active_by_default: class {class:?} not found"
@@ -310,7 +310,7 @@ pub fn set_class_active_by_default(
 pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError> {
     require_user(user)?;
     require_name("value list", list)?;
-    let noop = with_read(db, |conn| Ok(lookup_value_list(conn, list)?.is_none()))?;
+    let noop = with_read_plain(db, |conn| Ok(lookup_value_list(conn, list)?.is_none()))?;
     if noop {
         return Ok(());
     }
@@ -367,8 +367,8 @@ pub fn ensure_entity_class(
     }
 
     // Existing-class fast path (read-only, no commit): verify the dims match.
-    if let Some(cid) = with_read(db, |conn| lookup_entity_class(conn, name))? {
-        return with_read(db, |conn| check_class_dims(conn, name, cid, dims));
+    if let Some(cid) = with_read_plain(db, |conn| lookup_entity_class(conn, name))? {
+        return with_read_plain(db, |conn| check_class_dims(conn, name, cid, dims));
     }
     let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
     // The shared applier is the one class-create body (invariant 2).
@@ -414,7 +414,7 @@ pub fn ensure_parameter_definition(
     // rules), shared with the structural channel's prepare (invariant 2).
     validate_type_decls("ensure_parameter_definition", class, name, types)?;
 
-    if let Some(id) = with_read(db, |conn| {
+    if let Some(id) = with_read_plain(db, |conn| {
         let Some(cid) = lookup_entity_class(conn, class)? else {
             return Ok(None);
         };
@@ -462,7 +462,7 @@ pub fn ensure_entity(
     }
 
     // Existing-entity fast path (read-only, no commit): verify the tuple.
-    let pre = with_read(db, |conn| {
+    let pre = with_read_plain(db, |conn| {
         let s = entity_class_shape(conn, class)?;
         match lookup_entity(conn, s.cid, &effective_name)? {
             Some(eid) => {
@@ -563,7 +563,7 @@ pub fn stamp_template_identity(
         Ok(false)
     }
 
-    let pre = with_read(db, read_stamp)?;
+    let pre = with_read_plain(db, read_stamp)?;
     if guard(&pre, name, version, overwrite)? {
         return Ok(());
     }

@@ -25,6 +25,7 @@ fn cli_help_has_no_private_spec_refs() {
         &["extract", "--help"],
         &["maintain", "--help"],
         &["maintain", "compact", "--help"],
+        &["maintain", "refresh-views", "--help"],
         &["template", "--help"],
         &["template", "plan", "--help"],
         &["template", "apply", "--help"],

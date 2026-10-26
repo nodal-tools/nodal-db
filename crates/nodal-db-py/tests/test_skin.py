@@ -94,12 +94,15 @@ def test_indexed_timestamp_roundtrip(db):
     assert rb.num_rows == 3
     # dtype fidelity through write -> canon -> storage -> read: the datetime
     # index column (position 1; the macro exposes idx slots for all four
-    # possible positions) is timestamp[us] again, values identical.
+    # possible positions) is timestamp[us] again, values identical. (The
+    # period end idx1_end_ts is timestamp[us] too, and NULL here.)
     (dt_field,) = [
         f
         for f in rb.schema
-        if f.name.startswith("idx1") and f.type == pa.timestamp("us")
+        if f.name.startswith("idx1") and not f.name.endswith("_end_ts")
+        and f.type == pa.timestamp("us")
     ]
+    assert rb.column("idx1_end_ts").null_count == 3
     assert rb.column(dt_field.name).to_pylist() == ts.to_pylist()
     assert rb.column("v_float").to_pylist() == [1.0, 2.0, 3.0]
 
@@ -966,3 +969,72 @@ def test_value_floats_are_stored_canonical(db):
         con.close()
     got = [struct.unpack("<Q", struct.pack("<d", v))[0] for _, v in rows]
     assert got == [e for _, e in patterns]
+
+
+# ---------------------------------------------------------------------------
+# the read surface: status, refresh, stale files
+# ---------------------------------------------------------------------------
+
+
+def test_read_surface_types():
+    assert issubclass(nodal_db.ReadSurfaceStale, nodal_db.ApiError)
+    assert issubclass(nodal_db.ReadSurfaceStaleWarning, UserWarning)
+
+
+def test_read_surface_status_and_refresh_on_current_file(db):
+    st = db.read_surface_status()
+    assert st["status"] == "current"
+    assert st["found"] == st["expected"]
+    assert set(st["expected"]) == {"contract_major", "revision", "ddl_hash"}
+    assert st["refreshed"] is False
+    rep = db.refresh_read_surface()
+    assert rep["refreshed"] is False and rep["status"] == "current"
+
+
+def _age(path):
+    """Drop the version marker and read_value(s): a file of a build before
+    versioning, as far as these reads can tell."""
+    duckdb = pytest.importorskip(
+        "duckdb",
+        reason="python 'duckdb' package missing — install the declared test "
+        "deps (pip install 'nodal-db[test]')",
+    )
+    con = duckdb.connect(path)
+    try:
+        con.execute("DROP MACRO TABLE nodal_read_surface")
+        con.execute("DROP MACRO TABLE read_value")
+        con.execute("DROP MACRO TABLE read_values")
+    finally:
+        con.close()
+
+
+def test_stale_file_reads_warn_once_and_refresh(tmp_path):
+    import warnings
+
+    db = nodal_db.init(str(tmp_path / "stale.duckdb"), default_alternative="Base")
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1", "u2"], [1.0, 2.0]),
+                       user="t")
+    _age(db.path)
+    assert db.read_surface_status()["status"] == "missing"
+    assert db.read_surface_status()["found"] is None
+    with pytest.warns(nodal_db.ReadSurfaceStaleWarning, match="refresh-views"):
+        got = db.read_values("unit", "capacity", ["u1"])
+    assert got.num_rows == 1
+    # once per file and process: no second warning
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", nodal_db.ReadSurfaceStaleWarning)
+        assert db.read_values("unit", "capacity", ["u2"]).num_rows == 1
+        # db.query falls back to this build's objects on a missing one
+        t = db.query("SELECT * FROM read_values('unit', 'capacity', ['u1', 'u2'])").read_all()
+        assert t.num_rows == 2
+    rep = db.refresh_read_surface()
+    assert rep["refreshed"] is True and rep["status"] == "missing"
+    assert db.read_surface_status()["status"] == "current"
+
+
+def test_a_write_refreshes_a_stale_file(tmp_path):
+    db = nodal_db.init(str(tmp_path / "w.duckdb"), default_alternative="Base")
+    _age(db.path)
+    rep = db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    assert rep["read_surface_warning"] is None
+    assert db.read_surface_status()["status"] == "current"

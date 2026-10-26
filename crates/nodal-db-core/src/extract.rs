@@ -47,8 +47,10 @@
 //!   table macro reached through the attached catalog
 //!   (`nodal_rebuild_source.some_macro(…)`) binds its body's unqualified
 //!   names in the caller's default catalog and silently reads the wrong
-//!   database (pinned by a tripwire test). Views bind to their own catalog,
-//!   so the self-check compares the attached source's view with the temp's.
+//!   database (pinned by a tripwire test). The derived-view self-check
+//!   evaluates both sides through this build's definitions: the source
+//!   under `USE <SRC>` with TEMP copies of the views, dropped before the
+//!   extract side is read (`self_check_derived_views`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,6 +104,10 @@ pub struct ExtractReport {
     pub bytes_source: u64,
     /// Extract file size in bytes.
     pub bytes_extract: u64,
+    /// Set when part of the self-check could not run: the derived-view
+    /// comparison is skipped when this build's views do not bind on the
+    /// source (the table-level check of every carried row still ran).
+    pub warning: Option<String>,
 }
 
 /// The derived views the head-mode self-check compares between the source
@@ -343,9 +349,11 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
 
     // ---- self-check (before E, so E's rows are not in the comparison) ----
     let rows_per_table = self_check_selection(conn, &sel)?;
-    if mode == Mode::Head {
-        self_check_derived_views(conn)?;
-    }
+    let warning = if mode == Mode::Head {
+        self_check_derived_views(conn)?
+    } else {
+        None
+    };
     self_check_axes(conn, &real_cols)?;
 
     // ---- E, the new identity row, the horizon marker ----------------------
@@ -451,6 +459,7 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
         axes_dropped: axes_src.saturating_sub(axes_kept),
         bytes_source: 0,
         bytes_extract: 0,
+        warning,
     })
 }
 
@@ -797,21 +806,51 @@ fn self_check_selection(conn: &Connection, sel: &Sel) -> Result<Vec<(String, u64
 }
 
 /// Self-check (b), head mode: the derived (joining) views give the same
-/// result on the source and the extract. Views bind to their own catalog
-/// under ATTACH, so `<SRC>.<view>` reads the source.
-fn self_check_derived_views(conn: &Connection) -> Result<(), DbError> {
-    for view in DERIVED_VIEWS {
-        let probe = |rel: &str| -> Result<(i64, String), DbError> {
-            Ok(conn.query_row(
-                &format!(
-                    "SELECT count(*), CAST(COALESCE(bit_xor(hash(v)), 0) AS VARCHAR) \
-                     FROM (SELECT * FROM {rel}) v"
-                ),
-                [],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-            )?)
-        };
-        let a = probe(&format!("{SRC}.{}", q(view)))?;
+/// result on the source and the extract, both evaluated through THIS
+/// build's definitions. The source's own views may be older (its read
+/// surface is the one of the build that created or last refreshed it), and
+/// comparing an old body with this build's would fail on identical content.
+/// So the source side runs under `USE <SRC>` with TEMP copies of this
+/// build's view closure installed (their unqualified names then bind to the
+/// source's tables); the copies are DROPPED before switching back, which is
+/// mandatory: temp objects shadow even inside an attached catalog's views,
+/// so a leftover copy would make both sides read the same definitions and
+/// the check pass vacuously. The extract side then reads its own
+/// (this build's) views. Returns a note when the copies could not be
+/// installed on the source (the check is then skipped; the table-level
+/// self-check, which covers every carried row, still ran).
+fn self_check_derived_views(conn: &Connection) -> Result<Option<String>, DbError> {
+    let probe = |rel: &str| -> Result<(i64, String), DbError> {
+        Ok(conn.query_row(
+            &format!(
+                "SELECT count(*), CAST(COALESCE(bit_xor(hash(v)), 0) AS VARCHAR) \
+                 FROM (SELECT * FROM {rel}) v"
+            ),
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )?)
+    };
+    let own: String = conn.query_row("SELECT current_database()", [], |r| r.get(0))?;
+    // ---- the source, through this build's definitions ----------------------
+    conn.execute_batch(&format!("USE {SRC}"))?;
+    let overlay = match crate::read_surface::install_overlay_unguarded(conn, Some(DERIVED_VIEWS)) {
+        Ok(objs) => objs,
+        Err(e) => {
+            conn.execute_batch(&format!("USE {}", q(&own)))?;
+            return Ok(Some(format!(
+                "derived-view check skipped: this build's views do not bind on the \
+                 source ({e}); the table-level check of every carried row ran"
+            )));
+        }
+    };
+    let source: Result<Vec<(i64, String)>, DbError> =
+        DERIVED_VIEWS.iter().map(|v| probe(&q(v))).collect();
+    // Mandatory, before anything reads the extract side (see above).
+    crate::read_surface::drop_overlay(conn, &overlay)?;
+    conn.execute_batch(&format!("USE {}", q(&own)))?;
+    let source = source?;
+    // ---- the extract, through its own (this build's) views -----------------
+    for (view, a) in DERIVED_VIEWS.iter().zip(source) {
         let b = probe(&q(view))?;
         if a != b {
             return Err(DbError::Api(format!(
@@ -820,7 +859,7 @@ fn self_check_derived_views(conn: &Connection) -> Result<(), DbError> {
             )));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Self-check of the axis garbage collection: every axis id a carried row

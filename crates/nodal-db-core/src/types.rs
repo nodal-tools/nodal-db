@@ -331,6 +331,12 @@ pub struct WriteReport {
     /// membership) changes in this commit (structural_write_api_plan §2.3).
     /// Empty for pure value work. Additive, like `object_deletes`.
     pub structural: Vec<StructuralOutcome>,
+    /// Set when the database file's read surface was older than this
+    /// build's and the refresh that runs before the write failed (a user
+    /// table holding a reserved read-surface name): the write itself went
+    /// through. `nodal-db maintain refresh-views` reports the cause loudly.
+    /// Additive, like `object_deletes`.
+    pub read_surface_warning: Option<String>,
 }
 
 impl WriteReport {

@@ -52,6 +52,10 @@ pub mod schema_init;
 /// Connection discipline: open-write-close / open-read-close (Phase 2b, VMP Part 6).
 pub mod conn;
 
+/// The read surface's version marker, the refresh of older files before a
+/// write, and the read overlay (`docs/dev/read_surface.md`).
+pub mod read_surface;
+
 /// Content-verified axis dedup persistence (Phase 2b, VMP Part 4).
 pub mod axis;
 

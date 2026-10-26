@@ -239,6 +239,11 @@ where
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
     assert_min_version(&conn)?;
+    // An older read surface is replaced with this build's here, in its own
+    // transaction before the caller's (a rollback of the caller's write must
+    // not undo it, and the conflict loop must not repeat it). One version
+    // read on a current file; never fails the write (read_surface docs).
+    crate::read_surface::refresh_before_write(&conn, db_path);
     // The write path prepares its hot-path statements once per transaction
     // through this connection's statement cache (`prepare_cached`; the rare
     // paths, axis dedup lookups and the axis parent `INSERT … RETURNING` use
@@ -455,7 +460,95 @@ where
 
 /// Open a fresh read-only connection, run `f`, and close. Per-operation only —
 /// the handle must not outlive the call (CLAUDE.md invariant 1).
+///
+/// The read surface (`read_surface` module): the file's version is read
+/// first (one query). A file of another contract major is read through
+/// temporary copies of this build's views and macros (installed before
+/// `f`); within one major the file's own surface is used. When `f` fails on
+/// a missing view or macro of a stale file, the error becomes
+/// [`DbError::ReadSurfaceStale`] (`f` is `FnOnce`, so it cannot be retried;
+/// [`with_read_retrying`] retries once through the copies instead). A stale
+/// file is noticed once per process (`read_surface::take_notices`).
 pub fn with_read<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
+where
+    F: FnOnce(&Connection) -> Result<T, DbError>,
+{
+    use crate::read_surface::{map_read_error, prepare_read, ReadScope};
+    with_read_plain(db_path, |conn| {
+        let state = prepare_read(conn, db_path, ReadScope::Generic)?;
+        f(conn).map_err(|e| map_read_error(e, &state))
+    })
+}
+
+/// [`with_read`] for a re-runnable closure: when `f` fails on a missing view
+/// or macro of a stale file, the full set of this build's surface objects
+/// is installed as temporary copies and `f` runs once more (Python
+/// `db.query`). Never overlays a connection that `f` attached another
+/// database to: the error is returned instead.
+pub fn with_read_retrying<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
+where
+    F: Fn(&Connection) -> Result<T, DbError>,
+{
+    use crate::read_surface::{
+        attaches_other_database, install_overlay, is_missing_object, map_read_error, prepare_read,
+        ReadScope,
+    };
+    with_read_plain(db_path, |conn| {
+        let state = prepare_read(conn, db_path, ReadScope::Generic)?;
+        match f(conn) {
+            Err(e)
+                if !state.overlaid
+                    && state.check.is_stale()
+                    && is_missing_object(&e)
+                    && !attaches_other_database(conn).unwrap_or(true) =>
+            {
+                if install_overlay(conn, None).is_err() {
+                    return Err(map_read_error(e, &state));
+                }
+                f(conn).map_err(|e| map_read_error(e, &state))
+            }
+            r => r.map_err(|e| map_read_error(e, &state)),
+        }
+    })
+}
+
+/// [`with_read`] for one of the core's named reads (`api::read_parameter`,
+/// `api::read_values`): on a stale file, or one of another contract major,
+/// only the dependency closure of `objects` is installed as temporary copies
+/// of this build's (a dozen objects, ~15 ms, instead of the whole surface).
+pub(crate) fn with_read_named<T, F>(db_path: &Path, objects: &[&str], f: F) -> Result<T, DbError>
+where
+    F: FnOnce(&Connection) -> Result<T, DbError>,
+{
+    use crate::read_surface::{map_read_error, prepare_read, ReadScope};
+    with_read_plain(db_path, |conn| {
+        let state = prepare_read(conn, db_path, ReadScope::Named(objects))?;
+        f(conn).map_err(|e| map_read_error(e, &state))
+    })
+}
+
+/// One read-write connection for work that is not a commit (the read-surface
+/// refresh verb): open (bounded-backoff retry), version gate, `f`, close,
+/// under the per-path lock. `f` manages its own transactions.
+pub(crate) fn with_rw_conn<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
+where
+    F: FnOnce(&Connection) -> Result<T, DbError>,
+{
+    require_db_file(db_path)?;
+    let lock = path_lock(db_path);
+    let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
+    let result = assert_min_version(&conn).and_then(|()| f(&conn));
+    match conn.close() {
+        Ok(()) => result,
+        Err((_, e)) => result.and(Err(DbError::Duckdb(e))),
+    }
+}
+
+/// [`with_read`] without the read-surface step: for the core's own reads of
+/// base tables (lookups, previews, the commit head), which use no view or
+/// macro and so need no version read.
+pub(crate) fn with_read_plain<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
 where
     F: FnOnce(&Connection) -> Result<T, DbError>,
 {

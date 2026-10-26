@@ -85,6 +85,23 @@ pub enum DbError {
         message: String,
     },
 
+    /// A read through the core needed a view or macro that the database
+    /// file's read surface lacks, because the file's surface is older than
+    /// this build's (`found`: its `nodal_read_surface()` version, `None` when
+    /// the file predates versioning; `expected`: this build's). Raised instead
+    /// of DuckDB's raw "does not exist" Catalog error by `conn::with_read`;
+    /// the core's own named reads and `conn::with_read_retrying` read through
+    /// temporary copies of this build's objects instead. The remedy is
+    /// `nodal-db maintain refresh-views FILE` (`read_surface::refresh_read_surface`)
+    /// or any write with this build, which refreshes the file. Its own
+    /// variant, mirroring `SchemaMismatch`; never retried.
+    #[error("{message}")]
+    ReadSurfaceStale {
+        found: Option<String>,
+        expected: String,
+        message: String,
+    },
+
     /// The public write API (`api::write_parameter` / `api::ingest_segments`)
     /// was handed a batch it cannot interpret — wrong column count, a
     /// non-string entity column, an unsupported Arrow type for a dimension or

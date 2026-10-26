@@ -187,6 +187,27 @@ enum MaintainCommand {
         #[arg(long, requires = "if_needed")]
         max_commits: Option<u64>,
     },
+    /// Replace the database's views and macros (its read surface) with this
+    /// nodal-db's when they are older. Any write with this nodal-db does the
+    /// same first; use this for a file that is only read. Data and history
+    /// are untouched and no commit is recorded. A current file is left
+    /// alone, and so is a newer one (unless --force). Fails, changing
+    /// nothing, when the refresh cannot run (e.g. a table of yours holds a
+    /// name the read surface reserves).
+    RefreshViews {
+        /// Target DuckDB file.
+        db: PathBuf,
+        /// Only report the schema version and the file's and this build's
+        /// read-surface versions. Exit code 0 = current, 1 = stale (older, or
+        /// predating versioning), 2 = newer than this nodal-db.
+        #[arg(long)]
+        check: bool,
+        /// Also replace a NEWER read surface with this build's (a downgrade;
+        /// for development only: the newer nodal-db refreshes it back on its
+        /// next write).
+        #[arg(long, conflicts_with = "check")]
+        force: bool,
+    },
 }
 
 /// Bytes as MiB with one decimal.
@@ -196,6 +217,16 @@ fn mib(bytes: u64) -> String {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let result = run(cli);
+    // The core never prints: a stale read surface met by a read, or a failed
+    // refresh before a write, is reported here once per file.
+    for n in nodal_db_core::read_surface::take_notices() {
+        eprintln!("warning: {}", n.message);
+    }
+    result
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Init {
             db,
@@ -487,6 +518,56 @@ fn main() -> anyhow::Result<()> {
                     "{}: no compaction needed ({}; below the growth and commit thresholds)",
                     db.display(),
                     mib(r.bytes_before)
+                );
+            }
+            Ok(())
+        }
+        Command::Maintain {
+            command: MaintainCommand::RefreshViews { db, check, force },
+        } => {
+            import::require_db(&db)?;
+            use nodal_db_core::read_surface::SurfaceStatus;
+            if check {
+                let r = nodal_db_core::api::read_surface_status(&db)?;
+                println!("{}", db.display());
+                println!(
+                    "  schema version         {}",
+                    r.schema_version.as_deref().unwrap_or("(unreadable)")
+                );
+                println!("  file read surface      {}", r.check.found_label());
+                println!("  this nodal-db          {}", r.check.expected);
+                println!("  status                 {}", r.check.status.as_str());
+                let code = match r.check.status {
+                    SurfaceStatus::Current => 0,
+                    SurfaceStatus::Newer => 2,
+                    _ => 1,
+                };
+                for n in nodal_db_core::read_surface::take_notices() {
+                    eprintln!("warning: {}", n.message);
+                }
+                std::process::exit(code);
+            }
+            let r = nodal_db_core::api::refresh_read_surface(&db, force)?;
+            if r.refreshed {
+                println!(
+                    "refreshed the read surface of {}: {} -> {}",
+                    db.display(),
+                    r.check.found_label(),
+                    r.check.expected
+                );
+            } else if r.check.status == SurfaceStatus::Newer {
+                println!(
+                    "{}: read surface {} is newer than this nodal-db's ({}); left alone \
+                     (--force downgrades it)",
+                    db.display(),
+                    r.check.found_label(),
+                    r.check.expected
+                );
+            } else {
+                println!(
+                    "{}: read surface {} is current; nothing to do",
+                    db.display(),
+                    r.check.found_label()
                 );
             }
             Ok(())

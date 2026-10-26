@@ -1,0 +1,11 @@
+# Retired read-surface names (docs/dev/read_surface.md, "Changing a surface
+# object"). One name per line; `#` starts a comment.
+#
+# A view or macro that leaves schema/070-130 goes here in the same change.
+# The refresh (crates/nodal-db-core/src/read_surface.rs) drops every name of
+# the build's surface AND every name listed here from an older file, so an
+# object this build no longer has does not linger in old files with a stale
+# body. Names stay reserved: a user object with a listed name is dropped by
+# the refresh too. Never remove a line.
+#
+# (none yet)

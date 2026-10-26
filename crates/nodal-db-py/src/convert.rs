@@ -17,6 +17,7 @@ use nodal_db_core::compaction::{CompactionReport, CompactionTrigger};
 use nodal_db_core::erasure::{ErasePreview, EraseReport};
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract::ExtractReport;
+use nodal_db_core::read_surface::{SurfaceReport, SurfaceVersion};
 use nodal_db_core::template::{ApplyOutcome, ReconcilePlan};
 use nodal_db_core::types::{
     Blocker, CascadeCounts, CoveredWrites, CoveringDelete, EntityAddr, ObjectDeleteKey,
@@ -26,8 +27,8 @@ use nodal_db_core::types::{
 };
 
 use crate::{
-    ApiError, ArrowError, Busy, CanonError, Conflict, DatabaseError, InternalError, SchemaError,
-    SchemaMismatch, Stale, VersionTooOld,
+    ApiError, ArrowError, Busy, CanonError, Conflict, DatabaseError, InternalError,
+    ReadSurfaceStale, SchemaError, SchemaMismatch, Stale, VersionTooOld,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -42,6 +43,9 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::SchemaMismatch {
             found, expected, ..
         } => schema_mismatch_err(msg, found, expected),
+        DbError::ReadSurfaceStale {
+            found, expected, ..
+        } => read_surface_stale_err(msg, found, expected),
         DbError::VersionTooOld { .. } => VersionTooOld::new_err(msg),
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::Duckdb(_) => DatabaseError::new_err(msg),
@@ -76,6 +80,45 @@ fn schema_mismatch_err(msg: String, found: String, expected: String) -> PyErr {
         let _ = v.setattr("expected", expected);
     });
     err
+}
+
+/// A `ReadSurfaceStale` exception carrying `found` (the file's read-surface
+/// version, None when it predates versioning) / `expected` (this build's).
+fn read_surface_stale_err(msg: String, found: Option<String>, expected: String) -> PyErr {
+    let err = ReadSurfaceStale::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        let _ = v.setattr("found", found);
+        let _ = v.setattr("expected", expected);
+    });
+    err
+}
+
+/// A read-surface version as `{"contract_major", "revision", "ddl_hash"}`.
+fn surface_version_to_py<'py>(py: Python<'py>, v: &SurfaceVersion) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("contract_major", v.contract_major)?;
+    d.set_item("revision", v.revision)?;
+    d.set_item("ddl_hash", &v.ddl_hash)?;
+    Ok(d)
+}
+
+/// `read_surface_status()` / `refresh_read_surface()` result dict.
+pub(crate) fn surface_report_to_py<'py>(
+    py: Python<'py>,
+    r: &SurfaceReport,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("schema_version", r.schema_version.as_deref())?;
+    d.set_item("status", r.check.status.as_str())?;
+    let found = match &r.check.found {
+        Some(v) => Some(surface_version_to_py(py, v)?),
+        None => None,
+    };
+    d.set_item("found", found)?;
+    d.set_item("expected", surface_version_to_py(py, &r.check.expected)?)?;
+    d.set_item("refreshed", r.refreshed)?;
+    Ok(d)
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +624,7 @@ pub(crate) fn report_to_py<'py>(py: Python<'py>, r: &WriteReport) -> PyResult<Bo
         structs.append(structural_outcome_to_py(py, o)?)?;
     }
     d.set_item("structural", structs)?;
+    d.set_item("read_surface_warning", r.read_surface_warning.as_deref())?;
     Ok(d)
 }
 
@@ -661,6 +705,7 @@ pub(crate) fn extract_report_to_py<'py>(
     d.set_item("axes_dropped", r.axes_dropped)?;
     d.set_item("bytes_source", r.bytes_source)?;
     d.set_item("bytes_extract", r.bytes_extract)?;
+    d.set_item("warning", r.warning.as_deref())?;
     Ok(d)
 }
 

@@ -34,16 +34,17 @@ use arrow::array::{RecordBatchIterator, RecordBatchReader};
 use arrow::record_batch::RecordBatch;
 use arrow_pyarrow::{IntoPyArrow, ToPyArrow};
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyTypeError};
+use pyo3::exceptions::{PyException, PyTypeError, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
 
 use nodal_db_core::api;
 use nodal_db_core::compaction;
-use nodal_db_core::conn::with_read;
+use nodal_db_core::conn::with_read_retrying;
 use nodal_db_core::erasure;
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract;
+use nodal_db_core::read_surface;
 use nodal_db_core::schema_init;
 use nodal_db_core::template as tpl;
 use nodal_db_core::types::{ObjectDeleteKey, WriteOptions};
@@ -105,6 +106,26 @@ create_exception!(
      `expected` (this build's). Re-create the database with this build \
      (init + import), or use a build matching the file. A subclass of \
      ApiError, so `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
+    ReadSurfaceStale,
+    ApiError,
+    "A read needed a view or macro that the database file lacks because its \
+     read surface is older than this nodal-db's (DbError::ReadSurfaceStale). \
+     Attributes: `found` (the file's read-surface version, None when the file \
+     predates versioning) and `expected` (this build's). Refresh the file with \
+     `db.refresh_read_surface()` / `nodal-db maintain refresh-views FILE`, or \
+     write to it with this nodal-db. A subclass of ApiError."
+);
+create_exception!(
+    nodal_db,
+    ReadSurfaceStaleWarning,
+    PyUserWarning,
+    "Warning category of the read-surface notices: the file's views and \
+     macros are older than this nodal-db's (reads use temporary copies of this \
+     build's, at a cost per read, until the file is refreshed), or a refresh \
+     before a write failed. Issued once per process per file."
 );
 create_exception!(
     nodal_db,
@@ -183,7 +204,9 @@ impl Database {
     /// compaction). One per-operation read.
     fn db_identity(&self, py: Python<'_>) -> PyResult<String> {
         let path = self.path.clone();
-        py.detach(move || api::db_identity(&path)).map_err(db_err)
+        py.detach(move || api::db_identity(&path))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     /// The database's head commit id (`max(commit.id)`, 0 on an empty log).
@@ -191,7 +214,9 @@ impl Database {
     /// to commit only if nobody else committed in between.
     fn head_commit(&self, py: Python<'_>) -> PyResult<i64> {
         let path = self.path.clone();
-        py.detach(move || api::head_commit(&path)).map_err(db_err)
+        py.detach(move || api::head_commit(&path))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     /// Run one read-only SQL query and return the result as a
@@ -204,11 +229,17 @@ impl Database {
     /// it does not hold the file. Read through the views/macros
     /// (`read_parameter(...)`, `audit_*`, ...) — "SQL is the API"; base-table
     /// layout is not a contract.
+    ///
+    /// On a file whose read surface is older than this nodal-db's, the
+    /// query runs against the file's own views; if it needs one the file
+    /// lacks, it is run once more through temporary copies of this build's
+    /// views (a `ReadSurfaceStaleWarning` is issued once per file). A file of
+    /// another contract major is always read through this build's views.
     fn query<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
         let path = self.path.clone();
         let (schema, batches) = py
             .detach(move || {
-                with_read(&path, |conn| {
+                with_read_retrying(&path, |conn| {
                     let mut stmt = conn.prepare(&sql)?;
                     let arrow = stmt.query_arrow([])?;
                     let schema = arrow.get_schema();
@@ -216,7 +247,8 @@ impl Database {
                     Ok((schema, batches))
                 })
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         let reader: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
             batches.into_iter().map(Ok),
             schema,
@@ -237,7 +269,8 @@ impl Database {
         let path = self.path.clone();
         let batch = py
             .detach(move || api::read_parameter(&path, &class_name, &parameter, &alternative))
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         batch.to_pyarrow(py)
     }
 
@@ -272,7 +305,8 @@ impl Database {
                     .map(|v| v.iter().map(String::as_str).collect());
                 api::read_values(&path, &class_name, &parameter, &ents, alts.as_deref())
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         batch.to_pyarrow(py)
     }
 
@@ -331,7 +365,8 @@ impl Database {
         };
         let report = py
             .detach(move || api::ingest_segments(&path, vec![seg], &user, &message, opts))
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
     }
 
@@ -423,7 +458,8 @@ impl Database {
             .detach(move || {
                 api::commit_changes(&path, segs, structs, dels, odels, &user, &message, opts)
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
     }
 
@@ -448,7 +484,8 @@ impl Database {
         };
         let report = py
             .detach(move || api::commit_structural(&path, structs, &user, &message, opts))
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
     }
 
@@ -476,7 +513,8 @@ impl Database {
         };
         let report = py
             .detach(move || api::delete_values(&path, dels, &user, &message, opts))
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
     }
 
@@ -496,7 +534,8 @@ impl Database {
         let path = self.path.clone();
         let previews = py
             .detach(move || api::preview_object_deletes(&path, ks))
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         object_previews_to_py(py, &previews)
     }
 
@@ -517,7 +556,8 @@ impl Database {
                 let t = tpl::parse_file(&template_path)?;
                 tpl::plan(&path, &t)
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         plan_to_py(py, &plan)
     }
 
@@ -634,6 +674,7 @@ impl Database {
         let path = self.path.clone();
         py.detach(move || verbs::ensure_alternative(&path, &name, description.as_deref(), &user))
             .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     /// Whole-list declarative replace of a scenario's alternative ranking:
@@ -652,6 +693,7 @@ impl Database {
         let path = self.path.clone();
         py.detach(move || verbs::set_scenario_alternatives(&path, &scenario, &alternatives, &user))
             .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     /// Write/update (`active` True/False) or close (`active=None`) one
@@ -673,6 +715,7 @@ impl Database {
             verbs::set_entity_activation(&path, &class_name, &entity, &alternative, active, &user)
         })
         .map_err(db_err)
+        .and_then(|v| with_notices(py, v))
     }
 
     /// Versioned `entity_class.active_by_default` header update.
@@ -690,6 +733,7 @@ impl Database {
             verbs::set_class_active_by_default(&path, &class_name, active_by_default, &user)
         })
         .map_err(db_err)
+        .and_then(|v| with_notices(py, v))
     }
 
     /// Drop an orphan value list at runtime. Refuses a list a current
@@ -700,6 +744,7 @@ impl Database {
         let path = self.path.clone();
         py.detach(move || verbs::drop_value_list(&path, &list, &user))
             .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     /// Idempotent entity-class creation, 0-D or N-D. `dims` are existing
@@ -717,6 +762,7 @@ impl Database {
         let path = self.path.clone();
         py.detach(move || verbs::ensure_entity_class(&path, &name, &dims, &user))
             .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     /// Idempotent, properly-typed parameter-definition creation. `types` is
@@ -754,6 +800,7 @@ impl Database {
             )
         })
         .map_err(db_err)
+        .and_then(|v| with_notices(py, v))
     }
 
     /// Idempotent 0-D / N-D entity creation. 0-D: pass `name`. N-D: pass
@@ -776,6 +823,7 @@ impl Database {
             verbs::ensure_entity(&path, &class_name, name.as_deref(), &elements, &user)
         })
         .map_err(db_err)
+        .and_then(|v| with_notices(py, v))
     }
 
     /// Stamp `template_name` + `template_version` — the public identity
@@ -796,6 +844,7 @@ impl Database {
         let path = self.path.clone();
         py.detach(move || verbs::stamp_template_identity(&path, &name, &version, overwrite, &user))
             .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
     }
 
     // -- erasure -----------------------------------------------------------
@@ -821,7 +870,8 @@ impl Database {
                 };
                 erasure::preview_erase_alternative(&path, &key, &opts)
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         erase_preview_to_py(py, &preview)
     }
 
@@ -850,7 +900,8 @@ impl Database {
                 };
                 erasure::erase_alternative(&path, &key, &opts, &user)
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         erase_report_to_py(py, &report)
     }
 
@@ -882,8 +933,48 @@ impl Database {
                 };
                 extract::extract(&path, &dest, &opts)
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         extract_report_to_py(py, &report)
+    }
+
+    /// The file's read-surface status (one per-operation read; no overlay,
+    /// no warning): a dict with `schema_version`, `status` (`"current"`,
+    /// `"missing"` = predates versioning, `"older"`, `"drift"` = same
+    /// revision, other DDL hash (a development build), `"newer"`), `found`
+    /// and `expected` (each `{"contract_major", "revision", "ddl_hash"}`,
+    /// `found` None when missing) and `refreshed` (False).
+    fn read_surface_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let path = self.path.clone();
+        let r = py
+            .detach(move || api::read_surface_status(&path))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
+        surface_report_to_py(py, &r)
+    }
+
+    /// Replace the file's views and macros with this nodal-db's when the
+    /// file's are older (one read-write cycle; a no-op on a current file;
+    /// no commit is recorded, data and history are untouched). Any write
+    /// with this nodal-db does the same first, so this is for files you only
+    /// read (e.g. at the start of a run). A newer file is left alone unless
+    /// `force=True` (a downgrade; development only). Fails loudly (ApiError)
+    /// when the refresh cannot run, e.g. a table of yours holds a reserved
+    /// read-surface name; `SchemaMismatch` on another schema version.
+    /// Returns the status dict of `read_surface_status()` (as before the
+    /// refresh) with `refreshed` True when it ran.
+    #[pyo3(signature = (*, force = false))]
+    fn refresh_read_surface<'py>(
+        &self,
+        py: Python<'py>,
+        force: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let path = self.path.clone();
+        let r = py
+            .detach(move || api::refresh_read_surface(&path, force))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
+        surface_report_to_py(py, &r)
     }
 
     /// Rewrite the database file densely packed (keeps every row, history
@@ -940,7 +1031,8 @@ impl Database {
                     compaction::compact(&path)
                 }
             })
-            .map_err(db_err)?;
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
         compaction_report_to_py(py, &report)
     }
 }
@@ -1004,6 +1096,24 @@ fn erase_key(name: &str) -> ObjectDeleteKey {
     }
 }
 
+/// Issue the core's read-surface notices of this thread (`read_surface::
+/// take_notices`: a stale file, once per process per file; a failed refresh)
+/// as `ReadSurfaceStaleWarning`s, then pass `v` through. Called after every
+/// core call; a notice of a failed call is issued after the next one.
+fn with_notices<T>(py: Python<'_>, v: T) -> PyResult<T> {
+    for n in read_surface::take_notices() {
+        let msg =
+            std::ffi::CString::new(n.message.replace('\0', " ")).expect("NUL bytes were replaced");
+        PyErr::warn(
+            py,
+            py.get_type::<ReadSurfaceStaleWarning>().as_any(),
+            &msg,
+            1,
+        )?;
+    }
+    Ok(v)
+}
+
 // ---------------------------------------------------------------------------
 // Module functions
 // ---------------------------------------------------------------------------
@@ -1050,6 +1160,7 @@ fn init(
     })
     .map(|path| Database { path })
     .map_err(db_err)
+    .and_then(|v| with_notices(py, v))
 }
 
 /// The thin Python skin over nodal-db-core. See the crate docs at the top of
@@ -1067,6 +1178,11 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ApiError", py.get_type::<ApiError>())?;
     m.add("Stale", py.get_type::<Stale>())?;
     m.add("SchemaMismatch", py.get_type::<SchemaMismatch>())?;
+    m.add("ReadSurfaceStale", py.get_type::<ReadSurfaceStale>())?;
+    m.add(
+        "ReadSurfaceStaleWarning",
+        py.get_type::<ReadSurfaceStaleWarning>(),
+    )?;
     m.add("VersionTooOld", py.get_type::<VersionTooOld>())?;
     m.add("SchemaError", py.get_type::<SchemaError>())?;
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;

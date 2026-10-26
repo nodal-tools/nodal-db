@@ -87,7 +87,7 @@ use crate::api::{
     lookup_unit, lookup_value_list, parse_index_kind,
 };
 use crate::conn::{
-    head_on, with_read, with_write_txn_retrying, with_write_txn_retrying_opts, TxnOptions,
+    head_on, with_read_plain, with_write_txn_retrying, with_write_txn_retrying_opts, TxnOptions,
 };
 use crate::error::DbError;
 use crate::history::{
@@ -662,7 +662,7 @@ fn max_commit(conn: &Connection) -> Result<i64, DbError> {
 /// everything; quote `db_commit` to `expect_commit` to pin it.
 pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
     let chk = ir::validate(t)?;
-    with_read(db, |conn| {
+    with_read_plain(db, |conn| {
         let mut warnings = chk.warnings.clone();
         let mut vocab = read_vocab(conn, &mut warnings)?;
         let db_commit = max_commit(conn)?;
@@ -828,7 +828,7 @@ pub fn apply(
         substamp: Option<String>,
         commit: i64,
     }
-    let pre = with_read(db, |conn| {
+    let pre = with_read_plain(db, |conn| {
         Ok(Pre {
             name: read_metadata_key(conn, "template_name")?,
             version: read_metadata_key(conn, "template_version")?,
@@ -904,7 +904,7 @@ pub fn apply(
     }
 
     // --- Chain guards + blocked pre-check (review items 2, 3), one snapshot. ---
-    let spans = with_read(db, |conn| {
+    let spans = with_read_plain(db, |conn| {
         let mut w = Vec::new();
         let mut chain_blocked = Vec::new();
         let mut vocab = read_vocab(conn, &mut w)?;
@@ -970,7 +970,7 @@ pub fn apply(
                     // Layer 3: tool-side program through the public write API.
                     let program = registry.get(p).unwrap();
                     program(db, user)?;
-                    let after = with_read(db, max_commit)?;
+                    let after = with_read_plain(db, max_commit)?;
                     out.run_programs.push(RunProgramReport {
                         program: p.clone(),
                         commits: ((cursor + 1)..=after).collect(),
@@ -1076,7 +1076,7 @@ pub fn apply(
     // Past here the chain ran to completion (a skip returned above), so the
     // only skips left are the reconcile's own.
     out.notes = chain_effects.notes.clone();
-    let pre_plan = with_read(db, |conn| {
+    let pre_plan = with_read_plain(db, |conn| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
         diff(&vocab, &chk)

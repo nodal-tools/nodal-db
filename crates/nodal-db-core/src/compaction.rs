@@ -234,7 +234,10 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// table's insertable column shape (what the named-column `INSERT..SELECT`
 /// and the self-check hash range over). Bootstrap DATA rows and view/macro/
 /// index-only changes do NOT bump: the catalog is rebuilt from the DDL, never
-/// copied. Precedents: the DB-identity metadata row (20fe969) added bootstrap
+/// copied. A view or macro change bumps the READ-SURFACE revision instead
+/// (`schema/130_read_surface.sql`; the DDL hash test forces it), which is
+/// what brings it to existing files: a write refreshes an older file's
+/// surface (`read_surface` module, `docs/dev/engine_rules.md` §8). Precedents: the DB-identity metadata row (20fe969) added bootstrap
 /// data — no bump; the `erasure_marker` base table (0.3) changed the table set
 /// — bump; the `array_id` surrogate key on `value_array` / `value_array_hist`
 /// (this version) changed two tables' insertable columns — bump. Consequence of a bump (erasure_compaction_plan §9 step
@@ -478,8 +481,11 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // ---- Cheap source probe: schema_version gate (R2) + block metrics -------
     // One per-operation RO handle (opened directly so it does not re-take the
     // per-path lock we already hold), closed immediately.
-    let (src_version, blocks_before) = {
+    let (src_version, blocks_before, surface) = {
         let conn = open_with_retry(db_path, AccessMode::ReadOnly)?;
+        // The source's read-surface version: the rebuild re-creates the
+        // catalog from THIS build's DDL, which downgrades a newer surface.
+        let surface = crate::read_surface::check_on(&conn).ok();
         let version: String = conn.query_row(
             "SELECT value FROM metadata \
              WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
@@ -491,8 +497,21 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
                 r.get(0)
             })?;
         conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
-        (version, total as u64)
+        (version, total as u64, surface)
     };
+    // Compaction is the one path that may downgrade a read surface: it runs
+    // from saves (`compact_if_due`), so it must not refuse. It warns; the
+    // newer build refreshes the file again on its next write (~0.2 s).
+    let downgrade = surface
+        .filter(|c| c.status == crate::read_surface::SurfaceStatus::Newer)
+        .map(|c| {
+            format!(
+                "the read surface of {} ({}) is newer than this nodal-db's ({}); the                  compacted file carries this build's views and macros (a newer nodal-db                  refreshes them on its next write)",
+                db_path.display(),
+                c.found_label(),
+                c.expected
+            )
+        });
 
     // R2: hard-error on any schema mismatch BEFORE building a temp or copying —
     // a named-column INSERT..SELECT against a differently-shaped source would
@@ -553,6 +572,10 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
             db_path.display()
         )
     });
+    let join = |size: Option<String>| match (size, &downgrade) {
+        (Some(w), Some(d)) => Some(format!("{w}; {d}")),
+        (w, d) => w.or_else(|| d.clone()),
+    };
     if keeps_original(trigger, bytes_rebuilt, source_bytes) {
         // Automatic trigger, no gain: keep the original (the self-check-abort
         // path: the original is never written). Reset the baseline anyway, so
@@ -571,6 +594,7 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
             backed_off: false,
             kept_original: true,
             bytes_rebuilt,
+            // The original is kept: nothing was downgraded.
             warning: warning.map(|w| format!("{w}; original kept")),
         });
     }
@@ -631,13 +655,13 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         backed_off: false,
         kept_original: false,
         bytes_rebuilt,
-        warning: warning.map(|w| {
+        warning: join(warning.map(|w| {
             let why = match trigger {
                 CompactionTrigger::Commits => "commit backstop, not larger",
                 _ => "explicit compact",
             };
             format!("{w}; swapped anyway ({why})")
-        }),
+        })),
     })
 }
 

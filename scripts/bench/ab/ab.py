@@ -12,10 +12,14 @@ usage:
 BASE defaults to `git merge-base HEAD main` (give it explicitly on main
 itself), CAND to WORKTREE (the uncommitted working tree). `--release` (the
 release gate, `just full`): BASE = the commit in scripts/bench/ab/BASELINE,
-CAND = HEAD when the working tree is clean; `--advance-baseline` then moves
-BASELINE to CAND after an exit-0, unforced run of every metric at full
-scale against BASELINE itself, with the gate's own code committed (a
-ratchet, plan D2). In a release run, a metric whose capability the base
+CAND = HEAD when the working tree is clean, and each metric runs at its
+`release_scale` (metrics.toml: quick unless its cost depends on file
+size; perf_gate_footprint_PLAN D4; `--quick` / `--full` force one scale);
+`--advance-baseline` then moves BASELINE to CAND after an exit-0, unforced
+run of every metric against BASELINE itself, with the gate's own code
+committed (a ratchet, plan D2). A size metric with `size_from` is gated
+from the `size_bytes` its timed metric's samples printed when that metric
+ran (else its own mode runs). In a release run, a metric whose capability the base
 has and the candidate lacks is an ERROR, not SKIPPED. Both arms build
 the harness in `harness/` of *this* checkout against their own core
 (scripts/lib/revbuild.py: one shared target dir under --work, the harness
@@ -217,7 +221,7 @@ class Arm:
         self.key = None
         self.binary = None
         self.cli = None
-        self.env = {}
+        self.envs = {}  # scale -> {fixture env var: path}
 
     def prepare(self, work, harness_hash):
         """Extract the revision (a commit's extract is reused) and install
@@ -272,8 +276,11 @@ def clean_env():
 
 
 def build_fixtures(cfg, metrics, arms, work, scale):
-    """Build (or reuse) every fixture the metrics need, per arm with that
-    arm's own binary; a `shared` fixture is built once by the candidate."""
+    """Build (or reuse) every fixture the metrics need at `scale`, per arm
+    with that arm's own binary; a `shared` fixture is built once by the
+    candidate. Fills each arm's `envs[scale]`."""
+    for arm in arms.values():
+        arm.envs.setdefault(scale, {})
     needed = []
     for m in metrics:
         for f in m.fixtures:
@@ -284,7 +291,7 @@ def build_fixtures(cfg, metrics, arms, work, scale):
         if fx.build is None:  # the arm's CLI
             for arm in arms.values():
                 arm.build_cli(work)
-                arm.env[fx.env] = arm.cli
+                arm.envs[scale][fx.env] = arm.cli
             continue
         tag = scale if fx.scaled else "fixed"
         owners = [arms["cand"]] if fx.shared else list(arms.values())
@@ -305,9 +312,9 @@ def build_fixtures(cfg, metrics, arms, work, scale):
                 log(f"{arm.name}: fixture {fid} built in {time.time() - t0:.0f} s")
             if fx.shared:
                 for a in arms.values():
-                    a.env[fx.env] = path
+                    a.envs[scale][fx.env] = path
             else:
-                arm.env[fx.env] = path
+                arm.envs[scale][fx.env] = path
 
 
 # --------------------------------------------------------------- samples
@@ -358,11 +365,25 @@ def check_arm_caps(arms, caps, threads_used):
         f"memory {caps.memory_mb} MB (limit {0.8 * caps.memory_mb / 1024:.1f} GiB)")
 
 
+def size_lines(stdout):
+    """The `size_bytes N` values a sample printed (mt_* modes)."""
+    out = []
+    for ln in (stdout or "").splitlines():
+        if ln.startswith("size_bytes "):
+            try:
+                out.append(int(ln.split()[1]))
+            except (IndexError, ValueError):
+                raise gatelib.HarnessError(f"malformed size line {ln!r}")
+    return out
+
+
 def make_sampler(metric, arms, scale, cpus, inject, caps):
+    """sampler(arm) -> (value, digest); `sampler.sizes[arm]` collects the
+    sizes the samples printed (gated by a `size_from` metric)."""
     def sampler(arm):
         a = arms[arm]
         env = clean_env()
-        env.update(a.env)
+        env.update(a.envs.get(scale, {}))
         env.update(gatelib.duckdb_env(caps.for_metric(metric), caps.memory_mb))
         env["NODAL_AB_SCALE"] = scale
         if inject and arm == "cand" and inject[0] == metric.id:
@@ -371,7 +392,10 @@ def make_sampler(metric, arms, scale, cpus, inject, caps):
         if cpus:
             cmd = ["taskset", "-c", cpus] + cmd
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        return parse_sample(arm, metric, proc)
+        got = parse_sample(arm, metric, proc)
+        sampler.sizes[arm] += size_lines(proc.stdout)
+        return got
+    sampler.sizes = {"base": [], "cand": []}
     return sampler
 
 
@@ -503,14 +527,14 @@ def gate_tool_clean():
 
 
 def advance_baseline(out, code):
-    """After a passing, complete, full-scale release run of a committed
+    """After a passing, complete release run (release scales) of a committed
     candidate against the current BASELINE: BASELINE = CAND."""
     why = None
     baseline = read_baseline()
     if code != gatelib.EXIT_PASS:
         why = f"exit {code}"
-    elif not out.get("release") or out.get("scale") != "full":
-        why = "only a full-scale --release run advances it"
+    elif not out.get("release") or out.get("scale") not in ("release", "full"):
+        why = "only a --release run of the release suite (or at --full) advances it"
     elif out.get("metrics_filter"):
         why = f"a --metrics subset ({out['metrics_filter']})"
     elif not out["base"]["commit"].startswith(baseline):
@@ -565,6 +589,7 @@ def gate(a):
         for m in cfg.metrics.values():
             needs = f" needs {','.join(m.needs)}" if m.needs else ""
             needs += "" if len(m.scales) == 2 else f" ({'/'.join(m.scales)} only)"
+            needs += f"; release {m.release_scale}" + (f" (from {m.size_from})" if m.size_from else "")
             print(f"{m.id:32} {m.cls:4} T={m.threshold:.2f}  fixtures={','.join(m.fixtures) or '-'}{needs}")
             print(f"{'':32} check: {m.check}")
         return 0
@@ -580,11 +605,17 @@ def gate(a):
         inject = (mid, spec)
     metrics = cfg.select(a.metrics)
     allows = gatelib.parse_allows(a.allow, cfg.metrics)
-    scale = "full" if a.full else "quick"
-    plan = cfg.plan(scale)
+    # The release gate runs each metric at its release_scale (D4) unless a
+    # scale is given; any other run at --quick (default) or --full.
+    scale = "release" if a.release and not (a.quick or a.full) else ("full" if a.full else "quick")
+
+    def scale_of(m):
+        return m.release_scale if scale == "release" else scale
+    plans = {s: cfg.plan(s) for s in ("quick", "full")}
 
     host = host_info()
-    plan.drift_floor = host["nproc"] / 16
+    for p in plans.values():
+        p.drift_floor = host["nproc"] / 16
     meter = make_meter()
     host["foreign_start"] = meter.window(START_WINDOW_S)
     log(f"foreign load: {host['foreign_start']:.1f} busy cores over {START_WINDOW_S:g} s "
@@ -615,7 +646,8 @@ def gate(a):
     os.makedirs(work, exist_ok=True)
     hh = revbuild.dir_hash(HARNESS)
     log(f"base {base} = {arms['base'].tree}; cand {cand} = {arms['cand'].tree}; "
-        f"harness {hh}; {scale}, looks {plan.looks}; work {work}")
+        f"harness {hh}; {scale}, looks {plans['quick'].looks}/{plans['full'].looks}; "
+        f"work {work}")
 
     t_build = time.time()
     for arm in arms.values():
@@ -643,8 +675,8 @@ def gate(a):
                                      "(API removed, or its probe in capabilities.toml is stale)"})
             continue
         why = gatelib.skip_reason(m, shared, lacking)
-        if not why and scale not in m.scales:
-            why = f"{scale}: runs at {'/'.join(m.scales)} scale only"
+        if not why and scale_of(m) not in m.scales:
+            why = f"{scale_of(m)}: runs at {'/'.join(m.scales)} scale only"
         if why:
             results.append({"metric": m.id, "mode": m.mode, "class": m.cls,
                             "threshold": m.threshold, "verdict": gatelib.SKIPPED,
@@ -654,7 +686,10 @@ def gate(a):
     dcaps = cfg.caps
     check_arm_caps(arms, dcaps, [dcaps.fixture_threads] + [dcaps.for_metric(m) for m in runnable])
     try:
-        build_fixtures(cfg, runnable, arms, work, scale)
+        for sc in ("quick", "full"):
+            at = [m for m in runnable if scale_of(m) == sc]
+            if at:
+                build_fixtures(cfg, at, arms, work, sc)
     except subprocess.CalledProcessError as e:
         log(f"fixture build failed: {e}")
         return gatelib.EXIT_ERROR
@@ -675,12 +710,19 @@ def gate(a):
 
     rng = random.Random(a.seed)
     t_run = time.time()
+    done = {}  # metric id -> (result, sizes its samples printed)
     for m in runnable:
         t0 = time.time()
-        sampler = make_sampler(m, arms, scale, a.cpus, inject, dcaps)
-        r = gatelib.gate_metric(m, sampler, plan, rng, meter, log=log)
+        sm = scale_of(m)
+        r = None
+        if m.size_from in done:
+            r = gatelib.size_from_samples(m, *done[m.size_from])
+        if r is None:
+            sampler = make_sampler(m, arms, sm, a.cpus, inject, dcaps)
+            r = gatelib.gate_metric(m, sampler, plans[sm], rng, meter, log=log)
+            done[m.id] = (r, sampler.sizes)
         r["wall_s"] = time.time() - t0
-        r["scale"] = scale if m.scaled else "fixed"
+        r["scale"] = sm if m.scaled else "fixed"
         r["threads"] = dcaps.for_metric(m)
         results.append(r)
         ratio = (f"{r['ratio']:.3f} [{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]"
@@ -706,8 +748,8 @@ def gate(a):
         "metrics_filter": a.metrics,
         "gate_tool_clean": gate_tool_clean(),
         "scale": scale,
-        "looks": list(plan.looks),
-        "first_look_margin": plan.first_margin,
+        "looks": {sc: list(p.looks) for sc, p in plans.items()},
+        "first_look_margin": plans["quick"].first_margin,
         "capabilities": {"shared": sorted(shared), "features": features, "lacking": lacking},
         "host": {**host, "foreign_before_pairs": load_pairs, "load_end": os.getloadavg()},
         "forced": forced,

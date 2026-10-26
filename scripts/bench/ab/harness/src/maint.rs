@@ -1,6 +1,9 @@
 //! Maintenance gate modes: compaction and the history-free extract, timed
 //! (`mt_*`) and sized (`sz_*`, the value is bytes), on the shapes of the
-//! criterion benches `compaction_size.rs` and `extract.rs`.
+//! criterion benches `compaction_size.rs` and `extract.rs`. An `mt_*`
+//! sample also prints `size_bytes N` (the file it produced): the runner
+//! gates `sz_*` from those when the `mt_*` metric ran in the same gate run,
+//! and runs the `sz_*` mode itself only otherwise.
 //!
 //! - `build_hheavy <path> <quick|full>`: the history-heavy long table
 //!   (`compaction_size.rs`): `cells` rank-1 long cells over `series`
@@ -286,6 +289,9 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
     s.ms = if mode.starts_with("sz_") {
         bytes as f64
     } else {
+        // The runner gates sz_* from these (perf_gate_footprint_PLAN D4):
+        // the timed samples already produced the file.
+        println!("size_bytes {bytes}");
         ms
     };
     Some(s)

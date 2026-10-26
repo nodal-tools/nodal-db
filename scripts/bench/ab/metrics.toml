@@ -17,6 +17,20 @@
 # of T is labelled "FAIL (<= layout floor)" for human judgement; it still
 # fails. Recalibrate with `just perf-gate HEAD HEAD --aa [--aa-salt K]`.
 
+# `release_scale` (per metric; perf_gate_footprint_PLAN D4): the scale the
+# release gate (`ab.py --release`, `just full`) runs it at. Default quick
+# (full for a full-only metric); "full" for the metrics whose cost depends
+# on file size (checkpoints on a big file, compaction and extract of 10 M
+# rows, the dense and model-load reads, the import). The axes metrics run
+# quick only: quick detects the axis-expansion class at 1.3-5.6x, and full
+# cost ~20 min and the gate's 6-7 GB memory peak. Fixed-size fixtures
+# (`_100k`, `_big`, `longbig`) are the same at either scale.
+#
+# `size_from` (size metrics): gate the size from the `size_bytes` lines the
+# named timed metric's samples print (every sample of its run, >= 7 per
+# arm), when that metric ran; else the size metric runs its own mode.
+# `threads`: DuckDB threads for this metric's samples ([settings]).
+
 [settings]
 # The pre-fixed sequential plan (gatelib.Plan; error rates: sim.py and
 # specs/ab_ratio_gates_FINDINGS.md): cumulative pairs per look. A metric
@@ -142,6 +156,7 @@ scaled = true
 check = "every execution returns exactly 1 row; digest of the payload"
 
 [metric.rd_scalars_loader]
+release_scale = "full"
 layout_floor = 0.025
 class = "hot"
 fixtures = ["synth"]
@@ -149,6 +164,7 @@ scaled = true
 check = "row count = the scalar entities (10^5 full); digest of the loader columns"
 
 [metric.rd_dense]
+release_scale = "full"
 layout_floor = 0.040
 class = "hot"
 fixtures = ["synth"]
@@ -159,6 +175,7 @@ scales = ["full"]
 check = "row count = the array entities (1 000 full, ~70 MB); digest of the payloads"
 
 [metric.rd_model_load_long]
+release_scale = "full"
 layout_floor = 0.020
 class = "hot"
 fixtures = ["synth"]
@@ -166,6 +183,7 @@ scaled = true
 check = "row count = long entities x 8 760 (1.23 M full); digest of the logical columns"
 
 [metric.rd_long_scan_17pct]
+release_scale = "full"
 class = "hot"
 fixtures = ["synth"]
 scaled = true
@@ -254,7 +272,6 @@ check = "row count = long entities x 8 760; digest of the rows"
 class = "hot"
 fixtures = ["synth_axes"]
 scaled = true
-scales = ["full"]
 check = "row count = array entities x 8 760; digest of the rows"
 
 [metric.rd_axes_rp_irr]
@@ -360,6 +377,7 @@ check = "11 commits; the saved cell reads back with the last value; cls0/p00 dig
 note = "gate arm semantics: RO head poll + commit (the save_api feature is never set)"
 
 [metric.wr_replace_scalar_cycle_ckpt]
+release_scale = "full"
 layout_floor = 0.015
 class = "io"
 fixtures = ["synth"]
@@ -368,6 +386,7 @@ check = "3 commits; the entity reads back with the last cycle's value (count + d
 note = "write_parameter commit + CHECKPOINT, mean of 3 cycles on a fresh copy"
 
 [metric.wr_replace_array_cycle_ckpt]
+release_scale = "full"
 layout_floor = 0.025
 class = "io"
 fixtures = ["synth"]
@@ -375,6 +394,7 @@ scaled = true
 check = "3 commits; the array reads back with the last cycle's content (8 760 cells + digest)"
 
 [metric.wr_replace_long_cycle_ckpt]
+release_scale = "full"
 layout_floor = 0.010
 class = "io"
 fixtures = ["synth"]
@@ -419,6 +439,7 @@ note = "the public verb on existing entities: an RO open + lookups, io class"
 # ---------------------------------------------------------------- import
 
 [metric.imp_ipc_dense]
+release_scale = "full"
 layout_floor = 0.020
 class = "io"
 fixtures = ["ipc", "cli"]
@@ -429,6 +450,7 @@ note = "the arm's own nodal-db import, wall incl. spawn; not the 87.6 M-value im
 # ----------------------------------------------------------- maintenance
 
 [metric.mt_compact_history_heavy]
+release_scale = "full"
 layout_floor = 0.020
 class = "io"
 fixtures = ["hheavy"]
@@ -436,6 +458,7 @@ scaled = true
 check = "current-state digest equal before and after; value_long row count kept"
 
 [metric.mt_extract_head]
+release_scale = "full"
 layout_floor = 0.005
 class = "io"
 fixtures = ["xsrc"]
@@ -443,6 +466,8 @@ scaled = true
 check = "the extract's current state equals the source's (both parameters: counts + digests)"
 
 [metric.sz_compacted_bytes]
+release_scale = "full"
+size_from = "mt_compact_history_heavy"
 class = "size"
 fixtures = ["hheavy"]
 scaled = true
@@ -450,6 +475,8 @@ check = "as mt_compact_history_heavy"
 note = "file bytes after compaction; deterministic in the Phase-0 check (two builds x 3 runs)"
 
 [metric.sz_extract_bytes]
+release_scale = "full"
+size_from = "mt_extract_head"
 class = "size"
 fixtures = ["xsrc"]
 scaled = true

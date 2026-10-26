@@ -278,6 +278,64 @@ class DuckdbCaps(unittest.TestCase):
         self.assertEqual(cfg.caps.for_metric(cfg.metrics["rd_long_scan_17pct"]), 1)
 
 
+class ReleaseSuite(unittest.TestCase):
+    """perf_gate_footprint_PLAN D4: release_scale per metric, sizes from
+    the maintenance samples."""
+
+    def test_release_scale_default_and_validation(self):
+        self.assertEqual(metric().release_scale, "quick")
+        self.assertEqual(metric(scales=["full"]).release_scale, "full")
+        self.assertEqual(metric(release_scale="full").release_scale, "full")
+        with self.assertRaises(g.ConfigError):
+            metric(scales=["full"], release_scale="quick")
+
+    def cfg(self, **sz):
+        d = {"class": "size", "check": "c", "fixtures": ["f"], "release_scale": "full"}
+        d.update(sz)
+        return g.Config({"classes": CLASSES, "fixture": {"f": {"env": "X", "build": "b"}},
+                         "metric": {"mt": {"class": "io", "check": "c", "fixtures": ["f"],
+                                           "release_scale": "full"},
+                                    "sz": d}})
+
+    def test_size_from_validation(self):
+        self.assertEqual(self.cfg(size_from="mt").metrics["sz"].size_from, "mt")
+        for bad in ({"size_from": "nope"}, {"size_from": "sz"},
+                    {"size_from": "mt", "release_scale": "quick"},
+                    {"size_from": "mt", "fixtures": []}):
+            with self.assertRaises(g.ConfigError, msg=bad):
+                self.cfg(**bad)
+
+    def test_size_from_samples(self):
+        m = self.cfg(size_from="mt").metrics["sz"]
+        src = {"metric": "mt", "verdict": g.PASS, "load_start": 1.0, "load_end": 1.2,
+               "digest": {"rows": "5"}}
+        r = g.size_from_samples(m, src, {"base": [100] * 7, "cand": [101] * 7})
+        self.assertEqual((r["verdict"], r["n_pairs"], r["size_from"]), (g.PASS, 7, "mt"))
+        self.assertAlmostEqual(r["ratio"], 1.01)
+        self.assertTrue(r["deterministic"])
+        r = g.size_from_samples(m, src, {"base": [100, 100], "cand": [100, 103]})
+        self.assertEqual(r["verdict"], g.FAIL)  # max(C) / min(B)
+        self.assertIsNone(g.size_from_samples(m, src, {"base": [], "cand": []}))
+        self.assertIsNone(g.size_from_samples(m, {**src, "verdict": g.WRONG},
+                                              {"base": [1], "cand": [1]}))
+
+    def test_the_real_release_set(self):
+        cfg = g.load_config(os.path.join(HERE, "..", "metrics.toml"))
+        full = sorted(m.id for m in cfg.metrics.values() if m.release_scale == "full")
+        self.assertEqual(full, sorted([
+            "rd_dense", "rd_long_scan_17pct", "rd_model_load_long", "rd_scalars_loader",
+            "mt_compact_history_heavy", "mt_extract_head", "imp_ipc_dense",
+            "wr_replace_scalar_cycle_ckpt", "wr_replace_array_cycle_ckpt",
+            "wr_replace_long_cycle_ckpt", "sz_compacted_bytes", "sz_extract_bytes"]))
+        self.assertTrue(all("quick" in m.scales for m in cfg.metrics.values()
+                            if m.id.startswith("rd_axes_")))
+        # A size metric runs after the metric it is gated from.
+        order = list(cfg.metrics)
+        for m in cfg.metrics.values():
+            if m.size_from:
+                self.assertLess(order.index(m.size_from), order.index(m.id))
+
+
 class Capabilities(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ab-caps-")

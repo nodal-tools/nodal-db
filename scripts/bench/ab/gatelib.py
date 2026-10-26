@@ -75,6 +75,17 @@ class Metric:
         self.scales = list(d.get("scales", ["quick", "full"]))
         if not set(self.scales) <= {"quick", "full"} or not self.scales:
             raise ConfigError(f"metric {mid}: scales must be a subset of quick, full")
+        # The scale the release gate runs it at (perf_gate_footprint_PLAN
+        # D4): quick unless its cost depends on file size; a full-only
+        # metric runs full.
+        self.release_scale = d.get("release_scale",
+                                   "quick" if "quick" in self.scales else "full")
+        if self.release_scale not in self.scales:
+            raise ConfigError(f"metric {mid}: release_scale {self.release_scale!r} "
+                              f"is not one of its scales {self.scales}")
+        # A size metric gated from another metric's samples (`size_bytes`
+        # lines) when that metric runs in the same gate run (D4).
+        self.size_from = d.get("size_from")
         self.note = d.get("note", "")
         # DuckDB threads for this metric's samples (default: the
         # [settings] duckdb_threads cap); 1 for the few-ms scans whose
@@ -111,6 +122,16 @@ class Config:
                 if f not in self.fixtures:
                     raise ConfigError(f"metric {mid}: unknown fixture {f!r}")
             self.metrics[mid] = m
+        for m in self.metrics.values():
+            if m.size_from is None:
+                continue
+            src = self.metrics.get(m.size_from)
+            if not m.is_size or src is None or src.is_size:
+                raise ConfigError(f"metric {m.id}: size_from must name a timed metric from "
+                                  "a size metric")
+            if (src.fixtures, src.release_scale, src.scaled) != (m.fixtures, m.release_scale, m.scaled):
+                raise ConfigError(f"metric {m.id}: size_from {src.id} runs on other "
+                                  "fixtures or at another release scale")
 
     @property
     def caps(self):
@@ -477,12 +498,19 @@ def measure_size(metric, sampler, rng, load_fn, samples=3):
         cs.append(got["cand"][0])
         loads.append(load_fn())
         digest = got["cand"][1]
+    l0, l1 = load_ends(loads)
+    return {**size_verdict(metric, bs, cs), "load_start": l0, "load_end": l1, "digest": digest}
+
+
+def size_verdict(metric, bs, cs):
+    """max(C) / min(B) over the size samples of each arm (critique T3)."""
+    if not bs or not cs:
+        raise HarnessError("no size samples")
     if min(bs) <= 0:
         raise HarnessError(f"non-positive base size {min(bs)}")
     ratio = max(cs) / min(bs)
-    l0, l1 = load_ends(loads)
     return {
-        "n_pairs": samples,
+        "n_pairs": min(len(bs), len(cs)),
         "base_median": statistics.median(bs),
         "cand_median": statistics.median(cs),
         "base_values": bs,
@@ -494,10 +522,28 @@ def measure_size(metric, sampler, rng, load_fn, samples=3):
         "ci_coverage": None,
         "verdict": PASS if ratio <= metric.threshold else FAIL,
         "looks": 1,
-        "load_start": l0,
-        "load_end": l1,
-        "digest": digest,
     }
+
+
+def size_from_samples(metric, source, sizes):
+    """A size metric gated from the `size_bytes` of its `size_from`
+    metric's samples (D4): every sample of that metric's run (warm-ups,
+    pairs, reruns), so >= 7 per arm instead of 3. `source` = that metric's
+    result, `sizes` = {arm: [bytes]}. None when there is nothing to use
+    (the source errored or printed no sizes): run the size mode instead."""
+    if source.get("verdict") in (WRONG, ERROR) or not sizes.get("base") or not sizes.get("cand"):
+        return None
+    res = {"metric": metric.id, "mode": metric.mode, "class": metric.cls,
+           "threshold": metric.threshold, "check": metric.check, "size_from": source["metric"]}
+    try:
+        res.update(size_verdict(metric, sizes["base"], sizes["cand"]))
+    except HarnessError as e:
+        res.update(verdict=ERROR, error=str(e))
+    for k in ("load_start", "load_end", "digest"):
+        if k in source:
+            res[k] = source[k]
+    res["label"] = res["verdict"]
+    return res
 
 
 def measure_once(metric, sampler, plan, rng, load_fn):

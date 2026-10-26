@@ -189,17 +189,25 @@ class CapsCheck(unittest.TestCase):
             self.run_check("", rc=101)
 
     def test_sampler_env_carries_the_metric_cap(self):
-        arm = mock.Mock(binary="/bin/h", env={"NODAL_AB_SYNTH": "/f.db"})
+        arm = mock.Mock(binary="/bin/h", envs={"quick": {"NODAL_AB_SYNTH": "/q.db"},
+                                               "full": {"NODAL_AB_SYNTH": "/f.db"}})
         m = g.Metric("rd_x", {"class": "hot", "check": "c", "threads": 1}, {"hot": 1.05})
         got = {}
 
         def fake_run(cmd, **kw):
             got.update(kw["env"])
-            return proc(0, "digest a=1\n1.0\n")
+            return proc(0, "size_bytes 4096\ndigest a=1\n1.0\n")
         with mock.patch.object(ab.subprocess, "run", side_effect=fake_run):
-            ab.make_sampler(m, {"base": arm}, "quick", None, None, g.Caps(4, 8, 12000))("base")
+            sampler = ab.make_sampler(m, {"base": arm}, "full", None, None, g.Caps(4, 8, 12000))
+            self.assertEqual(sampler("base"), (1.0, {"a": "1"}))
         self.assertEqual((got["SLURM_CPUS_ON_NODE"], got["SLURM_MEM_PER_NODE"]), ("1", "12000"))
-        self.assertEqual(got["NODAL_AB_SYNTH"], "/f.db")
+        self.assertEqual((got["NODAL_AB_SYNTH"], got["NODAL_AB_SCALE"]), ("/f.db", "full"))
+        self.assertEqual(sampler.sizes, {"base": [4096], "cand": []})
+
+    def test_size_lines(self):
+        self.assertEqual(ab.size_lines("x\nsize_bytes 12\nsize_bytes 13\n1.0\n"), [12, 13])
+        with self.assertRaises(g.HarnessError):
+            ab.size_lines("size_bytes many\n")
 
 
 class Baseline(unittest.TestCase):
@@ -235,6 +243,11 @@ class Baseline(unittest.TestCase):
         rev, text = self.advance(self.out(), 0)
         self.assertEqual(rev, "2" * 40)
         self.assertIn("advanced", text)
+
+    def test_the_release_suite_advances(self):
+        # Each metric at its release_scale (perf_gate_footprint_PLAN D4).
+        rev, text = self.advance(self.out(scale="release"), 0)
+        self.assertEqual(rev, "2" * 40)
 
     def test_never_after_a_failure_a_worktree_or_a_forced_run(self):
         for out, code in ((self.out(), 1), (self.out(), 2),

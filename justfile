@@ -44,7 +44,7 @@ full:
     # join keys and needs an optimizer override in those tests, so only a
     # release run checks the engine as shipped.
     cargo test --release -p nodal-db-core --test array_id_index_scan --test entity_name_index_scan --test point_read_index_scan
-    python3 scripts/bench/ab/ab.py --release --full --advance-baseline
+    python3 scripts/bench/ab/ab.py --release --advance-baseline
 
 # Pre-merge, expected for perf-sensitive branches (CONTRIBUTING "Performance
 # gates"): BASE (default: merge-base with main) vs CAND (default: the working

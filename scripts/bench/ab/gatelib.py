@@ -284,7 +284,10 @@ def check_caps(output, threads, memory_mb, tolerance=0.03):
         mem = parse_size(got.get("memory_limit"))
     except ValueError as e:
         return f"memory_limit: {e}"
-    if abs(mem - want) > tolerance * want:
+    # DuckDB truncates the rendering to one decimal of its unit ("1.0 GiB"
+    # for 1.07 GiB): allow one display step below.
+    step = 0.1 * _UNITS[re.search(r"([A-Za-z]+)\s*$", got["memory_limit"]).group(1).lower()]
+    if mem > want * (1 + tolerance) or mem + step < want * (1 - tolerance):
         return (f"DuckDB memory_limit = {got.get('memory_limit')}, expected ~{want / 1024 ** 3:.1f} "
                 f"GiB (80 % of SLURM_MEM_PER_NODE = {memory_mb} MB)")
     return None

@@ -260,6 +260,9 @@ class DuckdbCaps(unittest.TestCase):
         self.assertIn("memory_limit", g.check_caps("threads 4\nmemory_limit 56.5 GiB\n", 4, 12000))
         self.assertIn("memory_limit", g.check_caps("threads 4\n", 4, 12000))
         self.assertIsNotNone(g.check_caps("", 4, 12000))
+        # 80 % of 1 440 MB = 1.0729 GiB, which DuckDB truncates to "1.0 GiB".
+        self.assertIsNone(g.check_caps("threads 4\nmemory_limit 1.0 GiB\n", 4, 1440))
+        self.assertIn("memory_limit", g.check_caps("threads 4\nmemory_limit 0.9 GiB\n", 4, 1440))
 
     def test_metric_threads_override(self):
         cfg = g.Config({"classes": CLASSES, "settings": {"duckdb_threads": 4},

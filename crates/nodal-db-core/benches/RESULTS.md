@@ -26,6 +26,14 @@ candidate commits, host and load, per-metric ratio [95 % CI] and verdict,
 and the reason of every `--allow`. The full results are in the run's
 `target-ab/runs/*/results.json`.
 
+From the first run after 2026-10-26 on, the gate runs capped and lighter
+(CONTRIBUTING "Performance gates"): DuckDB at 4 threads per sample (1 for
+`rd_long_scan_17pct`) with an 8.9 GiB memory_limit, each metric at its
+`release_scale` (quick for most), the load columns in foreign busy cores
+rather than the 1-min load average. Absolute milliseconds of those blocks
+are not comparable with the earlier ones (mostly lower for small
+operations); ratios are, since both arms always share the caps.
+
 ### 2026-10-25: `25ef921` (BASELINE) -> `9b62603`, full scale, exit 2
 
 Host: AMD Ryzen 9 5900XT 16-Core Processor, 32 threads, governor `powersave`, kernel 6.14.0-37-generic; 1-min load 2.2-36.0 while measuring (the host was shared with other build and test jobs). Looks (6, 11, 21); builds + fixtures 281 s, pairs 2198 s. Capabilities: lookup_const, skip_unchanged.

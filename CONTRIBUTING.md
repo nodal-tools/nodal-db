@@ -35,6 +35,10 @@ and re-check it after a bump. After one:
   engine. They check optimizer behaviour, not a documented contract, and
   fail loudly when it changes; their failure messages say what to
   re-evaluate.
+- If `duckdb_env_caps` fails, the new DuckDB no longer sizes its thread
+  pool and memory limit from `SLURM_CPUS_ON_NODE` / `SLURM_MEM_PER_NODE`:
+  the `cargo test` caps and the perf gate's caps (which refuses to start
+  then) need another mechanism ("Machine budget" below).
 - If `duckdb_dict_cache_guard`'s tripwire fails ("the DuckDB dict-cache
   bug appears fixed"), remove the `debug_enable_caching_operators`
   workaround as described in engine_rules.md §5. If every core open
@@ -63,6 +67,37 @@ Adopted from flextool-engine's hard-won lessons:
 3. **Parity tests gate rewrites.** When a component is reimplemented
    (e.g. a faster path replacing a reference path), keep the reference as an
    oracle and gate the new path with equality/tolerance parity tests.
+
+## Machine budget
+DuckDB sizes every instance to the machine by default: as many threads as
+cores and a memory limit of 80 % of RAM, per instance. A test binary runs
+many tests at once, each with its own instance, so an unbounded `cargo
+test` puts hundreds of runnable threads on every core in bursts. The repo
+bounds this in `.cargo/config.toml [env]`, for every `cargo test`, `cargo
+run` and `cargo bench` started in it:
+
+| variable | value | effect |
+|---|---|---|
+| `SLURM_CPUS_ON_NODE` | 4 | DuckDB threads per instance (DuckDB reads it when it creates an instance) |
+| `SLURM_MEM_PER_NODE` | 8000 | DuckDB memory_limit = 80 % of 8 000 MB per instance |
+| `RUST_TEST_THREADS` | 8 | at most 8 tests at once per test binary |
+
+A value in your environment wins: `SLURM_CPUS_ON_NODE=8 cargo test`,
+`RUST_TEST_THREADS=32 cargo test`; an empty `SLURM_*` value
+(`SLURM_CPUS_ON_NODE= SLURM_MEM_PER_NODE=`) runs DuckDB uncapped. Keep in
+mind that a `cargo run -p nodal-db-cli -- import …` and the criterion
+benches (`just bench`) run at 4 DuckDB threads too; set the variables
+empty to measure the engine as shipped. 4 rather than 1 keeps DuckDB's
+parallel operators running in tests (the dict-cache bug and row-order
+nondeterminism live there). `tests/duckdb_env_caps.rs` fails if a DuckDB
+release stops reading the variables. `just full` runs its release-build
+guard step (the index-scan guards and the dict-cache tripwire) uncapped,
+so the engine's production thread count is checked too, builds at 8 cargo
+jobs unless `CARGO_BUILD_JOBS` is set, and runs inside a systemd user
+scope with `MemoryMax=14G` and no swap (`NODAL_FULL_MEMORY_MAX=20G` or
+`=off` to change it; without `systemd-run --user` it runs unbounded and
+says so). Agents additionally source `scripts/dev/agent-env.sh SLOT` (8
+build jobs, own target dir, shared compiler cache).
 
 ## Write-path equivalence check
 A change to the write path that is meant to leave the stored data alone
@@ -120,20 +155,28 @@ just perf-gate BASE CAND --quick    # any two revisions (CAND may be WORKTREE)
 just perf-gate --metrics 'wr_*'     # a subset (comma-separated globs; --list shows all)
 ```
 
-The first run compiles the bundled DuckDB once (minutes); arms, fixtures
-and binaries are cached under `target-ab/` (gitignored). `--full` uses the
+The first run compiles the bundled DuckDB once (minutes; at most 8 cargo
+jobs, and ~20 s per arm when `sccache` is installed); arms, fixtures and
+binaries are cached under `target-ab/` (gitignored). `--full` uses the
 criterion gate's fixture sizes instead of a tenth of them.
 
-**The release gate** (`just full`) runs `ab.py --release --full
+**The release gate** (`just full`) runs `ab.py --release
 --advance-baseline`: BASE is the commit in `scripts/bench/ab/BASELINE` (the
 last passing release run), CAND is HEAD (a clean tree; with uncommitted
-changes, the working tree, and nothing advances). When every metric
-passes (exit 0; an `--allow`ed metric counts, and its reason goes into the
-block), BASELINE moves to HEAD: commit it together with the run's block in
-`crates/nodal-db-core/benches/RESULTS.md` ("A/B gate runs"), so the chain
-of release-to-release ratios stays visible. Only a complete run advances
-it: full scale, no `--metrics` subset, BASE = BASELINE, and no uncommitted
-change in the gate itself (`scripts/bench/ab/`, `scripts/lib/`). In a
+changes, the working tree, and nothing advances). Each metric runs at its
+`release_scale` (`metrics.toml`): quick for most, full for the ones whose
+cost depends on file size (the dense, model-load, scalars-loader and long
+scan reads, the CHECKPOINT cycles, the import, compaction and extract and
+their sizes); the axis-rendering metrics run quick only, which detects
+their regression class at 1.3-5.6x. The size metrics are gated from the
+file sizes the compaction and extract samples already produce. When every
+metric passes (exit 0; an `--allow`ed metric counts, and its reason goes
+into the block), BASELINE moves to HEAD: commit it together with the run's
+block in `crates/nodal-db-core/benches/RESULTS.md` ("A/B gate runs"), so
+the chain of release-to-release ratios stays visible. Only a complete run
+advances it: the release suite (or `--full`), no `--metrics` subset, BASE
+= BASELINE, and no uncommitted change in the gate itself
+(`scripts/bench/ab/`, `scripts/lib/`). In a
 release run, a metric whose API the baseline has and HEAD lacks is an
 ERROR rather than SKIPPED (an API removal, or a stale probe in
 `capabilities.toml`). Each pre-merge gate tolerates
@@ -171,15 +214,33 @@ FAIL (or INCONCLUSIVE, FLAKY, LOAD-DRIFT) into ALLOWED with the reason in
 the table and `results.json`; copy the reason into the PR. `--allow` never
 covers WRONG RESULT.
 
-**The host.** The gate refuses to start when the 1-minute load average is
-above nproc/4 and warns above nproc/8; `--force` runs anyway and marks the
-results FORCED. Under load the per-pair noise rises from ~2 % to 8-15 %,
-and 1.05 metrics then end INCONCLUSIVE. It records the CPU governor and
-boost flag and warns when the governor is not `performance` (it changes
-nothing). `--cpus LIST` runs both arms under `taskset`, but DuckDB sizes
-its thread pool from the machine, not the affinity mask (32 threads even
-on one pinned CPU), so pinning oversubscribes; use it only on a host you
-cannot quiet.
+**The gate's footprint.** Every sample runs with DuckDB capped at 4
+threads (1 for `rd_long_scan_17pct`, whose few-ms scan is bimodal when
+threaded) and a memory_limit of 8.9 GiB, every fixture build at 8 threads
+(`[settings]` in `metrics.toml`): the runner sets `SLURM_CPUS_ON_NODE` /
+`SLURM_MEM_PER_NODE`, which DuckDB reads when it creates an instance, so
+the caps reach both arms, old baselines, raw connections and the arm's
+CLI alike. Before the fixtures, each arm's binary must report exactly
+these caps, else the run stops (exit 3). Both arms always share the caps,
+so ratios stay comparable; absolute milliseconds differ from an uncapped
+run. A sample then averages 1-2.4 cores, ~5 at a burst.
+
+**The host.** The load rules count only the *foreign* load: the busy
+cores of every other process (busy CPU from `/proc/stat` minus the gate's
+own and its samples' CPU), so the gate's own samples and builds never
+count against it. The gate refuses to start when other processes keep
+more than nproc/4 cores busy over 5 s and warns above nproc/8; `--force`
+runs anyway and marks the results FORCED. The check repeats after the
+builds, with no waiting. A metric's run whose foreign load (median of its
+first 3 pairs vs its last 3) changes more than 2x is rerun once, then
+LOAD-DRIFT; loads below nproc/16 cores count as nproc/16, so a desktop's
+own small bursts are not a drift. Under load the per-pair
+noise rises from ~2 % to 8-15 %, and 1.05 metrics then end INCONCLUSIVE.
+Per pair the results record the foreign and gate cores, CPU pressure (PSI)
+and the 1-minute load average (information only), and the run the CPU
+governor and boost flag; it warns when the governor is not `performance`
+(it changes nothing). `--cpus LIST` runs both arms under `taskset` (DuckDB
+does not see the affinity mask, but its thread count is the cap anyway).
 
 **A/A calibration.** `just perf-gate HEAD HEAD --aa` builds one revision
 twice with different salts (two binaries, two fixture sets) and must PASS

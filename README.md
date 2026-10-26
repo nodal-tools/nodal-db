@@ -17,7 +17,7 @@ Managed with [`just`](https://github.com/casey/just); recipes in `justfile`.
 | `just t <args>` | targeted | forwards to `cargo test`, e.g. `just t -p nodal-db-core canon` |
 | `just` (or `just test`) | quick gate | `cargo test --workspace` (slow `#[ignore]` tests skipped) + schema smoke + the perf-gate tool's unit tests |
 | `just perf-gate` | pre-merge, perf-sensitive branches | paired A/B ratios of your change against its merge-base, on this host (`--quick`, ~10 min on a quiet host; see CONTRIBUTING "Performance gates") |
-| `just full` | release gate | the above **with** `--include-ignored` slow tests + the A/B perf gate at full scale against the last passing release run |
+| `just full` | release gate | the above **with** `--include-ignored` slow tests, the index-scan guards on a release build, and the A/B perf gate against the last passing release run (each metric at its release scale: quick for most, full where cost depends on file size); inside a 14 GB memory ceiling when `systemd-run --user` works |
 | `just bench` | recording | the criterion benches (informational numbers, no verdicts) |
 
 The quick gate is what you run on every change; `just full` is for pre-release.
@@ -26,6 +26,11 @@ of the quick gate automatically — tag any new slow test the same way. First ru
 compiles bundled DuckDB (minutes: ~4 on 32 cores, longer on small machines;
 cached thereafter). `just venv` creates the
 Python venv the smoke suite and conformance oracles need.
+
+Every `cargo test` (and `cargo run` / `cargo bench`) in the repo runs with
+DuckDB capped at 4 threads and an 8 000 MB memory basis per instance, and
+at most 8 tests at once per test binary (`.cargo/config.toml [env]`); a
+value in your environment wins. See CONTRIBUTING "Machine budget".
 
 ## Inspecting a database
 

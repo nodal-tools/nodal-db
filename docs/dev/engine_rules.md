@@ -365,3 +365,35 @@ of the stored-position legs, in `axis_position_stored` and
 `axis_position_stored_in_use`, which must not drift apart). The perf
 gate's `synth_axes` metrics measure the same reads on a file with 500
 axes of each sort.
+
+## 8. Name identity is DuckDB's `lower()`; the Rust fold must track it
+
+**Rule.** Names (entities, classes, parameters, alternatives, scenarios,
+value lists) are case-insensitive through DuckDB's `lower()`: the
+`cur_name` columns, their unique indexes and every SQL resolver use it.
+Rust code that compares names before they reach SQL (collision checks
+in `structural.rs`, `verbs.rs`, the write path) uses `types::fold`, and
+nothing else. Never compare names in a canonical path with another
+DuckDB string function or another Rust case mapping.
+
+**Why.** `types::fold` is Rust's `str::to_lowercase`, a second case
+table that is meant to agree with DuckDB's and does not quite: on
+DuckDB 2.0.0 and Rust 1.98 they differ on 56 code points (`İ`, and case
+pairs from recent Unicode versions that DuckDB lacks) and on the
+final-sigma rule (`ΟΔΟΣ` folds to `οδοσ` in DuckDB, `οδος` in Rust).
+Where they differ, a Rust-side check passes two names that then collide
+on a DuckDB unique index mid-transaction, or the reverse. Neither table
+is pinned: Rust's moves with the toolchain, DuckDB's with the bundled
+engine. Making name identity independent of both is planned separately
+(`specs/unicode_text_rule_PLAN.md`, T11); until then the difference is
+pinned so that it cannot change unnoticed.
+
+**Guard.**
+[`crates/nodal-db-core/tests/duckdb_lower_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/duckdb_lower_guard.rs)
+compares `types::fold` with DuckDB `lower()` on every Unicode scalar
+value and asserts the differences are exactly its committed list, plus
+the final-sigma and `İ` strings. It fails after a toolchain or DuckDB
+bump that changes either side, and lists the code points that started
+or stopped differing: re-evaluate T11 with them, then update the list
+(and, when DuckDB's side changed, compact the dev files; see
+[DuckDB upgrades](https://github.com/nodal-tools/nodal-db/blob/main/CONTRIBUTING.md#duckdb-upgrades)).

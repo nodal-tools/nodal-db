@@ -148,7 +148,11 @@ pub enum ScalarValue {
 /// `to_lowercase`, matching DuckDB's Unicode `lower()` that the schema's
 /// `cur_name` columns and every SQL resolver apply (api critique F3: an ASCII
 /// fold lets Ä/ä-aliased names slip past comparisons SQL would collapse).
-pub(crate) fn fold(s: &str) -> String {
+/// The match is not exact: the two case tables differ on a few code points
+/// (`İ`, case pairs DuckDB's tables lack) and on the final-sigma rule.
+/// `tests/duckdb_lower_guard.rs` pins the difference; closing it is plan T11
+/// (`specs/unicode_text_rule_PLAN.md`). Public for that guard.
+pub fn fold(s: &str) -> String {
     s.to_lowercase()
 }
 

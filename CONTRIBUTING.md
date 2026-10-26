@@ -52,7 +52,11 @@ and re-check it after a bump. After one:
   indexes (`ix_entity_lname`, the `uq_*_name` unique indexes over
   `cur_name`) persist keys computed by the engine that built them, so a
   changed case mapping could make an index lookup miss a row a scan
-  would find; compaction rebuilds every index from the DDL.
+  would find; compaction rebuilds every index from the DDL. A changed
+  case mapping also fails `duckdb_lower_guard` (engine_rules.md §8),
+  which pins where DuckDB's `lower()` and the Rust name fold differ; it
+  fails the same way after a Rust toolchain bump that changes
+  `to_lowercase`.
 
 ## Testing rules (binding once code exists)
 Adopted from flextool-engine's hard-won lessons:

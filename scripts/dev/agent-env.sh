@@ -10,7 +10,10 @@
 # crates by their location). The slots are fixed so the cache's base-dir
 # list (read once, when the sccache server starts) always covers them.
 
-_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# The MAIN checkout's root, also from inside a linked worktree, so every job
+# shares the same slot folders and the cache's base-dir list matches.
+_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+if [ -n "$_common" ]; then _root="$(dirname "$_common")"; else _root="$(pwd)"; fi
 _slot="${1:-1}"
 case "$_slot" in [1-8]) ;; *) echo "agent-env: SLOT must be 1-8" >&2; return 1 2>/dev/null || exit 1;; esac
 
@@ -35,4 +38,4 @@ if command -v sccache >/dev/null 2>&1; then
 fi
 
 export CARGO_TARGET_DIR="$_root/target-agent-$_slot"
-unset _root _slot _dirs i
+unset _root _common _slot _dirs i

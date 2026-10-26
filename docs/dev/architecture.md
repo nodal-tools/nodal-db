@@ -606,7 +606,7 @@ index-scan choice is made at run time and depends on engine heuristics,
 so `crates/nodal-db-core/tests/array_id_index_scan.rs` and
 `point_read_index_scan.rs` check it with `EXPLAIN ANALYZE` on every
 `cargo test`, including negative controls that show the fallback for
-dense ids and for 51 keys ([engine rules](engine_rules.md) §2 and §5).
+dense ids and for 51 keys ([engine rules](engine_rules.md) §2 and §6).
 
 CI runs `cargo test --workspace` and the schema smoke suite.
 

@@ -14,7 +14,10 @@
 //! <quick|full>`, `build_synth_axes <path> <quick|full>` (`axes.rs`),
 //! `build_hheavy <path> <quick|full>`, `build_xsrc <path> <quick|full>`,
 //! `build_ipc_dense <path> <entities>`. `threads` prints the
-//! DuckDB default thread count (pinning study, plan §6.2).
+//! DuckDB instance's `threads` and `memory_limit` as sized from the
+//! environment (`threads N`, `memory_limit 8.9 GiB`): the runner's start-up
+//! check that its `SLURM_*` caps took effect in each arm
+//! (perf_gate_footprint_PLAN D1).
 //!
 //! **Diagnostic modes** (below; not gated, no digest, the value only) keep
 //! their names for ad-hoc studies (`ab.py --bins OLD NEW --modes ...`);
@@ -485,12 +488,16 @@ fn main() {
     }
     if mode == "threads" {
         let conn = nodal_db_core::duckdb::Connection::open_in_memory().unwrap();
-        let t: String = conn
-            .query_row("SELECT current_setting('threads')::VARCHAR", [], |r| {
-                r.get(0)
-            })
+        let (t, mem): (String, String) = conn
+            .query_row(
+                "SELECT current_setting('threads')::VARCHAR, \
+                 current_setting('memory_limit')::VARCHAR",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        println!("{t}");
+        println!("threads {t}");
+        println!("memory_limit {mem}");
         return;
     }
     check::set_mode(mode);

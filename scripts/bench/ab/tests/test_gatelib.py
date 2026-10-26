@@ -204,6 +204,45 @@ class LoadRules(unittest.TestCase):
         self.assertIn("drift_rerun_of", r)
 
 
+class DuckdbCaps(unittest.TestCase):
+    """perf_gate_footprint_PLAN D1, D2: the SLURM_* env and its check."""
+
+    def test_env(self):
+        self.assertEqual(g.duckdb_env(4, 12000),
+                         {"SLURM_CPUS_ON_NODE": "4", "SLURM_MEM_PER_NODE": "12000"})
+
+    def test_parse_size(self):
+        self.assertAlmostEqual(g.parse_size("8.9 GiB"), 8.9 * 1024 ** 3)
+        self.assertEqual(g.parse_size("512.0 MiB"), 512 * 1024 ** 2)
+        self.assertEqual(g.parse_size("10 bytes"), 10)
+        with self.assertRaises(ValueError):
+            g.parse_size("lots")
+
+    def test_check_caps(self):
+        # 80 % of 12 000 MB = 9.6e9 B = 8.94 GiB, rendered "8.9 GiB".
+        self.assertIsNone(g.check_caps("threads 4\nmemory_limit 8.9 GiB\n", 4, 12000))
+        self.assertIn("threads", g.check_caps("threads 32\nmemory_limit 8.9 GiB\n", 4, 12000))
+        self.assertIn("memory_limit", g.check_caps("threads 4\nmemory_limit 56.5 GiB\n", 4, 12000))
+        self.assertIn("memory_limit", g.check_caps("threads 4\n", 4, 12000))
+        self.assertIsNotNone(g.check_caps("", 4, 12000))
+
+    def test_metric_threads_override(self):
+        cfg = g.Config({"classes": CLASSES, "settings": {"duckdb_threads": 4},
+                        "metric": {"a": {"class": "hot", "check": "c"},
+                                   "b": {"class": "hot", "check": "c", "threads": 1}}})
+        self.assertEqual([cfg.caps.for_metric(m) for m in cfg.metrics.values()], [4, 1])
+        for bad in (0, "2", 1.5):
+            with self.assertRaises(g.ConfigError):
+                metric(threads=bad)
+
+    def test_defaults_and_the_real_file(self):
+        caps = g.Config({"classes": CLASSES}).caps
+        self.assertEqual(caps.as_dict(), {"threads": 4, "fixture_threads": 8, "memory_mb": 12000})
+        cfg = g.load_config(os.path.join(HERE, "..", "metrics.toml"))
+        self.assertEqual(cfg.caps.threads, 4)
+        self.assertEqual(cfg.caps.for_metric(cfg.metrics["rd_long_scan_17pct"]), 1)
+
+
 class Capabilities(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ab-caps-")

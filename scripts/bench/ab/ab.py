@@ -23,6 +23,14 @@ lock seeded from the revision's root Cargo.lock, binaries cached by tree,
 harness, features, lock, rustc and salt), with the cargo features of the
 capabilities both arms provide (capabilities.toml, source probes). Each
 arm builds its own fixtures with its own core (cached under --work).
+Builds run at most 8 cargo jobs, through sccache when it is installed.
+
+DuckDB caps (metrics.toml [settings], perf_gate_footprint_PLAN D1, D2):
+every sample runs with SLURM_CPUS_ON_NODE = duckdb_threads (4; a metric's
+own `threads` wins) and SLURM_MEM_PER_NODE = duckdb_memory_mb, every
+fixture build with fixture_threads (8); DuckDB sizes each instance from
+them. Before the fixtures, each arm's binary must report exactly these
+caps (harness mode `threads`), else the run is refused (exit 3).
 
 Per metric (metrics.toml): one warm-up sample per arm, then pairs in
 counterbalanced order up to pre-fixed looks (default 6, 11, 21 pairs);
@@ -227,7 +235,9 @@ def build_fixtures(cfg, metrics, arms, work, scale):
                 t0 = time.time()
                 log(f"{arm.name}: building fixture {fid} ({tag}) ...")
                 args = [arm.binary, fx.build, tmp] + ([scale] if fx.scaled else [])
-                subprocess.run(args, check=True, env=clean_env(), stdout=subprocess.DEVNULL)
+                env = clean_env()
+                env.update(gatelib.duckdb_env(cfg.caps.fixture_threads, cfg.caps.memory_mb))
+                subprocess.run(args, check=True, env=env, stdout=subprocess.DEVNULL)
                 os.replace(tmp, path)
                 log(f"{arm.name}: fixture {fid} built in {time.time() - t0:.0f} s")
             if fx.shared:
@@ -266,11 +276,31 @@ def parse_sample(arm, metric, proc):
     return value, digest
 
 
-def make_sampler(metric, arms, scale, cpus, inject):
+def check_arm_caps(arms, caps, threads_used):
+    """Start-up check (perf_gate_footprint_PLAN D1): each arm's binary,
+    run with the caps' environment, must report exactly those DuckDB
+    threads and that memory_limit; else the run is refused (exit 3)."""
+    for arm in arms.values():
+        for t in sorted(set(threads_used)):
+            env = clean_env()
+            env.update(gatelib.duckdb_env(t, caps.memory_mb))
+            proc = subprocess.run([arm.binary, "threads"], capture_output=True, text=True, env=env)
+            why = (gatelib.check_caps(proc.stdout, t, caps.memory_mb) if proc.returncode == 0
+                   else f"`threads` mode exited {proc.returncode}")
+            if why:
+                raise gatelib.ConfigError(
+                    f"{arm.name}: the DuckDB caps did not take effect: {why}. A DuckDB bump "
+                    "may have changed its SLURM_* detection (CONTRIBUTING \"DuckDB upgrades\")")
+    log(f"DuckDB caps verified in both arms: threads {sorted(set(threads_used))}, "
+        f"memory {caps.memory_mb} MB (limit {0.8 * caps.memory_mb / 1024:.1f} GiB)")
+
+
+def make_sampler(metric, arms, scale, cpus, inject, caps):
     def sampler(arm):
         a = arms[arm]
         env = clean_env()
         env.update(a.env)
+        env.update(gatelib.duckdb_env(caps.for_metric(metric), caps.memory_mb))
         env["NODAL_AB_SCALE"] = scale
         if inject and arm == "cand" and inject[0] == metric.id:
             env["NODAL_AB_INJECT"] = f"{metric.mode}:{inject[1]}"
@@ -553,6 +583,8 @@ def gate(a):
                             "label": f"SKIPPED ({why})", "skip_reason": why})
         else:
             runnable.append(m)
+    dcaps = cfg.caps
+    check_arm_caps(arms, dcaps, [dcaps.fixture_threads] + [dcaps.for_metric(m) for m in runnable])
     try:
         build_fixtures(cfg, runnable, arms, work, scale)
     except subprocess.CalledProcessError as e:
@@ -575,10 +607,11 @@ def gate(a):
     t_run = time.time()
     for m in runnable:
         t0 = time.time()
-        sampler = make_sampler(m, arms, scale, a.cpus, inject)
+        sampler = make_sampler(m, arms, scale, a.cpus, inject, dcaps)
         r = gatelib.gate_metric(m, sampler, plan, rng, load1, log=log)
         r["wall_s"] = time.time() - t0
         r["scale"] = scale if m.scaled else "fixed"
+        r["threads"] = dcaps.for_metric(m)
         results.append(r)
         ratio = (f"{r['ratio']:.3f} [{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]"
                  if "ratio" in r else "-")
@@ -611,6 +644,7 @@ def gate(a):
         "aa": a.aa,
         "aa_binaries_identical": identical,
         "cpus": a.cpus,
+        "duckdb_caps": dcaps.as_dict(),
         "injection": {"metric": inject[0], "spec": inject[1]} if inject else None,
         "build_s": build_s,
         "run_s": time.time() - t_run,

@@ -221,5 +221,39 @@ class LockSeedTest(unittest.TestCase):
         self.assertNotEqual(h, revbuild.dir_hash(self.tool_src))
 
 
+class CargoEnvTest(unittest.TestCase):
+    """perf_gate_footprint_PLAN D7: a tool build runs at most 8 jobs and
+    through sccache when installed; the caller's values win."""
+
+    def test_jobs_capped_and_target_set(self):
+        env = revbuild.cargo_env("/w/target", environ={"PATH": "/bin"}, sccache=False)
+        self.assertEqual(env["CARGO_BUILD_JOBS"], "8")
+        self.assertEqual(env["CARGO_TARGET_DIR"], "/w/target")
+        self.assertNotIn("RUSTC_WRAPPER", env)
+
+    def test_caller_jobs_win(self):
+        env = revbuild.cargo_env("/t", environ={"CARGO_BUILD_JOBS": "2"}, sccache=False)
+        self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
+
+    def test_sccache_when_installed(self):
+        env = revbuild.cargo_env("/t", environ={}, sccache="/x/sccache")
+        self.assertEqual(env["RUSTC_WRAPPER"], "/x/sccache")
+        self.assertEqual((env["CC"], env["CXX"]), ("/x/sccache cc", "/x/sccache c++"))
+        self.assertIn("/t", env["SCCACHE_BASEDIRS"].split(":"))
+
+    def test_basedirs_match_agent_env(self):
+        root = revbuild.repo_root(HERE)
+        dirs = revbuild.sccache_basedirs(os.path.join(root, "target-ab", "target"))
+        self.assertEqual(dirs[0], os.path.join(root, "target"))
+        self.assertEqual(dirs[-1], os.path.join(root, "target-ab", "target"))
+        self.assertEqual(len(dirs), 10)
+
+    def test_caller_compiler_setup_wins(self):
+        env = revbuild.cargo_env("/t", environ={"CC": "clang", "SCCACHE_BASEDIRS": "/a"},
+                                 sccache="/x/sccache")
+        self.assertEqual(env["CC"], "clang")
+        self.assertNotIn("RUSTC_WRAPPER", env)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -224,9 +224,58 @@ def build_key(tree, tool_hash, features, rustc, lock_bytes, salt="", env=None):
     return f"{tree}-w{tool_hash}-{h.hexdigest()[:10]}"
 
 
+BUILD_JOBS = "8"
+
+
+def cargo_env(target_dir, environ=None, sccache=None):
+    """The environment of a tool build (perf_gate_footprint_PLAN D7): at
+    most BUILD_JOBS jobs (cargo passes it to the cc crate, so it also caps
+    the bundled DuckDB's C++ compile, ~1-1.5 GB per job), and the sccache
+    compiler cache when it is installed (as scripts/dev/agent-env.sh sets
+    it up), so a per-arm DuckDB compile takes ~20 s instead of minutes. A
+    value already in the caller's environment wins. Applied to the build
+    only: the cache key (`build_env`) reads the caller's environment, so a
+    compiler wrapper added here does not change keys."""
+    env = dict(os.environ if environ is None else environ)
+    env["CARGO_TARGET_DIR"] = target_dir
+    env.setdefault("CARGO_BUILD_JOBS", BUILD_JOBS)
+    if sccache is None:
+        sccache = shutil.which("sccache")
+    if sccache and "RUSTC_WRAPPER" not in env and "CC" not in env and "CXX" not in env:
+        env["RUSTC_WRAPPER"] = sccache
+        env["CC"] = f"{sccache} cc"
+        env["CXX"] = f"{sccache} c++"
+        # DuckDB's sources are unpacked into each target dir: list the
+        # folders as base dirs so cache keys match across them. The server
+        # reads the list once, when it starts, so it is the same list as
+        # agent-env.sh's (whoever starts the server, every job hits).
+        env.setdefault("SCCACHE_BASEDIRS", ":".join(sccache_basedirs(target_dir)))
+    return env
+
+
+def sccache_basedirs(target_dir):
+    """agent-env.sh's base-dir list (the repo's target, target-agent-1..8,
+    target-ab/target), plus `target_dir` when it is elsewhere."""
+    target_dir = os.path.abspath(target_dir)
+    probe = target_dir
+    while not os.path.isdir(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)
+    try:
+        root = repo_root(probe)
+    except (subprocess.CalledProcessError, OSError):
+        return [target_dir]
+    dirs = [os.path.join(root, "target")]
+    dirs += [os.path.join(root, f"target-agent-{i}") for i in range(1, 9)]
+    dirs.append(os.path.join(root, "target-ab", "target"))
+    if target_dir not in dirs:
+        dirs.append(target_dir)
+    return dirs
+
+
 def cargo_build(tool, target_dir, bin_name, features=None, package=None, quiet=True):
     """`cargo build --release` of the crate (or workspace `package`) at
-    `tool` into `target_dir`; returns the built binary's path."""
+    `tool` into `target_dir` (environment: `cargo_env`); returns the built
+    binary's path."""
     cmd = ["cargo", "build", "--release"]
     if quiet:
         cmd.append("--quiet")
@@ -236,7 +285,7 @@ def cargo_build(tool, target_dir, bin_name, features=None, package=None, quiet=T
         cmd += ["--no-default-features"]
         if features:
             cmd += ["--features", ",".join(sorted(features))]
-    subprocess.run(cmd, cwd=tool, check=True, env={**os.environ, "CARGO_TARGET_DIR": target_dir})
+    subprocess.run(cmd, cwd=tool, check=True, env=cargo_env(target_dir))
     return os.path.join(target_dir, "release", bin_name)
 
 

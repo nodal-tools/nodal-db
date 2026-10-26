@@ -96,6 +96,59 @@ class StartupRefusals(unittest.TestCase):
         self.assertIn("check:", text)
 
 
+class CapsCheck(unittest.TestCase):
+    """The per-arm start-up check of the DuckDB caps (perf_gate_footprint_PLAN D1)."""
+
+    def arms(self):
+        a = mock.Mock(binary="/bin/h")
+        a.name = "base"
+        return {"base": a}
+
+    def run_check(self, stdout, rc=0):
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(kw["env"])
+            return proc(rc, stdout)
+        caps = g.Caps(4, 8, 12000)
+        with mock.patch.object(ab.subprocess, "run", side_effect=fake_run), \
+                redirect_stdout(io.StringIO()):
+            ab.check_arm_caps(self.arms(), caps, [4, 1, 4])
+        return seen
+
+    def test_each_thread_value_is_checked_with_its_env(self):
+        def fake_run(cmd, **kw):
+            t = kw["env"]["SLURM_CPUS_ON_NODE"]
+            self.assertEqual(kw["env"]["SLURM_MEM_PER_NODE"], "12000")
+            return proc(0, f"threads {t}\nmemory_limit 8.9 GiB\n")
+        with mock.patch.object(ab.subprocess, "run", side_effect=fake_run) as run, \
+                redirect_stdout(io.StringIO()):
+            ab.check_arm_caps(self.arms(), g.Caps(4, 8, 12000), [4, 1, 4])
+        self.assertEqual(run.call_count, 2)
+
+    def test_uncapped_arm_refuses(self):
+        with self.assertRaises(g.ConfigError) as cm:
+            self.run_check("threads 32\nmemory_limit 56.5 GiB\n")
+        self.assertIn("did not take effect", str(cm.exception))
+
+    def test_failing_binary_refuses(self):
+        with self.assertRaises(g.ConfigError):
+            self.run_check("", rc=101)
+
+    def test_sampler_env_carries_the_metric_cap(self):
+        arm = mock.Mock(binary="/bin/h", env={"NODAL_AB_SYNTH": "/f.db"})
+        m = g.Metric("rd_x", {"class": "hot", "check": "c", "threads": 1}, {"hot": 1.05})
+        got = {}
+
+        def fake_run(cmd, **kw):
+            got.update(kw["env"])
+            return proc(0, "digest a=1\n1.0\n")
+        with mock.patch.object(ab.subprocess, "run", side_effect=fake_run):
+            ab.make_sampler(m, {"base": arm}, "quick", None, None, g.Caps(4, 8, 12000))("base")
+        self.assertEqual((got["SLURM_CPUS_ON_NODE"], got["SLURM_MEM_PER_NODE"]), ("1", "12000"))
+        self.assertEqual(got["NODAL_AB_SYNTH"], "/f.db")
+
+
 class Baseline(unittest.TestCase):
     def setUp(self):
         import tempfile

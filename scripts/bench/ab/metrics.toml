@@ -26,6 +26,19 @@ full_looks = [6, 11, 21]
 # Extra margin under T for a PASS at the first look (a systematic A/A
 # offset, from the A/A calibration); 0 = the exact order-statistic rule.
 first_look_margin = 0.0
+# DuckDB caps (perf_gate_footprint_PLAN D1, D2): the runner sets
+# SLURM_CPUS_ON_NODE / SLURM_MEM_PER_NODE in every sample's and fixture
+# build's environment, and DuckDB sizes each instance from them (both arms,
+# raw opens and the arm's CLI included); at start it refuses (exit 3) when an
+# arm's binary does not report them. Threads per sample (a metric may set
+# its own `threads`), threads per fixture build (untimed), and the memory in
+# MB DuckDB takes 80 % of as memory_limit (8.9 GiB; 3 GiB was measured to
+# suffice for every metric). Both arms always share them, so ratios stay
+# comparable; absolute milliseconds differ from uncapped runs. Changing one
+# is a gate-config change: recalibrate (A/A) and note it in RESULTS.md.
+duckdb_threads = 4
+fixture_threads = 8
+duckdb_memory_mb = 12000
 
 [classes]
 # In-process reads and lookups on a warm connection, CPU-bound.
@@ -159,7 +172,11 @@ scaled = true
 # At quick scale the scan takes ~2.5 ms and each process lands in one of two
 # speed modes (2.1-2.5 vs 3.8-4.5 ms: thread placement), so a pair's ratio
 # is 0.5-2.0 and no N decides it (A/A 1: [0.75, 1.25] at 21 pairs). The
-# model-load read covers the same rows at quick scale.
+# model-load read covers the same rows at quick scale. At one DuckDB thread
+# the quick scan stopped being bimodal (perf_gate_footprint_PLAN §1.2, 11
+# pairs: |r-1| .011 vs .18 at 4 threads); it stays full-only until an A/A
+# calibration confirms it at quick scale (plan D5).
+threads = 1
 scales = ["full"]
 check = "row count = long entities x 8 760 at ~17 % dead; digest of position, time, value"
 

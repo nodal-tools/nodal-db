@@ -76,6 +76,12 @@ class Metric:
         if not set(self.scales) <= {"quick", "full"} or not self.scales:
             raise ConfigError(f"metric {mid}: scales must be a subset of quick, full")
         self.note = d.get("note", "")
+        # DuckDB threads for this metric's samples (default: the
+        # [settings] duckdb_threads cap); 1 for the few-ms scans whose
+        # timings are bimodal when threaded (perf_gate_footprint_PLAN D2).
+        self.threads = d.get("threads")
+        if self.threads is not None and (not isinstance(self.threads, int) or self.threads < 1):
+            raise ConfigError(f"metric {mid}: threads must be a positive integer")
 
     @property
     def is_size(self):
@@ -106,6 +112,15 @@ class Config:
                     raise ConfigError(f"metric {mid}: unknown fixture {f!r}")
             self.metrics[mid] = m
 
+    @property
+    def caps(self):
+        """The DuckDB caps (perf_gate_footprint_PLAN D1, D2): threads for
+        samples and for fixture builds, and the memory in MB that DuckDB
+        sizes its memory_limit from (80 % of it)."""
+        st = self.settings
+        return Caps(int(st.get("duckdb_threads", 4)), int(st.get("fixture_threads", 8)),
+                    int(st.get("duckdb_memory_mb", 12000)))
+
     def plan(self, scale):
         """The pre-fixed sequential plan for `scale` (see `Plan`)."""
         looks = self.settings.get(f"{scale}_looks", DEFAULT_LOOKS)
@@ -119,6 +134,24 @@ class Config:
         if not out:
             raise ConfigError(f"--metrics {patterns!r} matches no metric")
         return out
+
+
+class Caps:
+    def __init__(self, threads, fixture_threads, memory_mb):
+        for name, v in (("duckdb_threads", threads), ("fixture_threads", fixture_threads),
+                        ("duckdb_memory_mb", memory_mb)):
+            if v < 1:
+                raise ConfigError(f"[settings] {name} must be positive, got {v}")
+        self.threads = threads
+        self.fixture_threads = fixture_threads
+        self.memory_mb = memory_mb
+
+    def for_metric(self, metric):
+        return metric.threads or self.threads
+
+    def as_dict(self):
+        return {"threads": self.threads, "fixture_threads": self.fixture_threads,
+                "memory_mb": self.memory_mb}
 
 
 def load_config(path):
@@ -186,6 +219,53 @@ def skip_reason(metric, shared, lacking, arm_names=None):
         if need not in shared:
             who = ", ".join(names.get(a, a) for a in lacking.get(need, ["?"]))
             return f"{who} lacks {need}"
+    return None
+
+
+# ------------------------------------------------------------ DuckDB caps
+
+def duckdb_env(threads, memory_mb):
+    """The environment that caps every DuckDB instance a process creates.
+    DuckDB (1.5.5 and 2.0.0: `DBConfig::GetSystemMaxThreads`,
+    `GetSystemAvailableMemory`) sizes `threads` from SLURM_CPUS_ON_NODE and
+    `memory_limit` (80 % of it) from SLURM_MEM_PER_NODE (MB) when it
+    creates an instance: core opens, raw opens and the arm's CLI child
+    alike, in every arm, old baselines included (perf_gate_footprint_PLAN
+    D1)."""
+    return {"SLURM_CPUS_ON_NODE": str(int(threads)), "SLURM_MEM_PER_NODE": str(int(memory_mb))}
+
+
+_UNITS = {"bytes": 1, "b": 1, "kib": 1024, "mib": 1024 ** 2, "gib": 1024 ** 3,
+          "tib": 1024 ** 4, "kb": 1000, "mb": 1000 ** 2, "gb": 1000 ** 3, "tb": 1000 ** 4}
+
+
+def parse_size(text):
+    """DuckDB's rendering of a byte size ("8.9 GiB", "512.0 MiB") in bytes."""
+    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]+)\s*", text or "")
+    if not m or m.group(2).lower() not in _UNITS:
+        raise ValueError(f"not a DuckDB size: {text!r}")
+    return float(m.group(1)) * _UNITS[m.group(2).lower()]
+
+
+def check_caps(output, threads, memory_mb, tolerance=0.03):
+    """Did the caps take effect? `output` = the harness's `threads` mode
+    (`threads N`, `memory_limit 8.9 GiB`). None if they did, else why not:
+    a DuckDB release that dropped or renamed the SLURM detection would
+    otherwise leave the gate silently uncapped."""
+    got = {}
+    for line in (output or "").splitlines():
+        k, _, v = line.partition(" ")
+        got[k] = v.strip()
+    if got.get("threads") != str(threads):
+        return f"DuckDB threads = {got.get('threads')!r}, expected {threads} (SLURM_CPUS_ON_NODE)"
+    want = 0.8 * memory_mb * 1000 ** 2
+    try:
+        mem = parse_size(got.get("memory_limit"))
+    except ValueError as e:
+        return f"memory_limit: {e}"
+    if abs(mem - want) > tolerance * want:
+        return (f"DuckDB memory_limit = {got.get('memory_limit')}, expected ~{want / 1024 ** 3:.1f} "
+                f"GiB (80 % of SLURM_MEM_PER_NODE = {memory_mb} MB)")
     return None
 
 

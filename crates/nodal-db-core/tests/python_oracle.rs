@@ -79,8 +79,12 @@ fn independent_python_oracle_reproduces_every_vector() {
         python.display()
     );
     // The axis encoder (spec §4-§7) and the value encoder (spec §9, OPEN-7)
-    // each have an independent Python re-encoder; both must agree.
+    // each have an independent Python re-encoder; both must agree. The
+    // oracle's own NFC (`nfc16.py`, Unicode 16.0.0 from the vendored
+    // table) first checks itself against the official NormalizationTest, in
+    // its own run so a failure names it.
     for rel in [
+        "conformance/oracle/nfc16.py",
         "conformance/oracle/encode_axis.py",
         "conformance/oracle/encode_value.py",
     ] {

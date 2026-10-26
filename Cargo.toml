@@ -86,3 +86,7 @@ tempfile = "3.27.0"
 # The pre-freeze benchmark gate (rust_implementation_plan.md Part 2 dev-only
 # deps; Part 5 deliverable 4). Dev-only, never in a shipped artifact.
 criterion = "0.5"
+# Test-only: reads the gzipped official NormalizationTest
+# (conformance/unicode/, tests/text_nfc.rs). Already in the tree as a
+# build dependency of libduckdb-sys, so it adds no crate.
+flate2 = "1.1.9"

@@ -1,0 +1,18 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "label": "\ud804\udf82\ud804\udfc9",
+          "ordinal": 0
+        }
+      ],
+      "type": "Label"
+    },
+    "length": 1
+  },
+  "description": "NFC under Unicode 16.0.0: TULU-TIGALARI U+11382 + U+113C9 composes to U+11383 (a composite new in 16.0; Unicode 15.x leaves the pair unchanged)",
+  "expected_canonical_hex": "050000006c6162656c0101000000000000000004000000f0918e83",
+  "expected_hash_u64": 924379955216138602,
+  "notes": "Version guard (spec \u00a73.4.1.1, plan unicode_text_rule \u00a71.4): the input pair is NFD; under the pinned Unicode 16.0.0 it MUST encode as the single code point U+11383 (UTF-8 F0 91 8E 83, len prefix 4). CPython 3.12 unicodedata (15.0.0) and unicode-normalization <= 0.1.23 leave it unchanged (8 bytes), so this vector fails on any 15.x table. Expected bytes written by hand from the spec layout (kind tag, form 0x01, length, empty property block, ordinal, label), hash by the xxhash package."
+}

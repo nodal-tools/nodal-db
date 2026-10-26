@@ -1,0 +1,18 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "label": "a\u1acf\u0323",
+          "ordinal": 0
+        }
+      ],
+      "type": "Label"
+    },
+    "length": 1
+  },
+  "description": "NFC under Unicode 16.0.0: 'a' U+1ACF U+0323 stays unchanged (U+1ACF is unassigned in 16.0, ccc 0, so it blocks; Unicode 17.0 gives it ccc 230, reorders and composes to U+1EA1 U+1ACF)",
+  "expected_canonical_hex": "050000006c6162656c010100000000000000000600000061e1ab8fcca3",
+  "expected_hash_u64": 11919307069462668319,
+  "notes": "Version guard in the other direction (spec \u00a73.4.1.1): the encoding must not move to Unicode 17.0 (unicode-normalization 0.1.25) silently. Under 16.0.0 the label is already NFC: bytes 61 E1 AB 8F CC A3 (len prefix 6). Expected bytes written by hand from the spec layout, hash by the xxhash package."
+}

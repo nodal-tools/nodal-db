@@ -1014,6 +1014,7 @@ version = "0.0.0"
 dependencies = [
  "criterion",
  "duckdb",
+ "flate2",
  "serde",
  "serde_json",
  "serde_norway",

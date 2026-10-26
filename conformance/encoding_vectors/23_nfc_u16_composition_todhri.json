@@ -1,0 +1,18 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "label": "\ud801\uddd2\u0307",
+          "ordinal": 0
+        }
+      ],
+      "type": "Label"
+    },
+    "length": 1
+  },
+  "description": "NFC under Unicode 16.0.0: TODHRI U+105D2 + U+0307 composes to U+105C9 (a composite new in 16.0; Unicode 15.x leaves the pair unchanged)",
+  "expected_canonical_hex": "050000006c6162656c0101000000000000000004000000f0909789",
+  "expected_hash_u64": 2570605092955177875,
+  "notes": "Version guard (spec \u00a73.4.1.1, plan unicode_text_rule \u00a71.4): under the pinned Unicode 16.0.0 the pair MUST encode as U+105C9 (UTF-8 F0 90 97 89, len prefix 4); a 15.x table leaves it as U+105D2 U+0307 (6 bytes). Expected bytes written by hand from the spec layout, hash by the xxhash package."
+}

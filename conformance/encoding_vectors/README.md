@@ -68,6 +68,16 @@ An optional store-decision assertion checked by the reproduce helpers, tagged by
 reconstruction (so the axis MUST be stored parametric); `false` asserts they do
 not (MUST be materialized).
 
+## NFC vectors
+
+Strings in the encoding are NFC under Unicode 16.0.0 (spec §3.4.1.1). Vector
+18 is a composition every Unicode version agrees on; 22 and 23 compose only
+from 16.0 on (CPython 3.12's `unicodedata`, Unicode 15.0, leaves them
+unchanged), and 24 changes under 17.0. Together they fail any implementation
+whose tables are not 16.0.0. The oracle normalizes with its own code over the
+vendored table (`conformance/oracle/nfc16.py`,
+`conformance/unicode/nfc_table_16.0.0.txt`), never with `unicodedata`.
+
 ## The goldens are authoritative — no in-test regeneration
 
 `expected_canonical_hex` / `expected_hash_u64` are **fixed literals**, not

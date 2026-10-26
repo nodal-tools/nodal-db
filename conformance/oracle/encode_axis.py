@@ -10,8 +10,8 @@ agree byte- and hash-for-hash is the whole point — a spec-divergent edit to th
 Rust encoder that also regenerated its own goldens would still fail here.
 
 It deliberately uses only:
-  - CPython `unicodedata.normalize("NFC", ...)`  for §3.4 NFC (see the version
-    caveat below),
+  - its own NFC (`nfc16.py`, Unicode 16.0.0 from the vendored table
+    `conformance/unicode/nfc_table_16.0.0.txt`) for §3.4,
   - `struct` little-endian packing               for §3.1/§3.2/§3.3/§3.5,
   - the `xxhash` PyPI package                     for §2 XXH3-64/seed-0.
 
@@ -22,12 +22,12 @@ Run standalone (exit 0 iff every vector reproduces):
 `xxhash` is required (`.venv/bin/pip install xxhash`); it is the only
 third-party dependency. The Rust side runs this via `python_oracle.rs`.
 
-NFC-version caveat: CPython's `unicodedata` tracks the interpreter's bundled
-Unicode version (3.12 -> 15.0.0, 3.13 -> 15.1.0), whereas the spec pins Unicode 16.0.0
-(§3.4.1.1). The committed NFC vector (18) is a stable basic composition
-(U+0065 U+0301 -> U+00E9) unaffected by that skew, so this oracle validates it
-correctly today; the version-pinning debt is tracked in
-`specs/rust_impl_session_decisions.md` ("Deferred pre-freeze debt").
+NFC version: the spec pins Unicode 16.0.0 (§3.4.1.1). CPython's
+`unicodedata` follows the interpreter (3.12 -> 15.0.0, 3.13 -> 15.1.0) and
+would disagree on vectors 22 and 23, so the oracle never uses it: `nfc16.py`
+normalizes with the vendored 16.0.0 table, independent of the interpreter and
+of the Rust core (it must never import `nodal_db`; `python_oracle.rs`
+guards that).
 """
 import json
 import math
@@ -36,6 +36,8 @@ import struct
 import sys
 
 import xxhash
+
+from nfc16 import nfc
 
 VECTORS_DIR = pathlib.Path(__file__).resolve().parents[1] / "encoding_vectors"
 
@@ -84,17 +86,8 @@ def _i64(n: int) -> bytes:
 
 def _string(s: str) -> bytes:
     """§3.4: NFC (Unicode), UTF-8, u32-LE byte-length prefix, then the bytes."""
-    nfc = unicodedata_nfc(s)
-    b = nfc.encode("utf-8")
+    b = nfc(s).encode("utf-8")
     return _u32(len(b)) + b
-
-
-def unicodedata_nfc(s: str) -> str:
-    # Isolated so the NFC source is obvious and swappable if the frozen
-    # Unicode-16 table is later vendored (§3.4.1.1).
-    import unicodedata
-
-    return unicodedata.normalize("NFC", s)
 
 
 def _double(x: float) -> bytes:

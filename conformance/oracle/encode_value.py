@@ -25,6 +25,8 @@ import sys
 
 import xxhash
 
+from nfc16 import nfc
+
 VECTORS_DIR = pathlib.Path(__file__).resolve().parents[1] / "value_vectors"
 
 # value_kind tag per ScalarValue variant (spec §9.3), and per ValueKind
@@ -62,12 +64,10 @@ def _u64(n: int) -> bytes:
 
 
 def _tag(s: str) -> bytes:
-    """An identifier string (the value_kind tag): NFC, then u32-length-
-    prefixed UTF-8 (spec §3.4). The tags are ASCII, so NFC never changes
-    them."""
-    import unicodedata
-
-    b = unicodedata.normalize("NFC", s).encode("utf-8")
+    """An identifier string (the value_kind tag): NFC (Unicode 16.0.0, the
+    oracle's own `nfc16`), then u32-length-prefixed UTF-8 (spec §3.4). The
+    tags are ASCII, so NFC never changes them."""
+    b = nfc(s).encode("utf-8")
     return _u32(len(b)) + b
 
 

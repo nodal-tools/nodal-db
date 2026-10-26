@@ -18,6 +18,7 @@ serde_norway = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
+flate2 = { workspace = true }
 # serde / serde_norway are regular dependencies above, so the integration
 # tests that deserialize fixtures (e.g. template_ir.rs) need no dev-dep copy.
 

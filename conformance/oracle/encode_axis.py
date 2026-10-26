@@ -23,7 +23,7 @@ Run standalone (exit 0 iff every vector reproduces):
 third-party dependency. The Rust side runs this via `python_oracle.rs`.
 
 NFC-version caveat: CPython's `unicodedata` tracks the interpreter's bundled
-Unicode version (3.12 -> 15.1.0), whereas the spec pins Unicode 16.0.0
+Unicode version (3.12 -> 15.0.0, 3.13 -> 15.1.0), whereas the spec pins Unicode 16.0.0
 (§3.4.1.1). The committed NFC vector (18) is a stable basic composition
 (U+0065 U+0301 -> U+00E9) unaffected by that skew, so this oracle validates it
 correctly today; the version-pinning debt is tracked in

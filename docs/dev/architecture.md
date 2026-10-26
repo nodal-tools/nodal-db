@@ -639,10 +639,11 @@ following:
   process, value inheritance, symbols, structured units, in-place
   reshape.
 - **Known debt before the encoding freezes**: the encoding pins Unicode
-  16.0.0 NFC normalization. This is currently held only by an exact
-  `unicode-normalization = "=0.1.24"` pin, while the Python oracle uses
-  CPython's own Unicode tables; the normalization tables need to be
-  vendored.
+  16.0.0 NFC normalization of identifier strings (labels and tags;
+  string values are encoded as their raw bytes). This is currently held
+  only by an exact `unicode-normalization = "=0.1.24"` pin, which a test
+  asserts, while the Python oracle uses CPython's own Unicode tables; the
+  normalization tables need to be vendored.
 
 ## 11. Naming note
 

@@ -1,0 +1,35 @@
+{
+  "description": "Tier-L rank-1 string-valued value whose two cells are the NFD (e U+0301) and NFC (U+00E9) spellings of 'é': long-tier string cells are encoded as raw UTF-8 like scalar ones (spec §9.5; one measure encoder serves both tiers), so the two cells encode differently",
+  "key": {
+    "entity_id": 10,
+    "parameter_definition_id": 20,
+    "alternative_id": 30
+  },
+  "content": {
+    "type": "Long",
+    "value_kind": "String",
+    "axis_hashes": [
+      16820818339860931418
+    ],
+    "cells": [
+      {
+        "positions": [
+          0
+        ],
+        "value": {
+          "Str": "é"
+        }
+      },
+      {
+        "positions": [
+          1
+        ],
+        "value": {
+          "Str": "é"
+        }
+      }
+    ]
+  },
+  "expected_canonical_hex": "0a0000000000000014000000000000001e0000000000000006000000737472696e6702015a63c9da288d6fe9020000000000000001010300000065cc8101000000010102000000c3a9",
+  "expected_hash_u64": 4761452954737213229
+}

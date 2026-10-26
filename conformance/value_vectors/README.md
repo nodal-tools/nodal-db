@@ -42,7 +42,17 @@ the axis form byte §5.2).
 
 `ScalarValue` is externally tagged: `{"Float":1.5}`, `{"Int":7}`,
 `{"Bool":true}`, `{"Str":"peak"}`, `{"DateTime":123}`,
-`{"Duration":{"months":1,"micros":2}}`.
+`{"Duration":{"months":1,"micros":2}}`. A `Long` vector's `value_kind` is a
+`ValueKind` name (`Float`, `Int`, `Bool`, `String`, `DateTime`, `Duration`).
+
+**Strings.** A string *value* (`Str`, the stored `v_str`) is encoded as its
+UTF-8 bytes exactly as written, `u32`-length-prefixed, and is **never**
+NFC-normalized (§9.5): storage keeps string values byte for byte, so the
+value encoding treats two strings as equal exactly when storage does. Only
+identifier strings are NFC-normalized (§3.4): in a value encoding, that is the
+`value_kind` tag (ASCII). `v13` (a scalar) and `v14` (long-tier cells, NFD
+and NFC spellings of one letter side by side) pin this; an implementation that
+normalizes string values fails both.
 
 The goldens are authoritative literals — no in-test regeneration (same policy as
 `../encoding_vectors/README.md`). Changing one is a rehash-class event

@@ -27,12 +27,15 @@ import xxhash
 
 VECTORS_DIR = pathlib.Path(__file__).resolve().parents[1] / "value_vectors"
 
-# value_kind tag per ScalarValue variant (spec §9.3).
+# value_kind tag per ScalarValue variant (spec §9.3), and per ValueKind
+# name (a Long vector's `value_kind`; only the string kind is spelled
+# differently: ScalarValue `Str`, ValueKind `String`).
 _VALUE_KIND_TAG = {
     "Float": "float",
     "Int": "int",
     "Bool": "bool",
     "Str": "string",
+    "String": "string",
     "DateTime": "date_time",
     "Duration": "duration",
 }
@@ -58,10 +61,22 @@ def _u64(n: int) -> bytes:
     return struct.pack("<Q", n)
 
 
-def _string(s: str) -> bytes:
+def _tag(s: str) -> bytes:
+    """An identifier string (the value_kind tag): NFC, then u32-length-
+    prefixed UTF-8 (spec §3.4). The tags are ASCII, so NFC never changes
+    them."""
     import unicodedata
 
     b = unicodedata.normalize("NFC", s).encode("utf-8")
+    return _u32(len(b)) + b
+
+
+def _str_value(s: str) -> bytes:
+    """A string VALUE (v_str): its UTF-8 bytes exactly as written, u32-
+    length-prefixed, never normalized (spec §9.5): the value encoding must
+    treat two strings as equal exactly when storage does, and storage keeps
+    string values byte for byte."""
+    b = s.encode("utf-8")
     return _u32(len(b)) + b
 
 
@@ -98,7 +113,7 @@ def _measure_bytes(sv: dict) -> bytes:
     if tag == "Bool":
         return _u8(0x01 if payload else 0x00)
     if tag == "Str":
-        return _string(payload)
+        return _str_value(payload)
     if tag == "DateTime":
         return _i64(payload)
     if tag == "Duration":
@@ -135,13 +150,13 @@ def encode_value(key: dict, content: dict) -> bytes:
     if t == "Scalar":
         sv = content["value"]
         tag, _ = _scalar_variant(sv)
-        out += _string(_VALUE_KIND_TAG[tag])
+        out += _tag(_VALUE_KIND_TAG[tag])
         out += _u8(_TIER_SCALAR)
         out += _shape([])
         out += _component_block([(1, _measure_bytes(sv))])
         return out
     if t == "Array":
-        out += _string("float")
+        out += _tag("float")
         out += _u8(_TIER_ARRAY)
         out += _shape(content["axis_hashes"])
         payload = _u32(len(content["values"]))
@@ -150,7 +165,7 @@ def encode_value(key: dict, content: dict) -> bytes:
         out += _component_block([(1, payload)])
         return out
     if t == "Long":
-        out += _string(_VALUE_KIND_TAG[content["value_kind"]])
+        out += _tag(_VALUE_KIND_TAG[content["value_kind"]])
         out += _u8(_TIER_LONG)
         out += _shape(content["axis_hashes"])
         cells = content["cells"]

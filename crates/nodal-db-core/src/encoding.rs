@@ -133,11 +133,24 @@ impl CanonicalAxis {
     }
 }
 
-/// A string, NFC-normalized (Unicode 16.0.0) by the core's one NFC
-/// function (`text::nfc`), `u32`-length-prefixed (spec §3.4).
+/// An identifier string (a label, an axis tag, the `value_kind` tag),
+/// NFC-normalized (Unicode 16.0.0) by the core's one NFC function
+/// (`text::nfc`), `u32`-length-prefixed (spec §3.4). String values use
+/// [`push_raw_string`] instead.
 fn push_string(out: &mut Vec<u8>, s: &str) {
     let nfc = crate::text::nfc(s);
     let bytes = nfc.as_bytes();
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// A string VALUE (`v_str`): its UTF-8 bytes exactly as written,
+/// `u32`-length-prefixed, never normalized (spec §9.5). Storage keeps
+/// string values byte for byte and compares them by bytes, so the value
+/// encoding must too: NFC here would make two values that storage keeps
+/// apart encode (and hash) equal.
+fn push_raw_string(out: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
 }
@@ -542,7 +555,7 @@ fn encode_measure(m: &ScalarValue) -> Result<Vec<u8>, EncodeError> {
         ScalarValue::Float(x) => push_double(&mut b, *x, NanPolicy::Canonicalize)?,
         ScalarValue::Int(n) => b.extend_from_slice(&n.to_le_bytes()),
         ScalarValue::Bool(v) => b.push(if *v { 0x01 } else { 0x00 }),
-        ScalarValue::Str(s) => push_string(&mut b, s),
+        ScalarValue::Str(s) => push_raw_string(&mut b, s),
         ScalarValue::DateTime(ts) => b.extend_from_slice(&ts.to_le_bytes()),
         ScalarValue::Duration { months, micros } => {
             b.extend_from_slice(&months.to_le_bytes());

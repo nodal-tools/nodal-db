@@ -3587,9 +3587,9 @@ impl VCols {
 /// The payload of one stored value row or long cell, decoded from its RAW
 /// stored columns: floats as bits, strings as their exact bytes, timestamps
 /// as µs. The stored side is never re-canonicalized (critique C3.1), and
-/// equality is never decided by `encoding::content_hash` / `encode_value`,
-/// whose string encoding is NFC-normalized while `v_str` is stored verbatim
-/// (C3.2). A new value is decoded by the same function from its
+/// equality is never decided by `encoding::content_hash` / `encode_value`
+/// (C3.2; the value encoding now encodes `v_str` as its raw bytes, spec
+/// §9.5, but a hash is still not an equality test). A new value is decoded by the same function from its
 /// [`VCols::of`] encoding, so equal cells mean equal encoder outputs: the
 /// same `value_kind` and the same bits in every value column.
 #[derive(Clone, Debug, PartialEq)]

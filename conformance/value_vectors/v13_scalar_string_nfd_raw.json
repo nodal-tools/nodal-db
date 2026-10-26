@@ -1,0 +1,16 @@
+{
+  "description": "scalar string value in NFD ('s' 'a' U+0308 'a' U+0308 't' 'o' U+0308, i.e. 'säätö' decomposed): a string VALUE is encoded as its UTF-8 bytes exactly as written, never NFC-normalized (spec §9.5), so it hashes unlike its NFC spelling, as storage keeps them apart",
+  "key": {
+    "entity_id": 5,
+    "parameter_definition_id": 6,
+    "alternative_id": 7
+  },
+  "content": {
+    "type": "Scalar",
+    "value": {
+      "Str": "säätö"
+    }
+  },
+  "expected_canonical_hex": "05000000000000000600000000000000070000000000000006000000737472696e67000001010b0000007361cc8861cc88746fcc88",
+  "expected_hash_u64": 15884576451280847378
+}

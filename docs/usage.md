@@ -913,8 +913,9 @@ use a nodal-db build that matches the file.
     `duckdb --version` or `python -c "import duckdb; print(duckdb.__version__)"`.
 
 !!! warning "DuckDB 2.0: filtered reads of long arrays can fail"
-    On DuckDB 2.0.x, a query that filters `value_rows` or `value_cells`
-    on array values, such as a time window
+    On DuckDB 2.0.x, a query that filters `value_rows`, `value_cells`
+    or `resolved_value_rows` (which reads `value_rows`) on array values,
+    such as a time window
     (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`),
     can fail with `INTERNAL Error: dict-surviving cache: …` on a
     database with several hundred long arrays (for example 8760 hourly

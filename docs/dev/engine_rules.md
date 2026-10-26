@@ -190,7 +190,8 @@ bare `Config::default()` or `Connection::open` in library code.
 that hits it is a join over dense ids that DuckDB runs as a perfect hash
 join, then `unnest` of a list longer than 2048 elements whose length is
 not a multiple of 2048, then a selective filter. In nodal-db that is
-`value_rows` (or `value_cells`) on 8760-long array values with a time
+`value_rows` (or `value_cells`, or `resolved_value_rows`, which reads
+`value_rows`) on 8760-long array values with a time
 window (`WHERE idx1_ts BETWEEN …`) or a threshold (`WHERE v_float > …`),
 on a file with several hundred such arrays. (`read_parameter` had the
 shape too until it got its own parameter-scoped body, which fetches
@@ -353,8 +354,10 @@ point reads 2.5 to 19 times slower.
 **Guards.**
 [`crates/nodal-db-core/tests/axis_render_scaling.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/axis_render_scaling.rs)
 (work counters of each read before and after adding 200 x 2 000-position
-axes of each sort: unused parametric, unused stored, parametric in use;
-no read plan contains an UNNEST over `axis`) and
+axes of each sort: unused parametric, unused stored, parametric in use,
+and stored in use, which is asserted for `read_parameter` of the other
+parameters only, since `value_rows` pays for it as described above; no
+read plan contains an UNNEST over `axis`) and
 [`crates/nodal-db-core/tests/axis_render_equality.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/axis_render_equality.rs)
 (the rendering, bit for bit, against the pre-change text frozen in
 `tests/fixtures/axis_render_oracle.sql`; it also covers the two copies

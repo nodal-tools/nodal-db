@@ -5,8 +5,8 @@
 --
 -- Reworked after the DDL critique (F4): the array decode is zip-unnest
 -- (one pass, no per-cell list_extract), and value_rows is split into
--- rank-specialized branches so scalar reads never touch axis_position and
--- rank-1 reads probe it once instead of four times. Constant filters on the
+-- rank-specialized branches so scalar reads render no axis and rank-1
+-- reads render one dimension instead of four. Constant filters on the
 -- branch discriminators (tier, axis2_id) let the optimizer prune whole
 -- branches of the UNION ALL.
 

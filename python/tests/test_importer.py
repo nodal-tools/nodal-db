@@ -921,3 +921,38 @@ def test_names_differing_only_in_normalization_refuse(tmp_path):
         db.commit_session("normalization collision")
     with pytest.raises(ImportError_, match="differ only in Unicode normalization"):
         run_import(tmp_path, spine)
+
+
+def test_keys_differing_only_in_normalization_are_a_duplicate_key(tmp_path):
+    """nodal-db compares labels in NFC, so two keys of one map that differ
+    only in Unicode normalization are one key: the last entry is kept and
+    the duplicate is reported, as for any repeated key (the core, not the
+    importer, normalizes the stored key)."""
+    from spinedb_api import Map
+
+    spine = make_basic_spine(tmp_path)
+    _add_param_value(spine, "hub", "h1", "settings",
+                     Map([E_NFC, "b", E_NFD], [1.0, 2.0, 3.0], index_name="key"))
+    rep, out = run_import(tmp_path, spine)
+
+    assert _cells(_nodal(out), "hub", "settings", 1) == [(("b",), 2.0), ((E_NFC,), 3.0)]
+    assert len(rep.duplicate_keys) == 1, rep.summary()
+    dup = rep.duplicate_keys[0]
+    assert dup.key == E_NFD, "the kept entry's spelling"
+    assert dup.entries == [(0, "1.0"), (2, "3.0")]
+    assert dup.kept == 2
+    assert dup.spellings == [E_NFC, E_NFD]
+    assert dup.describe() == (
+        "class 'hub', entity 'h1', parameter 'settings', alternative 'Base': key "
+        f"{E_NFD!r} appears 2 times at the top level of the value (spelled "
+        "differently: the spellings differ only in Unicode normalization, and "
+        f"nodal-db compares keys in NFC) (entry 0: key {E_NFC!r} (U+00E9), 1.0; "
+        f"entry 2: key {E_NFD!r} (U+0065 U+0301), 3.0); kept the last, entry 2. A "
+        "map holds one value per key: fix the source so the key appears once."
+    )
+    assert dup.describe() in rep.summary()
+    # The core stored the kept key in NFC and said so.
+    normalized = [w for w in rep.write_warnings if w["kind"] == "text_normalized"]
+    assert [(w["what"], w["written"], w["stored"]) for w in normalized] == [
+        ("label", E_NFD, E_NFC)
+    ]

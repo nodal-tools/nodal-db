@@ -26,7 +26,9 @@ Mechanics
    ("declared X, observed Y — chain will repair"). Zero silent drops.
    A key repeated within one map level (or a repeated time stamp) keeps its
    LAST entry and is reported as a warning in ``duplicate_keys`` (and
-   logged), at every map level. A name with leading or trailing whitespace
+   logged), at every map level. Keys are compared as nodal-db stores them,
+   in Unicode NFC (by the core's ``normalize_identifier``), so keys that
+   differ only in normalization are a repeated key too. A name with leading or trailing whitespace
    is imported trimmed and reported as a warning in ``trimmed_names`` (and
    logged); every reference to it uses the trimmed name.
 
@@ -180,6 +182,10 @@ class DuplicateKey:
     entries: list
     #: the position of the entry that was imported (the last one)
     kept: int
+    #: when the entries spell the key differently (string keys that differ
+    #: only in Unicode normalization, which nodal-db compares in NFC):
+    #: each entry's spelling as written, in ``entries`` order; else empty
+    spellings: list = field(default_factory=list)
 
     def describe(self) -> str:
         level = (
@@ -187,13 +193,21 @@ class DuplicateKey:
             if not self.path
             else "in the map at key path (" + ", ".join(_show_key(k) for k in self.path) + ")"
         )
-        entries = "; ".join(f"entry {pos}: {desc}" for pos, desc in self.entries)
+        if self.spellings:
+            entries = "; ".join(
+                f"entry {pos}: key {_show_key(s)} ({_code_points(s)}), {desc}"
+                for (pos, desc), s in zip(self.entries, self.spellings))
+            spelled = (" (spelled differently: the spellings differ only in "
+                       "Unicode normalization, and nodal-db compares keys in NFC)")
+        else:
+            entries = "; ".join(f"entry {pos}: {desc}" for pos, desc in self.entries)
+            spelled = ""
         return (
             f"class {self.entity_class!r}, entity {self.entity!r}, parameter "
             f"{self.parameter!r}, alternative {self.alternative!r}: key "
-            f"{_show_key(self.key)} appears {len(self.entries)} times {level} "
-            f"({entries}); kept the last, entry {self.kept}. A map holds one "
-            "value per key: fix the source so the key appears once."
+            f"{_show_key(self.key)} appears {len(self.entries)} times {level}"
+            f"{spelled} ({entries}); kept the last, entry {self.kept}. A map holds "
+            "one value per key: fix the source so the key appears once."
         )
 
 
@@ -318,6 +332,10 @@ def _show_key(key) -> str:
     return repr(key)
 
 
+def _code_points(s: str) -> str:
+    return " ".join(f"U+{ord(c):04X}" for c in s)
+
+
 def _describe_entry(value, limit: int = 60) -> str:
     """A short, readable description of one map entry's value."""
     import spinedb_api
@@ -335,37 +353,52 @@ def _describe_entry(value, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def flatten_value(parsed, residue: list, where: str, duplicates=None) -> list[_LeafGroup]:
+def flatten_value(parsed, residue: list, where: str, duplicates=None,
+                  normalize_label=None) -> list[_LeafGroup]:
     """Flatten one parsed Spine value into leaf groups (one group per
     distinct (index kinds, leaf kind) signature — ragged maps are legal in
     Spine and land as several groups, i.e. several observed members).
 
     A key repeated within one map level (or one time stamp repeated in a
     time series) keeps its LAST entry; ``duplicates(path, key, entries,
-    kept)`` is called once per repeated key (see :class:`DuplicateKey`).
-    The kept entry takes the key's first position, as in a ``dict``."""
+    kept, spellings)`` is called once per repeated key (see
+    :class:`DuplicateKey`). The kept entry takes the key's first position,
+    as in a ``dict``. ``normalize_label`` (the core's
+    ``nodal_db.normalize_identifier``) is how string keys are compared:
+    nodal-db stores labels in NFC, so two keys that differ only in Unicode
+    normalization are one key. The importer passes the keys on as written;
+    the core normalizes them."""
     import spinedb_api
 
     groups: dict[tuple, _LeafGroup] = {}
 
+    def identity(k):
+        kind, conv = k
+        if normalize_label is not None and kind == "label":
+            return (kind, normalize_label(conv))
+        return k
+
     def last_wins(keys, items, path):
         """``[(key, item)]`` with one entry per key: the key's first
-        position, its last item. ``keys`` are the converted keys."""
+        position, its last item and that item's spelling of the key.
+        ``keys`` are the converted keys."""
         by_key: dict = {}
         for pos, (k, item) in enumerate(zip(keys, items)):
-            by_key.setdefault(k, []).append((pos, item))
+            by_key.setdefault(identity(k), []).append((pos, k, item))
         if len(by_key) == len(keys):
             return list(zip(keys, items))
         out = []
-        for k, entries in by_key.items():
+        for entries in by_key.values():
             if len(entries) > 1 and duplicates is not None:
+                spelled = [k[1] for _, k, _ in entries]
                 duplicates(
                     path,
-                    k[1],
-                    [(pos, _describe_entry(item)) for pos, item in entries],
+                    entries[-1][1][1],
+                    [(pos, _describe_entry(item)) for pos, _, item in entries],
                     entries[-1][0],
+                    spelled if len(set(spelled)) > 1 else [],
                 )
-            out.append((k, entries[-1][1]))
+            out.append((entries[-1][1], entries[-1][2]))
         return out
 
     def add(kinds, names, idx_tuple, leaf_value):
@@ -691,14 +724,17 @@ class SpineImporter:
                     continue
                 ent_name = pv.get("entity_name") or "__".join(pv["entity_byname"])
 
-                def on_duplicate(path, key, entries, kept, _cls=cls, _par=par,
-                                 _ent=ent_name, _alt=pv["alternative_name"]):
+                def on_duplicate(path, key, entries, kept, spellings, _cls=cls,
+                                 _par=par, _ent=ent_name, _alt=pv["alternative_name"]):
                     dup = DuplicateKey(_cls, _ent, _par, _alt, tuple(path), key,
-                                       entries, kept)
+                                       entries, kept, spellings)
                     rep.duplicate_keys.append(dup)
                     log.warning("duplicate key in source value: %s", dup.describe())
 
-                groups = flatten_value(parsed, rep.residue, where, on_duplicate)
+                # Keys compare as nodal-db stores them (NFC, by the core's
+                # own function); the importer converts nothing itself.
+                groups = flatten_value(parsed, rep.residue, where, on_duplicate,
+                                       nodal_db.normalize_identifier)
                 for g in groups:
                     if not g.rows:
                         continue

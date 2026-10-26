@@ -828,9 +828,10 @@ not convert anything itself; the core does, and the import report counts
 what it converted (`normalized identifiers` in `report.summary()`). Two
 names of one kind that differ only in Unicode normalization (or in it
 and case) stop the import, like a case collision. Two keys of one map
-that differ only in this way are one label to nodal-db, so the core
-refuses that value as a duplicate (or its label domain as a repeat) and
-the import stops; fix the source.
+that differ only in this way are one label to nodal-db, so they are a
+duplicate key: the last entry is kept and the warning in
+`report.duplicate_keys` says the spellings differ only in Unicode
+normalization.
 
 Each trimmed name is reported as a warning, in the same places as a
 duplicate key: in `report.trimmed_names`, in `report.summary()`, and

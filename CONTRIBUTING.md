@@ -47,6 +47,12 @@ and re-check it after a bump. After one:
   dict-cache data guard in `point_read_index_scan` fails with it (its
   positive control no longer raises): re-evaluate engine_rules.md §6
   then.
+- If `just docs-check` reports the read-surface listing
+  (`schema/read_surface_contract.tsv`) stale after the bump with no DDL
+  change, the new DuckDB infers a column type differently (a literal or an
+  aggregate). A stable column's type is part of the contract: add an
+  explicit `CAST` in the DDL to keep the old type (then bump the
+  read-surface revision), do not bump the contract major.
 - If the release notes mention Unicode or utf8proc updates (case
   mapping), compact the dev files after the bump. The `lower(name)`
   indexes (`ix_entity_lname`, the `uq_*_name` unique indexes over
@@ -57,6 +63,18 @@ and re-check it after a bump. After one:
   which pins where DuckDB's `lower()` and the Rust name fold differ; it
   fails the same way after a Rust toolchain bump that changes
   `to_lowercase`.
+
+## Changing the read surface
+Every change to a view or macro in `schema/070`–`120_*.sql` bumps the
+read-surface revision in `schema/130_read_surface.sql` (the
+`read_surface` test prints the new hash) and regenerates the contract
+listing and reference with `just docs-gen`, which refuses a breaking
+change without a contract-major bump. The procedure, and why it is what
+brings a fix to existing files, is in
+[`docs/dev/engine_rules.md` §8](docs/dev/engine_rules.md). Two local
+builds whose surface DDL differs at the same revision refresh each
+other's files on every write (about 0.2 s each): bump the revision in a
+branch as soon as its DDL changes.
 
 ## Testing rules (binding once code exists)
 Adopted from flextool-engine's hard-won lessons:

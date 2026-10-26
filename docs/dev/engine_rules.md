@@ -397,3 +397,75 @@ bump that changes either side, and lists the code points that started
 or stopped differing: re-evaluate T11 with them, then update the list
 (and, when DuckDB's side changed, compact the dev files; see
 [DuckDB upgrades](https://github.com/nodal-tools/nodal-db/blob/main/CONTRIBUTING.md#duckdb-upgrades)).
+
+## 9. Changing a read-surface object
+
+**Rule.** Every change to a view or macro in `schema/070`–`120_*.sql`
+bumps the read-surface `revision` in `schema/130_read_surface.sql`, in
+the same commit, together with its `ddl_hash`; a breaking change to a
+stable object also bumps `contract_major`. Procedure:
+
+1. Edit the DDL. A new object gets its class tag on the line directly
+   above its `CREATE` (`-- @surface: stable|mirror|advisory|internal`;
+   classes in [The read surface](read_surface.md#what-is-public)). A new
+   listed table macro gets an entry in `DUMMY_ARGS` in
+   `scripts/docs/gen_schema.py` (explicit arguments, typed so the macro
+   binds: the listing is read with `DESCRIBE SELECT * FROM macro(…)`).
+2. Run `cargo test -p nodal-db-core --test read_surface`: the hash test
+   fails and prints the new hash. Increase `revision` by one and paste
+   the hash into `130_read_surface.sql`. Comment-only and
+   whitespace-only edits keep the hash; a tag edit does not.
+3. Run `just docs-gen`. It rewrites the reference and the committed
+   listing `schema/read_surface_contract.tsv`, and refuses when the
+   change is breaking without the matching bump:
+   - a stable object, column or parameter removed or renamed, or a
+     stable column's type or position changed: bump `contract_major`
+     (from 1 on this is a breaking release; pre-freeze, major 0 allows it
+     but it still needs the bump);
+   - a mirror's columns changed: only together with a `SCHEMA_VERSION`
+     bump (the mirrors follow the tables);
+   - columns appended at the end, new objects, any change to an
+     advisory or internal object: the revision bump of step 2 is enough.
+   A stable column whose type changes with no DDL edit (a DuckDB upgrade
+   that infers a literal or an aggregate differently) is fixed with an
+   explicit `CAST` in the DDL, not with a bump.
+4. A removed or renamed object goes into
+   `schema/read_surface_retired.txt` (never delete a line), so the
+   refresh drops it from older files instead of leaving it with a stale
+   body.
+5. Commit the DDL, `130_read_surface.sql`, the listing and the generated
+   docs together.
+
+**Why.** The views and macros live inside each database file. A fix to a
+view reaches existing files only through the refresh: the core compares
+the file's `nodal_read_surface()` with its own on every write cycle (one
+query) and, when the file is older, replaces its surface with its own
+in a transaction of its own before the write. Without the revision bump
+an old file looks current and keeps the old body forever. Two
+development builds with different DDL at the same revision refresh each
+other's files on every write (~0.2 s each); release revisions are unique
+because the hash test forces a bump and two parallel bumps conflict in
+`130_read_surface.sql`.
+
+**Mechanics the refresh relies on** (`crates/nodal-db-core/src/read_surface.rs`):
+DuckDB 2.0 records no dependencies of views or macros, so objects drop
+in any order and views of users over surface objects survive (they bind
+by name at query time). Drops are `IF EXISTS`, per the kind the file
+has, and never `CASCADE` (it would drop users' views the day DuckDB
+starts tracking those dependencies). DDL is transactional: a refresh
+killed at any point leaves the old or the new surface, never a mix.
+Temporary objects shadow file objects everywhere on a connection,
+including inside the file's own views and through `main.`; the read
+overlay depends on that, and it is why an overlay is never installed on
+a connection that attaches another nodal-db file.
+
+**Guards.**
+[`crates/nodal-db-core/tests/read_surface.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/read_surface.rs)
+(the hash, the tag census, the listing header, the pinned "does not
+exist" error text, the refresh of a file built from the frozen old DDL in
+`tests/fixtures/read_surface_v0/`, user views surviving, a user table
+blocking with a warning, overlays, newer files, extract and compaction),
+the CLI's kill test in
+[`crates/nodal-db-cli/tests/refresh_views_cli.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-cli/tests/refresh_views_cli.rs),
+`just docs-check` (the listing and the reference are current) and the
+contract-gate check in `schema/smoke_test.py`.

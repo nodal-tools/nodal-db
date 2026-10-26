@@ -35,8 +35,16 @@ answer will be a served API, not a protocol document.
 - Read through the **views and table macros**
   ([`schema/070`–`120_*.sql`](https://github.com/nodal-tools/nodal-db/tree/main/schema)),
   not the base tables. The base-table layout is not a stable interface;
-  the read surface is. The [schema page](../schema.md#views-and-table-macros)
-  lists the views and macros with their purposes.
+  the read surface is. [The read surface](read_surface.md) is its
+  contract: which objects are public, the rules for readers, which read
+  to use, the column conventions, the versioning, and a generated
+  reference of every stable object's columns and types.
+- Each file carries the read surface of the nodal-db that created or last
+  wrote it (`SELECT * FROM nodal_read_surface()`). nodal-db upgrades an
+  older file on its next write and reads it through its own definitions
+  meanwhile; on your own connection, check the version and run
+  `nodal-db maintain refresh-views FILE` when it is old. See
+  [Versions and old files](read_surface.md#versions-and-old-files).
 - **Hold connections per operation: open, query, close.** DuckDB's file
   lock covers readers too: an idle read-only handle (a notebook, a GUI
   tab) blocks every writer commit until it closes. See
@@ -80,8 +88,7 @@ the README files in the subdirectories explain the vector formats.
 
 ## Not yet written
 
-- A reference for the read surface: every public view and macro with
-  parameters, columns, types and semantics.
 - Per-language snippets for reading correctly (open-query-close and
   commit polling).
-- An error reference beyond `Busy`, `Stale` and `SchemaMismatch`.
+- An error reference beyond `Busy`, `Stale`, `SchemaMismatch` and
+  `ReadSurfaceStale`.

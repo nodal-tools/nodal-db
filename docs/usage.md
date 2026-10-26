@@ -408,7 +408,10 @@ finally:
 parameter, across all alternatives, in one long shape: `idx1`…`idx4`
 columns per index kind (`_text`, `_ts`, `_num`, `_ordinal`, `_coord`)
 and `v_*` columns per value kind (`v_float`, `v_int`, `v_bool`, `v_str`,
-`v_datetime`, …). The index columns are numbered by position; the
+`v_datetime`, …), then the period ends `idx1_end_ts`…`idx4_end_ts`
+(a period index is `[idxN_ts, idxN_end_ts)`). New columns may be
+appended at the end in later versions: select columns by name.
+[The read surface](dev/read_surface.md) documents every column. The index columns are numbered by position; the
 declared dimension names are in `parameter_type_dimension`. If you
 filter array values on your own DuckDB connection, see
 [DuckDB 2.0: filtered reads of long arrays](#duckdb-version) first.
@@ -431,6 +434,7 @@ Commonly used parts of the read surface:
 | `value_array_asof_for(commit, parameter_definition_id, entity_id, alternative_id)` | one array value as of an earlier commit (see [Read history](#read-history)) |
 | `"commit"` | the commit log: id, timestamp, user, message |
 | `audit_health`, `audit_*` | integrity, completeness and maintenance reports |
+| `nodal_read_surface()` | the version of the views and macros the file carries (see [Old files](#old-files-refresh-the-read-surface)) |
 
 Scenario resolution:
 
@@ -812,9 +816,44 @@ implementation that touches canonical data must reproduce them exactly.
 ### Reading: SQL is the interface
 
 Read through the views and table macros (`schema/070_*.sql` to
-`schema/120_*.sql`), not the base tables. The base-table layout is not a
-stable interface; the read surface is. The [schema page](schema.md) shows
-the tables for reference.
+`schema/130_*.sql`), not the base tables. The base-table layout is not a
+stable interface; the read surface is. [The read surface](dev/read_surface.md)
+is its contract: what is public, which read to use, the column
+conventions and a reference of every column. The [schema page](schema.md)
+shows the tables for reference.
+
+### Old files: refresh the read surface
+
+The views and macros live inside each database file, as the nodal-db
+that created the file wrote them. A newer nodal-db brings its own:
+
+- **The next write upgrades the file** (about 0.2 s, once): nodal-db
+  replaces the file's views and macros with its own before the write.
+  Data and history are not touched and no commit is recorded. Your own
+  views are kept. A table of yours that uses a name of nodal-db's views
+  blocks the upgrade; the write still goes through and its report says
+  so (`read_surface_warning`).
+- **Reading without writing works**, but warns once per file and is a
+  little slower: nodal-db reads the file through temporary copies of its
+  own views where it needs them.
+- **Upgrade a file you only read** with the command, or from Python:
+
+```sh
+nodal-db maintain refresh-views demo.duckdb --check   # report only; exit 0 current, 1 older, 2 newer
+nodal-db maintain refresh-views demo.duckdb
+```
+
+```python
+db.read_surface_status()["status"]   # "current", "older", "missing", "newer", ...
+db.refresh_read_surface()             # no-op when current
+```
+
+On your own DuckDB connection, `SELECT * FROM nodal_read_surface()`
+shows the file's version (`contract_major`, `revision`, `ddl_hash`); an
+error means the file predates versioning and should be refreshed. A
+file written by a *newer* nodal-db is never downgraded by an older one,
+except by compaction, which says so in its warning. Names of nodal-db's
+views and macros are reserved: give your own objects other names.
 
 !!! warning "Do not call table macros through an attached database"
     When one connection reads two nodal-db files (`ATTACH 'other.duckdb'

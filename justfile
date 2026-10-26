@@ -50,9 +50,12 @@ full:
 # gates"): BASE (default: merge-base with main) vs CAND (default: the working
 # tree), paired ratios on this host. e.g. `just perf-gate`, `just perf-gate
 # 88c0c5b HEAD --metrics 'wr_*'`, `just perf-gate HEAD HEAD --aa` (A/A).
+# Arguments are passed through as given ("$@"), so a quoted
+# `--allow 'METRIC=a reason with spaces'` or `--metrics 'rd_*'` stays one word.
 # A/B perf gate (exit 0 pass, 1 fail, 2 inconclusive, 3 error, 4 wrong result).
+[positional-arguments]
 perf-gate *ARGS:
-    python3 scripts/bench/ab/ab.py {{ARGS}}
+    python3 scripts/bench/ab/ab.py "$@"
 
 # The perf-gate tool's unit tests alone (stdlib, no builds).
 perf-gate-test:
@@ -61,8 +64,9 @@ perf-gate-test:
 # Builds and runs a few metrics with injected slowdowns and wrong results
 # (minutes; wants a quiet host): the whole pipeline must catch them.
 # The perf gate's integration self-test (A/A, injection, wrong result, old baseline).
+[positional-arguments]
 perf-gate-selftest *ARGS:
-    python3 scripts/bench/ab/selftest.py {{ARGS}}
+    python3 scripts/bench/ab/selftest.py "$@"
 
 # DuckDB schema smoke suite alone (245 checks).
 smoke:

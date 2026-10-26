@@ -11,8 +11,14 @@
 //! row was made, lookups map the ids back to names.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
+use nodal_db_core::api::Segment;
+use nodal_db_core::canon::LabelDomain;
+use nodal_db_core::duckdb::arrow::array::{ArrayRef, Float64Array, StringArray};
+use nodal_db_core::duckdb::arrow::datatypes::{DataType, Field, Schema};
+use nodal_db_core::duckdb::arrow::record_batch::RecordBatch;
 use nodal_db_core::schema_init::init_schema_with_default;
 
 use crate::check::{
@@ -49,6 +55,48 @@ fn readback(s: Sample, db: &Path, sql: &str, want: usize) -> Sample {
     check_rows("read-back", h.rows as usize, want);
     s.hash("readback", &h)
 }
+
+/// A label-domain segment of parameter `param` (plan T12): every entity of
+/// `names` writes the labels `pick(k)` (indices into an 8 760-label domain
+/// `t0001..t8760`, which rides in the segment's `domains`) of a rank-1
+/// float value.
+fn label_seg(param: &str, names: &[String], pick: impl Fn(usize) -> Vec<usize>) -> Segment {
+    let domain: Vec<String> = (1..=LABELS).map(|i| format!("t{i:04}")).collect();
+    let (mut ent, mut lab, mut val) = (vec![], vec![], vec![]);
+    for (k, name) in names.iter().enumerate() {
+        for i in pick(k) {
+            ent.push(name.as_str());
+            lab.push(domain[i].as_str());
+            val.push((k * LABELS + i) as f64 * 0.5);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("t", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(ent)) as ArrayRef,
+            Arc::new(StringArray::from(lab)) as ArrayRef,
+            Arc::new(Float64Array::from(val)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    Segment {
+        class: "node".into(),
+        parameter: param.into(),
+        alternative: "Base".into(),
+        batches: vec![batch],
+        domains: vec![LabelDomain {
+            position: 1,
+            labels: domain,
+        }],
+    }
+}
+
+/// The size of the label-domain metrics' domain: an hourly year.
+const LABELS: usize = 8_760;
 
 fn scalar_writes(dir: &Path, mode: &str) -> Sample {
     let db = copy_base(dir);
@@ -179,6 +227,31 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
                 &db,
                 &param_readback("node", param, None),
                 24_000,
+            )
+        }
+        "wr_label_10x8760_new" | "wr_label_1000x3_of_8760_new" => {
+            // Label-indexed values over an 8 760-label domain (plan T12): the
+            // dense shape (every label, in reverse order) and the sparse one
+            // (many values, three labels each), on a fresh file.
+            let db = fresh(dir);
+            let (seg, want) = if mode == "wr_label_10x8760_new" {
+                let s = label_seg("lab8760", &names(0..10), |_| (0..LABELS).rev().collect());
+                (s, 10 * LABELS)
+            } else {
+                // The same three labels for every value: one shared axis,
+                // so the per-value canonicalization cost is not buried
+                // under 1 000 axis inserts.
+                let s = label_seg("lab8760", &names(0..1_000), |_| vec![LABELS - 1, 4_000, 17]);
+                (s, 3_000)
+            };
+            let before = head(&db);
+            let ms = api_commit(&db, vec![seg], vec![]);
+            check_commits(&db, before, 1);
+            readback(
+                Sample::new(ms),
+                &db,
+                &param_readback("node", "lab8760", None),
+                want,
             )
         }
         "wr_long_10x8760_replace" => {

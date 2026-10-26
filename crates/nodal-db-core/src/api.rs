@@ -33,6 +33,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use duckdb::arrow::array::{Array, StringArray, UInt32Array};
 use duckdb::arrow::compute::{concat_batches, take_record_batch};
@@ -41,7 +42,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{params, Connection};
 
 use crate::axis::AxisCache;
-use crate::canon::{canonicalize, check_domain_labels, CanonicalValue, LabelDomain};
+use crate::canon::{canonicalize_indexed, index_domains, CanonicalValue, DomainIndex, LabelDomain};
 use crate::conn::{head_on, with_read, with_write_txn_retrying_ends, TxnEnd, TxnOptions};
 use crate::error::DbError;
 use crate::history::{
@@ -1609,7 +1610,8 @@ struct PreparedSegment {
     alternative: String,
     value_kind: ValueKind,
     inferred: Vec<(String, IndexKind)>,
-    domains: Vec<LabelDomain>,
+    /// The label lookup of `domains`, built once per segment (plan T12).
+    domain_index: Arc<DomainIndex>,
     tz_warnings: Vec<Warning>,
     /// Distinct entity names, first-seen order, case-insensitively deduped.
     names: Vec<String>,
@@ -1632,7 +1634,7 @@ impl PreparedSegment {
         declared: &DeclaredType,
     ) -> Result<CanonicalValue, DbError> {
         let sub = take_record_batch(&self.sub_all, &UInt32Array::from(self.rows[j].clone()))?;
-        canonicalize(&sub, declared, self.value_kind, &self.domains).map_err(|e| {
+        canonicalize_indexed(&sub, declared, self.value_kind, &self.domain_index).map_err(|e| {
             DbError::Canon(e.at_value(
                 &self.names[j],
                 &self.class,
@@ -1661,7 +1663,7 @@ impl PreparedSegment {
             alternative: self.alternative.clone(),
             value_kind: self.value_kind,
             inferred: self.inferred.clone(),
-            domains: self.domains.clone(),
+            domain_index: Arc::clone(&self.domain_index),
             tz_warnings: self.tz_warnings.clone(),
             names,
             rows,
@@ -1725,12 +1727,13 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     // domain for a label dimension the arg did not cover (decision D).
     let domains = effective_domains(&batch, &inferred, &seg.domains)?;
     // A domain that repeats a label has no well-defined order: refuse it once
-    // per segment, before any value is canonicalized.
-    check_domain_labels(&domains, |position| {
+    // per segment, before any value is canonicalized, while building the
+    // segment's label lookup.
+    let domain_index = Arc::new(index_domains(&domains, |position| {
         inferred
             .get(usize::from(position).wrapping_sub(1))
             .map(|(name, _)| name.clone())
-    })?;
+    })?);
 
     // Tz-bearing timestamp columns are accepted — a Timestamp(µs, tz) is a
     // well-defined instant, stored as the UTC-µs instant unchanged — but never
@@ -1799,7 +1802,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         alternative: seg.alternative.clone(),
         value_kind,
         inferred,
-        domains,
+        domain_index,
         tz_warnings,
         names,
         rows,

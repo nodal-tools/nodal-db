@@ -198,26 +198,94 @@ fn render_timestamp(us: i64) -> String {
     }
 }
 
-/// Reject a label domain that repeats a label. A label's ordinal is its
-/// place in the domain, so a repeat makes the order ambiguous; it is almost
-/// always a producer bug. `dim_name` gives the dimension name of a domain
-/// position, for the message. The write path runs this once per segment,
-/// before any value is canonicalized.
-pub fn check_domain_labels(
+fn repeated_label(
+    d: &LabelDomain,
+    label: &str,
+    dim_name: &impl Fn(u8) -> Option<String>,
+) -> CanonError {
+    CanonError::RepeatedDomainLabel {
+        label: label.to_string(),
+        position: d.position,
+        dimension: dim_name(d.position),
+    }
+}
+
+/// The label -> ordinal lookup of a segment's label domains (plan T12).
+///
+/// A label's ordinal is its index in the domain. Looking it up with a linear
+/// scan per distinct label made canonicalization O(labels x domain) per value
+/// (8 760 labels: ~90 ms per value), so the write path builds this index once
+/// per segment ([`index_domains`]) and passes it to every value of the
+/// segment ([`canonicalize_indexed`]).
+///
+/// It reproduces the scan exactly: the first domain listed for a position
+/// serves that position (later ones are ignored, as by `iter().find`), and a
+/// label repeated in a domain keeps its **first** ordinal. The write path
+/// refuses repeats before it gets here; the rule matters for a direct
+/// [`canonicalize`] caller that passes one.
+#[derive(Clone, Debug, Default)]
+pub struct DomainIndex {
+    /// Per domain position, in the order the positions first appear.
+    by_position: Vec<(u8, HashMap<String, usize>)>,
+}
+
+impl DomainIndex {
+    /// Build the index without checking for repeated labels (first
+    /// occurrence wins).
+    pub fn new(domains: &[LabelDomain]) -> DomainIndex {
+        let mut by_position: Vec<(u8, HashMap<String, usize>)> = Vec::new();
+        for d in domains {
+            if by_position.iter().any(|(p, _)| *p == d.position) {
+                continue;
+            }
+            let mut map = HashMap::with_capacity(d.labels.len());
+            for (ord, label) in d.labels.iter().enumerate() {
+                map.entry(label.clone()).or_insert(ord);
+            }
+            by_position.push((d.position, map));
+        }
+        DomainIndex { by_position }
+    }
+
+    /// The lookup of domain position `position`, if a domain covers it.
+    fn get(&self, position: u8) -> Option<&HashMap<String, usize>> {
+        self.by_position
+            .iter()
+            .find(|(p, _)| *p == position)
+            .map(|(_, m)| m)
+    }
+}
+
+/// Reject a label domain that repeats a label, and return the domains'
+/// [`DomainIndex`]. A label's ordinal is its place in the domain, so a
+/// repeat makes the order ambiguous; it is almost always a producer bug.
+/// `dim_name` gives the dimension name of a domain position, for the
+/// message. The write path runs this once per segment, before any value is
+/// canonicalized.
+pub fn index_domains(
     domains: &[LabelDomain],
     dim_name: impl Fn(u8) -> Option<String>,
-) -> Result<(), CanonError> {
+) -> Result<DomainIndex, CanonError> {
+    let mut by_position: Vec<(u8, HashMap<String, usize>)> = Vec::new();
     for d in domains {
-        let mut seen: HashSet<&str> = HashSet::with_capacity(d.labels.len());
-        if let Some(label) = d.labels.iter().find(|l| !seen.insert(l.as_str())) {
-            return Err(CanonError::RepeatedDomainLabel {
-                label: label.clone(),
-                position: d.position,
-                dimension: dim_name(d.position),
-            });
+        if by_position.iter().any(|(p, _)| *p == d.position) {
+            // A later domain for a covered position is never looked up, but
+            // its repeats are refused all the same.
+            let mut seen: HashSet<&str> = HashSet::with_capacity(d.labels.len());
+            if let Some(label) = d.labels.iter().find(|l| !seen.insert(l.as_str())) {
+                return Err(repeated_label(d, label, &dim_name));
+            }
+            continue;
         }
+        let mut map = HashMap::with_capacity(d.labels.len());
+        for (ord, label) in d.labels.iter().enumerate() {
+            if map.insert(label.clone(), ord).is_some() {
+                return Err(repeated_label(d, label, &dim_name));
+            }
+        }
+        by_position.push((d.position, map));
     }
-    Ok(())
+    Ok(DomainIndex { by_position })
 }
 
 /// One dimension column, downcast once before the row loop.
@@ -244,12 +312,25 @@ enum ValCol<'a> {
 }
 
 /// Run the four-step pipeline. `domains` supplies the ordered domain of every
-/// `label` dimension; datetime/integer dimensions ignore it.
+/// `label` dimension; datetime/integer dimensions ignore it. Builds the
+/// domains' [`DomainIndex`] for this one value; a caller that canonicalizes
+/// many values over the same domains builds it once and calls
+/// [`canonicalize_indexed`].
 pub fn canonicalize(
     batch: &RecordBatch,
     declared: &DeclaredType,
     value_kind: ValueKind,
     domains: &[LabelDomain],
+) -> Result<CanonicalValue, CanonError> {
+    canonicalize_indexed(batch, declared, value_kind, &DomainIndex::new(domains))
+}
+
+/// [`canonicalize`] over a prebuilt [`DomainIndex`].
+pub fn canonicalize_indexed(
+    batch: &RecordBatch,
+    declared: &DeclaredType,
+    value_kind: ValueKind,
+    domains: &DomainIndex,
 ) -> Result<CanonicalValue, CanonError> {
     let rank = declared.rank();
     if batch.num_columns() != rank + 1 {
@@ -389,8 +470,7 @@ pub fn canonicalize(
             IndexKind::Label => {
                 is_label[i] = true;
                 let domain = domains
-                    .iter()
-                    .find(|d| d.position == *position)
+                    .get(*position)
                     .ok_or(CanonError::MissingDomain(*position))?;
                 // distinct present labels, each with its domain ordinal.
                 let mut present: Vec<(i32, String)> = Vec::new();
@@ -401,10 +481,8 @@ pub fn canonicalize(
                         RawCoord::Num(_) => unreachable!("label dim holds a number"),
                     };
                     if seen.insert(lab.clone(), ()).is_none() {
-                        let ord = domain
-                            .labels
-                            .iter()
-                            .position(|d| d == lab)
+                        let ord = *domain
+                            .get(lab.as_str())
                             .ok_or_else(|| CanonError::LabelNotInDomain(lab.clone(), i))?;
                         present.push((ord as i32, lab.clone()));
                     }

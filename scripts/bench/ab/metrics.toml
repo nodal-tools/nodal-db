@@ -330,6 +330,16 @@ layout_floor = 0.020
 class = "io"
 check = "1 commit; read_parameter of the new value: 24 000 cells + digest"
 
+[metric.wr_label_10x8760_new]
+class = "io"
+check = "1 commit; read_parameter of the new values: 87 600 cells + digest"
+note = "10 label-indexed values, each over all of an 8 760-label domain (the dense shape of plan T12's per-segment domain index)"
+
+[metric.wr_label_1000x3_of_8760_new]
+class = "io"
+check = "1 commit; read_parameter of the new values: 3 000 cells + digest"
+note = "1 000 label-indexed values of the same 3 labels (one shared axis) from an 8 760-label domain: the sparse shape of plan T12, whose domain index is built once per segment, not per value"
+
 [metric.wr_long_10x8760_replace]
 layout_floor = 0.030
 class = "io"

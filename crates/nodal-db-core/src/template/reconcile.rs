@@ -661,6 +661,8 @@ fn max_commit(conn: &Connection) -> Result<i64, DbError> {
 /// (CLAUDE.md invariant 1). Best-effort snapshot — [`apply`] recomputes
 /// everything; quote `db_commit` to `expect_commit` to pin it.
 pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
+    // Names in NFC (the text rule, `crate::text`).
+    let t = &ir::nfc_names(t);
     let chk = ir::validate(t)?;
     with_read_plain(db, |conn| {
         let mut warnings = chk.warnings.clone();
@@ -798,6 +800,8 @@ pub fn apply(
     message: &str,
     opts: &ApplyOptions,
 ) -> Result<ApplyOutcome, DbError> {
+    // Names in NFC (the text rule, `crate::text`).
+    let t = &ir::nfc_names(t);
     let chk = ir::validate(t)?;
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));

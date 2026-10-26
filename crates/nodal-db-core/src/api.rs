@@ -56,6 +56,7 @@ use crate::object_delete::{
     written_value_covered, PreparedObjectDelete, WrittenIds,
 };
 use crate::structural::{apply_structural, prepare_structural};
+use crate::text::{nfc, Normalized};
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
     ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, ShapedData, StructuralChange,
@@ -240,10 +241,10 @@ pub struct DeleteKey {
 #[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
-    segments: Vec<Segment>,
-    structural: Vec<StructuralChange>,
-    deletes: Vec<DeleteKey>,
-    object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
+    mut segments: Vec<Segment>,
+    mut structural: Vec<StructuralChange>,
+    mut deletes: Vec<DeleteKey>,
+    mut object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
     user: &str,
     message: &str,
     opts: WriteOptions,
@@ -262,6 +263,38 @@ pub fn commit_changes(
             "nothing to do: no segments, no structural changes, no deletes, no object deletes"
                 .into(),
         ));
+    }
+    // The text rule for names (`text.rs`): every name of the call in NFC
+    // before any check, lookup or store, so NFC-equal spellings are one
+    // name everywhere below. Names that create or change something are
+    // reported (one warning per segment, one for the structural changes);
+    // delete keys only look names up and are normalized silently.
+    let mut segment_names: Vec<Normalized> = Vec::with_capacity(segments.len());
+    for s in &mut segments {
+        let mut n = Normalized::default();
+        n.nfc_in_place(&mut s.class);
+        n.nfc_in_place(&mut s.parameter);
+        n.nfc_in_place(&mut s.alternative);
+        segment_names.push(n);
+    }
+    let mut structural_names = Normalized::default();
+    for ch in &mut structural {
+        nfc_structural_names(ch, &mut structural_names);
+    }
+    let structural_warning = structural_names.warning("name", "structural", "");
+    let mut lookups = Normalized::default();
+    for k in &mut deletes {
+        for s in [
+            &mut k.class,
+            &mut k.parameter,
+            &mut k.alternative,
+            &mut k.entity,
+        ] {
+            lookups.nfc_in_place(s);
+        }
+    }
+    for (k, _) in &mut object_deletes {
+        nfc_object_delete_key(k, &mut lookups);
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
     // defined history semantics (spec §4.2, E7 class); compare by the same
@@ -293,9 +326,10 @@ pub fn commit_changes(
     let multi = segments.len() > 1;
     let prepared: Vec<PreparedSegment> = segments
         .iter()
+        .zip(segment_names)
         .enumerate()
-        .map(|(i, s)| {
-            prepare_segment(s).map_err(|e| {
+        .map(|(i, (s, names))| {
+            prepare_segment(s, names).map_err(|e| {
                 if multi {
                     // Name the failing segment (spec §9.1: errors name the
                     // segment by ordinal and class:parameter).
@@ -352,6 +386,7 @@ pub fn commit_changes(
             commit_id,
             ..Default::default()
         };
+        report.warnings.extend(structural_warning.clone());
         // The commit's value writes, deferred to set-based writes per tier
         // (set_based_scalar_write_PLAN D1, set_based_long_and_delete_PLAN
         // D2): each buffer is flushed whenever it reaches one round and after
@@ -557,6 +592,94 @@ pub fn commit_changes(
     Ok(report)
 }
 
+/// The names of one structural change in NFC (the text rule, `text.rs`).
+/// Descriptions are free text and stay as written; so do the dimension
+/// names inside a parameter's type declarations.
+fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
+    match ch {
+        StructuralChange::CreateAlternative { name, .. }
+        | StructuralChange::CreateScenario { name, .. } => n.nfc_in_place(name),
+        StructuralChange::RenameAlternative {
+            current, new_name, ..
+        }
+        | StructuralChange::RenameScenario {
+            current, new_name, ..
+        } => {
+            n.nfc_in_place(current);
+            n.nfc_in_place(new_name);
+        }
+        StructuralChange::SetScenarioAlternatives {
+            scenario,
+            alternatives,
+        } => {
+            n.nfc_in_place(scenario);
+            alternatives.iter_mut().for_each(|a| n.nfc_in_place(a));
+        }
+        StructuralChange::SetEntityActivation {
+            class,
+            entity,
+            alternative,
+            ..
+        } => {
+            n.nfc_in_place(class);
+            n.nfc_in_place(entity);
+            n.nfc_in_place(alternative);
+        }
+        StructuralChange::CreateEntity {
+            class,
+            name,
+            elements,
+        } => {
+            n.nfc_in_place(class);
+            if let Some(name) = name {
+                n.nfc_in_place(name);
+            }
+            elements.iter_mut().for_each(|e| n.nfc_in_place(e));
+        }
+        StructuralChange::CreateEntityClass { name, dims } => {
+            n.nfc_in_place(name);
+            dims.iter_mut().for_each(|d| n.nfc_in_place(d));
+        }
+        StructuralChange::CreateParameter {
+            class,
+            name,
+            value_list,
+            ..
+        } => {
+            n.nfc_in_place(class);
+            n.nfc_in_place(name);
+            if let Some(list) = value_list {
+                n.nfc_in_place(list);
+            }
+        }
+        StructuralChange::SetMembership {
+            group,
+            member,
+            alternative,
+            ..
+        } => {
+            for addr in [group, member] {
+                n.nfc_in_place(&mut addr.class);
+                n.nfc_in_place(&mut addr.name);
+            }
+            if let Some(a) = alternative {
+                n.nfc_in_place(a);
+            }
+        }
+    }
+}
+
+/// The names of one object-delete key in NFC (the text rule, `text.rs`).
+fn nfc_object_delete_key(k: &mut ObjectDeleteKey, n: &mut Normalized) {
+    if let Some(class) = &mut k.class {
+        n.nfc_in_place(class);
+    }
+    match &mut k.target {
+        ObjectRef::Name(name) => n.nfc_in_place(name),
+        ObjectRef::Elements(els) => els.iter_mut().for_each(|e| n.nfc_in_place(e)),
+    }
+}
+
 /// What a `commit_changes` attempt submitted and what its deletes did, for
 /// [`wrote_nothing`].
 struct NoopEvidence {
@@ -598,7 +721,9 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
     } = report;
     let warnings_ok = warnings.iter().all(|w| match w.kind {
         WarningKind::AutoCreated => false,
+        // Normalizing a name or label is not a write by itself.
         WarningKind::TimezoneNormalized { .. }
+        | WarningKind::TextNormalized { .. }
         | WarningKind::UnknownReferent { .. }
         | WarningKind::NothingToDelete { .. }
         // A dropped write is not a write (CoveredWrites::DeleteWins).
@@ -1216,8 +1341,12 @@ pub fn delete_objects(
 /// (CLAUDE.md invariant 1) — cheap enough to call every frame the dialog is open.
 pub fn preview_object_deletes(
     db: &Path,
-    keys: Vec<ObjectDeleteKey>,
+    mut keys: Vec<ObjectDeleteKey>,
 ) -> Result<Vec<ObjectDeletePreview>, DbError> {
+    let mut lookups = Normalized::default();
+    for k in &mut keys {
+        nfc_object_delete_key(k, &mut lookups);
+    }
     with_read_plain(db, |conn| {
         keys.iter()
             .enumerate()
@@ -1621,7 +1750,9 @@ struct PreparedSegment {
     inferred: Vec<(String, IndexKind)>,
     /// The label lookup of `domains`, built once per segment (plan T12).
     domain_index: Arc<DomainIndex>,
-    tz_warnings: Vec<Warning>,
+    /// Warnings of the segment itself (timezone-normalized columns,
+    /// normalized names and labels), added to the report on every attempt.
+    prep_warnings: Vec<Warning>,
     /// Distinct entity names, first-seen order, case-insensitively deduped.
     names: Vec<String>,
     /// Per-entity row indices into the concatenated batch, ascending (i.e.
@@ -1673,7 +1804,7 @@ impl PreparedSegment {
             value_kind: self.value_kind,
             inferred: self.inferred.clone(),
             domain_index: Arc::clone(&self.domain_index),
-            tz_warnings: self.tz_warnings.clone(),
+            prep_warnings: self.prep_warnings.clone(),
             names,
             rows,
             sub_all: self.sub_all.clone(),
@@ -1681,7 +1812,11 @@ impl PreparedSegment {
     }
 }
 
-fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
+/// Validate and split one segment. `seg_names` holds what normalizing the
+/// segment's class, parameter and alternative names changed; the entity
+/// names are normalized here, and the segment's `TextNormalized` warnings
+/// (names, labels) join its prepared warnings.
+fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedSegment, DbError> {
     // Referent names must be non-empty (critique F5): a caller-contract
     // problem is caught here, never as a raw CHECK error mid-transaction.
     for (what, name) in [
@@ -1747,11 +1882,11 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     // Tz-bearing timestamp columns are accepted — a Timestamp(µs, tz) is a
     // well-defined instant, stored as the UTC-µs instant unchanged — but never
     // silently: each gets a TimezoneNormalized warning (critique F6).
-    let mut tz_warnings: Vec<Warning> = Vec::new();
+    let mut prep_warnings: Vec<Warning> = Vec::new();
     for i in 1..ncols {
         let field = batch.schema().field(i).clone();
         if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) = field.data_type() {
-            tz_warnings.push(Warning {
+            prep_warnings.push(Warning {
                 kind: WarningKind::TimezoneNormalized {
                     column: field.name().clone(),
                     tz: tz.to_string(),
@@ -1778,7 +1913,8 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         if entity_arr.is_null(row) {
             return Err(DbError::Api(format!("null entity name in row {row}")));
         }
-        let name = entity_arr.value(row).to_string();
+        // Entity names are names: NFC before the dedup below (the text rule).
+        let name = seg_names.nfc(entity_arr.value(row)).into_owned();
         if name.trim().is_empty() {
             return Err(DbError::Api(format!("empty entity name in row {row}")));
         }
@@ -1805,6 +1941,29 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
     let project: Vec<usize> = (1..ncols).collect();
     let sub_all = batch.project(&project)?;
 
+    // Labels (the text rule): canon compares and stores them in NFC; count
+    // here, once per segment, the distinct spellings that it changes, in
+    // the label columns and the domains alike, for the segment's warning.
+    let mut labels = Normalized::default();
+    for d in &domains {
+        for l in &d.labels {
+            labels.note(l);
+        }
+    }
+    for (i, (_, kind)) in inferred.iter().enumerate() {
+        if *kind != IndexKind::Label {
+            continue;
+        }
+        if let Some(col) = batch.column(i + 1).as_any().downcast_ref::<StringArray>() {
+            for v in col.iter().flatten() {
+                labels.note(v);
+            }
+        }
+    }
+    let target = format!("{}:{}/{}", seg.class, seg.parameter, seg.alternative);
+    prep_warnings.extend(seg_names.warning("name", "segment", &target));
+    prep_warnings.extend(labels.warning("label", "segment", &target));
+
     Ok(PreparedSegment {
         class: seg.class.clone(),
         parameter: seg.parameter.clone(),
@@ -1812,7 +1971,7 @@ fn prepare_segment(seg: &Segment) -> Result<PreparedSegment, DbError> {
         value_kind,
         inferred,
         domain_index,
-        tz_warnings,
+        prep_warnings,
         names,
         rows,
         sub_all,
@@ -1835,7 +1994,7 @@ fn write_prepared(
     targets: &mut HashSet<(i64, i64)>,
     names: &mut ResolveCache,
 ) -> Result<(), DbError> {
-    report.warnings.extend(p.tz_warnings.iter().cloned());
+    report.warnings.extend(p.prep_warnings.iter().cloned());
 
     let class_id = names.entity_class(conn, commit_id, &p.class, &mut report.warnings)?;
     let ResolvedParameter {
@@ -2314,10 +2473,16 @@ pub fn read_parameter(
     parameter: &str,
     alternative: &str,
 ) -> Result<RecordBatch, DbError> {
+    // Stored names are NFC (the text rule): look them up in NFC.
+    let (class, parameter, alternative) = (nfc(class), nfc(parameter), nfc(alternative));
     with_read_named(db, &["read_parameter"], |conn| {
         let mut stmt =
             conn.prepare("SELECT * FROM read_parameter(?, ?) WHERE lower(alternative) = lower(?)")?;
-        let arrow = stmt.query_arrow(params![class, parameter, alternative])?;
+        let arrow = stmt.query_arrow(params![
+            class.as_ref(),
+            parameter.as_ref(),
+            alternative.as_ref()
+        ])?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
         Ok(concat_batches(&schema, &batches)?)
@@ -2361,12 +2526,20 @@ pub fn read_values(
     alternatives: Option<&[&str]>,
 ) -> Result<RecordBatch, DbError> {
     use duckdb::types::Value;
-    let list = |xs: &[&str]| Value::List(xs.iter().map(|x| Value::Text(x.to_string())).collect());
+    // Stored names are NFC (the text rule): look them up in NFC.
+    let list = |xs: &[&str]| {
+        Value::List(
+            xs.iter()
+                .map(|x| Value::Text(nfc(x).into_owned()))
+                .collect(),
+        )
+    };
     let ents = list(entities);
     let alts = alternatives.map_or(Value::Null, list);
+    let (class, parameter) = (nfc(class), nfc(parameter));
     with_read_named(db, &["read_values"], |conn| {
         let mut stmt = conn.prepare(READ_VALUES_SQL)?;
-        let arrow = stmt.query_arrow(params![class, parameter, ents, alts])?;
+        let arrow = stmt.query_arrow(params![class.as_ref(), parameter.as_ref(), ents, alts])?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
         Ok(concat_batches(&schema, &batches)?)

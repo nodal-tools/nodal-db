@@ -1163,6 +1163,20 @@ fn init(
     .and_then(|v| with_notices(py, v))
 }
 
+/// `s` as nodal-db stores a name or an index label: in Unicode
+/// Normalization Form C, Unicode 16.0.0 (the text rule; the core's one
+/// normalization function, `text::nfc`). The writer applies it to every
+/// name and label it is given, so callers never need to; use it to compare
+/// or search the way the database does (an editor's filter box, an
+/// importer's duplicate check). Never normalize with `unicodedata`: its
+/// Unicode version is the interpreter's and can disagree with the store's.
+/// String values are stored exactly as written and must not be passed
+/// through this.
+#[pyfunction]
+fn normalize_identifier(s: &str) -> String {
+    nodal_db_core::text::nfc(s).into_owned()
+}
+
 /// The thin Python skin over nodal-db-core. See the crate docs at the top of
 /// `lib.rs` for the connection-discipline and GIL/reentrancy contracts.
 #[pymodule]
@@ -1171,6 +1185,16 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Database>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(init, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_identifier, m)?)?;
+    m.add(
+        "UNICODE_VERSION",
+        format!(
+            "{}.{}.{}",
+            nodal_db_core::text::UNICODE_VERSION.0,
+            nodal_db_core::text::UNICODE_VERSION.1,
+            nodal_db_core::text::UNICODE_VERSION.2
+        ),
+    )?;
     let py = m.py();
     m.add("NodalDbError", py.get_type::<NodalDbError>())?;
     m.add("Busy", py.get_type::<Busy>())?;

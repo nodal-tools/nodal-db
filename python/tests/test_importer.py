@@ -885,3 +885,39 @@ def test_clean_source_reports_no_trimmed_names(tmp_path):
     rep, _out = run_import(tmp_path, make_basic_spine(tmp_path))
     assert rep.trimmed_names == []
     assert "trimmed names: 0" in rep.summary()
+
+
+# ---------------------------------------------------------------------------
+# The text rule: nodal-db stores names and map keys in Unicode NFC
+# ---------------------------------------------------------------------------
+
+E_NFC, E_NFD = "é", "é"
+
+
+def test_nfd_map_key_imports_in_nfc_and_is_reported(tmp_path):
+    """The importer converts nothing itself; the core stores the key in
+    NFC and the report counts it."""
+    from spinedb_api import Map
+
+    spine = make_basic_spine(tmp_path)
+    _add_param_value(spine, "hub", "h1", "levels", Map([E_NFD, "b"], [1.0, 2.0]))
+    rep, out = run_import(tmp_path, spine)
+    vals = _nodal_values(_nodal(out), "hub", "levels")
+    assert vals[("h1", "Base")] == ("map", [("b", 2.0), (E_NFC, 1.0)])
+    normalized = [w for w in rep.write_warnings if w["kind"] == "text_normalized"]
+    assert [(w["what"], w["written"], w["stored"]) for w in normalized] == [
+        ("label", E_NFD, E_NFC)
+    ]
+    assert "normalized identifiers: 1 (stored in Unicode NFC)" in rep.summary()
+
+
+def test_names_differing_only_in_normalization_refuse(tmp_path):
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        for name in (f"w{E_NFC}", f"w{E_NFD}"):
+            db.add_update_item("entity", entity_class_name="widget", entity_byname=(name,))
+        db.commit_session("normalization collision")
+    with pytest.raises(ImportError_, match="differ only in Unicode normalization"):
+        run_import(tmp_path, spine)

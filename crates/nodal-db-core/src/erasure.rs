@@ -166,8 +166,13 @@ pub fn preview_erase_alternative(
     alt: &ObjectDeleteKey,
     opts: &EraseOpts,
 ) -> Result<ErasePreview, DbError> {
-    let name = validate_erase_key(alt)?.to_string();
-    let expect: Vec<String> = opts.expect_present.iter().map(|s| s.to_string()).collect();
+    // Names in NFC (the text rule, `text.rs`).
+    let name = crate::text::nfc(validate_erase_key(alt)?).into_owned();
+    let expect: Vec<String> = opts
+        .expect_present
+        .iter()
+        .map(|s| crate::text::nfc(s).into_owned())
+        .collect();
     with_read_plain(db, |conn| {
         let Some(resolved) = resolve_alternative_any(conn, &name)? else {
             return Ok(ErasePreview::default());
@@ -256,7 +261,8 @@ pub fn erase_alternative(
     opts: &EraseOpts,
     user: &str,
 ) -> Result<EraseReport, DbError> {
-    let name = validate_erase_key(alt)?.to_string();
+    // Names in NFC (the text rule, `text.rs`).
+    let name = crate::text::nfc(validate_erase_key(alt)?).into_owned();
     if user.trim().is_empty() {
         return Err(DbError::Api("user must be non-empty".into()));
     }
@@ -273,7 +279,11 @@ pub fn erase_alternative(
     // Same stance as compaction's R2 gate, same migration story.
     assert_schema_version(db)?;
     let note = opts.note.map(str::to_string);
-    let expect: Vec<String> = opts.expect_present.iter().map(|s| s.to_string()).collect();
+    let expect: Vec<String> = opts
+        .expect_present
+        .iter()
+        .map(|s| crate::text::nfc(s).into_owned())
+        .collect();
     let message = format!("erase alternative '{name}'");
 
     // Carries the resolved id out of a rolled-back no-op attempt (the closure

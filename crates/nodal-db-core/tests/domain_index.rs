@@ -82,7 +82,7 @@ fn first_domain_for_a_position_serves_it() {
     // "c" is only in the ignored second domain.
     let err = canonicalize(&batch(&["c"]), &rank1(), ValueKind::Float, &d).unwrap_err();
     assert!(
-        matches!(err, CanonError::LabelNotInDomain(ref l, 0) if l == "c"),
+        matches!(err, CanonError::LabelNotInDomain(ref l, 1) if l == "c"),
         "{err:?}"
     );
 }
@@ -104,7 +104,7 @@ fn index_domains_refuses_repeats_in_every_domain() {
     let name = |p: u8| Some(format!("dim{p}"));
     let err = index_domains(&[domain(1, &["a", "b", "a"])], name).unwrap_err();
     assert!(
-        matches!(&err, CanonError::RepeatedDomainLabel { label, position: 1, dimension: Some(d) }
+        matches!(&err, CanonError::RepeatedDomainLabel { label, position: 1, dimension: Some(d), other: None }
             if label == "a" && d == "dim1"),
         "{err:?}"
     );

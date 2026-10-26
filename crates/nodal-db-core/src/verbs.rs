@@ -49,7 +49,13 @@ use crate::template::reconcile::{
     clear_metadata, close_value_list, read_ec_row, revise_ec_row, set_metadata,
     value_list_binding_count,
 };
+use crate::text::nfc;
 use crate::types::{charset_ok, fold};
+
+/// Every name of `names` in NFC (the text rule, `text.rs`).
+fn nfc_all(names: &[String]) -> Vec<String> {
+    names.iter().map(|n| nfc(n).into_owned()).collect()
+}
 
 fn require_user(user: &str) -> Result<(), DbError> {
     if user.trim().is_empty() {
@@ -84,6 +90,8 @@ pub fn ensure_alternative(
     description: Option<&str>,
     user: &str,
 ) -> Result<i64, DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let name = &*nfc(name);
     require_user(user)?;
     require_name("alternative", name)?;
     if let Some(id) = with_read_plain(db, |conn| lookup_alternative(conn, name))? {
@@ -124,6 +132,9 @@ pub fn set_scenario_alternatives(
     alternatives: &[String],
     user: &str,
 ) -> Result<i64, DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let scenario = &*nfc(scenario);
+    let alternatives = &nfc_all(alternatives);
     require_user(user)?;
     require_name("scenario", scenario)?;
     // Caller-contract checks, before any DB work: non-empty names, no
@@ -202,6 +213,8 @@ pub fn set_entity_activation(
     active: Option<bool>,
     user: &str,
 ) -> Result<(), DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let (class, entity, alternative) = (&*nfc(class), &*nfc(entity), &*nfc(alternative));
     require_user(user)?;
     require_name("class", class)?;
     require_name("entity", entity)?;
@@ -263,6 +276,8 @@ pub fn set_class_active_by_default(
     active_by_default: bool,
     user: &str,
 ) -> Result<(), DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let class = &*nfc(class);
     require_user(user)?;
     require_name("class", class)?;
     let noop = with_read_plain(db, |conn| {
@@ -308,6 +323,8 @@ pub fn set_class_active_by_default(
 /// a still-bound list refuses (rebind/drop its definitions first). Idempotent:
 /// a missing list is a no-op that burns no commit.
 pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let list = &*nfc(list);
     require_user(user)?;
     require_name("value list", list)?;
     let noop = with_read_plain(db, |conn| Ok(lookup_value_list(conn, list)?.is_none()))?;
@@ -353,6 +370,9 @@ pub fn ensure_entity_class(
     dims: &[String],
     user: &str,
 ) -> Result<i64, DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let name = &*nfc(name);
+    let dims = &nfc_all(dims);
     require_user(user)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
@@ -403,6 +423,10 @@ pub fn ensure_parameter_definition(
     description: Option<&str>,
     user: &str,
 ) -> Result<i64, DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let (class, name) = (&*nfc(class), &*nfc(name));
+    let value_list = value_list.map(nfc);
+    let value_list = value_list.as_deref();
     require_user(user)?;
     require_name("class", class)?;
     if !charset_ok(name) {
@@ -452,6 +476,11 @@ pub fn ensure_entity(
     elements: &[String],
     user: &str,
 ) -> Result<i64, DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let class = &*nfc(class);
+    let name = name.map(nfc);
+    let name = name.as_deref();
+    let elements = &nfc_all(elements);
     require_user(user)?;
     require_name("class", class)?;
     let effective_name = effective_entity_name(name, elements)?;
@@ -509,6 +538,8 @@ pub fn stamp_template_identity(
     overwrite: bool,
     user: &str,
 ) -> Result<(), DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let name = &*nfc(name);
     require_user(user)?;
     require_name("template", name)?;
     if version.trim().is_empty() {

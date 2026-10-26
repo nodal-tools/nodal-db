@@ -152,7 +152,8 @@ fn seed_default_alternative(conn: &Connection, name: &str) -> Result<(), DbError
     conn.execute(
         "INSERT INTO alternative (id, name, valid_from_commit) \
          VALUES (nextval('seq_alternative'), ?, (SELECT max(id) FROM commit))",
-        [name],
+        // A name: stored in NFC (the text rule, `text.rs`).
+        [crate::text::nfc(name).as_ref()],
     )?;
     Ok(())
 }

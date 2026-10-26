@@ -42,11 +42,18 @@ pub enum DbError {
     /// `length` must equal the number of coordinate/position child rows, and
     /// must be non-zero. A release-mode check so a malformed axis can never be
     /// persisted (the debug-only `encode_axis` assert is not enough).
-    #[error("malformed materialized axis ({kind}): length {length} != child count {children}")]
+    ///
+    /// The same guard refuses an axis whose text is not what canon produces
+    /// (`problem` says which, plan T6): a label or tag that is not in NFC,
+    /// or a label axis that holds one label twice. Canon never builds
+    /// either; a path that bypassed it would store labels whose bytes
+    /// depend on write order.
+    #[error("{}", malformed_axis_message(kind, *length, *children, problem.as_deref()))]
     MalformedAxis {
         kind: &'static str,
         length: i32,
         children: usize,
+        problem: Option<String>,
     },
 
     /// The history write protocol exhausted its bounded conflict-retry budget:
@@ -133,4 +140,20 @@ pub enum DbError {
     /// An Arrow compute/project error while slicing the write batch per entity.
     #[error(transparent)]
     Arrow(#[from] duckdb::arrow::error::ArrowError),
+}
+
+fn malformed_axis_message(
+    kind: &str,
+    length: i32,
+    children: usize,
+    problem: Option<&str>,
+) -> String {
+    match problem {
+        Some(problem) => format!("malformed axis ({kind}): {problem}"),
+        None => {
+            format!(
+                "malformed materialized axis ({kind}): length {length} != child count {children}"
+            )
+        }
+    }
 }

@@ -454,8 +454,21 @@ class ImportReport:
             f"trimmed names: {len(self.trimmed_names)} (imported without "
             "leading/trailing whitespace)",
         ]
+        # Names and map keys the core stored in Unicode NFC (one warning
+        # per write and kind; the core's `text_normalized`).
+        normalized = [w for w in self.write_warnings
+                      if w.get("kind") == "text_normalized"]
+        if normalized:
+            lines.append(
+                f"normalized identifiers: {sum(w['count'] for w in normalized)} "
+                "(stored in Unicode NFC)")
         for t in self.trimmed_names[:50]:
             lines.append(f"  trimmed name: {t.describe()}")
+        for w in normalized[:50]:
+            where = f" in {w['name']}" if w["name"] else ""
+            lines.append(
+                f"  normalized {w['what']}: {w['count']}{where}, e.g. "
+                f"{w['written']!r} stored as {w['stored']!r}")
         for d in self.duplicate_keys[:50]:
             lines.append(f"  duplicate key: {d.describe()}")
         for r in self.residue[:50]:
@@ -605,18 +618,30 @@ class SpineImporter:
             ent_alts, values = trimmed["ent_alts"], trimmed["values"]
             declared_types = trimmed["declared_types"]
 
-            # nodal-db name resolution is case-insensitive; Spine's is not.
-            # Case-colliding names cannot import faithfully — refuse loudly.
+            # nodal-db name resolution is case-insensitive and compares
+            # names in Unicode NFC; Spine's compares bytes. Names that
+            # collide either way cannot import faithfully — refuse loudly.
+            # The NFC is the core's own (`normalize_identifier`), never
+            # `unicodedata` (whose Unicode version is the interpreter's).
             def check_fold(kind, names):
                 seen: dict[str, str] = {}
                 for n in names:
-                    if n.lower() in seen and seen[n.lower()] != n:
+                    key = nodal_db.normalize_identifier(n).lower()
+                    if key in seen and seen[key] != n:
+                        first = seen[key]
+                        if first.lower() == n.lower():
+                            raise ImportError_(
+                                f"case-colliding {kind} names {first!r} / "
+                                f"{n!r}: nodal-db resolution is case-insensitive; "
+                                "merge or rename in the source first"
+                            )
                         raise ImportError_(
-                            f"case-colliding {kind} names {seen[n.lower()]!r} / "
-                            f"{n!r}: nodal-db resolution is case-insensitive; "
-                            "merge or rename in the source first"
+                            f"{kind} names {first!r} / {n!r} differ only in Unicode "
+                            "normalization (or in it and case): nodal-db compares "
+                            "names in NFC, so they would be one name; merge or "
+                            "rename in the source first"
                         )
-                    seen[n.lower()] = n
+                    seen[key] = n
 
             check_fold("alternative", [a["name"] for a in alternatives])
             check_fold("scenario", [s["name"] for s in scenarios])

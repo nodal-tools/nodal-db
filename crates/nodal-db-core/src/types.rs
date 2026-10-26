@@ -261,6 +261,22 @@ pub enum WarningKind {
         segment_index: usize,
         by: CoveringDelete,
     },
+    /// Identifiers the writer normalized to NFC (Unicode 16.0.0) before
+    /// storing or looking them up (the text rule, `text.rs`): `what` is
+    /// `"label"` (index labels and label-domain entries) or `"name"`
+    /// (entity, class, parameter, alternative, scenario names). One
+    /// warning per segment and kind, never one per string: `count` is the
+    /// number of distinct spellings that changed, `written` the first of
+    /// them as the caller wrote it and `stored` its NFC form, which is
+    /// what reads return. `object_type` is `"segment"` (`name` is
+    /// `class:parameter/alternative`, normalized) or `"structural"` (the
+    /// structural changes of the call; `name` is empty); `id` is 0.
+    TextNormalized {
+        what: String,
+        count: usize,
+        written: String,
+        stored: String,
+    },
 }
 
 /// The delete that covers a dropped write ([`WarningKind::DroppedByDelete`]).

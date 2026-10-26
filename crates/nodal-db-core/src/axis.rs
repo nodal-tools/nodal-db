@@ -33,6 +33,7 @@ use crate::encoding::{
 };
 use crate::error::DbError;
 use crate::history::{clip, exec_columnar, list, opt_list};
+use crate::text::{describe, is_nfc};
 
 /// A client-side dedup cache, scoped to one write session (Phase 3 threads it
 /// across a batch so a handful of axes serving thousands of values are looked
@@ -113,6 +114,11 @@ pub(crate) fn dedup_or_insert_created(
     }
 
     // 3. No true match — insert a fresh axis (+ child rows for materialized).
+    // Only an insert can store text canon would not produce (the encoding
+    // normalizes, so a non-NFC input can only *match* an NFC axis, and an
+    // input repeating a label never matches a well-formed one), so the T6
+    // text guard runs here: once per new axis, not once per value.
+    ensure_text_canonical(axis)?;
     let new_id = insert_axis(conn, axis, hash)?;
     cache.remember(hash, new_id, axis.clone());
     Ok((new_id, true))
@@ -140,7 +146,70 @@ fn ensure_wellformed(axis: &CanonicalAxis) -> Result<(), DbError> {
             kind: axis.kind_tag(),
             length: axis.length,
             children,
+            problem: None,
         });
+    }
+    Ok(())
+}
+
+/// T6 guard (`specs/unicode_text_rule_PLAN.md`): an axis's text is what
+/// canon produces: every label and tag in NFC (the text rule, `text.rs`)
+/// and no label twice in one label axis. Checked before every insert, in
+/// release builds, so a write path that bypassed canon fails loudly
+/// instead of storing labels whose bytes depend on write order (the
+/// encoder normalizes two spellings to one encoding, and dedup would
+/// reuse whichever was stored first).
+fn ensure_text_canonical(axis: &CanonicalAxis) -> Result<(), DbError> {
+    let malformed = |problem: String| DbError::MalformedAxis {
+        kind: axis.kind_tag(),
+        length: axis.length,
+        children: axis.length.max(0) as usize,
+        problem: Some(problem),
+    };
+    let p = &axis.properties;
+    for (tag, value) in [
+        ("calendar", &p.calendar),
+        ("timezone", &p.timezone),
+        ("crs", &p.crs),
+    ] {
+        if let Some(v) = value {
+            if !is_nfc(v) {
+                return Err(malformed(format!(
+                    "the {tag} tag {} is not in NFC",
+                    describe(v)
+                )));
+            }
+        }
+    }
+    match &axis.body {
+        AxisBody::Label { positions } => {
+            let mut seen: HashMap<&str, usize> = HashMap::with_capacity(positions.len());
+            for (i, p) in positions.iter().enumerate() {
+                if !is_nfc(&p.label) {
+                    return Err(malformed(format!(
+                        "the label {} at position {i} is not in NFC",
+                        describe(&p.label)
+                    )));
+                }
+                if let Some(first) = seen.insert(p.label.as_str(), i) {
+                    return Err(malformed(format!(
+                        "the label {:?} is at positions {first} and {i}",
+                        p.label
+                    )));
+                }
+            }
+        }
+        AxisBody::TimePattern { positions } => {
+            for t in positions.iter().flat_map(|p| &p.terms) {
+                if !is_nfc(&t.unit) {
+                    return Err(malformed(format!(
+                        "the time-pattern unit {} is not in NFC",
+                        describe(&t.unit)
+                    )));
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

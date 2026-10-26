@@ -1038,3 +1038,47 @@ def test_a_write_refreshes_a_stale_file(tmp_path):
     rep = db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
     assert rep["read_surface_warning"] is None
     assert db.read_surface_status()["status"] == "current"
+
+
+# ---------------------------------------------------------------------------
+# the text rule: names and labels in NFC, string values as written
+# ---------------------------------------------------------------------------
+
+E_NFC, E_NFD = "\u00e9", "e\u0301"
+
+
+def test_normalize_identifier_is_the_cores_unicode_16_nfc():
+    assert nodal_db.UNICODE_VERSION == "16.0.0"
+    assert nodal_db.normalize_identifier(E_NFD) == E_NFC
+    assert nodal_db.normalize_identifier("node_1") == "node_1"
+    # A Unicode 16.0 composite: CPython 3.12's unicodedata (15.0) leaves
+    # the pair unchanged, the core composes it.
+    assert nodal_db.normalize_identifier("\U00011382\U000113c9") == "\U00011383"
+
+
+def test_nfd_names_and_labels_read_back_in_nfc(db):
+    batch = pa.record_batch({
+        "entity": pa.array([f"n{E_NFD}", f"n{E_NFD}"], pa.string()),
+        "mode": pa.array([E_NFD, "b"], pa.string()),
+        "value": pa.array([E_NFD + "!", "plain"], pa.string()),
+    })
+    rep = db.write_parameter(
+        f"cl{E_NFD}", "p", "Base", batch, domains={1: [E_NFD, "b"]}, user="tester",
+    )
+    text = sorted(
+        (w["what"], w["count"], w["written"], w["stored"], w["name"])
+        for w in rep["warnings"] if w["kind"] == "text_normalized"
+    )
+    assert text == [
+        ("label", 1, E_NFD, E_NFC, f"cl{E_NFC}:p/Base"),
+        ("name", 2, f"cl{E_NFD}", f"cl{E_NFC}", f"cl{E_NFC}:p/Base"),
+    ]
+    # Either spelling reads it; names and labels come back in NFC, the
+    # string value exactly as written.
+    for cls in (f"cl{E_NFC}", f"cl{E_NFD}"):
+        rb = db.read_parameter(cls, "p", "Base")
+        rows = sorted(zip(rb.column("entity").to_pylist(),
+                          rb.column("idx1_text").to_pylist(),
+                          rb.column("v_str").to_pylist()))
+        assert rows == [(f"n{E_NFC}", "b", "plain"), (f"n{E_NFC}", E_NFC, E_NFD + "!")]
+

@@ -1030,13 +1030,137 @@ impl MigrationStep {
 }
 
 // ---------------------------------------------------------------------------
+// The text rule for names
+// ---------------------------------------------------------------------------
+
+/// `t` with every name in NFC (the text rule, `crate::text`): the template
+/// name, unit, value-list, parameter-group, class-set, class and parameter
+/// names, every reference to them (dimensions, set members, bindings, audit
+/// rules, seed entities and memberships, migration steps), and seed entity
+/// names and elements. Data text stays as written: list members, defaults,
+/// audit-rule branch values, `map_values`, the member values of member
+/// steps, descriptions, versions and `run:` program names; so do the
+/// dimension names of type declarations. Parsing applies it, and so do
+/// [`super::plan`], [`super::apply`] and [`normalized_model`] (hence
+/// [`template_content_hash`]), so a template written with NFD names loads
+/// and hashes as its NFC spelling.
+pub fn nfc_names(t: &Template) -> Template {
+    fn n(s: &mut String) {
+        if let std::borrow::Cow::Owned(x) = crate::text::nfc(s) {
+            *s = x;
+        }
+    }
+    fn on(s: &mut Option<String>) {
+        if let Some(s) = s {
+            n(s);
+        }
+    }
+    let mut t = t.clone();
+    n(&mut t.template.name);
+    t.units.iter_mut().for_each(|u| n(&mut u.name));
+    t.value_lists.iter_mut().for_each(|l| n(&mut l.name));
+    t.parameter_groups.iter_mut().for_each(|g| n(&mut g.name));
+    for s in &mut t.class_sets {
+        n(&mut s.name);
+        s.members.iter_mut().for_each(n);
+    }
+    for c in &mut t.classes {
+        n(&mut c.name);
+        for d in &mut c.dimensions {
+            match d {
+                DimRef::Class(name) => n(name),
+                DimRef::Set { class_set } => n(class_set),
+            }
+        }
+        for p in &mut c.parameters {
+            n(&mut p.name);
+            on(&mut p.value_list);
+            on(&mut p.unit);
+            on(&mut p.group);
+        }
+    }
+    if let Some(a) = &mut t.audit_rules {
+        for r in &mut a.conditional_requirements {
+            n(&mut r.class);
+            n(&mut r.selector);
+            for w in r.when.0.values_mut() {
+                w.require.iter_mut().for_each(n);
+            }
+        }
+    }
+    if let Some(seed) = &mut t.seed {
+        for e in &mut seed.entities {
+            n(&mut e.class);
+            on(&mut e.name);
+            if let Some(els) = &mut e.elements {
+                els.iter_mut().for_each(n);
+            }
+        }
+        for m in &mut seed.memberships {
+            for r in [&mut m.group, &mut m.member] {
+                n(&mut r.class);
+                n(&mut r.entity);
+            }
+        }
+    }
+    for m in &mut t.migrations {
+        for s in &mut m.steps {
+            match s {
+                MigrationStep::RenameClass { from, to } => {
+                    n(from);
+                    n(to);
+                }
+                MigrationStep::RenameParameter {
+                    class, from, to, ..
+                }
+                | MigrationStep::MergeParameter {
+                    class, from, to, ..
+                } => {
+                    n(class);
+                    n(from);
+                    n(to);
+                }
+                MigrationStep::RenameValueList { from, to, .. } => {
+                    n(from);
+                    n(to);
+                }
+                // `from` / `to` / `value` are list members: data.
+                MigrationStep::RenameListMember { list, .. }
+                | MigrationStep::MergeListMember { list, .. }
+                | MigrationStep::DropValueList { list }
+                | MigrationStep::DropListMember { list, .. } => n(list),
+                MigrationStep::MoveParameter {
+                    name,
+                    from_class,
+                    to_class,
+                } => {
+                    n(name);
+                    n(from_class);
+                    n(to_class);
+                }
+                MigrationStep::DropParameter { class, parameter } => {
+                    n(class);
+                    n(parameter);
+                }
+                MigrationStep::DropClass { class } => n(class),
+                MigrationStep::Run(_) => {}
+            }
+        }
+    }
+    t
+}
+
+// ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
 /// Parse a template from YAML 1.2 text. JSON is a YAML subset, so JSON input
-/// parses through the same call (D1: one loader, both surfaces).
+/// parses through the same call (D1: one loader, both surfaces). Names come
+/// back in NFC ([`nfc_names`]).
 pub fn parse_str(text: &str) -> Result<Template, DbError> {
-    serde_norway::from_str(text).map_err(|e| DbError::Api(format!("template parse error: {e}")))
+    let t: Template = serde_norway::from_str(text)
+        .map_err(|e| DbError::Api(format!("template parse error: {e}")))?;
+    Ok(nfc_names(&t))
 }
 
 /// Parse a template file (YAML or JSON — one parser, D1).
@@ -1900,6 +2024,7 @@ fn type_member_json(ty: &TypeDecl) -> Value {
 /// the hash input AND the round-trip comparator (§8.1.7): parse both sides,
 /// compare `normalized_model` outputs.
 pub fn normalized_model(t: &Template) -> Value {
+    let t = &nfc_names(t);
     let mut root = Map::new();
     let lists_by_name: HashMap<String, &ValueList> =
         t.value_lists.iter().map(|l| (fold(&l.name), l)).collect();

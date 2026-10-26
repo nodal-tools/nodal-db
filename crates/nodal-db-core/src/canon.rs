@@ -15,7 +15,9 @@
 //! Arrow types by kind: `datetime` -> `Timestamp(µs)`, `integer` -> `Int64`,
 //! `label` -> `Utf8`. The value column's type follows `value_kind`.
 
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
 use duckdb::arrow::array::{
     Array, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
@@ -26,6 +28,7 @@ use crate::encoding::{
     canonical_value_f64, datetime_coord, datetime_reproduces, encode_value, hash_axis,
     integer_regular_step, AxisBody, CanonicalAxis, Duration, EncodeError, LabelPos, ValueContent,
 };
+use crate::text::nfc;
 use crate::tier;
 use crate::types::{
     DeclaredType, IndexKind, LongRow, ScalarValue, ShapedData, Tier, ValueKey, ValueKind,
@@ -110,31 +113,52 @@ pub enum CanonError {
     ColumnCount { rank: usize, got: usize },
     #[error("column {0} has the wrong Arrow type for its declared kind")]
     ColumnType(usize),
+    /// A NULL index coordinate; the number is the dimension's position
+    /// (1-based, as in every message that names a dimension).
     #[error("null index coordinate in dimension {0} (index positions must be present)")]
-    NullCoord(usize),
+    NullCoord(u8),
     #[error("missing ordered domain for label dimension at position {0}")]
     MissingDomain(u8),
+    /// A data label missing from its dimension's domain; the number is the
+    /// dimension's position (1-based, like [`CanonError::RepeatedDomainLabel`]).
+    /// Both sides are compared in NFC, so the label is shown in NFC.
     #[error("label {0:?} in dimension {1} is not in the caller-supplied ordered domain")]
-    LabelNotInDomain(String, usize),
+    LabelNotInDomain(String, u8),
     /// Two rows of one value share an index tuple. `coords` is the tuple as
     /// the caller wrote it (labels quoted, integers, ISO timestamps), not the
     /// internal axis positions; `location` names the value (entity, class,
     /// parameter, alternative) once the write path knows it
     /// ([`CanonError::at_value`]).
-    #[error("{}", duplicate_tuple_message(coords, location.as_deref()))]
+    ///
+    /// Labels are compared in NFC (the text rule, `text.rs`): `respelled`
+    /// lists each label of the tuple that some row of the value wrote in
+    /// another spelling, as `(written, NFC)`, so the message can say why
+    /// two rows that look different are one tuple.
+    #[error("{}", duplicate_tuple_message(coords, location.as_deref(), respelled))]
     DuplicateTuple {
         coords: Vec<String>,
         location: Option<String>,
+        respelled: Vec<(String, String)>,
     },
+    /// A label domain lists one label twice. Labels are compared in NFC, so
+    /// two spellings that differ only in Unicode normalization are a
+    /// repeat too: `other` is then the earlier spelling (`None` when the
+    /// two are byte-identical).
     #[error(
-        "the label domain of dimension {position}{} repeats the label {label:?}; \
+        "the label domain of dimension {position}{} repeats the label {label:?}{}; \
          each label may appear only once in a domain",
-        dimension.as_ref().map(|n| format!(" ({n:?})")).unwrap_or_default()
+        dimension.as_ref().map(|n| format!(" ({n:?})")).unwrap_or_default(),
+        other.as_ref().map(|o| format!(
+            " ({} and {} differ only in Unicode normalization, and labels are compared in NFC)",
+            crate::text::describe(o),
+            crate::text::describe(label)
+        )).unwrap_or_default()
     )]
     RepeatedDomainLabel {
         label: String,
         position: u8,
         dimension: Option<String>,
+        other: Option<String>,
     },
     #[error("rank-0 scalar must have exactly one non-null value, got {0}")]
     ScalarRows(usize),
@@ -159,28 +183,44 @@ impl CanonError {
     /// variant passes through unchanged.
     pub fn at_value(self, entity: &str, class: &str, parameter: &str, alternative: &str) -> Self {
         match self {
-            CanonError::DuplicateTuple { coords, .. } => CanonError::DuplicateTuple {
+            CanonError::DuplicateTuple {
+                coords, respelled, ..
+            } => CanonError::DuplicateTuple {
                 coords,
                 location: Some(format!(
                     "entity {entity:?} (class {class:?}, parameter {parameter:?}, \
                      alternative {alternative:?})"
                 )),
+                respelled,
             },
             other => other,
         }
     }
 }
 
-fn duplicate_tuple_message(coords: &[String], location: Option<&str>) -> String {
+fn duplicate_tuple_message(
+    coords: &[String],
+    location: Option<&str>,
+    respelled: &[(String, String)],
+) -> String {
     let tuple = coords.join(", ");
-    match location {
+    let mut msg = match location {
         Some(loc) => format!(
             "{loc}: duplicate index tuple ({tuple}); a value maps one measure per index tuple"
         ),
         None => {
             format!("duplicate index tuple ({tuple}); a value maps one measure per index tuple")
         }
+    };
+    for (written, stored) in respelled {
+        msg.push_str(&format!(
+            " (the label {} was also written as {}: spellings that differ only in Unicode \
+             normalization are one label)",
+            crate::text::describe(stored),
+            crate::text::describe(written)
+        ));
     }
+    msg
 }
 
 /// A timestamp (µs since the Unix epoch) as ISO 8601 (`YYYY-MM-DDTHH:MM:SS`,
@@ -198,15 +238,20 @@ fn render_timestamp(us: i64) -> String {
     }
 }
 
+/// The repeat of `label` in domain `d`; `first` is the ordinal of its
+/// earlier occurrence (whose spelling may differ only in normalization).
 fn repeated_label(
     d: &LabelDomain,
     label: &str,
+    first: usize,
     dim_name: &impl Fn(u8) -> Option<String>,
 ) -> CanonError {
+    let earlier = &d.labels[first];
     CanonError::RepeatedDomainLabel {
         label: label.to_string(),
         position: d.position,
         dimension: dim_name(d.position),
+        other: (earlier != label).then(|| earlier.clone()),
     }
 }
 
@@ -223,6 +268,10 @@ fn repeated_label(
 /// label repeated in a domain keeps its **first** ordinal. The write path
 /// refuses repeats before it gets here; the rule matters for a direct
 /// [`canonicalize`] caller that passes one.
+///
+/// Keys are the labels in NFC (the text rule, `text.rs`): a domain entry
+/// and a data label that differ only in Unicode normalization are one
+/// label, and two such entries in one domain are a repeat.
 #[derive(Clone, Debug, Default)]
 pub struct DomainIndex {
     /// Per domain position, in the order the positions first appear.
@@ -240,7 +289,7 @@ impl DomainIndex {
             }
             let mut map = HashMap::with_capacity(d.labels.len());
             for (ord, label) in d.labels.iter().enumerate() {
-                map.entry(label.clone()).or_insert(ord);
+                map.entry(nfc(label).into_owned()).or_insert(ord);
             }
             by_position.push((d.position, map));
         }
@@ -271,16 +320,26 @@ pub fn index_domains(
         if by_position.iter().any(|(p, _)| *p == d.position) {
             // A later domain for a covered position is never looked up, but
             // its repeats are refused all the same.
-            let mut seen: HashSet<&str> = HashSet::with_capacity(d.labels.len());
-            if let Some(label) = d.labels.iter().find(|l| !seen.insert(l.as_str())) {
-                return Err(repeated_label(d, label, &dim_name));
+            let mut seen: HashMap<Cow<str>, usize> = HashMap::with_capacity(d.labels.len());
+            for (ord, label) in d.labels.iter().enumerate() {
+                match seen.entry(nfc(label)) {
+                    Entry::Occupied(e) => {
+                        return Err(repeated_label(d, label, *e.get(), &dim_name))
+                    }
+                    Entry::Vacant(e) => {
+                        e.insert(ord);
+                    }
+                }
             }
             continue;
         }
-        let mut map = HashMap::with_capacity(d.labels.len());
+        let mut map: HashMap<String, usize> = HashMap::with_capacity(d.labels.len());
         for (ord, label) in d.labels.iter().enumerate() {
-            if map.insert(label.clone(), ord).is_some() {
-                return Err(repeated_label(d, label, &dim_name));
+            match map.entry(nfc(label).into_owned()) {
+                Entry::Occupied(e) => return Err(repeated_label(d, label, *e.get(), &dim_name)),
+                Entry::Vacant(e) => {
+                    e.insert(ord);
+                }
             }
         }
         by_position.push((d.position, map));
@@ -397,8 +456,13 @@ pub fn canonicalize_indexed(
     };
 
     // --- Step 1: NULL elimination (NULL ≡ absent) + read surviving cells. ---
+    // Labels are read in NFC (the text rule, `text.rs`), so the domain
+    // lookup, the distinct-label map and the duplicate check all compare
+    // NFC; per dimension, the NFC labels some row wrote in another
+    // spelling (NFC -> as written, the first), for the duplicate message.
     let n = batch.num_rows();
     let mut kept: Vec<(Vec<RawCoord>, ScalarValue)> = Vec::new();
+    let mut respelled: Vec<HashMap<String, String>> = vec![HashMap::new(); rank];
     for row in 0..n {
         let measure = match read_value(&value_col, row, rank)? {
             Some(m) => m,
@@ -406,7 +470,8 @@ pub fn canonicalize_indexed(
         };
         let mut coords = Vec::with_capacity(rank);
         for (i, dc) in dim_cols.iter().enumerate() {
-            coords.push(read_coord(dc, row, i)?);
+            let position = declared.positions[i].0;
+            coords.push(read_coord(dc, row, i, position, &mut respelled[i])?);
         }
         kept.push((coords, measure));
     }
@@ -483,7 +548,7 @@ pub fn canonicalize_indexed(
                     if seen.insert(lab.clone(), ()).is_none() {
                         let ord = *domain
                             .get(lab.as_str())
-                            .ok_or_else(|| CanonError::LabelNotInDomain(lab.clone(), i))?;
+                            .ok_or_else(|| CanonError::LabelNotInDomain(lab.clone(), *position))?;
                         present.push((ord as i32, lab.clone()));
                     }
                 }
@@ -540,9 +605,25 @@ pub fn canonicalize_indexed(
     rows.sort_by(|a, b| a.positions.cmp(&b.positions));
     for w in rows.windows(2) {
         if w[0].positions == w[1].positions {
+            // Each label of the tuple that some row spelled differently.
+            let respelled = w[0]
+                .positions
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &p)| match &axes[i].body {
+                    AxisBody::Label { positions } => {
+                        let stored = &positions[p as usize].label;
+                        respelled[i]
+                            .get(stored)
+                            .map(|written| (written.clone(), stored.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
             return Err(CanonError::DuplicateTuple {
                 coords: render_tuple(&w[0].positions, declared, &axes, &num_coords),
                 location: None,
+                respelled,
             });
         }
     }
@@ -607,25 +688,44 @@ fn checked_ts(us: i64, column: usize) -> Result<i64, CanonError> {
     }
 }
 
-fn read_coord(dc: &DimCol, row: usize, dim: usize) -> Result<RawCoord, CanonError> {
+/// Read one index coordinate of dimension column `dim` (declared position
+/// `position`). A label is returned in NFC; when that changed it, the
+/// spelling as written is remembered in `respelled` (NFC -> written, the
+/// first).
+fn read_coord(
+    dc: &DimCol,
+    row: usize,
+    dim: usize,
+    position: u8,
+    respelled: &mut HashMap<String, String>,
+) -> Result<RawCoord, CanonError> {
     match dc {
         DimCol::Ts(a) => {
             if a.is_null(row) {
-                return Err(CanonError::NullCoord(dim));
+                return Err(CanonError::NullCoord(position));
             }
             Ok(RawCoord::Num(checked_ts(a.value(row), dim)?))
         }
         DimCol::Int(a) => {
             if a.is_null(row) {
-                return Err(CanonError::NullCoord(dim));
+                return Err(CanonError::NullCoord(position));
             }
             Ok(RawCoord::Num(a.value(row)))
         }
         DimCol::Label(a) => {
             if a.is_null(row) {
-                return Err(CanonError::NullCoord(dim));
+                return Err(CanonError::NullCoord(position));
             }
-            Ok(RawCoord::Label(a.value(row).to_string()))
+            let written = a.value(row);
+            Ok(RawCoord::Label(match nfc(written) {
+                Cow::Borrowed(s) => s.to_string(),
+                Cow::Owned(s) => {
+                    if !respelled.contains_key(&s) {
+                        respelled.insert(s.clone(), written.to_string());
+                    }
+                    s
+                }
+            }))
         }
     }
 }

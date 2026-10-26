@@ -137,11 +137,9 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     for (raw, meta) in raws.iter().zip(&metas) {
         let alternative = effective_alternative(raw.ordinal, meta, args)?;
         assert_flags(raw.ordinal, meta, args)?;
-        if !targets.insert((
-            meta.class.to_lowercase(),
-            meta.parameter.to_lowercase(),
-            alternative.to_lowercase(),
-        )) {
+        // Folded from the NFC names the core stores (the text rule).
+        let fold = |s: &str| nodal_db_core::text::nfc(s).to_lowercase();
+        if !targets.insert((fold(&meta.class), fold(&meta.parameter), fold(&alternative))) {
             bail!(
                 "E7: duplicate target {}:{} (alternative {:?}) across segments \
                  (comparison is case-insensitive)",
@@ -236,6 +234,16 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                     w.name
                 )
             }
+            WarningKind::TextNormalized {
+                what,
+                count,
+                written,
+                stored,
+            } => println!(
+                "warning: {count} {what}(s) of {} stored in Unicode NFC, e.g. {written:?} as \
+                 {stored:?} (spellings that differ only in normalization are one {what})",
+                w.name
+            ),
         }
     }
     Ok(())
@@ -554,8 +562,10 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
     match (&meta.alternative, &args.alternative) {
         (Some(m), Some(f)) => {
             // Unicode fold, matching DuckDB lower() — alternative names have no
-            // ASCII charset CHECK (critique F3).
-            if m.to_lowercase() != f.to_lowercase() {
+            // ASCII charset CHECK (critique F3) — of the NFC names the core
+            // stores (the text rule, `nodal_db_core::text`).
+            let fold = |s: &str| nodal_db_core::text::nfc(s).to_lowercase();
+            if fold(m) != fold(f) {
                 bail!(
                     "E4: segment {ordinal} ({}:{}): spinal:alternative {m:?} conflicts with \
                      --alternative {f:?} (neither takes precedence: they must match, case-insensitively)",

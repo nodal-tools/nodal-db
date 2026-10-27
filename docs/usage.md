@@ -449,6 +449,44 @@ precedence.
 
 The CLI has no scenario commands; use Python or Rust, or a template.
 
+### Renaming an alternative or scenario
+
+`RenameAlternative` / `RenameScenario` close the current identity row and
+open a same-id successor (`version + 1`) whenever `new_name` differs from
+the stored spelling **at all**, once both sides are compared in NFC — so
+`"High" -> "HIGH"` and a pure Unicode re-spelling (NFD -> NFC of the same
+text) are each a real, committed rename, not just a byte-identical name
+that collapses two different but case/Unicode-equivalent spellings into
+one object. Only a spelling that is already byte-identical after NFC,
+with no description change, is a no-op (`StructuralEffect::NoOp`,
+`commit_id` 0 if that is the whole call):
+
+```python
+# A pure case restyle is a real rename: version bumps, new spelling stored.
+rep = db.commit_structural(
+    [{"op": "rename_alternative", "current": "high_demand",
+      "new_name": "HIGH_DEMAND"}],
+    user="alice")
+rep["structural"][0]["effect"]  # "renamed"
+
+# Renaming to the exact current spelling (post-NFC) is a no-op.
+rep = db.commit_structural(
+    [{"op": "rename_alternative", "current": "HIGH_DEMAND",
+      "new_name": "HIGH_DEMAND"}],
+    user="alice")
+rep["structural"][0]["effect"], rep["commit_id"]  # ("no_op", 0)
+```
+
+Renaming to a spelling that is already a DIFFERENT, live object (by the
+database's case-insensitive name resolution) still collides and is
+refused — self-collision is excluded by id, not by the rename's case or
+Unicode form, so renaming an object to its own case-restyled spelling
+never collides with itself. A caller that wants the OLD (pre-2026-10-27)
+behavior — case/Unicode-form-only renames treated as nothing to do —
+checks the stored spelling itself before calling `rename_alternative` /
+`rename_scenario` and skips the call, or ignores the `renamed` effect
+when its own `current` and `new_name` differ only this way.
+
 ### Read with SQL
 
 Reads use SQL views and table macros. Any DuckDB client of version 2.0

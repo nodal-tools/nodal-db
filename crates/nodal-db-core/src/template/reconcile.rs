@@ -3485,10 +3485,23 @@ fn execute_step(
             }
             let id = lookup_entity_class(conn, from)?
                 .ok_or_else(|| DbError::Api(format!("rename_class: {from:?} not found")))?;
-            if fold(from) != fold(to) && lookup_entity_class(conn, to)?.is_some() {
-                return Err(DbError::Api(format!(
-                    "rename_class: target name {to:?} already exists"
-                )));
+            // Exclude-by-id, not by Rust fold (R4 critique K6,
+            // name_fold_identity_PLAN §10; the same ruling as structural
+            // renames' `rename_identity`): a Rust-fold pre-filter here would
+            // skip the DB lookup for a case-only `from -> to` and ALSO miss
+            // a true collision where Rust's fold and DuckDB's `lower()`
+            // disagree (T11 drift), either silently letting a real
+            // collision through or — the direction that actually bit this
+            // code — resolving `to` to `from`'s own row under DuckDB's
+            // `lower()` and refusing the rename as "already exists" against
+            // itself. Looking `to` up unconditionally and comparing the
+            // resolved id against `id` is correct either way.
+            if let Some(other) = lookup_entity_class(conn, to)? {
+                if other != id {
+                    return Err(DbError::Api(format!(
+                        "rename_class: target name {to:?} already exists"
+                    )));
+                }
             }
             let mut row = read_ec_row(conn, id)?;
             row.name = to.clone();
@@ -3510,11 +3523,15 @@ fn execute_step(
             }
             let cid = hint_class_id(conn, "rename_parameter", class)?;
             let src = lookup_parameter(conn, cid, from)?;
-            let tgt = if fold(from) != fold(to) {
-                lookup_parameter(conn, cid, to)?
-            } else {
-                None
-            };
+            // Exclude-by-id, not by Rust fold (R4 critique K6; same ruling
+            // as `rename_class` above and structural renames):
+            // `lookup_parameter(conn, cid, to)` is the DB's own identity
+            // resolution, so comparing its result against `src`'s id is
+            // the correct "is this really a different, already-live
+            // target" test. A Rust-fold pre-filter would wrongly treat a
+            // T11-drift rename (Rust and DuckDB's `lower()` disagree) as a
+            // collision with itself.
+            let tgt = lookup_parameter(conn, cid, to)?.filter(|&tid| Some(tid) != src);
             // Absent-source tolerance (finale plan F-C, chain-ladder reality):
             // a per-version ladder's rename may target a definition that was
             // introduced by an earlier RECONCILE-ONLY version — which, under
@@ -3629,10 +3646,14 @@ fn execute_step(
                     "rename_value_list: {from:?} not found"
                 )));
             };
-            if fold(from) != fold(to) && lookup_value_list(conn, to)?.is_some() {
-                return Err(DbError::Api(format!(
-                    "rename_value_list: target name {to:?} already exists"
-                )));
+            // Exclude-by-id, not by Rust fold (R4 critique K6; same ruling
+            // as `rename_class`/`rename_parameter` above).
+            if let Some(other) = lookup_value_list(conn, to)? {
+                if other != id {
+                    return Err(DbError::Api(format!(
+                        "rename_value_list: target name {to:?} already exists"
+                    )));
+                }
             }
             let mut row = read_list_row(conn, id)?;
             row.name = to.clone();

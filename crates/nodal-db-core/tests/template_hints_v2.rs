@@ -460,6 +460,128 @@ fn v28_collision_drops_stale_source_v66_renames_plain() {
 }
 
 // ---------------------------------------------------------------------------
+// R4 critique K6 (nodal-editor/specs/core_requests_2026-10-27.md): a
+// case-only rename target must not be a false self-collision.
+// `rename_class`/`rename_parameter`/`rename_value_list` used to gate their
+// DB collision lookup on a Rust-side fold check (`fold(from) != fold(to)`)
+// instead of excluding the match by id. Where Rust's fold and DuckDB's
+// `lower()` disagree (T11 drift, e.g. case pairs recent Unicode versions
+// added that DuckDB's bundled tables lack), that gate let a case-only
+// (or similarly fold-mismatched) rename's own DB lookup resolve `to` back
+// to `from`'s own row and refuse it as "already exists" against itself.
+// ---------------------------------------------------------------------------
+
+const RENAME_SELF_COLLISION_BASE: &str = r#"
+template: {name: self_collision, version: "1"}
+value_lists:
+  - name: colors
+    members: [{value: "red"}, {value: "blue"}]
+classes:
+  - name: widget
+    parameters:
+      - {name: size, types: [{kind: float}]}
+seed:
+  entities:
+    - {class: widget, name: w1}
+"#;
+
+#[test]
+fn rename_class_case_only_is_not_a_false_self_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, RENAME_SELF_COLLISION_BASE);
+    let v2 = r#"
+template: {name: self_collision, version: "2"}
+value_lists:
+  - name: colors
+    members: [{value: "red"}, {value: "blue"}]
+classes:
+  - name: WIDGET
+    parameters:
+      - {name: size, types: [{kind: float}]}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_class: {from: widget, to: WIDGET}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT name FROM entity_class WHERE cur_name = lower('widget')"
+        )
+        .as_deref(),
+        Some("WIDGET"),
+        "the new spelling is stored, not refused as a self-collision"
+    );
+}
+
+#[test]
+fn rename_parameter_case_only_is_not_a_false_self_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, RENAME_SELF_COLLISION_BASE);
+    let v2 = r#"
+template: {name: self_collision, version: "2"}
+value_lists:
+  - name: colors
+    members: [{value: "red"}, {value: "blue"}]
+classes:
+  - name: widget
+    parameters:
+      - {name: SIZE, types: [{kind: float}]}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_parameter: {class: widget, from: size, to: SIZE}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT name FROM parameter_definition WHERE cur_name = lower('size')"
+        )
+        .as_deref(),
+        Some("SIZE"),
+        "the new spelling is stored, not refused as a self-collision"
+    );
+}
+
+#[test]
+fn rename_value_list_case_only_is_not_a_false_self_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db_with(&dir, RENAME_SELF_COLLISION_BASE);
+    let v2 = r#"
+template: {name: self_collision, version: "2"}
+value_lists:
+  - name: COLORS
+    members: [{value: "red"}, {value: "blue"}]
+classes:
+  - name: widget
+    parameters:
+      - {name: size, types: [{kind: float}]}
+migrations:
+  - from: "1"
+    to: "2"
+    steps:
+      - rename_value_list: {from: colors, to: COLORS}
+"#;
+    let out = apply_v2(&db, v2);
+    assert!(out.converged, "skips: {:?}", out.plan.skipped);
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT name FROM parameter_value_list WHERE cur_name = lower('colors')"
+        )
+        .as_deref(),
+        Some("COLORS"),
+        "the new spelling is stored, not refused as a self-collision"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // v41 — same-class parameter merge (G3)
 // ---------------------------------------------------------------------------
 

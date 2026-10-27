@@ -114,7 +114,14 @@ fn create_rename_alternative() {
         1
     );
 
-    // Self-restyle (fold-equal, no desc change) ⇒ NoOp, NOT a false collision (m5).
+    // Case-only self-restyle (fold-equal, no desc change) ⇒ a REAL rename
+    // (editor request R4, owner decision 2026-10-27: the client decides
+    // whether case matters, not the core — a `commit_changes` caller that
+    // wants it treated as a no-op does so itself), id preserved, version
+    // bumps again, and — critically — NOT a false collision with itself
+    // (m5's self-exclusion in the uniqueness check still holds: "wet_year"
+    // and "WET_YEAR" resolve to the SAME row by id, so the collision check
+    // does not refuse it).
     let r = cs(
         &db,
         vec![SC::RenameAlternative {
@@ -123,8 +130,93 @@ fn create_rename_alternative() {
             description: None,
         }],
     );
+    assert_eq!(r.structural[0].effect, SE::Renamed);
+    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT version FROM alternative WHERE cur_name = lower('WET_YEAR')"
+        ),
+        3
+    );
+    // The new spelling is stored (not just resolvable through `lower()`).
+    let conn = Connection::open(&db).unwrap();
+    let stored_name: String = conn
+        .query_row(
+            "SELECT name FROM alternative WHERE cur_name = lower('WET_YEAR')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_name, "WET_YEAR");
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM alternative WHERE valid_to_commit IS NOT NULL"
+        ),
+        2,
+        "two close-outs so far: hydro->wet_year, then wet_year->WET_YEAR"
+    );
+}
+
+/// An NFD -> NFC re-spelling of the SAME name is a byte-identical rename
+/// once both sides are normalized (editor request R4): `new_name` is NFC'd
+/// at the API entry point before `rename_identity` ever sees it, and the
+/// stored spelling is already NFC (every writer of this table goes
+/// through the same rule), so `"Pa\u{308}a\u{308}"` (NFD "Pää") renaming to
+/// `"P\u{e4}\u{e4}"` (NFC "Pää") is the NoOp this R4 carve-out keeps: same
+/// bytes once both are NFC, nothing to store. This is the one case R4
+/// explicitly keeps as `NoOp`.
+#[test]
+fn rename_to_the_nfc_form_of_an_nfd_spelling_is_byte_identical_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    const PAA_NFD: &str = "Pa\u{308}a\u{308}";
+    const PAA_NFC: &str = "P\u{e4}\u{e4}";
+    let r = cs(
+        &db,
+        vec![SC::CreateAlternative {
+            name: PAA_NFD.into(),
+            description: None,
+        }],
+    );
+    assert_eq!(r.structural[0].effect, SE::Created);
+    let id = r.structural[0].object_id;
+    // The create itself stored the NFC form (the text rule normalizes at
+    // every entry point, create included).
+    let conn = Connection::open(&db).unwrap();
+    let stored: String = conn
+        .query_row("SELECT name FROM alternative WHERE cur_id = ?", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, PAA_NFC);
+    drop(conn);
+
+    // Renaming the (already-NFC-stored) alternative to the NFD spelling's
+    // NFC form is byte-identical post-NFC: NoOp, no version bump.
+    let r = cs(
+        &db,
+        vec![SC::RenameAlternative {
+            current: PAA_NFD.into(),
+            new_name: PAA_NFD.into(),
+            description: None,
+        }],
+    );
     assert_eq!(r.structural[0].effect, SE::NoOp);
     assert_eq!(r.structural[0].object_id, id);
+    let conn = Connection::open(&db).unwrap();
+    let version: i64 = conn
+        .query_row(
+            "SELECT version FROM alternative WHERE cur_id = ?",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        version, 1,
+        "no version bump: the NoOp carve-out, not a real rename"
+    );
 }
 
 #[test]
@@ -220,6 +312,26 @@ fn create_rename_scenario() {
     assert_eq!(
         q1(&db, "SELECT version FROM scenario WHERE cur_name = 's2'"),
         2
+    );
+
+    // A case-only self-rename (R4) is a real rename for scenarios too —
+    // not just alternatives: `rename_identity` is shared, so the kind
+    // doesn't matter.
+    let r = cs(
+        &db,
+        vec![SC::RenameScenario {
+            current: "s2".into(),
+            new_name: "S2".into(),
+            description: None,
+        }],
+    );
+    assert_eq!(r.structural[0].effect, SE::Renamed);
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT version FROM scenario WHERE cur_name = lower('S2')"
+        ),
+        3
     );
 }
 
@@ -742,6 +854,36 @@ fn prepare_guards() {
     )
     .unwrap_err();
     assert!(format!("{err}").contains("contradictory renames"));
+
+    // Contradictory renames of one object to two DIFFERENT case spellings
+    // of the same folded target (R4 critique K6, structural.rs
+    // `check_rename_coherence`): before the fix, "Foo" and "FOO" folded to
+    // one value, so this looked coherent and the second would silently
+    // overwrite the first (last-wins) instead of being refused. Now that
+    // a case-only rename is itself a real rename, these are genuinely
+    // different target spellings and must be caught here, up front,
+    // exactly like the "b" vs "c" case above.
+    cs(&db, vec![create_alt("k")]);
+    let err = commit_structural(
+        &db,
+        vec![
+            SC::RenameAlternative {
+                current: "k".into(),
+                new_name: "Foo".into(),
+                description: None,
+            },
+            SC::RenameAlternative {
+                current: "K".into(),
+                new_name: "FOO".into(),
+                description: None,
+            },
+        ],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap_err();
+    assert!(format!("{err}").contains("contradictory renames"), "{err}");
 
     // Both object-delete AND structurally reference one object (M2).
     let err = commit_changes(

@@ -232,7 +232,17 @@ fn rename_identity(
             )));
         }
     }
-    let name_same = fold(&row.name) == fold(new_name);
+    // A rename that differs only in case or Unicode form IS a real rename
+    // (editor request R4, `nodal-editor/specs/core_requests_2026-10-27.md`,
+    // owner decision 2026-10-27: the client decides whether case matters,
+    // not the core). `new_name` arrives already NFC (`nfc_structural_names`,
+    // the text rule's API-entry-point normalization) and the stored
+    // `row.name` is NFC too (every writer of this table goes through the
+    // same rule), so a plain byte comparison is exactly "byte-identical
+    // post-NFC" — no Rust-side fold here, matching the owner's ruling that
+    // the fold belongs only in the uniqueness lookup above (self-excluded
+    // by id), never in front of it.
+    let name_same = row.name == new_name;
     let desc_change = description.is_some() && description != row.description.as_deref();
     if name_same && !desc_change {
         return Ok(StructuralEffect::NoOp);
@@ -1265,8 +1275,20 @@ fn check_rename_coherence(
     let mut seen: HashMap<String, String> = HashMap::new();
     for ch in changes {
         if let Some((current, new_name)) = pick(ch) {
+            // The SOURCE key still folds: `current` only has to resolve to the
+            // same object (DB lookup is case-insensitive), so "a" and "A" as
+            // `current` name one rename target. The TARGET must compare by
+            // exact post-NFC bytes, never fold (R4, owner decision
+            // 2026-10-27, name_fold_identity_PLAN §10 K6): now that a
+            // case-only or Unicode-form-only rename is itself a real rename,
+            // `a -> Foo` and `a -> FOO` in one commit are two DIFFERENT
+            // target spellings, not one folded value — folding here would
+            // let the later one silently win (last-wins) instead of being
+            // refused as contradictory. `new_name` arrives already NFC
+            // (`api::nfc_structural_names`, run before `prepare_structural`),
+            // so a plain byte comparison is exactly "post-NFC equality".
             let key = fold(current);
-            let val = fold(new_name);
+            let val = new_name.clone();
             match seen.get(&key) {
                 Some(prev) if *prev != val => {
                     return Err(DbError::Api(format!(

@@ -615,18 +615,36 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // open — the hazard. Unlinking after the rename instead would race a
     // second process's NEW live WAL on the swapped-in file; before the
     // rename, no writer can have the new inode yet.
+    //
+    // The unlink itself runs AFTER the fsyncs, immediately before the rename
+    // (editor request R2, `nodal-editor/specs/core_requests_2026-10-27.md`):
+    // doing it first (the original ordering) opened a crash window where a
+    // kill between the unlink and the rename leaves the OLD file (still the
+    // live one — the rename has not happened yet) without its WAL, losing
+    // whatever commits existed only in that WAL. Moving the unlink to just
+    // before the rename does not reopen the race the comment above rules
+    // out (it is still strictly before the rename, so it can only ever see
+    // the old inode's WAL) and it shrinks the lost-update window to the gap
+    // between the unlink and the very next syscall, rather than spanning two
+    // fsyncs. Renaming the stale WAL aside instead of deleting it would close
+    // that last sliver too, but it is not worth the extra failure mode (a
+    // leftover sidecar to clean up on every future compaction) for a window
+    // this narrow — the content is already durably in the fsynced temp, so
+    // the only thing a kill in this window can do is leave the pre-compaction
+    // original without its WAL, which is exactly the hazard being minimized,
+    // not a new one.
     let stale_wal = {
         let mut w = db_path.as_os_str().to_os_string();
         w.push(".wal");
         PathBuf::from(w)
     };
-    let _ = fs::remove_file(&stale_wal);
 
     // Durability + atomic swap (§3): fsync the temp bytes and its directory
     // entry, rename over the original, fsync the directory again.
     fsync_file(&temp_path)?;
     let dir = parent_dir(db_path);
     fsync_dir(dir);
+    let _ = fs::remove_file(&stale_wal);
     fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
         path: temp_path.display().to_string(),
         source,

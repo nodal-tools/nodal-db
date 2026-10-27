@@ -655,6 +655,80 @@ fn compact_unlinks_stale_wal_sidecar_after_swap() {
     assert_eq!(n, 1);
 }
 
+/// Editor request R2 (`nodal-editor/specs/core_requests_2026-10-27.md`): the
+/// stale-WAL unlink must not run before the temp is durable. The two tests
+/// above already pin that a stale WAL present at compaction time is handled
+/// (removed, content carried, file usable afterwards); this test pins the
+/// same outcome again on a LARGER, non-trivial WAL (closer to what a real
+/// crashed writer leaves than a one-line invalid header), so the fix cannot
+/// regress to "unlink first" without a WAL-handling test failing — the
+/// ordering itself has no externally observable effect on the success path,
+/// only on a crash mid-compaction.
+///
+/// A true crash-window test (kill the process between the unlink and the
+/// rename, then assert the pre-compaction original still has its WAL) is
+/// not added: `compact_locked` has no fault-injection seam (no hook to
+/// interrupt it between two specific syscalls), and the codebase's testing
+/// rules call for deterministic tests, not a timing race against a real
+/// `SIGKILL`. The ordering fix is reasoned instead, in the comment at the
+/// unlink site in `compaction.rs`: moving the unlink to immediately before
+/// the rename (after both fsyncs) cannot reopen the "unlink after rename"
+/// race the existing comment there rules out (it is still strictly before
+/// the rename), and it shrinks the lost-update window from "the two fsyncs'
+/// duration" to "the gap between one unlink syscall and the next rename
+/// syscall".
+#[test]
+fn compact_removes_stale_wal_only_once_the_rebuild_is_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 8);
+    let wal = {
+        let mut w = db.as_os_str().to_os_string();
+        w.push(".wal");
+        std::path::PathBuf::from(w)
+    };
+
+    // A bigger stale WAL than a one-line header: several committed rows,
+    // left by a writer that crashed before checkpointing.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("PRAGMA disable_checkpoint_on_shutdown;")
+        .unwrap();
+    for i in 0..20 {
+        conn.execute(
+            "INSERT INTO \"commit\" (user, message) VALUES ('walpin', ?)",
+            [format!("wal-only commit {i}")],
+        )
+        .unwrap();
+    }
+    conn.close().unwrap();
+    assert!(wal.exists(), "fixture: the WAL must remain after close");
+
+    let report = compact(&db).expect("compact with a sizeable stale wal");
+    assert!(report.swapped);
+    assert!(
+        !wal.exists(),
+        "the stale wal must be unlinked only as part of a completed swap"
+    );
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT count(*) FROM \"commit\" WHERE message LIKE 'wal-only commit%'"
+        ),
+        20,
+        "every WAL-only commit must survive into the compacted, swapped-in file"
+    );
+
+    // The file is immediately usable: a crash-safe swap leaves no residue
+    // that blocks the next writer.
+    write_scalar(&db, "Widget", "size", "Base", "w_after_big_wal", 3.0);
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT count(*) FROM entity WHERE cur_name = 'w_after_big_wal'"
+        ),
+        1
+    );
+}
+
 // --- compact_if_needed byte-growth watermark (R1 CALIBRATION FIX) -----------
 
 #[test]

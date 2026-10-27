@@ -64,6 +64,19 @@ log = logging.getLogger("nodal_spine_import")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def _name_key(name: str) -> str:
+    """The core's name identity of ``name``: its NFC form
+    (``nodal_db.normalize_identifier``) folded by ``nodal_db.fold_name``,
+    the core's own fold (an exact copy of DuckDB's ``lower()``). Never
+    ``str.lower``/``str.casefold``: Python's case tables follow the
+    interpreter's Unicode version and apply the final-sigma rule, so they
+    disagree with the core on rare letters (``tests/test_name_fold_ban.py``
+    keeps them out of this package)."""
+    import nodal_db
+
+    return nodal_db.fold_name(nodal_db.normalize_identifier(name))
+
+
 #: The whitespace the Rust writer's ``str::trim`` removes (Unicode
 #: White_Space). Python's ``str.strip()`` differs: it also strips
 #: U+001C..U+001F, which Rust keeps, so the set is spelled out.
@@ -284,7 +297,7 @@ def _trim_names(sections: dict, report) -> dict:
                     f"{kind} name {original!r}{where} is empty once its "
                     "whitespace is trimmed — refusing to import an empty name"
                 )
-            groups.setdefault((scope, trimmed.lower()), []).append(original)
+            groups.setdefault((scope, _name_key(trimmed)), []).append(original)
             if trimmed != original:
                 t = TrimmedName(kind, scope, original, trimmed)
                 report.trimmed_names.append(t)
@@ -659,10 +672,10 @@ class SpineImporter:
             def check_fold(kind, names):
                 seen: dict[str, str] = {}
                 for n in names:
-                    key = nodal_db.normalize_identifier(n).lower()
+                    key = _name_key(n)
                     if key in seen and seen[key] != n:
                         first = seen[key]
-                        if first.lower() == n.lower():
+                        if nodal_db.fold_name(first) == nodal_db.fold_name(n):
                             raise ImportError_(
                                 f"case-colliding {kind} names {first!r} / "
                                 f"{n!r}: nodal-db resolution is case-insensitive; "
@@ -954,8 +967,8 @@ class SpineImporter:
             waves: list[list] = []
             wave_targets: list[set] = []
             for seg in segments:
-                target = (seg["class"].lower(), seg["parameter"].lower(),
-                          seg["alternative"].lower())
+                target = (_name_key(seg["class"]), _name_key(seg["parameter"]),
+                          _name_key(seg["alternative"]))
                 placed = False
                 for wave, targets in zip(waves, wave_targets):
                     if target not in targets and len(wave) < 300:
@@ -1003,7 +1016,7 @@ class SpineImporter:
         signature has a declared row of the same rank whose type family
         matches (str->string, float->float, *_map/array -> indexed)."""
         def norm(t, r):
-            t = (t or "").lower()
+            t = (t or "").lower()  # not a name: a Spine type tag
             if t in ("str", "string"):
                 return ("string", 0)
             if t in ("float", "int"):

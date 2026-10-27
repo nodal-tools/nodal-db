@@ -341,10 +341,8 @@ pub struct TypeDecl {
 impl TypeDecl {
     /// The (value_kind tag, folded (name, kind) vector) the write path matches
     /// and distinguishes on (`api.rs` `MatchKey`, VMP Part 7 as amended).
-    /// Folding is the crate-wide Unicode [`fold`] (DuckDB `lower()` parity);
-    /// the write path's own matcher folds ASCII-only, so this load-time check
-    /// is equal-or-STRICTER — a set it refuses would only ever differ on
-    /// non-ASCII case aliases the SQL layer would collapse anyway.
+    /// Folding is the crate-wide name [`fold`] (engine rule 8), the same
+    /// fold the write path's matcher applies, so the two agree exactly.
     pub fn match_key(&self) -> (String, Vec<(String, String)>) {
         (
             self.kind.clone(),
@@ -1462,7 +1460,7 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                                                 d.kind
                                             ));
                                         }
-                                        if !dn.insert(d.name.to_ascii_lowercase()) {
+                                        if !dn.insert(fold(&d.name)) {
                                             errs.push(format!(
                                                 "{tloc}: duplicate dimension name {:?}",
                                                 d.name

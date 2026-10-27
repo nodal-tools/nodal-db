@@ -5,6 +5,10 @@
 //! form. (The plan-shape guard lives in `array_id_index_scan.rs`; replace /
 //! delete id stability in `api_write_parameter.rs` / `api_delete_values.rs`.)
 
+// Tests may use raw case mappings (as data or to build fixtures); the
+// workspace clippy.toml ban on them is for name compares in the crates.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::Path;
 use std::sync::Arc;
 

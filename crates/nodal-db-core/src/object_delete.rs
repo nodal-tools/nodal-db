@@ -32,6 +32,7 @@ use std::collections::HashSet;
 use duckdb::{params, Connection};
 
 use crate::error::DbError;
+use crate::types::fold;
 use crate::types::{
     Blocker, CascadeCounts, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteOutcome,
     ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, TableCount,
@@ -789,14 +790,14 @@ pub(crate) fn prepare_object_deletes(
 }
 
 fn class_fold(class: &Option<String>) -> Option<String> {
-    class.as_ref().map(|c| c.to_lowercase())
+    class.as_deref().map(fold)
 }
 
 fn target_fold(target: &ObjectRef) -> String {
     match target {
-        ObjectRef::Name(n) => format!("name:{}", n.to_lowercase()),
+        ObjectRef::Name(n) => format!("name:{}", fold(n)),
         ObjectRef::Elements(es) => {
-            let parts: Vec<String> = es.iter().map(|e| e.to_lowercase()).collect();
+            let parts: Vec<String> = es.iter().map(|e| fold(e)).collect();
             format!("elems:{}", parts.join("\u{1f}"))
         }
     }

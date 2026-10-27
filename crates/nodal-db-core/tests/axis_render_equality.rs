@@ -31,6 +31,10 @@
 //! `0x40dda52635cbf3d8` through `axis_position`, `value_rows` and
 //! `read_parameter` (as dimension 1 and as dimension 2).
 
+// Tests may use raw case mappings (as data or to build fixtures); the
+// workspace clippy.toml ban on them is for name compares in the crates.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

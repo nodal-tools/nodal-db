@@ -137,9 +137,11 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     for (raw, meta) in raws.iter().zip(&metas) {
         let alternative = effective_alternative(raw.ordinal, meta, args)?;
         assert_flags(raw.ordinal, meta, args)?;
-        // Folded from the NFC names the core stores (the text rule).
-        let fold = |s: &str| nodal_db_core::text::nfc(s).to_lowercase();
-        if !targets.insert((fold(&meta.class), fold(&meta.parameter), fold(&alternative))) {
+        if !targets.insert((
+            fold_name(&meta.class),
+            fold_name(&meta.parameter),
+            fold_name(&alternative),
+        )) {
             bail!(
                 "E7: duplicate target {}:{} (alternative {:?}) across segments \
                  (comparison is case-insensitive)",
@@ -561,11 +563,9 @@ fn parse_version(s: &str) -> Result<(u32, u32)> {
 fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<String> {
     match (&meta.alternative, &args.alternative) {
         (Some(m), Some(f)) => {
-            // Unicode fold, matching DuckDB lower() — alternative names have no
-            // ASCII charset CHECK (critique F3) — of the NFC names the core
+            // The core's name fold (engine rule 8) of the NFC names the core
             // stores (the text rule, `nodal_db_core::text`).
-            let fold = |s: &str| nodal_db_core::text::nfc(s).to_lowercase();
-            if fold(m) != fold(f) {
+            if fold_name(m) != fold_name(f) {
                 bail!(
                     "E4: segment {ordinal} ({}:{}): spinal:alternative {m:?} conflicts with \
                      --alternative {f:?} (neither takes precedence: they must match, case-insensitively)",
@@ -586,11 +586,19 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
     }
 }
 
+/// The core's name identity of a user-typed name: `types::fold` of its NFC
+/// form, exactly how the core resolves it (engine rules 8 and 10). Every name
+/// compare in the importer goes through this.
+fn fold_name(s: &str) -> String {
+    nodal_db_core::types::fold(&nodal_db_core::text::nfc(s))
+}
+
 /// `--class` / `--parameter` are assertions, not selectors (OPEN-Q3-6b): a
-/// non-matching segment is an error, never skipped.
+/// non-matching segment is an error, never skipped. Compared by the core's
+/// name identity (`fold_name`): the names are Unicode.
 fn assert_flags(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<()> {
     if let Some(c) = &args.class {
-        if !c.eq_ignore_ascii_case(&meta.class) {
+        if fold_name(c) != fold_name(&meta.class) {
             bail!(
                 "E4: segment {ordinal} targets class {:?} but --class {c:?} was asserted",
                 meta.class
@@ -598,7 +606,7 @@ fn assert_flags(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<()>
         }
     }
     if let Some(p) = &args.parameter {
-        if !p.eq_ignore_ascii_case(&meta.parameter) {
+        if fold_name(p) != fold_name(&meta.parameter) {
             bail!(
                 "E4: segment {ordinal} targets parameter {:?} but --parameter {p:?} was asserted",
                 meta.parameter
@@ -654,6 +662,9 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
 /// §5.1.1: a column literally named `entity`/`value` (case-insensitively) at a
 /// position other than its slot is E6 (the SHOULD-names are tripwires whenever
 /// present); both names absent entirely draws a warning.
+// The case-insensitive matches here are on the reserved Arrow column names
+// `entity`/`value` (an ASCII vocabulary), not on user names.
+#[allow(clippy::disallowed_methods)]
 fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
     let ncols = schema.fields().len();
     let mut saw_entity = false;
@@ -1041,7 +1052,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         }
         let ent = entity.value(row).to_string();
         // §6.4: each entity at most one row per segment (folded like the core).
-        if !seen_entities.insert(ent.to_ascii_lowercase()) {
+        if !seen_entities.insert(fold_name(&ent)) {
             bail!("E6: {tag}: entity {ent:?} appears in more than one dense row");
         }
 

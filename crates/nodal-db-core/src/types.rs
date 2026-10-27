@@ -154,6 +154,7 @@ pub enum ScalarValue {
 /// (`İ`, case pairs DuckDB's tables lack) and on the final-sigma rule.
 /// `tests/duckdb_lower_guard.rs` pins the difference; closing it is plan T11
 /// (`specs/unicode_text_rule_PLAN.md`). Public for that guard.
+#[allow(clippy::disallowed_methods)] // the one sanctioned case mapping
 pub fn fold(s: &str) -> String {
     s.to_lowercase()
 }

@@ -591,3 +591,34 @@ fn default_absent_vs_null_are_distinct_states() {
         template_content_hash(&absent)
     );
 }
+
+/// Dimension names are names: compared by `types::fold` (engine rule 8),
+/// not an ASCII fold. `Ä_t`/`ä_t` in one type are one dimension name
+/// (duplicate), and two members differing only in that case are
+/// indistinguishable. Both passed under the former ASCII-only compare.
+#[test]
+fn dimension_names_fold_like_every_other_name() {
+    expect_err(
+        "template: {name: t, version: \"1\"}
+classes:
+  - name: c
+    parameters:
+      - name: p
+        types:
+          - {kind: indexed, dims: [{name: Ä_t, kind: datetime}, {name: ä_t, kind: integer}]}
+",
+        "duplicate dimension name",
+    );
+    expect_err(
+        "template: {name: t, version: \"1\"}
+classes:
+  - name: c
+    parameters:
+      - name: p
+        types:
+          - {kind: indexed, dims: [{name: Ä_t, kind: datetime}]}
+          - {kind: indexed, dims: [{name: ä_t, kind: datetime}]}
+",
+        "indistinguishable",
+    );
+}

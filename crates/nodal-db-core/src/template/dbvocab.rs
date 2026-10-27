@@ -32,7 +32,7 @@ impl DbTypeMember {
             self.value_kind.clone(),
             self.dims
                 .iter()
-                .map(|(n, k)| (n.to_ascii_lowercase(), k.clone()))
+                .map(|(n, k)| (fold(n), k.clone()))
                 .collect(),
         )
     }

@@ -1207,6 +1207,19 @@ fn normalize_identifier(s: &str) -> String {
     nodal_db_core::text::nfc(s).into_owned()
 }
 
+/// The core's name fold: how nodal-db decides that two names are the same
+/// name (`nodal_db_core::types::fold`, an exact copy of DuckDB's `lower()`,
+/// Unicode 15.1 simple lowercase, proven equal on every code point). Name
+/// identity is `fold_name(normalize_identifier(s))`: names are compared in
+/// NFC, so normalize first when the input may not be NFC. Use it, never
+/// `str.lower`/`str.casefold` (their tables follow the interpreter's
+/// Unicode version and apply the final-sigma rule), wherever a client must
+/// predict whether two names collide.
+#[pyfunction]
+fn fold_name(s: &str) -> String {
+    nodal_db_core::types::fold(s)
+}
+
 /// The thin Python skin over nodal-db-core. See the crate docs at the top of
 /// `lib.rs` for the connection-discipline and GIL/reentrancy contracts.
 #[pymodule]
@@ -1216,6 +1229,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(init, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_identifier, m)?)?;
+    m.add_function(wrap_pyfunction!(fold_name, m)?)?;
     m.add(
         "UNICODE_VERSION",
         format!(

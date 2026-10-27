@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::conn::with_read_plain;
 use crate::error::DbError;
-use crate::types::ScalarValue;
+use crate::types::{fold, ScalarValue};
 
 use super::dbvocab::{read_vocab, DbVocab};
 use super::ir::{
@@ -30,10 +30,6 @@ use super::ir::{
     ListMember, Lit, Parameter, ParameterGroup, Seed, SeedEntity, SeedMembership, Template,
     TypeDecl, Unit, ValueList,
 };
-
-fn fold(s: &str) -> String {
-    s.to_lowercase()
-}
 
 fn lit_of(v: &ScalarValue) -> Option<(Lit, &'static str)> {
     match v {

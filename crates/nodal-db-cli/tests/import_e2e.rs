@@ -2046,3 +2046,83 @@ fn dense_form_float_values_are_stored_canonical() {
         pattern_expected()
     );
 }
+
+// --- name identity: every compare is the core's fold (engine rule 8) -------
+
+/// `--class`/`--parameter` are compared by the core's name identity, not an
+/// ASCII fold: names are Unicode, so `--class ä_NODE` asserts the segment's
+/// `Ä_node` (they are one class to the core). This was refused before the
+/// one-fold change (an ASCII-only compare).
+#[test]
+fn unicode_case_variant_class_and_parameter_assertions_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let file = write_file(
+        dir.path(),
+        "assert_unicode.arrows",
+        &long_segment("Ä_node", "Ö_profile", 1, &[("n1", 0, 1.0)]),
+    );
+    let out = import(
+        &db,
+        &file,
+        &[
+            "--alternative",
+            "Base",
+            "--user",
+            "tester",
+            "--class",
+            "ä_NODE",
+            "--parameter",
+            "ö_PROFILE",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The dense form's one-row-per-entity check folds like the core: `Äx` and
+/// `äx` are one entity, so two dense rows for them are E6 (before the
+/// one-fold change the ASCII fold let them through to a core error).
+#[test]
+fn unicode_case_aliased_dense_entities_are_e6() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let mut steps = ListBuilder::new(Int64Builder::new());
+    let mut vals = ListBuilder::new(Float64Builder::new());
+    for _ in 0..2 {
+        steps.values().append_slice(&[0, 1]);
+        steps.append(true);
+        vals.values().append_slice(&[1.0, 2.0]);
+        vals.append(true);
+    }
+    let steps = Arc::new(steps.finish()) as ArrayRef;
+    let vals = Arc::new(vals.finish()) as ArrayRef;
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("step", steps.data_type().clone(), false),
+            Field::new("value", vals.data_type().clone(), false),
+        ],
+        segment_metadata("node", "price", "dense", 1),
+    ));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["Äx", "äx"])) as ArrayRef,
+            steps,
+            vals,
+        ],
+    )
+    .unwrap();
+    let file = write_file(dir.path(), "dense_alias.arrows", &stream(schema, &[batch]));
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("appears in more than one dense row"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

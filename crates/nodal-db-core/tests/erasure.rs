@@ -12,6 +12,10 @@
 //! engine-upgrade tripwire the plan mandates (weakest-point (c)) — the guard's
 //! soundness rests on optimizer behavior, so this sweep must never be removed.
 
+// Tests may use raw case mappings (as data or to build fixtures); the
+// workspace clippy.toml ban on them is for name compares in the crates.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

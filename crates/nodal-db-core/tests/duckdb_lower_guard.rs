@@ -21,6 +21,10 @@
 //! `lower(name)` indexes persist keys computed by the engine that built
 //! them).
 
+// Tests may use raw case mappings (as data or to build fixtures); the
+// workspace clippy.toml ban on them is for name compares in the crates.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeMap;
 
 use nodal_db_core::duckdb::Connection;

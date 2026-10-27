@@ -20,6 +20,10 @@
 //! call with a covered write whose covering deletes all fail to take effect
 //! is refused and changes nothing.
 
+// Tests may use raw case mappings (as data or to build fixtures); the
+// workspace clippy.toml ban on them is for name compares in the crates.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

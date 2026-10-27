@@ -1574,8 +1574,9 @@ fn array_id_is_stable_across_replace_and_copied_into_hist() {
 }
 
 /// Non-ASCII case-aliases (critique C2 of set_based_scalar_write_PLAN): the
-/// up-front dedup folds ASCII only, so `"Ä"` and `"ä"` reach the resolver,
-/// which folds by DuckDB's Unicode `lower()`. Two spellings of one entity
+/// up-front dedup folds by `types::fold` (the Rust copy of DuckDB's
+/// `lower()`; it folded ASCII only before, leaving `"Ä"`/`"ä"` to the
+/// resolver, which repeats the check). Two spellings of one entity
 /// are the same ambiguity as `"N1"`/`"n1"` and raise the same Api error,
 /// whether the entity is missing or already exists. Nothing is written.
 #[test]
@@ -1769,4 +1770,33 @@ fn entity_ids_after_a_failed_commit_are_contiguous() {
         count(&db, "SELECT max(id) FROM entity WHERE cur_name = 'c'"),
         3
     );
+}
+
+/// Dimension names match the declared member by the name fold
+/// (`types::fold`, engine rule 8), not an ASCII fold: a batch column `Ä_STEP`
+/// instantiates a member declared with `ä_step` (refused as "no member"
+/// under the former ASCII-only compare).
+#[test]
+fn non_ascii_dimension_name_matches_its_declared_member_case_insensitively() {
+    let (_dir, db) = fresh_db();
+    declare_definition(
+        &db,
+        "node",
+        "usage",
+        &[("indexed", &[("ä_step", "integer")])],
+    );
+    write_parameter(
+        &db,
+        "node",
+        "usage",
+        "Base",
+        indexed_float_batch("n1", "Ä_STEP", &[0, 1], &[1.0, 2.0]),
+        &[],
+        WriteOptions::default(),
+        "t",
+        "m",
+    )
+    .expect("Ä_STEP instantiates the ä_step member");
+    let got = read_parameter(&db, "node", "usage", "Base").expect("read");
+    assert_eq!(got.num_rows(), 2);
 }

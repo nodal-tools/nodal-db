@@ -523,6 +523,9 @@ pub fn build_ddl_hash() -> String {
     ddl_hash_of(&surface_files())
 }
 
+// The case mappings here act on SQL keywords and the DDL's own object words
+// (an ASCII vocabulary), never on user names: the name fold does not apply.
+#[allow(clippy::disallowed_methods)]
 fn parse_surface(files: Vec<(&'static str, &'static str)>) -> Surface {
     let mut objects: Vec<SurfaceObject> = Vec::new();
     let mut other = Vec::new();

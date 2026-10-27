@@ -1,0 +1,15 @@
+# Name identity is one function (docs/dev/engine_rules.md §8): every name
+# compare in the workspace goes through `nodal_db_core::types::fold`, the
+# verified copy of DuckDB's `lower()`. A raw case mapping is how a second,
+# drifting fold creeps back in, so they are banned; a genuine non-name use
+# (SQL keywords, value-kind tags, reserved column names) carries a commented
+# `#[allow(clippy::disallowed_methods)]`.
+disallowed-methods = [
+    { path = "str::to_lowercase", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+    { path = "str::to_uppercase", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+    { path = "str::to_ascii_lowercase", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+    { path = "str::to_ascii_uppercase", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+    { path = "str::eq_ignore_ascii_case", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+    { path = "char::to_lowercase", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+    { path = "char::to_uppercase", reason = "compare names with nodal_db_core::types::fold (engine_rules.md §8)" },
+]

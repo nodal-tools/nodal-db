@@ -1081,6 +1081,17 @@ def test_normalize_identifier_is_the_cores_unicode_16_nfc():
     assert nodal_db.normalize_identifier("\U00011382\U000113c9") == "\U00011383"
 
 
+def test_fold_name_is_the_cores_name_fold():
+    """fold_name is the core's name identity fold (engine rule 8): with
+    normalize_identifier it predicts exactly which names the store treats
+    as one."""
+    assert nodal_db.fold_name("Node_ÄÖ") == "node_äö"
+    assert nodal_db.fold_name("node_1") == "node_1"
+    # The fold does not normalize: identity is fold_name(normalize_identifier(s)).
+    assert nodal_db.fold_name("E\u0301") != E_NFC
+    assert nodal_db.fold_name(nodal_db.normalize_identifier("E\u0301")) == E_NFC
+
+
 def test_nfd_names_and_labels_read_back_in_nfc(db):
     batch = pa.record_batch({
         "entity": pa.array([f"n{E_NFD}", f"n{E_NFD}"], pa.string()),

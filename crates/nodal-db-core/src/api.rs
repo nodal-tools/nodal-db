@@ -57,6 +57,7 @@ use crate::object_delete::{
 };
 use crate::structural::{apply_structural, prepare_structural};
 use crate::text::{nfc, Normalized};
+use crate::types::fold;
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
     ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, ShapedData, StructuralChange,
@@ -303,16 +304,12 @@ pub fn commit_changes(
     // Unicode, and alternative names carry no ASCII charset CHECK, so the fold
     // must be Unicode too — an ASCII fold lets Ä/ä-aliased targets resolve to
     // one row and die as a raw CHECK error mid-transaction (critique F3).
-    // Rust's `to_lowercase` still differs from DuckDB's `lower()` on a few
-    // letters (final sigma, dotted capital I), so `write_prepared` repeats
-    // the check on the resolved ids; this one fails early with no DB work.
+    // `types::fold` is the Rust copy of DuckDB's `lower()` (engine rule 8);
+    // `write_prepared` still repeats the check on the resolved ids as the
+    // second line; this one fails early with no DB work.
     let mut seen: HashMap<(String, String, String), ()> = HashMap::new();
     for s in &segments {
-        let key = (
-            s.class.to_lowercase(),
-            s.parameter.to_lowercase(),
-            s.alternative.to_lowercase(),
-        );
+        let key = (fold(&s.class), fold(&s.parameter), fold(&s.alternative));
         if seen.insert(key, ()).is_some() {
             return Err(DbError::Api(format!(
                 "duplicate target {}:{} (alternative {:?}) across segments \
@@ -764,21 +761,17 @@ fn reject_write_and_delete(
     }
     let mut written: HashSet<(String, String, String, String)> = HashSet::new();
     for p in prepared {
-        let (c, pa, a) = (
-            p.class.to_lowercase(),
-            p.parameter.to_lowercase(),
-            p.alternative.to_lowercase(),
-        );
+        let (c, pa, a) = (fold(&p.class), fold(&p.parameter), fold(&p.alternative));
         for n in &p.names {
-            written.insert((c.clone(), pa.clone(), a.clone(), n.to_lowercase()));
+            written.insert((c.clone(), pa.clone(), a.clone(), fold(n)));
         }
     }
     for (i, k) in deletes {
         let fold = (
-            k.class.to_lowercase(),
-            k.parameter.to_lowercase(),
-            k.alternative.to_lowercase(),
-            k.entity.to_lowercase(),
+            fold(&k.class),
+            fold(&k.parameter),
+            fold(&k.alternative),
+            fold(&k.entity),
         );
         if written.contains(&fold) {
             return Err(same_key_error(*i, k, None));
@@ -812,21 +805,21 @@ fn reject_write_and_object_delete(
     let mut params: HashSet<(String, String)> = HashSet::new();
     let mut entities: HashSet<(String, String)> = HashSet::new();
     for p in prepared {
-        let c = p.class.to_lowercase();
-        alts.insert(p.alternative.to_lowercase());
-        params.insert((c.clone(), p.parameter.to_lowercase()));
+        let c = fold(&p.class);
+        alts.insert(fold(&p.alternative));
+        params.insert((c.clone(), fold(&p.parameter)));
         for n in &p.names {
-            entities.insert((c.clone(), n.to_lowercase()));
+            entities.insert((c.clone(), fold(n)));
         }
         classes.insert(c);
     }
     for od in object_deletes {
         let name = match &od.key.target {
-            ObjectRef::Name(n) => n.to_lowercase(),
+            ObjectRef::Name(n) => fold(n),
             // An element tuple resolves only in the DB (the commit-time check).
             ObjectRef::Elements(_) => continue,
         };
-        let class = od.key.class.as_deref().map(str::to_lowercase);
+        let class = od.key.class.as_deref().map(fold);
         let covered = match (od.key.kind, class) {
             (ObjectKind::Alternative, _) => alts.contains(&name),
             (ObjectKind::Class, _) => classes.contains(&name),
@@ -1398,10 +1391,10 @@ fn prepare_deletes(keys: &[DeleteKey]) -> Result<Vec<(usize, DeleteKey)>, DbErro
             }
         }
         let fold = (
-            k.class.to_lowercase(),
-            k.parameter.to_lowercase(),
-            k.alternative.to_lowercase(),
-            k.entity.to_lowercase(),
+            fold(&k.class),
+            fold(&k.parameter),
+            fold(&k.alternative),
+            fold(&k.entity),
         );
         match seen.get(&fold) {
             Some(&j) => {
@@ -1943,13 +1936,12 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
         if name.trim().is_empty() {
             return Err(DbError::Api(format!("empty entity name in row {row}")));
         }
-        // Dedup by an ASCII case fold so case-aliases cannot double-write one
-        // entity. Aliased spellings are ambiguous, not mergeable (critique
-        // F3). Entity names are free text, and DB resolution folds by
-        // DuckDB's Unicode `lower()`: a non-ASCII alias (`"Ä"`/`"ä"`) passes
-        // here and is rejected with the same error by `resolve_entities`,
-        // which groups by the fold DuckDB returns.
-        let idx = *slot.entry(name.to_ascii_lowercase()).or_insert_with(|| {
+        // Dedup by the name fold (`types::fold`, the Rust copy of DuckDB's
+        // `lower()`) so case-aliases cannot double-write one entity. Aliased
+        // spellings are ambiguous, not mergeable (critique F3).
+        // `resolve_entities`, which groups by the fold DuckDB returns, repeats
+        // the check as the second line.
+        let idx = *slot.entry(fold(&name)).or_insert_with(|| {
             names.push(name.clone());
             rows.push(Vec::new());
             names.len() - 1
@@ -3179,7 +3171,7 @@ fn member_key(m: &DbDeclared) -> MatchKey {
         m.dim_names
             .iter()
             .zip(&m.shape.positions)
-            .map(|(n, (_, k))| (n.to_ascii_lowercase(), *k))
+            .map(|(n, (_, k))| (fold(n), *k))
             .collect(),
     )
 }
@@ -3192,10 +3184,7 @@ fn batch_key(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> MatchKe
     };
     (
         tag.to_string(),
-        inferred
-            .iter()
-            .map(|(n, k)| (n.to_ascii_lowercase(), *k))
-            .collect(),
+        inferred.iter().map(|(n, k)| (fold(n), *k)).collect(),
     )
 }
 
@@ -3248,8 +3237,11 @@ fn validate_declared(
         "indexed",
     ];
     let damaged = set.iter().any(|m| {
-        (m.value_kind != bkey.0 && m.value_kind.eq_ignore_ascii_case(&bkey.0))
-            || !KNOWN_TAGS.contains(&m.value_kind.as_str())
+        // `value_kind` tags are not names (an ASCII vocabulary), so the
+        // name fold does not apply.
+        #[allow(clippy::disallowed_methods)]
+        let case_only = m.value_kind != bkey.0 && m.value_kind.eq_ignore_ascii_case(&bkey.0);
+        case_only || !KNOWN_TAGS.contains(&m.value_kind.as_str())
     });
     let hint = if damaged {
         " (note: a declared value_kind tag differs from the batch's only by case, or is \

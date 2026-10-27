@@ -13,6 +13,10 @@
 //!   4d  DOUBLE[] LIST value round-trips (through duckdb::arrow — risk R2)
 //!   4e  TransactionException conflict on concurrent update
 
+// Tests may use raw case mappings (as data or to build fixtures); the
+// workspace clippy.toml ban on them is for name compares in the crates.
+#![allow(clippy::disallowed_methods)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

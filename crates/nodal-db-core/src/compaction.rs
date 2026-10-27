@@ -51,7 +51,13 @@
 //! A crash before the rename leaves the intact original + an orphan
 //! `*.compact.*.tmp` (swept on the next [`compact`]); a crash during/after the
 //! rename leaves the complete new file (the temp is fsync'd, and the directory
-//! entry, before the rename flips it). POSIX `rename` over an existing path is
+//! entry, before the rename flips it). One residual exception: when a crashed
+//! writer left a stale `<db>.wal`, it is unlinked immediately before the
+//! rename (see the stale-WAL comment in `compact_locked`), so a kill in the
+//! gap between that unlink and the rename (or a power loss before the final
+//! directory fsync makes the rename durable) leaves the original WITHOUT that
+//! WAL's commits; they survive only in the orphan temp, which the next
+//! compaction sweeps. POSIX `rename` over an existing path is
 //! atomic — a reader sees the old inode or the new one, never a splice.
 //!
 //! **Windows single-writer assumption (§3):** `rename`-over-an-open-file fails

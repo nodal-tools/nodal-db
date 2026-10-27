@@ -660,10 +660,10 @@ fn compact_unlinks_stale_wal_sidecar_after_swap() {
 /// above already pin that a stale WAL present at compaction time is handled
 /// (removed, content carried, file usable afterwards); this test pins the
 /// same outcome again on a LARGER, non-trivial WAL (closer to what a real
-/// crashed writer leaves than a one-line invalid header), so the fix cannot
-/// regress to "unlink first" without a WAL-handling test failing — the
-/// ordering itself has no externally observable effect on the success path,
-/// only on a crash mid-compaction.
+/// crashed writer leaves than a one-line invalid header). It does NOT pin
+/// the ordering: the ordering has no externally observable effect on the
+/// success path, only on a crash mid-compaction, so this test would also
+/// pass with the unlink moved back before the fsyncs.
 ///
 /// A true crash-window test (kill the process between the unlink and the
 /// rename, then assert the pre-compaction original still has its WAL) is

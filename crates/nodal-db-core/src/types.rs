@@ -102,9 +102,11 @@ pub struct WriteOptions {
 /// call covers (see [`WriteOptions::covered_writes`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoveredWrites {
-    /// Refuse the call as [`crate::error::DbError::Api`] before anything is
-    /// written, whatever the content, the tier or the object delete's
-    /// `cascade` option (the default).
+    /// Refuse the call before anything is written, whatever the content,
+    /// the tier or the object delete's `cascade` option (the default):
+    /// [`crate::error::DbError::WriteAndDeleteSameKey`] for a value delete
+    /// of a written key (D9), [`crate::error::DbError::CoveredWrite`] for an
+    /// object delete covering a write (D10).
     #[default]
     Refuse,
     /// The delete wins: every covered write is dropped before anything runs

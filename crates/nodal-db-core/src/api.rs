@@ -210,10 +210,11 @@ pub struct DeleteKey {
 /// `commit_id == 0`, the head (the polling cookie) does not move and the
 /// commit message is not recorded. Its `seq_commit` value stays consumed
 /// (commit ids may skip, as after a conflict retry). A value delete of a
-/// key the same call writes is refused up front as [`DbError::Api`],
-/// whatever the content (D9), and so is a value write that an object delete
-/// in the same call covers — its entity (or a container of it), parameter
-/// definition, alternative or class — whatever the content, the tier or
+/// key the same call writes is refused up front as
+/// [`DbError::WriteAndDeleteSameKey`], whatever the content (D9), and so is
+/// a value write that an object delete in the same call covers — its
+/// entity (or a container of it), parameter definition, alternative or
+/// class — as [`DbError::CoveredWrite`], whatever the content, the tier or
 /// the delete's `cascade` option (D10).
 ///
 /// **Covered writes under `DeleteWins`.** With
@@ -1458,8 +1459,9 @@ enum DeleteResolution {
 /// overrode it, as in the write path (`write_prepared`).
 ///
 /// A key that resolves to a value this call also writes (`written`, the
-/// resolved write keys) is rejected as [`DbError::Api`] before anything is
-/// closed (D9; the resolved-id repeat of `reject_write_and_delete`).
+/// resolved write keys) is rejected as [`DbError::WriteAndDeleteSameKey`]
+/// before anything is closed (D9; the resolved-id repeat of
+/// `reject_write_and_delete`).
 /// Returns the number of keys that closed at least one row.
 fn apply_deletes(
     conn: &Connection,

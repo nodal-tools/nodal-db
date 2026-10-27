@@ -557,7 +557,8 @@ fn rows_written_earlier_in_a_commit_are_visible_to_its_later_statements() {
     )
     .expect_err("a write under an alternative the call deletes is refused");
     assert!(
-        matches!(&err, DbError::Api(m) if m.contains("its object deleted in one call")),
+        matches!(&err, DbError::CoveredWrite(_))
+            && err.to_string().contains("its object deleted in one call"),
         "{err:?}"
     );
 }
@@ -1455,9 +1456,16 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
             WriteOptions::default(),
         )
         .expect_err("a write and a delete of one key in one commit");
+        let DbError::WriteAndDeleteSameKey(details) = &err else {
+            panic!("{parameter}: expected DbError::WriteAndDeleteSameKey, got {err:?}")
+        };
         assert!(
-            matches!(&err, DbError::Api(m) if m.contains("written and deleted in one call")),
-            "{parameter}: {err:?}"
+            err.to_string().contains("written and deleted in one call"),
+            "{parameter}: {err}"
+        );
+        assert!(
+            details.resolved.is_none(),
+            "{parameter}: the up-front name check carries no resolved ids: {err}"
         );
         assert_eq!(table_counts(&db), before, "{parameter}");
         assert_eq!(head_commit(&db).unwrap(), head, "{parameter}: no commit");
@@ -1499,9 +1507,16 @@ fn a_write_and_delete_resolving_to_one_key_are_refused() {
             WriteOptions::default(),
         )
         .expect_err("a write and a delete resolving to one key");
+        let DbError::WriteAndDeleteSameKey(details) = &err else {
+            panic!("{v}: expected DbError::WriteAndDeleteSameKey, got {err:?}")
+        };
         assert!(
-            matches!(&err, DbError::Api(m) if m.contains("written and deleted in one call")),
-            "{v}: {err:?}"
+            err.to_string().contains("written and deleted in one call"),
+            "{v}: {err}"
+        );
+        assert!(
+            details.resolved.is_some(),
+            "{v}: the resolved-id check must have found it: {err}"
         );
         assert_eq!(table_counts(&db), before, "{v}");
         assert_eq!(head_commit(&db).unwrap(), head, "{v}: no commit");

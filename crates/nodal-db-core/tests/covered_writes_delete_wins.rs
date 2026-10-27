@@ -385,8 +385,15 @@ fn assert_refused_by_default(
         WriteOptions::default(),
     )
     .expect_err("the default policy refuses a covered write");
+    // D9 (value delete) and D10 (object delete) each have their own typed
+    // variant (editor request R3,
+    // `nodal-editor/specs/core_requests_2026-10-27.md`); this helper covers
+    // both refusal shapes, so it matches either.
     assert!(
-        matches!(&err, DbError::Api(m) if m.contains("in one call")),
+        matches!(
+            &err,
+            DbError::WriteAndDeleteSameKey(_) | DbError::CoveredWrite(_)
+        ) && err.to_string().contains("in one call"),
         "{err:?}"
     );
     assert_eq!(dump(db), before, "a refused call writes nothing");

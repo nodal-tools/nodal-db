@@ -27,8 +27,8 @@ use nodal_db_core::types::{
 };
 
 use crate::{
-    ApiError, ArrowError, Busy, CanonError, Conflict, DatabaseError, InternalError,
-    ReadSurfaceStale, SchemaError, SchemaMismatch, Stale, VersionTooOld,
+    ApiError, ArrowError, Busy, CanonError, Conflict, CoveredWrite, DatabaseError, InternalError,
+    ReadSurfaceStale, SchemaError, SchemaMismatch, Stale, VersionTooOld, WriteAndDeleteSameKey,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -40,6 +40,18 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::Conflict { .. } => Conflict::new_err(msg),
         DbError::Api(_) => ApiError::new_err(msg),
         DbError::Stale { expected, found } => stale_err(msg, expected, found),
+        DbError::CoveredWrite(d) => {
+            covered_write_err(msg, d.key_index, d.kind, d.target, d.class, d.resolved)
+        }
+        DbError::WriteAndDeleteSameKey(d) => write_and_delete_same_key_err(
+            msg,
+            d.key_index,
+            d.class,
+            d.parameter,
+            d.alternative,
+            d.entity,
+            d.resolved,
+        ),
         DbError::SchemaMismatch {
             found, expected, ..
         } => schema_mismatch_err(msg, found, expected),
@@ -65,6 +77,57 @@ fn stale_err(msg: String, expected: i64, found: i64) -> PyErr {
         // Best-effort: the message carries both ids in any case.
         let _ = v.setattr("expected", expected);
         let _ = v.setattr("found", found);
+    });
+    err
+}
+
+/// A `CoveredWrite` (D10) exception carrying the covering object-delete key
+/// and the covered write's resolved ids (when known) as attributes.
+fn covered_write_err(
+    msg: String,
+    key_index: usize,
+    kind: ObjectKind,
+    target: String,
+    class: Option<String>,
+    resolved: Option<(i64, i64, i64)>,
+) -> PyErr {
+    let err = CoveredWrite::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message carries the same information in any case.
+        let _ = v.setattr("key_index", key_index);
+        let _ = v.setattr("kind", kind.tag());
+        let _ = v.setattr("target", target);
+        // "class_name", not "class": the latter is a Python keyword, so
+        // `err.class` would be a syntax error (`getattr(err, "class")`
+        // still works, but every other class-bearing attribute in this
+        // skin is already named "class_name" for the same reason).
+        let _ = v.setattr("class_name", class);
+        let _ = v.setattr("resolved", resolved);
+    });
+    err
+}
+
+/// A `WriteAndDeleteSameKey` (D9) exception carrying the colliding delete
+/// key and its resolved ids (when known) as attributes.
+fn write_and_delete_same_key_err(
+    msg: String,
+    key_index: usize,
+    class: String,
+    parameter: String,
+    alternative: String,
+    entity: String,
+    resolved: Option<(i64, i64, i64)>,
+) -> PyErr {
+    let err = WriteAndDeleteSameKey::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        let _ = v.setattr("key_index", key_index);
+        let _ = v.setattr("class_name", class);
+        let _ = v.setattr("parameter", parameter);
+        let _ = v.setattr("alternative", alternative);
+        let _ = v.setattr("entity", entity);
+        let _ = v.setattr("resolved", resolved);
     });
     err
 }

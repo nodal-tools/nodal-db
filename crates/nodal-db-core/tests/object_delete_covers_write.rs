@@ -216,14 +216,16 @@ fn seeded() -> (tempfile::TempDir, PathBuf) {
 /// How the refusal must have been found.
 #[derive(Clone, Copy, Debug)]
 enum Path_ {
-    /// The up-front name check (no ids in the message).
+    /// The up-front name check (no resolved ids).
     Names,
     /// The commit-time check on the resolved ids.
     Ids,
 }
 
-/// Run one write + object delete call and assert the D10 refusal: an
-/// `Api` error from the expected check, nothing written, no commit.
+/// Run one write + object delete call and assert the D10 refusal: a
+/// [`DbError::CoveredWrite`] from the expected check, nothing written, no
+/// commit. Matches the typed variant (editor request R3,
+/// `nodal-editor/specs/core_requests_2026-10-27.md`), not the message text.
 fn assert_refused(
     db: &Path,
     what: &str,
@@ -245,13 +247,22 @@ fn assert_refused(
         WriteOptions::default(),
     )
     .expect_err(what);
-    let DbError::Api(m) = &err else {
-        panic!("{what}: expected DbError::Api, got {err:?}")
+    let DbError::CoveredWrite(details) = &err else {
+        panic!("{what}: expected DbError::CoveredWrite, got {err:?}")
     };
-    assert!(m.contains("its object deleted in one call"), "{what}: {m}");
+    assert!(
+        err.to_string().contains("its object deleted in one call"),
+        "{what}: {err}"
+    );
     match path {
-        Path_::Names => assert!(!m.contains("entity id"), "{what}: name check expected: {m}"),
-        Path_::Ids => assert!(m.contains("entity id"), "{what}: id check expected: {m}"),
+        Path_::Names => assert!(
+            details.resolved.is_none(),
+            "{what}: name check expected: {err}"
+        ),
+        Path_::Ids => assert!(
+            details.resolved.is_some(),
+            "{what}: id check expected: {err}"
+        ),
     }
     assert_eq!(census(db), before, "{what}: nothing written");
     assert_eq!(head_commit(db).unwrap(), head, "{what}: no commit");

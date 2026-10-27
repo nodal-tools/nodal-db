@@ -46,7 +46,7 @@ use crate::canon::{canonicalize_indexed, index_domains, CanonicalValue, DomainIn
 use crate::conn::{
     head_on, with_read_named, with_read_plain, with_write_txn_retrying_ends, TxnEnd, TxnOptions,
 };
-use crate::error::DbError;
+use crate::error::{CoveredWriteDetails, DbError, WriteAndDeleteSameKeyDetails};
 use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
@@ -780,7 +780,7 @@ fn reject_write_and_delete(
             k.entity.to_lowercase(),
         );
         if written.contains(&fold) {
-            return Err(same_key_error(*i, k));
+            return Err(same_key_error(*i, k, None));
         }
     }
     Ok(())
@@ -844,8 +844,6 @@ fn reject_write_and_object_delete(
     Ok(())
 }
 
-/// The D10 refusal; `ids` names the covered (entity, parameter definition,
-/// alternative) when the commit-time check found it.
 /// An object-delete key's target as written: its name or element tuple.
 fn object_target_label(k: &ObjectDeleteKey) -> String {
     match &k.target {
@@ -854,15 +852,15 @@ fn object_target_label(k: &ObjectDeleteKey) -> String {
     }
 }
 
+/// The [`DbError::CoveredWrite`] (D10) refusal; `ids` names the covered
+/// (entity, parameter definition, alternative) when the commit-time check
+/// found it.
 fn object_delete_covers_write_error(
     i: usize,
     k: &ObjectDeleteKey,
     ids: Option<(i64, i64, i64)>,
 ) -> DbError {
-    let target = match &k.target {
-        ObjectRef::Name(n) => n.clone(),
-        ObjectRef::Elements(es) => format!("({})", es.join(", ")),
-    };
+    let target = object_target_label(k);
     let class = k
         .class
         .as_deref()
@@ -874,11 +872,19 @@ fn object_delete_covers_write_error(
         }
         None => String::new(),
     };
-    DbError::Api(format!(
+    let message = format!(
         "object-delete key {i} ({} {target}{class}) covers a value this call also \
          writes{which}: a value cannot be written and its object deleted in one call",
         k.kind.tag()
-    ))
+    );
+    DbError::CoveredWrite(Box::new(CoveredWriteDetails {
+        key_index: i,
+        kind: k.kind,
+        target,
+        class: k.class.clone(),
+        resolved: ids,
+        message,
+    }))
 }
 
 /// The writes a call's deletes cover, for [`CoveredWrites::DeleteWins`]:
@@ -1251,12 +1257,25 @@ fn dropped_warning(
     }
 }
 
-fn same_key_error(i: usize, k: &DeleteKey) -> DbError {
-    DbError::Api(format!(
+/// The [`DbError::WriteAndDeleteSameKey`] (D9) refusal; `ids` names the
+/// same key's resolved (entity, parameter definition, alternative) when
+/// the resolved-id check (inside `apply_deletes`) found it, `None` from
+/// the up-front name check (`reject_write_and_delete`).
+fn same_key_error(i: usize, k: &DeleteKey, ids: Option<(i64, i64, i64)>) -> DbError {
+    let message = format!(
         "delete key {i} ({}:{}/{}/{}) names a value this call also writes: \
          a value cannot be written and deleted in one call",
         k.class, k.parameter, k.alternative, k.entity
-    ))
+    );
+    DbError::WriteAndDeleteSameKey(Box::new(WriteAndDeleteSameKeyDetails {
+        key_index: i,
+        class: k.class.clone(),
+        parameter: k.parameter.clone(),
+        alternative: k.alternative.clone(),
+        entity: k.entity.clone(),
+        resolved: ids,
+        message,
+    }))
 }
 
 /// Delete (append-only close-out) each named value in ONE atomic, conflict-
@@ -1544,7 +1563,11 @@ fn apply_deletes(
             continue;
         };
         if written.contains(&(entity_id, pd_id, alt_id)) {
-            return Err(same_key_error(*key_index, dk));
+            return Err(same_key_error(
+                *key_index,
+                dk,
+                Some((entity_id, pd_id, alt_id)),
+            ));
         }
         if !seen.insert((entity_id, pd_id, alt_id)) {
             resolved.push(DeleteResolution::Repeat);

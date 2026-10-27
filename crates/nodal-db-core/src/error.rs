@@ -5,6 +5,7 @@
 //! write path returns a single `DbError`.
 
 use crate::encoding::EncodeError;
+use crate::types::ObjectKind;
 use crate::MINIMUM_DUCKDB;
 
 /// Errors raised by connection handling, schema application, and axis dedup.
@@ -119,6 +120,44 @@ pub enum DbError {
     #[error("{0}")]
     Api(String),
 
+    /// D10 (skip_unchanged_writes_PLAN, the P2 review): a value write in a
+    /// call also carries an object delete whose cascade covers it — the
+    /// cascade closes only rows older than the commit, so under the long
+    /// cell diff it would close the unchanged old cells and keep the
+    /// changed ones the write just inserted, a partial value under a
+    /// closed object. Raised by both the up-front pure-name check
+    /// (`api::reject_write_and_object_delete`, `resolved: None`) and its
+    /// in-transaction repeat on resolved ids
+    /// (`object_delete::written_value_covered`, `resolved` names the
+    /// covered write's `(entity_id, parameter_definition_id,
+    /// alternative_id)`). Its own variant (editor request R3,
+    /// `nodal-editor/specs/core_requests_2026-10-27.md`) so a caller can
+    /// match the refusal structurally and name the covering object delete,
+    /// instead of matching `message`, which stays exactly what either
+    /// check has always produced. Boxed (clippy::result_large_err): the
+    /// details would otherwise bloat every `Result<_, DbError>` in the
+    /// crate, not just this refusal's own callers.
+    #[error("{}", .0.message)]
+    CoveredWrite(Box<CoveredWriteDetails>),
+
+    /// D9 (critique C1): a call writes a value and also deletes it by the
+    /// same key. Deletes run after the writes, so the delete would close
+    /// the row the write just inserted when the write changed the value,
+    /// but succeed (as a no-op) when it did not — the outcome would depend
+    /// on the content, so the call is refused up front whatever it is.
+    /// Raised by both the up-front pure-name check
+    /// (`api::reject_write_and_delete`, `resolved: None`) and the
+    /// resolved-id repeat inside `apply_deletes` (`resolved` names the
+    /// same key's `(entity_id, parameter_definition_id, alternative_id)`).
+    /// A parallel typed variant to [`DbError::CoveredWrite`] (editor
+    /// request R3): the ask was specifically about D10, but the two
+    /// refusals are structurally twins, so this one gets the same
+    /// treatment rather than staying a bare `Api` string. `message` is
+    /// unchanged by this — it never carried ids, and still does not.
+    /// Boxed for the same reason as `CoveredWrite`.
+    #[error("{}", .0.message)]
+    WriteAndDeleteSameKey(Box<WriteAndDeleteSameKeyDetails>),
+
     /// A writer-internal invariant failed before any data reached DuckDB —
     /// e.g. the columnar-insert length check (a bound list shorter or longer
     /// than its chunk would be NULL-padded silently by the zip-unnest). Never
@@ -140,6 +179,45 @@ pub enum DbError {
     /// An Arrow compute/project error while slicing the write batch per entity.
     #[error(transparent)]
     Arrow(#[from] duckdb::arrow::error::ArrowError),
+}
+
+/// [`DbError::CoveredWrite`] (D10)'s payload, boxed out of the enum so a
+/// large struct variant does not grow every `Result<_, DbError>` in the
+/// crate (clippy::result_large_err).
+#[derive(Debug)]
+pub struct CoveredWriteDetails {
+    /// The covering object-delete key's 0-based index in the call.
+    pub key_index: usize,
+    /// The covering object delete's kind (entity, parameter, alternative,
+    /// class, scenario).
+    pub kind: ObjectKind,
+    /// The covering object delete's target, as written: a name, or
+    /// `(a, b, …)` for an element tuple.
+    pub target: String,
+    /// The covering object delete's class (`None` for `Alternative`/`Class`,
+    /// which are addressed by a globally unique name).
+    pub class: Option<String>,
+    /// The covered write's resolved ids, when the in-transaction check
+    /// found them; `None` from the up-front name check, which cannot see
+    /// them.
+    pub resolved: Option<(i64, i64, i64)>,
+    pub message: String,
+}
+
+/// [`DbError::WriteAndDeleteSameKey`] (D9)'s payload, boxed for the same
+/// reason as [`CoveredWriteDetails`].
+#[derive(Debug)]
+pub struct WriteAndDeleteSameKeyDetails {
+    /// The delete key's 0-based index in the call's delete list.
+    pub key_index: usize,
+    pub class: String,
+    pub parameter: String,
+    pub alternative: String,
+    pub entity: String,
+    /// The resolved ids, when the resolved-id check found them; `None`
+    /// from the up-front name check.
+    pub resolved: Option<(i64, i64, i64)>,
+    pub message: String,
 }
 
 fn malformed_axis_message(

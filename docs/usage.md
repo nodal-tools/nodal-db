@@ -290,11 +290,34 @@ changed values get the new commit. `--force-replace` (or
 `force_replace`) only decides what the replaced versions keep; it does
 not make the core rewrite unchanged values. A call may not write a
 value and delete the same value; the core refuses it before writing
-anything. Likewise a call may not write a value and delete an object
+anything, as `DbError::WriteAndDeleteSameKey` in Rust /
+`nodal_db.WriteAndDeleteSameKey` in Python (both subclasses of
+`ApiError`), naming the colliding `(class, parameter, alternative,
+entity)` key by its `key_index` in the call's delete list plus
+`class`/`class_name`, `parameter`, `alternative` and `entity`.
+Likewise a call may not write a value and delete an object
 that the value belongs to: its entity (or an entity it is an element
 of), its parameter, its alternative or its class. The core refuses
-such a call whatever the values and whatever the `cascade` option.
-Write the values and delete the objects in separate calls.
+such a call whatever the values and whatever the `cascade` option, as
+`DbError::CoveredWrite` / `nodal_db.CoveredWrite` (also `ApiError`
+subclasses), naming the covering object delete by its `key_index`,
+`kind`, `target` and `class`/`class_name`. Both exceptions carry a
+`resolved` attribute: the covered write's resolved `(entity_id,
+parameter_definition_id, alternative_id)` when the in-transaction,
+resolved-id check is what caught it, `None` when the up-front
+name check already did. Write the values and delete the objects in
+separate calls.
+
+```python
+try:
+    db.commit_changes(
+        segments=[{"class": "node", "parameter": "demand",
+                   "alternative": "Base", "batch": batch}],
+        deletes=[("node", "demand", "Base", "north")],
+        user="alice")
+except nodal_db.WriteAndDeleteSameKey as e:
+    print(e.key_index, e.class_name, e.parameter, e.alternative, e.entity)
+```
 
 A script that has to send such a batch as one call can make the delete
 win instead: pass `covered_writes="delete_wins"` to `commit_changes` in

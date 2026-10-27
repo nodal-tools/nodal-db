@@ -20,6 +20,7 @@ use nodal_db_core::api::{
     commit_changes, delete_objects, preview_object_deletes, read_parameter, write_parameter,
     DeleteKey, Segment,
 };
+use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
     Blocker, CascadeCounts, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind,
@@ -740,7 +741,8 @@ fn same_commit_write_then_cascade_guard() {
     )
     .expect_err("a write under an alternative the call deletes is refused");
     assert!(
-        err.to_string().contains("its object deleted in one call"),
+        matches!(&err, DbError::CoveredWrite(_))
+            && err.to_string().contains("its object deleted in one call"),
         "{err}"
     );
     assert_eq!(
@@ -3181,7 +3183,8 @@ fn same_commit_array_write_then_cascade_guard() {
     )
     .expect_err("an array write under an alternative the call deletes is refused");
     assert!(
-        err.to_string().contains("its object deleted in one call"),
+        matches!(&err, DbError::CoveredWrite(_))
+            && err.to_string().contains("its object deleted in one call"),
         "{err}"
     );
     assert_eq!(

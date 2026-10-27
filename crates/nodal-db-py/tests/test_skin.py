@@ -191,14 +191,22 @@ def test_identical_write_is_unchanged_and_commits_nothing(db):
     db.delete_values([("unit", "capacity", "Base", "u1")], user="t")
     rep = db.delete_values([("unit", "capacity", "Base", "u1")], user="t")
     assert rep["commit_id"] == 0
-    # A write and a delete of one value in one call is refused up front.
-    with pytest.raises(nodal_db.ApiError):
+    # A write and a delete of one value in one call is refused up front
+    # (D9), as the typed `WriteAndDeleteSameKey` (an `ApiError` subclass,
+    # so `except ApiError` still catches it) carrying the key.
+    with pytest.raises(nodal_db.WriteAndDeleteSameKey) as ei:
         db.commit_changes(
             segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
                        "batch": scalar_batch(["u1"], [2.0])}],
             deletes=[("unit", "capacity", "Base", "u1")],
             user="t",
         )
+    assert isinstance(ei.value, nodal_db.ApiError)
+    assert (ei.value.key_index, ei.value.class_name, ei.value.parameter) == (
+        0, "unit", "capacity",
+    )
+    assert (ei.value.alternative, ei.value.entity) == ("Base", "u1")
+    assert ei.value.resolved is None  # the up-front name check, not resolved ids
 
 
 def test_query_returns_arrow_reader(db):
@@ -210,6 +218,23 @@ def test_query_returns_arrow_reader(db):
     # The query connection is read-only: a write through it must fail.
     with pytest.raises(nodal_db.DatabaseError):
         db.query("INSERT INTO commit (user, message) VALUES ('x', 'y')")
+
+
+def test_commit_changes_write_plus_object_delete_is_covered_write(db):
+    # A value write and an object delete that cascades over it in one call
+    # (D10) is refused up front as the typed `CoveredWrite` (an `ApiError`
+    # subclass), carrying the covering object-delete key.
+    with pytest.raises(nodal_db.CoveredWrite) as ei:
+        db.commit_changes(
+            segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
+                       "batch": scalar_batch(["u1"], [1.0])}],
+            object_deletes=[{"kind": "alternative", "name": "Base", "cascade": True}],
+            user="t",
+        )
+    assert isinstance(ei.value, nodal_db.ApiError)
+    assert (ei.value.key_index, ei.value.kind, ei.value.target) == (0, "alternative", "Base")
+    assert ei.value.class_name is None
+    assert ei.value.resolved is None  # the up-front name check, not resolved ids
 
 
 def test_commit_changes_write_plus_delete_one_commit(db):

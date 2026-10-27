@@ -109,6 +109,36 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    CoveredWrite,
+    ApiError,
+    "A value write and an object delete covering it (its entity, a \
+     container entity of it, its parameter definition, its alternative, or \
+     a class above them) were in the same call (DbError::CoveredWrite, \
+     D10). Refused up front, nothing was written. Attributes: `key_index` \
+     (the covering object-delete key's position in the call), `kind` \
+     (its object kind — \"entity\", \"parameter\", \"alternative\", \
+     \"class\" or \"scenario\"), `target` (its name, or \"(a, b, ...)\" for \
+     an element tuple), `class_name` (its class, None for alternative/class), \
+     and `resolved` — the covered write's `(entity_id, \
+     parameter_definition_id, alternative_id)` when the in-transaction \
+     check found it, else None. A subclass of ApiError, so `except \
+     ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
+    WriteAndDeleteSameKey,
+    ApiError,
+    "A call wrote a value and also deleted it by the same \
+     (class, parameter, alternative, entity) key (DbError::WriteAndDeleteSameKey, \
+     D9). Refused up front, nothing was written. Attributes: `key_index` \
+     (the delete key's position in the call), `class_name`, `parameter`, \
+     `alternative`, `entity` (the key, as given), and `resolved` — the \
+     same key's resolved `(entity_id, parameter_definition_id, \
+     alternative_id)` when the resolved-id check found it, else None. A \
+     subclass of ApiError, so `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
     ReadSurfaceStale,
     ApiError,
     "A read needed a view or macro that the database file lacks because its \
@@ -1201,6 +1231,11 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("Conflict", py.get_type::<Conflict>())?;
     m.add("ApiError", py.get_type::<ApiError>())?;
     m.add("Stale", py.get_type::<Stale>())?;
+    m.add("CoveredWrite", py.get_type::<CoveredWrite>())?;
+    m.add(
+        "WriteAndDeleteSameKey",
+        py.get_type::<WriteAndDeleteSameKey>(),
+    )?;
     m.add("SchemaMismatch", py.get_type::<SchemaMismatch>())?;
     m.add("ReadSurfaceStale", py.get_type::<ReadSurfaceStale>())?;
     m.add(

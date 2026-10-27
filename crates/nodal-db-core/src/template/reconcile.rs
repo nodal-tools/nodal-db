@@ -3313,7 +3313,9 @@ fn cascade_close(
 ) -> Result<(), DbError> {
     let prepared = prepare_object_deletes(&[(key, ObjectDeleteOpts { cascade: true })])?;
     let mut report = WriteReport::default();
-    apply_object_delete(conn, c, &prepared[0], &mut report)?;
+    // The template chain names its own objects; it reports no warnings.
+    let mut folds = crate::text::NameFolds::default();
+    apply_object_delete(conn, c, &prepared[0], &mut report, &mut folds)?;
     match &report.object_deletes[0].result {
         ObjectDeleteResult::Deleted { closed_out } => {
             fx.notes.push(format!(

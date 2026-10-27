@@ -56,7 +56,7 @@ use crate::object_delete::{
     written_value_covered, PreparedObjectDelete, WrittenIds,
 };
 use crate::structural::{apply_structural, prepare_structural};
-use crate::text::{nfc, Normalized};
+use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
@@ -407,9 +407,13 @@ pub fn commit_changes(
         // later in this same commit may target a referent an earlier structural
         // item just created, and items apply sequentially against the one open
         // txn, so create → use resolves. Caller-given vec order is honored.
+        let mut structural_folds = NameFolds::default();
         for (i, ch) in structural.iter().enumerate() {
-            apply_structural(conn, commit_id, i, ch, &mut report)?;
+            apply_structural(conn, commit_id, i, ch, &mut report, &mut structural_folds)?;
         }
+        report
+            .warnings
+            .extend(structural_folds.warnings("structural", ""));
         // An object delete may not reach an object a structural change of
         // this call created (under either policy): the same-commit guard
         // would leave it live. The resolved-id repeat of the name-level
@@ -553,9 +557,13 @@ pub fn commit_changes(
         // Object deletes run LAST, under the same commit_id (object_delete plan
         // §2): every close-out is guarded by `valid_from < commit_id`, so a row
         // this commit created is never closed (would trip the span CHECK).
+        let mut object_folds = NameFolds::default();
         for p in &prepared_object_deletes {
-            apply_object_delete(conn, commit_id, p, &mut report)?;
+            apply_object_delete(conn, commit_id, p, &mut report, &mut object_folds)?;
         }
+        report
+            .warnings
+            .extend(object_folds.warnings("object_delete", ""));
         // `DeleteWins`: a write is dropped only for a delete that took
         // effect; otherwise the whole call is refused (rolled back). Each
         // warning's `by` then names a covering delete that took effect.
@@ -722,6 +730,8 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         // Normalizing a name or label is not a write by itself.
         WarningKind::TimezoneNormalized { .. }
         | WarningKind::TextNormalized { .. }
+        // Resolving a reference by the name fold is not a write by itself.
+        | WarningKind::NameFolded { .. }
         | WarningKind::UnknownReferent { .. }
         | WarningKind::NothingToDelete { .. }
         // A dropped write is not a write (CoveredWrites::DeleteWins).
@@ -1079,7 +1089,10 @@ impl DropPlan {
         }
         let names: Vec<&str> = p.names.iter().map(String::as_str).collect();
         let looked: Vec<(String, Option<i64>)> = match class_id {
-            Some(cid) => lookup_entities(conn, cid, &names)?,
+            Some(cid) => lookup_entities(conn, cid, &names)?
+                .into_iter()
+                .map(|(f, e)| (f, e.map(|e| e.id)))
+                .collect(),
             None => duck_folds(conn, &names)?
                 .into_iter()
                 .map(|f| (f, None))
@@ -1469,46 +1482,50 @@ fn apply_deletes(
     }
     // --- Class, parameter and alternative: memoized point lookups, in key
     // order (a key stops at its first missing level, as before). ---
-    let mut classes: HashMap<&str, Option<i64>> = HashMap::new();
-    let mut params: HashMap<(i64, &str), Option<i64>> = HashMap::new();
-    let mut alts: HashMap<&str, Option<i64>> = HashMap::new();
+    let mut classes: HashMap<&str, Option<Found>> = HashMap::new();
+    let mut params: HashMap<(i64, &str), Option<Found>> = HashMap::new();
+    let mut alts: HashMap<&str, Option<Found>> = HashMap::new();
+    // References that resolved to a differently spelled existing object
+    // (`NameFolded`, one warning per referent table of the deletes).
+    let mut folds = NameFolds::default();
     // Per key: Err(unknown level + name) or Ok((class, pd, alt)).
     type Partial = Result<(i64, i64, i64), (&'static str, String)>;
     let mut partial: Vec<Partial> = Vec::with_capacity(deletes.len());
     for (_, dk) in deletes {
-        let class_id = match classes.get(dk.class.as_str()) {
-            Some(&id) => id,
+        let class = match classes.get(dk.class.as_str()) {
+            Some(f) => f.clone(),
             None => {
-                let id = lookup_entity_class(conn, &dk.class)?;
-                classes.insert(&dk.class, id);
-                id
+                let f = find_entity_class(conn, &dk.class)?;
+                classes.insert(&dk.class, f.clone());
+                f
             }
         };
-        let Some(class_id) = class_id else {
+        let Some(class_id) = class.map(|f| f.noted(&mut folds, "entity_class", &dk.class)) else {
             partial.push(Err(("entity_class", dk.class.clone())));
             continue;
         };
-        let pd_id = match params.get(&(class_id, dk.parameter.as_str())) {
-            Some(&id) => id,
+        let pd = match params.get(&(class_id, dk.parameter.as_str())) {
+            Some(f) => f.clone(),
             None => {
-                let id = lookup_parameter(conn, class_id, &dk.parameter)?;
-                params.insert((class_id, &dk.parameter), id);
-                id
+                let f = find_parameter(conn, class_id, &dk.parameter)?;
+                params.insert((class_id, &dk.parameter), f.clone());
+                f
             }
         };
-        let Some(pd_id) = pd_id else {
+        let Some(pd_id) = pd.map(|f| f.noted(&mut folds, "parameter_definition", &dk.parameter))
+        else {
             partial.push(Err(("parameter_definition", dk.parameter.clone())));
             continue;
         };
-        let alt_id = match alts.get(dk.alternative.as_str()) {
-            Some(&id) => id,
+        let alt = match alts.get(dk.alternative.as_str()) {
+            Some(f) => f.clone(),
             None => {
-                let id = lookup_alternative(conn, &dk.alternative)?;
-                alts.insert(&dk.alternative, id);
-                id
+                let f = find_alternative(conn, &dk.alternative)?;
+                alts.insert(&dk.alternative, f.clone());
+                f
             }
         };
-        let Some(alt_id) = alt_id else {
+        let Some(alt_id) = alt.map(|f| f.noted(&mut folds, "alternative", &dk.alternative)) else {
             partial.push(Err(("alternative", dk.alternative.clone())));
             continue;
         };
@@ -1532,11 +1549,11 @@ fn apply_deletes(
             }
         }
     }
-    let mut entities: HashMap<(i64, &str), Option<i64>> = HashMap::new();
+    let mut entities: HashMap<(i64, &str), Option<Found>> = HashMap::new();
     for class_id in class_order {
         let names = &by_class[&class_id];
-        for (name, (_, id)) in names.iter().zip(lookup_entities(conn, class_id, names)?) {
-            entities.insert((class_id, name), id);
+        for (name, (_, found)) in names.iter().zip(lookup_entities(conn, class_id, names)?) {
+            entities.insert((class_id, name), found);
         }
     }
 
@@ -1553,7 +1570,10 @@ fn apply_deletes(
                 continue;
             }
         };
-        let Some(entity_id) = entities[&(class_id, dk.entity.as_str())] else {
+        let Some(entity_id) = entities[&(class_id, dk.entity.as_str())]
+            .clone()
+            .map(|f| f.noted(&mut folds, "entity", &dk.entity))
+        else {
             resolved.push(DeleteResolution::Unknown("entity", dk.entity.clone()));
             continue;
         };
@@ -1598,6 +1618,7 @@ fn apply_deletes(
         });
     }
 
+    report.warnings.extend(folds.warnings("delete", ""));
     let outcomes = history::delete_values(conn, commit_id, &round)?;
 
     // --- Report and warnings, in key order. ---
@@ -1647,33 +1668,67 @@ fn unknown(report: &mut WriteReport, key_index: usize, level: &str, name: &str) 
 }
 
 // Lookup-only resolvers: the FIRST branch of each write-path resolver (§2), via
-// `opt_id` — the case-insensitive current-row lookup, minus the auto-create tail.
+// `opt_found` — the case-insensitive current-row lookup, minus the auto-create
+// tail. Each statement returns the row's id and its stored spelling (the
+// `find_*` form, for the `NameFolded` warning); the `lookup_*` form keeps the
+// id only.
+
+/// A current row a name lookup found: its id and its name as stored. The
+/// lookup matched by the name fold (engine rule 8), so `name` may differ
+/// from the spelling looked up in case (never in NFC: both sides are NFC).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub id: i64,
+    pub name: String,
+}
+
+impl Found {
+    /// The id, after recording a reference spelled `written` that resolved
+    /// to this row (`NameFolded`, warned when the spellings differ).
+    pub(crate) fn noted(self, folds: &mut NameFolds, referent: &'static str, written: &str) -> i64 {
+        folds.note(referent, written, &self.name, self.id);
+        self.id
+    }
+}
+
+const CLASS_LOOKUP_SQL: &str = "SELECT id, name FROM entity_class WHERE cur_name = lower(?)";
+const ALTERNATIVE_LOOKUP_SQL: &str = "SELECT id, name FROM alternative WHERE cur_name = lower(?)";
+const SCENARIO_LOOKUP_SQL: &str = "SELECT id, name FROM scenario WHERE cur_name = lower(?)";
+const PARAMETER_LOOKUP_SQL: &str =
+    "SELECT id, name FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)";
+const VALUE_LIST_LOOKUP_SQL: &str =
+    "SELECT id, name FROM parameter_value_list WHERE cur_name = lower(?)";
+
+pub(crate) fn find_entity_class(conn: &Connection, name: &str) -> Result<Option<Found>, DbError> {
+    opt_found(conn, CLASS_LOOKUP_SQL, -1, name)
+}
 
 pub(crate) fn lookup_entity_class(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(
-        conn,
-        "SELECT id FROM entity_class WHERE cur_name = lower(?)",
-        -1,
-        name,
-    )
+    Ok(find_entity_class(conn, name)?.map(|f| f.id))
+}
+
+pub(crate) fn find_alternative(conn: &Connection, name: &str) -> Result<Option<Found>, DbError> {
+    opt_found(conn, ALTERNATIVE_LOOKUP_SQL, -1, name)
 }
 
 pub(crate) fn lookup_alternative(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(
-        conn,
-        "SELECT id FROM alternative WHERE cur_name = lower(?)",
-        -1,
-        name,
-    )
+    Ok(find_alternative(conn, name)?.map(|f| f.id))
+}
+
+pub(crate) fn find_scenario(conn: &Connection, name: &str) -> Result<Option<Found>, DbError> {
+    opt_found(conn, SCENARIO_LOOKUP_SQL, -1, name)
 }
 
 pub(crate) fn lookup_scenario(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(
-        conn,
-        "SELECT id FROM scenario WHERE cur_name = lower(?)",
-        -1,
-        name,
-    )
+    Ok(find_scenario(conn, name)?.map(|f| f.id))
+}
+
+pub(crate) fn find_parameter(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+) -> Result<Option<Found>, DbError> {
+    opt_found(conn, PARAMETER_LOOKUP_SQL, class_id, name)
 }
 
 pub(crate) fn lookup_parameter(
@@ -1681,12 +1736,7 @@ pub(crate) fn lookup_parameter(
     class_id: i64,
     name: &str,
 ) -> Result<Option<i64>, DbError> {
-    opt_id(
-        conn,
-        "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
-        class_id,
-        name,
-    )
+    Ok(find_parameter(conn, class_id, name)?.map(|f| f.id))
 }
 
 /// The single-name entity lookup of `lookup_entity` (`?1` class id, `?2`
@@ -1716,17 +1766,25 @@ pub(crate) fn lookup_parameter(
 /// `MATERIALIZED` CTE: DuckDB's `CTEFilterPusher` already pushes filters into
 /// one of this shape.
 #[doc(hidden)]
-pub const ENTITY_NAME_LOOKUP_SQL: &str = "SELECT id FROM \
-       (SELECT id, entity_class_id, valid_to_commit FROM entity \
+pub const ENTITY_NAME_LOOKUP_SQL: &str = "SELECT id, name FROM \
+       (SELECT id, name, entity_class_id, valid_to_commit FROM entity \
         WHERE lower(name) = lower(?2) OFFSET 0) \
      WHERE entity_class_id = ?1 AND valid_to_commit IS NULL";
+
+pub(crate) fn find_entity(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+) -> Result<Option<Found>, DbError> {
+    opt_found(conn, ENTITY_NAME_LOOKUP_SQL, class_id, name)
+}
 
 pub(crate) fn lookup_entity(
     conn: &Connection,
     class_id: i64,
     name: &str,
 ) -> Result<Option<i64>, DbError> {
-    opt_id(conn, ENTITY_NAME_LOOKUP_SQL, class_id, name)
+    Ok(find_entity(conn, class_id, name)?.map(|f| f.id))
 }
 
 pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
@@ -1738,13 +1796,12 @@ pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i
     )
 }
 
+pub(crate) fn find_value_list(conn: &Connection, name: &str) -> Result<Option<Found>, DbError> {
+    opt_found(conn, VALUE_LIST_LOOKUP_SQL, -1, name)
+}
+
 pub(crate) fn lookup_value_list(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
-    opt_id(
-        conn,
-        "SELECT id FROM parameter_value_list WHERE cur_name = lower(?)",
-        -1,
-        name,
-    )
+    Ok(find_value_list(conn, name)?.map(|f| f.id))
 }
 
 pub(crate) fn lookup_unit(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
@@ -2013,7 +2070,11 @@ fn write_prepared(
 ) -> Result<(), DbError> {
     report.warnings.extend(p.prep_warnings.iter().cloned());
 
-    let class_id = names.entity_class(conn, commit_id, &p.class, &mut report.warnings)?;
+    // References that resolved to a differently spelled existing object
+    // (`NameFolded`, one warning per referent table of the segment).
+    let mut folds = NameFolds::default();
+    let class_id =
+        names.entity_class(conn, commit_id, &p.class, &mut report.warnings, &mut folds)?;
     let ResolvedParameter {
         pd_id,
         pt_id,
@@ -2027,8 +2088,15 @@ fn write_prepared(
         &p.inferred,
         p.value_kind,
         &mut report.warnings,
+        &mut folds,
     )?;
-    let alt_id = names.alternative(conn, commit_id, &p.alternative, &mut report.warnings)?;
+    let alt_id = names.alternative(
+        conn,
+        commit_id,
+        &p.alternative,
+        &mut report.warnings,
+        &mut folds,
+    )?;
     // Two segments that resolve to one (parameter, alternative) would write
     // the same value keys twice in one commit. The up-front check compares a
     // Rust fold; this one compares the ids DuckDB resolved, so a spelling
@@ -2066,7 +2134,10 @@ fn write_prepared(
         &p.names,
         entities,
         &mut report.warnings,
+        &mut folds,
     )?;
+    let target = format!("{}:{}/{}", p.class, p.parameter, p.alternative);
+    report.warnings.extend(folds.warnings("segment", &target));
     let (entity_ids, entity_minted) = match resolved {
         Resolved::Ids { ids, minted } => (ids, minted),
         Resolved::NdRefused { first_missing, err } => {
@@ -2191,6 +2262,8 @@ struct CachedParameter {
     pd_id: i64,
     declared: Vec<DbDeclared>,
     retain_content: bool,
+    /// The definition's name as stored (for `NameFolded`).
+    stored: String,
 }
 
 /// The per-attempt class / parameter / alternative resolution cache of the
@@ -2214,8 +2287,8 @@ struct CachedParameter {
 /// attempts or commits.
 struct ResolveCache {
     enabled: bool,
-    classes: HashMap<String, i64>,
-    alternatives: HashMap<String, i64>,
+    classes: HashMap<String, Found>,
+    alternatives: HashMap<String, Found>,
     parameters: HashMap<(i64, String), CachedParameter>,
 }
 
@@ -2229,38 +2302,43 @@ impl ResolveCache {
         }
     }
 
+    /// The class id `name` resolves to, noted in `folds` (a hit notes the
+    /// stored spelling the lookup returned, as the uncached path does).
     fn entity_class(
         &mut self,
         conn: &Connection,
         commit_id: i64,
         name: &str,
         warnings: &mut Vec<Warning>,
+        folds: &mut NameFolds,
     ) -> Result<i64, DbError> {
-        if let Some(&id) = self.classes.get(name) {
-            return Ok(id);
+        if let Some(f) = self.classes.get(name) {
+            return Ok(f.clone().noted(folds, "entity_class", name));
         }
-        let id = resolve_entity_class(conn, commit_id, name, warnings)?;
+        let found = resolve_entity_class(conn, commit_id, name, warnings)?;
         if self.enabled {
-            self.classes.insert(name.to_string(), id);
+            self.classes.insert(name.to_string(), found.clone());
         }
-        Ok(id)
+        Ok(found.noted(folds, "entity_class", name))
     }
 
+    /// The alternative id `name` resolves to, noted in `folds`.
     fn alternative(
         &mut self,
         conn: &Connection,
         commit_id: i64,
         name: &str,
         warnings: &mut Vec<Warning>,
+        folds: &mut NameFolds,
     ) -> Result<i64, DbError> {
-        if let Some(&id) = self.alternatives.get(name) {
-            return Ok(id);
+        if let Some(f) = self.alternatives.get(name) {
+            return Ok(f.clone().noted(folds, "alternative", name));
         }
-        let id = resolve_alternative(conn, commit_id, name, warnings)?;
+        let found = resolve_alternative(conn, commit_id, name, warnings)?;
         if self.enabled {
-            self.alternatives.insert(name.to_string(), id);
+            self.alternatives.insert(name.to_string(), found.clone());
         }
-        Ok(id)
+        Ok(found.noted(folds, "alternative", name))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2273,11 +2351,13 @@ impl ResolveCache {
         inferred: &[(String, IndexKind)],
         value_kind: ValueKind,
         warnings: &mut Vec<Warning>,
+        folds: &mut NameFolds,
     ) -> Result<ResolvedParameter, DbError> {
         let key = (class_id, name.to_string());
         if let Some(c) = self.parameters.get(&key) {
             // The match the uncached path runs, on the same set.
             let matched = validate_declared(name, c.pd_id, &c.declared, inferred, value_kind)?;
+            folds.note("parameter_definition", name, &c.stored, c.pd_id);
             return Ok(ResolvedParameter {
                 pd_id: c.pd_id,
                 pt_id: matched.pt_id,
@@ -2285,9 +2365,10 @@ impl ResolveCache {
                 retain_content: c.retain_content,
             });
         }
-        let (pd_id, pt_id, shape, set) = resolve_parameter(
+        let (pd_id, pt_id, shape, set, stored) = resolve_parameter(
             conn, commit_id, class_id, name, inferred, value_kind, warnings,
         )?;
+        folds.note("parameter_definition", name, &stored, pd_id);
         let retain_content = read_retain_content(conn, pd_id)?;
         if let (true, Some(declared)) = (self.enabled, set) {
             self.parameters.insert(
@@ -2296,6 +2377,7 @@ impl ResolveCache {
                     pd_id,
                     declared,
                     retain_content,
+                    stored,
                 },
             );
         }
@@ -2684,6 +2766,32 @@ fn effective_domains(
 // Name resolution + auto-create (decision B)
 // ---------------------------------------------------------------------------
 
+/// [`opt_id`] for the name lookups whose statement returns `(id, name)`.
+fn opt_found(
+    conn: &Connection,
+    sql: &str,
+    id_param: i64,
+    name: &str,
+) -> Result<Option<Found>, DbError> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let row = |r: &duckdb::Row<'_>| {
+        Ok(Found {
+            id: r.get(0)?,
+            name: r.get(1)?,
+        })
+    };
+    let r = if id_param < 0 {
+        stmt.query_row(params![name], row)
+    } else {
+        stmt.query_row(params![id_param, name], row)
+    };
+    match r {
+        Ok(f) => Ok(Some(f)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn opt_id(conn: &Connection, sql: &str, id_param: i64, name: &str) -> Result<Option<i64>, DbError> {
     // Two shapes share this: class/alternative (name only) and entity (class +
     // name). `id_param` < 0 means "name only"; the SQL then ignores it.
@@ -2703,19 +2811,16 @@ fn opt_id(conn: &Connection, sql: &str, id_param: i64, name: &str) -> Result<Opt
     }
 }
 
+/// The class `name` resolves to (its stored spelling for `NameFolded`),
+/// auto-created (`AutoCreated`, stored as written) when there is none.
 fn resolve_entity_class(
     conn: &Connection,
     commit_id: i64,
     name: &str,
     warnings: &mut Vec<Warning>,
-) -> Result<i64, DbError> {
-    if let Some(id) = opt_id(
-        conn,
-        "SELECT id FROM entity_class WHERE cur_name = lower(?)",
-        -1,
-        name,
-    )? {
-        return Ok(id);
+) -> Result<Found, DbError> {
+    if let Some(found) = find_entity_class(conn, name)? {
+        return Ok(found);
     }
     let id: i64 = conn.query_row(
         "INSERT INTO entity_class (name, valid_from_commit) VALUES (?, ?) RETURNING id",
@@ -2728,7 +2833,10 @@ fn resolve_entity_class(
         name: name.into(),
         id,
     });
-    Ok(id)
+    Ok(Found {
+        id,
+        name: name.to_string(),
+    })
 }
 
 /// The one `alternative` create site (the write path's decision-B
@@ -2748,19 +2856,16 @@ pub(crate) fn insert_alternative_row(
     )?)
 }
 
+/// The alternative `name` resolves to (its stored spelling for
+/// `NameFolded`), auto-created (`AutoCreated`) when there is none.
 fn resolve_alternative(
     conn: &Connection,
     commit_id: i64,
     name: &str,
     warnings: &mut Vec<Warning>,
-) -> Result<i64, DbError> {
-    if let Some(id) = opt_id(
-        conn,
-        "SELECT id FROM alternative WHERE cur_name = lower(?)",
-        -1,
-        name,
-    )? {
-        return Ok(id);
+) -> Result<Found, DbError> {
+    if let Some(found) = find_alternative(conn, name)? {
+        return Ok(found);
     }
     let id = insert_alternative_row(conn, commit_id, name, None)?;
     warnings.push(Warning {
@@ -2769,7 +2874,10 @@ fn resolve_alternative(
         name: name.into(),
         id,
     });
-    Ok(id)
+    Ok(Found {
+        id,
+        name: name.to_string(),
+    })
 }
 
 /// The outcome of [`resolve_entities`].
@@ -2785,8 +2893,9 @@ enum Resolved {
 }
 
 /// The entity lookup of [`resolve_entities`]: every input name with its
-/// ordinal, its DuckDB `lower()` fold and the id of the current entity of the
-/// class holding that folded name (NULL when missing). The fold is DuckDB's,
+/// ordinal, its DuckDB `lower()` fold and the id and stored name of the
+/// current entity of the class holding that folded name (NULL when missing).
+/// The fold is DuckDB's,
 /// returned to Rust, never recomputed there (CLAUDE.md invariant 2). The
 /// predicate is the expansion of `cur_cls = ? AND cur_name = lower(n)` on the
 /// base columns (the VIRTUAL `cur_*` columns are `CASE WHEN valid_to_commit
@@ -2794,24 +2903,27 @@ enum Resolved {
 /// before `lower(name)` is evaluated.
 const ENTITY_LOOKUP_SQL: &str = "WITH k AS (SELECT unnest(?::VARCHAR[]) AS n, \
                                          unnest(?::BIGINT[]) AS i) \
-     SELECT k.i, lower(k.n), e.id FROM k \
+     SELECT k.i, lower(k.n), e.id, e.name FROM k \
      LEFT JOIN entity e ON e.entity_class_id = ? AND e.valid_to_commit IS NULL \
                        AND lower(e.name) = lower(k.n)";
 
 /// The single-name form of `ENTITY_LOOKUP_SQL` (plan D3(b), a
-/// statement-form switch only): the fold and the id (NULL when missing).
-/// `?1` name, `?2` class id. The id comes through the same `OFFSET 0` fence
-/// as [`ENTITY_NAME_LOOKUP_SQL`] (see there for why, the guard and the
-/// fallbacks), so it uses the `ix_entity_lname` index.
+/// statement-form switch only): the fold, the id and the stored name (NULL
+/// when missing; one row always, through the outer join on a one-row
+/// relation). `?1` name, `?2` class id. The entity comes through the same
+/// `OFFSET 0` fence as [`ENTITY_NAME_LOOKUP_SQL`] (see there for why, the
+/// guard and the fallbacks), so it uses the `ix_entity_lname` index.
 #[doc(hidden)]
-pub const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), (SELECT id FROM \
-       (SELECT id, entity_class_id, valid_to_commit FROM entity \
-        WHERE lower(name) = lower(?1) OFFSET 0) \
-     WHERE entity_class_id = ?2 AND valid_to_commit IS NULL)";
+pub const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), e.id, e.name \
+     FROM (SELECT 1) AS one_row LEFT JOIN \
+       (SELECT id, name FROM \
+         (SELECT id, name, entity_class_id, valid_to_commit FROM entity \
+          WHERE lower(name) = lower(?1) OFFSET 0) \
+        WHERE entity_class_id = ?2 AND valid_to_commit IS NULL) AS e ON true";
 
 /// Look up `names` among the current entities of `class_id`: per name, in
-/// input order, DuckDB's `lower()` fold of it and the id of the current
-/// entity holding that folded name (`None` when missing). One statement:
+/// input order, DuckDB's `lower()` fold of it and the current entity holding
+/// that folded name (`None` when missing). One statement:
 /// [`ENTITY_LOOKUP_ONE_SQL`] for one name, [`ENTITY_LOOKUP_SQL`] with an
 /// explicit ordinal list otherwise; every ordinal must come back exactly
 /// once (hard check). The one entity lookup of the write path's
@@ -2820,17 +2932,25 @@ fn lookup_entities(
     conn: &Connection,
     class_id: i64,
     names: &[&str],
-) -> Result<Vec<(String, Option<i64>)>, DbError> {
+) -> Result<Vec<(String, Option<Found>)>, DbError> {
     use duckdb::types::Value;
 
+    fn found(id: Option<i64>, name: Option<String>) -> Option<Found> {
+        Some(Found {
+            id: id?,
+            name: name?,
+        })
+    }
     if let [name] = names {
-        let row: (String, Option<i64>) = conn
+        let row = conn
             .prepare_cached(ENTITY_LOOKUP_ONE_SQL)?
-            .query_row(params![name, class_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            .query_row(params![name, class_id], |r| {
+                Ok((r.get::<_, String>(0)?, found(r.get(1)?, r.get(2)?)))
+            })?;
         return Ok(vec![row]);
     }
     let n = names.len();
-    let mut out: Vec<Option<(String, Option<i64>)>> = vec![None; n];
+    let mut out: Vec<Option<(String, Option<Found>)>> = vec![None; n];
     if n == 0 {
         return Ok(Vec::new());
     }
@@ -2841,7 +2961,7 @@ fn lookup_entities(
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
-            r.get::<_, Option<i64>>(2)?,
+            found(r.get(2)?, r.get(3)?),
         ))
     })?;
     for row in rows {
@@ -2866,6 +2986,8 @@ pub(crate) struct CachedEntity {
     id: i64,
     /// DuckDB's `lower()` of the name, as the lookup returned it.
     fold: String,
+    /// The entity's name as stored (for `NameFolded`).
+    stored: String,
     /// Minted (auto-created) by this commit.
     minted: bool,
 }
@@ -2899,6 +3021,7 @@ const ENTITY_INSERT_SQL: &str = "INSERT INTO entity (entity_class_id, name, vali
 /// warnings follow in the same order, as the per-entity resolver pushed
 /// them. Never auto-creates into an N-D class (critique F10): an N-D
 /// entity's identity is its member tuple, which the batch does not carry.
+#[allow(clippy::too_many_arguments)]
 fn resolve_entities(
     conn: &Connection,
     commit_id: i64,
@@ -2907,36 +3030,43 @@ fn resolve_entities(
     names: &[String],
     cache: &mut EntityCache,
     warnings: &mut Vec<Warning>,
+    folds: &mut NameFolds,
 ) -> Result<Resolved, DbError> {
     use duckdb::types::Value;
 
     let n = names.len();
     let mut ids: Vec<Option<i64>> = vec![None; n];
-    let mut folds: Vec<Option<String>> = vec![None; n];
+    let mut name_folds: Vec<Option<String>> = vec![None; n];
+    // The stored spelling of each name that resolved to an existing entity.
+    let mut stored: Vec<Option<String>> = vec![None; n];
     let mut minted = vec![false; n];
     let mut lookup: Vec<usize> = Vec::new();
     for (i, name) in names.iter().enumerate() {
         match cache.get(&(class_id, name.clone())) {
             Some(c) => {
                 ids[i] = Some(c.id);
-                folds[i] = Some(c.fold.clone());
+                name_folds[i] = Some(c.fold.clone());
+                stored[i] = Some(c.stored.clone());
                 minted[i] = c.minted;
             }
             None => lookup.push(i),
         }
     }
     let looked_up: Vec<&str> = lookup.iter().map(|&i| names[i].as_str()).collect();
-    for (&i, (fold, id)) in lookup
+    for (&i, (fold, found)) in lookup
         .iter()
         .zip(lookup_entities(conn, class_id, &looked_up)?)
     {
-        folds[i] = Some(fold);
-        ids[i] = id;
+        name_folds[i] = Some(fold);
+        if let Some(f) = found {
+            ids[i] = Some(f.id);
+            stored[i] = Some(f.name);
+        }
     }
 
     // Fold collisions (critique C2), in input order.
     let mut first_by_fold: HashMap<&str, usize> = HashMap::with_capacity(n);
-    for (i, fold) in folds.iter().enumerate() {
+    for (i, fold) in name_folds.iter().enumerate() {
         let fold = fold.as_deref().unwrap_or_default();
         if let Some(&j) = first_by_fold.get(fold) {
             return Err(DbError::Api(format!(
@@ -2995,6 +3125,7 @@ fn resolve_entities(
                 }
                 last_id = id;
                 ids[i] = Some(id);
+                stored[i] = Some(name.clone());
                 minted[i] = true;
                 warnings.push(Warning {
                     kind: WarningKind::AutoCreated,
@@ -3005,13 +3136,22 @@ fn resolve_entities(
             }
         }
     }
+    // `NameFolded`: every name that resolved to an existing entity spelled
+    // differently (a minted entity is stored as written: silent).
+    for (i, name) in names.iter().enumerate() {
+        if let (Some(id), Some(st)) = (ids[i], &stored[i]) {
+            folds.note("entity", name, st, id);
+        }
+    }
     for &i in &lookup {
-        if let (Some(id), Some(fold)) = (ids[i], folds[i].clone()) {
+        if let (Some(id), Some(fold), Some(st)) = (ids[i], name_folds[i].clone(), stored[i].clone())
+        {
             cache.insert(
                 (class_id, names[i].clone()),
                 CachedEntity {
                     id,
                     fold,
+                    stored: st,
                     minted: minted[i],
                 },
             );
@@ -3024,8 +3164,8 @@ fn resolve_entities(
 }
 
 /// What [`resolve_parameter`] returns: `(pd_id, parameter_type_id, shape,
-/// declared set as read)`.
-type ParameterResolution = (i64, i64, DeclaredType, Option<Vec<DbDeclared>>);
+/// declared set as read, the definition's stored name)`.
+type ParameterResolution = (i64, i64, DeclaredType, Option<Vec<DbDeclared>>, String);
 
 /// Resolve the parameter definition within `class_id`, auto-creating it (and its
 /// `parameter_type` + `parameter_type_dimension` declaration) when absent. The
@@ -3046,12 +3186,11 @@ fn resolve_parameter(
     value_kind: ValueKind,
     warnings: &mut Vec<Warning>,
 ) -> Result<ParameterResolution, DbError> {
-    if let Some(pd_id) = opt_id(
-        conn,
-        "SELECT id FROM parameter_definition WHERE cur_cls = ? AND cur_name = lower(?)",
-        class_id,
-        name,
-    )? {
+    if let Some(Found {
+        id: pd_id,
+        name: stored,
+    }) = find_parameter(conn, class_id, name)?
+    {
         // Existing definition: read the declared allowed-type set from the DB
         // and hold the batch to it — it must instantiate exactly one member
         // (critique F2/F4/F11; VMP Part 7 as amended 2026-09-18, D2(a)). If the
@@ -3069,10 +3208,10 @@ fn resolve_parameter(
                 name: name.into(),
                 id: pt_id,
             });
-            Ok((pd_id, pt_id, inferred_declared(inferred), None))
+            Ok((pd_id, pt_id, inferred_declared(inferred), None, stored))
         } else {
             let matched = validate_declared(name, pd_id, &set, inferred, value_kind)?;
-            Ok((pd_id, matched.pt_id, matched.shape, Some(set)))
+            Ok((pd_id, matched.pt_id, matched.shape, Some(set), stored))
         }
     } else {
         let pd_id: i64 = conn.query_row(
@@ -3088,7 +3227,13 @@ fn resolve_parameter(
             name: name.into(),
             id: pd_id,
         });
-        Ok((pd_id, pt_id, inferred_declared(inferred), None))
+        Ok((
+            pd_id,
+            pt_id,
+            inferred_declared(inferred),
+            None,
+            name.to_string(),
+        ))
     }
 }
 

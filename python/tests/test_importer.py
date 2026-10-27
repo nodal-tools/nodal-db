@@ -973,3 +973,19 @@ def test_inner_keys_differing_only_in_normalization_share_one_domain_label(tmp_p
     assert rep.duplicate_keys == []
     assert _cells(_nodal(out), "hub", "nested", 2) == [
         (("a", E_NFC), 1.0), (("b", E_NFC), 2.0)]
+
+
+# ---------------------------------------------------------------------------
+# Name identity: the core reports references it resolved case-insensitively
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("make", ["basic", "padded"])
+def test_fixture_imports_report_no_case_folded_references(tmp_path, make):
+    """Spine refers to its objects by id and the importer refuses case
+    collisions up front, so every reference it sends is spelled as the
+    object was created: the core's ``name_folded`` warning never fires."""
+    spine = make_basic_spine(tmp_path) if make == "basic" else make_padded_spine(tmp_path)
+    rep, _out = run_import(tmp_path, spine)
+    assert [w for w in rep.write_warnings if w["kind"] == "name_folded"] == []
+    assert "case-folded references: 0" in rep.summary()

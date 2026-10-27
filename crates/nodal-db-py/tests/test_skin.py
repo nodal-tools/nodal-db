@@ -287,7 +287,12 @@ def test_commit_changes_covered_writes_delete_wins(db):
         segments=segments, deletes=deletes, user="t", covered_writes="delete_wins"
     )
     assert rep["commit_id"] > 0
-    assert rep["warnings"] == [
+    # The delete spells the entity "U1" (stored "u1"): reported as folded.
+    folded = [w for w in rep["warnings"] if w["kind"] == "name_folded"]
+    assert [(w["what"], w["written"], w["stored"]) for w in folded] == [
+        ("delete", "U1", "u1")
+    ]
+    assert [w for w in rep["warnings"] if w["kind"] != "name_folded"] == [
         {
             "kind": "dropped_by_delete",
             "segment_index": 0,
@@ -1090,6 +1095,22 @@ def test_fold_name_is_the_cores_name_fold():
     # The fold does not normalize: identity is fold_name(normalize_identifier(s)).
     assert nodal_db.fold_name("E\u0301") != E_NFC
     assert nodal_db.fold_name(nodal_db.normalize_identifier("E\u0301")) == E_NFC
+
+
+def test_case_variant_reference_reports_name_folded(db):
+    """A reference that resolves case-insensitively to an existing object
+    spelled differently is reported (the core's NameFolded)."""
+    db.write_parameter("Node", "p", "Base", scalar_batch(["N1"], [1.0]), user="t")
+    rep = db.write_parameter("node", "p", "Base", scalar_batch(["n1"], [2.0]), user="t")
+    folded = sorted(
+        (w["what"], w["object_type"], w["count"], w["written"], w["stored"], w["name"])
+        for w in rep["warnings"] if w["kind"] == "name_folded"
+    )
+    assert folded == [
+        ("segment", "entity", 1, "n1", "N1", "node:p/Base"),
+        ("segment", "entity_class", 1, "node", "Node", "node:p/Base"),
+    ]
+    assert all(w["id"] > 0 for w in rep["warnings"] if w["kind"] == "name_folded")
 
 
 def test_nfd_names_and_labels_read_back_in_nfc(db):

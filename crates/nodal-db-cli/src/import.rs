@@ -246,6 +246,24 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                  {stored:?} (spellings that differ only in normalization are one {what})",
                 w.name
             ),
+            WarningKind::NameFolded {
+                what,
+                count,
+                written,
+                stored,
+            } => {
+                let at = if w.name.is_empty() {
+                    what.clone()
+                } else {
+                    format!("{what} {}", w.name)
+                };
+                println!(
+                    "warning: {count} {} name(s) of {at} matched an existing {} spelled \
+                     differently (names are case-insensitive), e.g. {written:?} is stored as \
+                     {stored:?} (id {})",
+                    w.object_type, w.object_type, w.id
+                )
+            }
         }
     }
     Ok(())

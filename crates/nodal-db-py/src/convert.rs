@@ -573,6 +573,18 @@ fn warning_to_py<'py>(py: Python<'py>, w: &Warning) -> PyResult<Bound<'py, PyDic
             d.set_item("stored", stored)?;
             "text_normalized"
         }
+        WarningKind::NameFolded {
+            what,
+            count,
+            written,
+            stored,
+        } => {
+            d.set_item("what", what)?;
+            d.set_item("count", count)?;
+            d.set_item("written", written)?;
+            d.set_item("stored", stored)?;
+            "name_folded"
+        }
     };
     d.set_item("kind", kind)?;
     d.set_item("object_type", &w.object_type)?;

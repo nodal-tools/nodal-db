@@ -50,11 +50,18 @@ use crate::template::reconcile::{
     value_list_binding_count,
 };
 use crate::text::nfc;
+use crate::text::NameFolds;
 use crate::types::{charset_ok, fold};
 
 /// Every name of `names` in NFC (the text rule, `text.rs`).
 fn nfc_all(names: &[String]) -> Vec<String> {
     names.iter().map(|n| nfc(n).into_owned()).collect()
+}
+
+/// The verbs return ids, not a `WriteReport`: the `NameFolded` notes of the
+/// structural functions they share have nowhere to go.
+fn no_report() -> NameFolds {
+    NameFolds::default()
 }
 
 fn require_user(user: &str) -> Result<(), DbError> {
@@ -187,7 +194,8 @@ pub fn set_scenario_alternatives(
     // 2, critique F2): the verb and the composable channel produce identical
     // history for the same logical op.
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_set_scenario_alternatives(conn, c, scenario, alternatives).map(|(sid, _)| sid)
+        apply_set_scenario_alternatives(conn, c, scenario, alternatives, &mut no_report())
+            .map(|(sid, _)| sid)
     })
 }
 
@@ -261,7 +269,16 @@ pub fn set_entity_activation(
     );
     // The shared applier is the ONE entity_alternative writer (invariant 2).
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_set_entity_activation(conn, c, class, entity, alternative, active).map(|_| ())
+        apply_set_entity_activation(
+            conn,
+            c,
+            class,
+            entity,
+            alternative,
+            active,
+            &mut no_report(),
+        )
+        .map(|_| ())
     })
 }
 
@@ -393,7 +410,7 @@ pub fn ensure_entity_class(
     let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
     // The shared applier is the one class-create body (invariant 2).
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_entity_class(conn, c, name, dims).map(|(id, _)| id)
+        apply_create_entity_class(conn, c, name, dims, &mut no_report()).map(|(id, _)| id)
     })
 }
 
@@ -450,8 +467,17 @@ pub fn ensure_parameter_definition(
     let msg = format!("ensure_parameter_definition {class}.{name}");
     // The shared applier is the one definition+type-member create body.
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_parameter(conn, c, class, name, types, value_list, description)
-            .map(|(id, _)| id)
+        apply_create_parameter(
+            conn,
+            c,
+            class,
+            name,
+            types,
+            value_list,
+            description,
+            &mut no_report(),
+        )
+        .map(|(id, _)| id)
     })
 }
 
@@ -508,7 +534,7 @@ pub fn ensure_entity(
     let msg = format!("ensure_entity {class}:{effective_name}");
     // The shared applier is the one entity+element create body (invariant 2).
     with_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_entity(conn, c, class, name, elements).map(|(id, _)| id)
+        apply_create_entity(conn, c, class, name, elements, &mut no_report()).map(|(id, _)| id)
     })
 }
 

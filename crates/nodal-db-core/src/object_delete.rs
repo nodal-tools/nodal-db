@@ -31,7 +31,11 @@ use std::collections::HashSet;
 
 use duckdb::{params, Connection};
 
+use crate::api::{
+    find_alternative, find_entity, find_entity_class, find_parameter, find_scenario, Found,
+};
 use crate::error::DbError;
+use crate::text::NameFolds;
 use crate::types::fold;
 use crate::types::{
     Blocker, CascadeCounts, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteOutcome,
@@ -861,12 +865,18 @@ struct ResolvedTarget {
 }
 
 /// Resolve one object key to its live object id. `Ok(None)` ⇒ the target has no
-/// current row (already closed or never existed) ⇒ `NotFound`. P1 resolves only
-/// `Alternative`; other kinds error (the leg set is `None`).
+/// current row (already closed or never existed) ⇒ `NotFound`. Every name that
+/// resolved (the class, the target, the elements of a tuple) is noted in
+/// `folds` (`NameFolded`).
 fn resolve_target(
     conn: &Connection,
     key: &ObjectDeleteKey,
+    folds: &mut NameFolds,
 ) -> Result<Option<ResolvedTarget>, DbError> {
+    let target =
+        |f: Found, folds: &mut NameFolds, referent: &'static str, written: &str| ResolvedTarget {
+            id: f.noted(folds, referent, written),
+        };
     match key.kind {
         ObjectKind::Alternative => {
             let name = match &key.target {
@@ -877,7 +887,7 @@ fn resolve_target(
                     ))
                 }
             };
-            Ok(crate::api::lookup_alternative(conn, name)?.map(|id| ResolvedTarget { id }))
+            Ok(find_alternative(conn, name)?.map(|f| target(f, folds, "alternative", name)))
         }
         ObjectKind::Parameter => {
             // A parameter is per-class and name-addressed: resolve its class,
@@ -896,11 +906,12 @@ fn resolve_target(
                 .as_deref()
                 .ok_or_else(|| DbError::Api("a parameter delete requires its class".into()))?;
             // Miss at EITHER step ⇒ None ⇒ NotFound (never auto-create).
-            let class_id = match crate::api::lookup_entity_class(conn, class)? {
-                Some(id) => id,
+            let class_id = match find_entity_class(conn, class)? {
+                Some(f) => f.noted(folds, "entity_class", class),
                 None => return Ok(None),
             };
-            Ok(crate::api::lookup_parameter(conn, class_id, name)?.map(|id| ResolvedTarget { id }))
+            Ok(find_parameter(conn, class_id, name)?
+                .map(|f| target(f, folds, "parameter_definition", name)))
         }
         ObjectKind::Entity => {
             // Entity is per-class; resolve the class first. Miss ⇒ None.
@@ -908,18 +919,17 @@ fn resolve_target(
                 .class
                 .as_deref()
                 .ok_or_else(|| DbError::Api("an entity delete requires its class".into()))?;
-            let class_id = match crate::api::lookup_entity_class(conn, class)? {
-                Some(id) => id,
+            let class_id = match find_entity_class(conn, class)? {
+                Some(f) => f.noted(folds, "entity_class", class),
                 None => return Ok(None),
             };
             match &key.target {
                 // 0-D or the (per-class-unique) N-D name.
                 ObjectRef::Name(n) => {
-                    Ok(crate::api::lookup_entity(conn, class_id, n)?
-                        .map(|id| ResolvedTarget { id }))
+                    Ok(find_entity(conn, class_id, n)?.map(|f| target(f, folds, "entity", n)))
                 }
                 // N-D element tuple (§4c, critique C6).
-                ObjectRef::Elements(es) => resolve_entity_tuple(conn, class_id, class, es)
+                ObjectRef::Elements(es) => resolve_entity_tuple(conn, class_id, class, es, folds)
                     .map(|o| o.map(|id| ResolvedTarget { id })),
             }
         }
@@ -934,7 +944,7 @@ fn resolve_target(
                     ))
                 }
             };
-            Ok(crate::api::lookup_entity_class(conn, name)?.map(|id| ResolvedTarget { id }))
+            Ok(find_entity_class(conn, name)?.map(|f| target(f, folds, "entity_class", name)))
         }
         ObjectKind::Scenario => {
             // A scenario is globally name-addressed (class is None, validated in
@@ -947,7 +957,7 @@ fn resolve_target(
                     ))
                 }
             };
-            Ok(crate::api::lookup_scenario(conn, name)?.map(|id| ResolvedTarget { id }))
+            Ok(find_scenario(conn, name)?.map(|f| target(f, folds, "scenario", name)))
         }
     }
 }
@@ -969,6 +979,7 @@ fn resolve_entity_tuple(
     class_id: i64,
     class: &str,
     es: &[String],
+    folds: &mut NameFolds,
 ) -> Result<Option<i64>, DbError> {
     // Declared dimensions of the class, in position order. The REAL `position`
     // is carried through: the schema only guarantees `position >= 1` with
@@ -1006,8 +1017,8 @@ fn resolve_entity_tuple(
     // ⇒ NotFound (the tuple cannot exist).
     let mut element_ids: Vec<i64> = Vec::with_capacity(es.len());
     for ((dim_class, dim_set, _pos), name) in dims.iter().zip(es.iter()) {
-        match resolve_element(conn, *dim_class, *dim_set, name)? {
-            Some(id) => element_ids.push(id),
+        match find_element(conn, *dim_class, *dim_set, name)? {
+            Some(f) => element_ids.push(f.noted(folds, "entity", name)),
             None => return Ok(None),
         }
     }
@@ -1068,6 +1079,16 @@ pub(crate) fn resolve_element(
     dim_set: Option<i64>,
     name: &str,
 ) -> Result<Option<i64>, DbError> {
+    Ok(find_element(conn, dim_class, dim_set, name)?.map(|f| f.id))
+}
+
+/// [`resolve_element`] with the element's stored name (for `NameFolded`).
+pub(crate) fn find_element(
+    conn: &Connection,
+    dim_class: Option<i64>,
+    dim_set: Option<i64>,
+    name: &str,
+) -> Result<Option<Found>, DbError> {
     // Candidate dimension classes for this position.
     let candidates: Vec<i64> = match (dim_class, dim_set) {
         (Some(c), None) => vec![c],
@@ -1086,22 +1107,21 @@ pub(crate) fn resolve_element(
             ))
         }
     };
-    let mut hits: Vec<i64> = Vec::new();
+    let mut hits: Vec<Found> = Vec::new();
     for c in candidates {
-        if let Some(id) = crate::api::lookup_entity(conn, c, name)? {
-            hits.push(id);
+        if let Some(f) = find_entity(conn, c, name)? {
+            hits.push(f);
         }
     }
-    match hits.as_slice() {
-        [] => Ok(None),
-        [id] => Ok(Some(*id)),
-        many => Err(DbError::Api(format!(
+    if hits.len() > 1 {
+        let ids: Vec<i64> = hits.iter().map(|f| f.id).collect();
+        return Err(DbError::Api(format!(
             "element name '{name}' is ambiguous across the class-set dimension: \
-             it matches {} entities {:?}",
-            many.len(),
-            many
-        ))),
+             it matches {} entities {ids:?}",
+            ids.len()
+        )));
     }
+    Ok(hits.pop())
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,10 +1367,11 @@ pub(crate) fn apply_object_delete(
     commit_id: i64,
     prepared: &PreparedObjectDelete,
     report: &mut crate::types::WriteReport,
+    folds: &mut NameFolds,
 ) -> Result<(), DbError> {
     let key_index = prepared.key_index;
     let kind = prepared.key.kind;
-    let result = apply_one(conn, commit_id, &prepared.key, prepared.opts)?;
+    let result = apply_one(conn, commit_id, &prepared.key, prepared.opts, folds)?;
     report.object_deletes.push(ObjectDeleteOutcome {
         key_index,
         kind,
@@ -1364,6 +1385,7 @@ fn apply_one(
     commit_id: i64,
     key: &ObjectDeleteKey,
     opts: ObjectDeleteOpts,
+    folds: &mut NameFolds,
 ) -> Result<ObjectDeleteResult, DbError> {
     let legs = object_legs(key.kind).ok_or_else(|| {
         DbError::Api(format!(
@@ -1371,7 +1393,7 @@ fn apply_one(
             key.kind.tag()
         ))
     })?;
-    let target = match resolve_target(conn, key)? {
+    let target = match resolve_target(conn, key, folds)? {
         Some(t) => t,
         None => return Ok(ObjectDeleteResult::NotFound), // absent / already closed (D4)
     };
@@ -1481,7 +1503,8 @@ pub(crate) fn cascade_scope(
     conn: &Connection,
     key: &ObjectDeleteKey,
 ) -> Result<Option<Vec<(ObjectKind, i64)>>, DbError> {
-    let Some(target) = resolve_target(conn, key)? else {
+    // A scope probe, not the delete's own resolution: nothing is noted.
+    let Some(target) = resolve_target(conn, key, &mut NameFolds::default())? else {
         return Ok(None);
     };
     if object_legs(key.kind).is_none() {
@@ -1556,7 +1579,8 @@ pub(crate) fn preview_one(
             )))
         }
     };
-    let target = match resolve_target(conn, key)? {
+    // A preview writes nothing and reports no warnings.
+    let target = match resolve_target(conn, key, &mut NameFolds::default())? {
         Some(t) => t,
         None => {
             return Ok(ObjectDeletePreview {

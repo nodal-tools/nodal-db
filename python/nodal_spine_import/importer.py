@@ -508,6 +508,19 @@ class ImportReport:
             lines.append(
                 f"normalized identifiers: {sum(w['count'] for w in normalized)} "
                 "(stored in Unicode NFC)")
+        # References the core resolved case-insensitively to an existing
+        # object spelled differently (the core's `name_folded`). Spine names
+        # are referenced by id and checked for case collisions up front, so
+        # an import should never produce one: any is reported loudly.
+        folded = [w for w in self.write_warnings if w.get("kind") == "name_folded"]
+        lines.append(
+            f"case-folded references: {sum(w['count'] for w in folded)} "
+            "(names that matched an existing object spelled differently)")
+        for w in folded[:50]:
+            where = f" in {w['name']}" if w["name"] else ""
+            lines.append(
+                f"  case-folded {w['object_type']} ({w['what']}{where}): "
+                f"{w['count']}, e.g. {w['written']!r} is stored as {w['stored']!r}")
         for t in self.trimmed_names[:50]:
             lines.append(f"  trimmed name: {t.describe()}")
         for w in normalized[:50]:

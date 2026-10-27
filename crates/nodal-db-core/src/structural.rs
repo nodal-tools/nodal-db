@@ -26,17 +26,18 @@ use std::collections::{HashMap, HashSet};
 use duckdb::{params, Connection};
 
 use crate::api::{
-    insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class,
-    lookup_parameter, lookup_scenario, lookup_value_list,
+    find_alternative, find_entity, find_entity_class, find_parameter, find_scenario,
+    find_value_list, insert_alternative_row, lookup_alternative, lookup_scenario,
 };
 use crate::error::DbError;
-use crate::object_delete::resolve_element as resolve_element_in_dim;
+use crate::object_delete::find_element;
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
     insert_class_dim_row, insert_class_row, insert_definition_row, insert_entity_element_row,
     insert_entity_row, insert_membership_row, insert_scenario_row, insert_type_member,
     revise_alternative_row, revise_scenario_row,
 };
+use crate::text::NameFolds;
 use crate::types::{
     charset_ok, fold, EntityAddr, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef,
     StructuralChange, StructuralEffect, StructuralKind, StructuralOutcome, WriteReport,
@@ -50,16 +51,21 @@ use crate::types::{
 /// appending its [`StructuralOutcome`] to `report.structural`. Items apply
 /// sequentially against the one open txn (§4.1), so item N's inserts are visible
 /// to item N+1's strict lookups (create → activate resolves in one save).
+///
+/// Every reference to an existing object (an idempotent create's own name
+/// included, a rename's new name excluded) is noted in `folds` for the
+/// call's `NameFolded` warnings.
 pub(crate) fn apply_structural(
     conn: &Connection,
     c: i64,
     change_index: usize,
     change: &StructuralChange,
     report: &mut WriteReport,
+    folds: &mut NameFolds,
 ) -> Result<(), DbError> {
     let (kind, object_id, effect) = match change {
         StructuralChange::CreateAlternative { name, description } => {
-            let (id, e) = apply_create_alternative(conn, c, name, description.as_deref())?;
+            let (id, e) = apply_create_alternative(conn, c, name, description.as_deref(), folds)?;
             (StructuralKind::Alternative, id, e)
         }
         StructuralChange::RenameAlternative {
@@ -67,12 +73,18 @@ pub(crate) fn apply_structural(
             new_name,
             description,
         } => {
-            let (id, e) =
-                apply_rename_alternative(conn, c, current, new_name, description.as_deref())?;
+            let (id, e) = apply_rename_alternative(
+                conn,
+                c,
+                current,
+                new_name,
+                description.as_deref(),
+                folds,
+            )?;
             (StructuralKind::Alternative, id, e)
         }
         StructuralChange::CreateScenario { name, description } => {
-            let (id, e) = apply_create_scenario(conn, c, name, description.as_deref())?;
+            let (id, e) = apply_create_scenario(conn, c, name, description.as_deref(), folds)?;
             (StructuralKind::Scenario, id, e)
         }
         StructuralChange::RenameScenario {
@@ -81,14 +93,14 @@ pub(crate) fn apply_structural(
             description,
         } => {
             let (id, e) =
-                apply_rename_scenario(conn, c, current, new_name, description.as_deref())?;
+                apply_rename_scenario(conn, c, current, new_name, description.as_deref(), folds)?;
             (StructuralKind::Scenario, id, e)
         }
         StructuralChange::SetScenarioAlternatives {
             scenario,
             alternatives,
         } => {
-            let (id, e) = apply_set_scenario_alternatives(conn, c, scenario, alternatives)?;
+            let (id, e) = apply_set_scenario_alternatives(conn, c, scenario, alternatives, folds)?;
             (StructuralKind::ScenarioRanking, id, e)
         }
         StructuralChange::SetEntityActivation {
@@ -98,7 +110,7 @@ pub(crate) fn apply_structural(
             active,
         } => {
             let (id, e) =
-                apply_set_entity_activation(conn, c, class, entity, alternative, *active)?;
+                apply_set_entity_activation(conn, c, class, entity, alternative, *active, folds)?;
             (StructuralKind::Activation, id, e)
         }
         StructuralChange::SetMembership {
@@ -107,8 +119,15 @@ pub(crate) fn apply_structural(
             alternative,
             included,
         } => {
-            let (id, e) =
-                apply_set_membership(conn, c, group, member, alternative.as_deref(), *included)?;
+            let (id, e) = apply_set_membership(
+                conn,
+                c,
+                group,
+                member,
+                alternative.as_deref(),
+                *included,
+                folds,
+            )?;
             (StructuralKind::Membership, id, e)
         }
         StructuralChange::CreateEntity {
@@ -116,11 +135,11 @@ pub(crate) fn apply_structural(
             name,
             elements,
         } => {
-            let (id, e) = apply_create_entity(conn, c, class, name.as_deref(), elements)?;
+            let (id, e) = apply_create_entity(conn, c, class, name.as_deref(), elements, folds)?;
             (StructuralKind::Entity, id, e)
         }
         StructuralChange::CreateEntityClass { name, dims } => {
-            let (id, e) = apply_create_entity_class(conn, c, name, dims)?;
+            let (id, e) = apply_create_entity_class(conn, c, name, dims, folds)?;
             (StructuralKind::EntityClass, id, e)
         }
         StructuralChange::CreateParameter {
@@ -138,6 +157,7 @@ pub(crate) fn apply_structural(
                 types,
                 value_list.as_deref(),
                 description.as_deref(),
+                folds,
             )?;
             (StructuralKind::Parameter, id, e)
         }
@@ -160,9 +180,11 @@ pub(crate) fn apply_create_alternative(
     c: i64,
     name: &str,
     description: Option<&str>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    if let Some(id) = lookup_alternative(conn, name)? {
-        return Ok((id, StructuralEffect::NoOp)); // idempotent
+    if let Some(f) = find_alternative(conn, name)? {
+        // idempotent
+        return Ok((f.noted(folds, "alternative", name), StructuralEffect::NoOp));
     }
     let id = insert_alternative_row(conn, c, name, description)?;
     Ok((id, StructuralEffect::Created))
@@ -173,9 +195,10 @@ pub(crate) fn apply_create_scenario(
     c: i64,
     name: &str,
     description: Option<&str>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    if let Some(id) = lookup_scenario(conn, name)? {
-        return Ok((id, StructuralEffect::NoOp));
+    if let Some(f) = find_scenario(conn, name)? {
+        return Ok((f.noted(folds, "scenario", name), StructuralEffect::NoOp));
     }
     let id = insert_scenario_row(conn, c, name, description)?;
     Ok((id, StructuralEffect::Created))
@@ -269,12 +292,15 @@ pub(crate) fn apply_rename_alternative(
     current: &str,
     new_name: &str,
     description: Option<&str>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    let id = lookup_alternative(conn, current)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "rename_alternative: alternative {current:?} does not exist"
-        ))
-    })?;
+    let id = find_alternative(conn, current)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "rename_alternative: alternative {current:?} does not exist"
+            ))
+        })?
+        .noted(folds, "alternative", current);
     let e = rename_identity(
         conn,
         c,
@@ -294,12 +320,15 @@ pub(crate) fn apply_rename_scenario(
     current: &str,
     new_name: &str,
     description: Option<&str>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    let id = lookup_scenario(conn, current)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "rename_scenario: scenario {current:?} does not exist"
-        ))
-    })?;
+    let id = find_scenario(conn, current)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "rename_scenario: scenario {current:?} does not exist"
+            ))
+        })?
+        .noted(folds, "scenario", current);
     let e = rename_identity(
         conn,
         c,
@@ -322,20 +351,23 @@ pub(crate) fn apply_set_scenario_alternatives(
     c: i64,
     scenario: &str,
     alternatives: &[String],
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
     // Strict resolution of every alternative BEFORE touching anything.
     let mut alt_ids: Vec<i64> = Vec::with_capacity(alternatives.len());
     for a in alternatives {
-        let id = lookup_alternative(conn, a)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "set_scenario_alternatives: alternative {a:?} does not exist (create it first)"
-            ))
-        })?;
+        let id = find_alternative(conn, a)?
+            .ok_or_else(|| {
+                DbError::Api(format!(
+                    "set_scenario_alternatives: alternative {a:?} does not exist (create it first)"
+                ))
+            })?
+            .noted(folds, "alternative", a);
         alt_ids.push(id);
     }
     // Resolve or auto-create the scenario (the one sanctioned auto-create, §4.4).
-    let (sid, scenario_created) = match lookup_scenario(conn, scenario)? {
-        Some(id) => (id, false),
+    let (sid, scenario_created) = match find_scenario(conn, scenario)? {
+        Some(f) => (f.noted(folds, "scenario", scenario), false),
         None => (insert_scenario_row(conn, c, scenario, None)?, true),
     };
 
@@ -432,19 +464,25 @@ pub(crate) fn apply_set_entity_activation(
     entity: &str,
     alternative: &str,
     active: Option<bool>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    let cid = lookup_entity_class(conn, class)?
-        .ok_or_else(|| DbError::Api(format!("set_entity_activation: class {class:?} not found")))?;
-    let entity_id = lookup_entity(conn, cid, entity)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "set_entity_activation: entity {class}:{entity} not found"
-        ))
-    })?;
-    let alt_id = lookup_alternative(conn, alternative)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "set_entity_activation: alternative {alternative:?} not found"
-        ))
-    })?;
+    let cid = find_entity_class(conn, class)?
+        .ok_or_else(|| DbError::Api(format!("set_entity_activation: class {class:?} not found")))?
+        .noted(folds, "entity_class", class);
+    let entity_id = find_entity(conn, cid, entity)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "set_entity_activation: entity {class}:{entity} not found"
+            ))
+        })?
+        .noted(folds, "entity", entity);
+    let alt_id = find_alternative(conn, alternative)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "set_entity_activation: alternative {alternative:?} not found"
+            ))
+        })?
+        .noted(folds, "alternative", alternative);
     // (active, version, valid_from) of the current row, if any.
     let current = opt_row3(
         conn,
@@ -527,16 +565,20 @@ pub(crate) fn apply_set_membership(
     member: &EntityAddr,
     alternative: Option<&str>,
     included: Option<bool>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    let gid = resolve_entity_addr(conn, group, "group")?;
-    let mid = resolve_entity_addr(conn, member, "member")?;
-    let alt_id: Option<i64> =
-        match alternative {
-            Some(a) => Some(lookup_alternative(conn, a)?.ok_or_else(|| {
-                DbError::Api(format!("set_membership: alternative {a:?} not found"))
-            })?),
-            None => None,
-        };
+    let gid = resolve_entity_addr(conn, group, "group", folds)?;
+    let mid = resolve_entity_addr(conn, member, "member", folds)?;
+    let alt_id: Option<i64> = match alternative {
+        Some(a) => Some(
+            find_alternative(conn, a)?
+                .ok_or_else(|| {
+                    DbError::Api(format!("set_membership: alternative {a:?} not found"))
+                })?
+                .noted(folds, "alternative", a),
+        ),
+        None => None,
+    };
     // Base rows join `one_current_membership` on cur_a = coalesce(alt, 0), so a
     // base lookup/close keys on cur_a = 0 (NEVER `alternative_id = ?` bound to
     // NULL, which matches nothing); an insert stores NULL, never 0 (M4).
@@ -616,19 +658,28 @@ fn membership_current(
     }
 }
 
-fn resolve_entity_addr(conn: &Connection, addr: &EntityAddr, role: &str) -> Result<i64, DbError> {
-    let cid = lookup_entity_class(conn, &addr.class)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "set_membership: {role} class {:?} not found",
-            addr.class
-        ))
-    })?;
-    lookup_entity(conn, cid, &addr.name)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "set_membership: {role} entity {}:{} not found",
-            addr.class, addr.name
-        ))
-    })
+fn resolve_entity_addr(
+    conn: &Connection,
+    addr: &EntityAddr,
+    role: &str,
+    folds: &mut NameFolds,
+) -> Result<i64, DbError> {
+    let cid = find_entity_class(conn, &addr.class)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "set_membership: {role} class {:?} not found",
+                addr.class
+            ))
+        })?
+        .noted(folds, "entity_class", &addr.class);
+    Ok(find_entity(conn, cid, &addr.name)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "set_membership: {role} entity {}:{} not found",
+                addr.class, addr.name
+            ))
+        })?
+        .noted(folds, "entity", &addr.name))
 }
 
 /// A `(bool, i64, i64)` current-row read keyed on two ids (activation), or
@@ -699,8 +750,10 @@ pub(crate) fn apply_create_entity_class(
     c: i64,
     name: &str,
     dims: &[String],
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    if let Some(cid) = lookup_entity_class(conn, name)? {
+    if let Some(f) = find_entity_class(conn, name)? {
+        let cid = f.noted(folds, "entity_class", name);
         return Ok((
             check_class_dims(conn, name, cid, dims)?,
             StructuralEffect::NoOp,
@@ -709,11 +762,13 @@ pub(crate) fn apply_create_entity_class(
     // Resolve every dimension class BEFORE inserting anything.
     let mut dim_ids: Vec<i64> = Vec::with_capacity(dims.len());
     for d in dims {
-        let id = lookup_entity_class(conn, d)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "ensure_entity_class: dimension class {d:?} does not exist (create it first)"
-            ))
-        })?;
+        let id = find_entity_class(conn, d)?
+            .ok_or_else(|| {
+                DbError::Api(format!(
+                    "ensure_entity_class: dimension class {d:?} does not exist (create it first)"
+                ))
+            })?
+            .noted(folds, "entity_class", d);
         dim_ids.push(id);
     }
     let cid = insert_class_row(conn, c, name, None, true, false, None)?;
@@ -731,8 +786,18 @@ pub(crate) struct ClassShape {
 }
 
 pub(crate) fn entity_class_shape(conn: &Connection, class: &str) -> Result<ClassShape, DbError> {
-    let cid = lookup_entity_class(conn, class)?
-        .ok_or_else(|| DbError::Api(format!("ensure_entity: class {class:?} not found")))?;
+    entity_class_shape_noted(conn, class, &mut NameFolds::default())
+}
+
+/// [`entity_class_shape`], noting the class reference in `folds`.
+fn entity_class_shape_noted(
+    conn: &Connection,
+    class: &str,
+    folds: &mut NameFolds,
+) -> Result<ClassShape, DbError> {
+    let cid = find_entity_class(conn, class)?
+        .ok_or_else(|| DbError::Api(format!("ensure_entity: class {class:?} not found")))?
+        .noted(folds, "entity_class", class);
     let mut stmt = conn.prepare(
         "SELECT cur_p, dimension_class_id, dimension_class_set_id \
          FROM entity_class_dimension WHERE cur_c = ? ORDER BY cur_p",
@@ -797,10 +862,12 @@ pub(crate) fn apply_create_entity(
     class: &str,
     name: Option<&str>,
     elements: &[String],
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let effective_name = effective_entity_name(name, elements)?;
-    let s = entity_class_shape(conn, class)?;
-    if let Some(eid) = lookup_entity(conn, s.cid, &effective_name)? {
+    let s = entity_class_shape_noted(conn, class, folds)?;
+    if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
+        let eid = f.noted(folds, "entity", &effective_name);
         verify_entity_elements(conn, class, &effective_name, eid, elements)?;
         return Ok((eid, StructuralEffect::NoOp));
     }
@@ -820,12 +887,14 @@ pub(crate) fn apply_create_entity(
     // Resolve every element BEFORE inserting anything (strict, §4.4).
     let mut el_ids: Vec<(i64, i64)> = Vec::with_capacity(elements.len());
     for ((pos, dc, ds), el) in s.dims.iter().zip(elements.iter()) {
-        let id = resolve_element_in_dim(conn, *dc, *ds, el)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "ensure_entity: element {el:?} at position {pos} does not name an entity of \
-                 the dimension's class"
-            ))
-        })?;
+        let id = find_element(conn, *dc, *ds, el)?
+            .ok_or_else(|| {
+                DbError::Api(format!(
+                    "ensure_entity: element {el:?} at position {pos} does not name an entity of \
+                     the dimension's class"
+                ))
+            })?
+            .noted(folds, "entity", el);
         el_ids.push((*pos, id));
     }
     let eid = insert_entity_row(conn, c, s.cid, &effective_name, None)?;
@@ -903,6 +972,7 @@ pub(crate) fn validate_type_decls(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_create_parameter(
     conn: &Connection,
     c: i64,
@@ -911,22 +981,33 @@ pub(crate) fn apply_create_parameter(
     types: &[TypeDecl],
     value_list: Option<&str>,
     description: Option<&str>,
+    folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
-    let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "ensure_parameter_definition: class {class:?} not found (create it first)"
-        ))
-    })?;
-    if let Some(id) = lookup_parameter(conn, cid, name)? {
-        return Ok((id, StructuralEffect::NoOp)); // exists: as-is, never re-declared (D-F4)
+    let cid = find_entity_class(conn, class)?
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "ensure_parameter_definition: class {class:?} not found (create it first)"
+            ))
+        })?
+        .noted(folds, "entity_class", class);
+    if let Some(f) = find_parameter(conn, cid, name)? {
+        // exists: as-is, never re-declared (D-F4)
+        return Ok((
+            f.noted(folds, "parameter_definition", name),
+            StructuralEffect::NoOp,
+        ));
     }
     let lid = match value_list {
         None => None,
-        Some(l) => Some(lookup_value_list(conn, l)?.ok_or_else(|| {
-            DbError::Api(format!(
-                "ensure_parameter_definition: value_list {l:?} not found"
-            ))
-        })?),
+        Some(l) => Some(
+            find_value_list(conn, l)?
+                .ok_or_else(|| {
+                    DbError::Api(format!(
+                        "ensure_parameter_definition: value_list {l:?} not found"
+                    ))
+                })?
+                .noted(folds, "parameter_value_list", l),
+        ),
     };
     // §3.5 inference: no explicit types + a bound list ⇒ the single rank-0 member
     // of the list's uniform member kind.

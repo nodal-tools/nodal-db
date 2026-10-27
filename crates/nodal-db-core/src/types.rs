@@ -280,6 +280,32 @@ pub enum WarningKind {
         written: String,
         stored: String,
     },
+    /// A name reference resolved, by the case-insensitive name identity
+    /// (engine rule 8: DuckDB `lower()`, of which [`fold`] is the exact
+    /// Rust copy), to an existing object whose stored spelling differs
+    /// from the one written (after NFC): the write went to that object,
+    /// under its stored name. Fires for every write-path reference to an
+    /// existing object (value writes, value deletes, object deletes,
+    /// structural references and idempotent creates), including objects
+    /// created or renamed earlier in the same call; never for the
+    /// reference that creates an object, a rename's new name, the verbs
+    /// (they return ids, not reports) or reads. One warning per group and
+    /// referent table, never one per string: `what` is the group
+    /// (`"segment"`, `"delete"`, `"object_delete"` or `"structural"`),
+    /// `count` the number of distinct written spellings that resolved this
+    /// way, `written`/`stored` the first such pair in input order.
+    /// `object_type` is the referent table (`"entity_class"`,
+    /// `"parameter_definition"`, `"alternative"`, `"entity"`,
+    /// `"scenario"`, `"parameter_value_list"`), `name` the segment
+    /// (`class:parameter/alternative`, as written) or empty, and `id` the
+    /// first resolved row's id. Not a write by itself. A client that sends
+    /// the spellings it loaded never sees one.
+    NameFolded {
+        what: String,
+        count: usize,
+        written: String,
+        stored: String,
+    },
 }
 
 /// The delete that covers a dropped write ([`WarningKind::DroppedByDelete`]).

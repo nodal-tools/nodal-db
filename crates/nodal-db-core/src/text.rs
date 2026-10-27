@@ -136,3 +136,68 @@ impl Normalized {
         })
     }
 }
+
+/// The references of one group of a write (a segment, the value deletes,
+/// the object deletes, the structural changes) that resolved to an
+/// existing object whose stored spelling is not byte-equal to the
+/// written (NFC) one, for the [`WarningKind::NameFolded`] warnings: one
+/// warning per referent table, `count` distinct written spellings, the
+/// first pair and its resolved id. A lookup found the row, so the two
+/// spellings are equal under the name fold by construction; no fold is
+/// computed here. Lives in one transaction attempt, so a conflict retry
+/// does not count twice.
+#[derive(Debug, Default)]
+pub(crate) struct NameFolds {
+    /// Per referent table, in first-seen order (deterministic warnings).
+    kinds: Vec<(&'static str, FoldedSpellings)>,
+}
+
+#[derive(Debug)]
+struct FoldedSpellings {
+    written: HashSet<String>,
+    first: (String, String, i64),
+}
+
+impl NameFolds {
+    /// Record that `written` (NFC, as the caller spelled the reference)
+    /// resolved to the `referent` row `id` stored as `stored`. Silent when
+    /// the spellings are byte-equal.
+    pub(crate) fn note(&mut self, referent: &'static str, written: &str, stored: &str, id: i64) {
+        if written == stored {
+            return;
+        }
+        match self.kinds.iter_mut().find(|(k, _)| *k == referent) {
+            Some((_, f)) => {
+                f.written.insert(written.to_string());
+            }
+            None => self.kinds.push((
+                referent,
+                FoldedSpellings {
+                    written: HashSet::from([written.to_string()]),
+                    first: (written.to_string(), stored.to_string(), id),
+                },
+            )),
+        }
+    }
+
+    /// The warnings, one per referent table that had a folded reference.
+    /// `what` names the group (`"segment"`, `"delete"`, `"object_delete"`,
+    /// `"structural"`), `name` where in it (a segment's
+    /// `class:parameter/alternative`, else empty).
+    pub(crate) fn warnings(&self, what: &str, name: &str) -> Vec<Warning> {
+        self.kinds
+            .iter()
+            .map(|(referent, f)| Warning {
+                kind: WarningKind::NameFolded {
+                    what: what.to_string(),
+                    count: f.written.len(),
+                    written: f.first.0.clone(),
+                    stored: f.first.1.clone(),
+                },
+                object_type: (*referent).to_string(),
+                name: name.to_string(),
+                id: f.first.2,
+            })
+            .collect()
+    }
+}

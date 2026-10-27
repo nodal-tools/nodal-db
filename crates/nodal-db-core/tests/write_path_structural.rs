@@ -30,7 +30,7 @@ use nodal_db_core::history::write_value;
 use nodal_db_core::schema_init::{init_schema, init_schema_with_default};
 use nodal_db_core::types::{
     LongRow, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, ScalarValue, ShapedData,
-    Tier, ValueKey, ValueKind, WriteOptions,
+    Tier, ValueKey, ValueKind, WarningKind, WriteOptions,
 };
 
 fn fresh_db() -> (tempfile::TempDir, PathBuf) {
@@ -951,9 +951,13 @@ fn entities_resolved_by_earlier_segments_of_a_commit_are_reused() {
     let minted = r
         .warnings
         .iter()
-        .filter(|w| w.object_type == "entity")
+        .filter(|w| w.object_type == "entity" && w.kind == WarningKind::AutoCreated)
         .count();
     assert_eq!(minted, 1, "one entity, reused by segments 2 and 3");
+    // Segment 3 spells it differently: reported as a folded reference.
+    assert!(r.warnings.iter().any(|w| w.object_type == "entity"
+        && matches!(&w.kind, WarningKind::NameFolded { written, stored, .. }
+            if written == "äx" && stored == "Äx")));
     assert_eq!(
         q_i64(&db, "SELECT count(DISTINCT entity_id) FROM value_scalar"),
         1

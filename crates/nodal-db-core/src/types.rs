@@ -146,17 +146,98 @@ pub enum ScalarValue {
     Duration { months: i32, micros: i64 },
 }
 
-/// The one name fold used everywhere names are compared in Rust: Unicode
-/// `to_lowercase`, matching DuckDB's Unicode `lower()` that the schema's
-/// `cur_name` columns and every SQL resolver apply (api critique F3: an ASCII
-/// fold lets Ä/ä-aliased names slip past comparisons SQL would collapse).
-/// The match is not exact: the two case tables differ on a few code points
-/// (`İ`, case pairs DuckDB's tables lack) and on the final-sigma rule.
-/// `tests/duckdb_lower_guard.rs` pins the difference; closing it is plan T11
-/// (`specs/unicode_text_rule_PLAN.md`). Public for that guard.
-#[allow(clippy::disallowed_methods)] // the one sanctioned case mapping
+/// The name fold: how nodal-db decides that two names are the same name
+/// (engine rule 8). It is an exact copy of DuckDB's `lower()`, which the
+/// schema's `cur_name` columns, their unique indexes and every SQL resolver
+/// apply: Unicode 15.1.0 Simple_Lowercase_Mapping, one code point to one,
+/// with no context rule (no final sigma), from the vendored table
+/// [`crate::fold_table::LOWER`]. `tests/duckdb_lower_guard.rs` proves it
+/// equal to the bundled engine's `lower()` on every Unicode scalar value,
+/// and [`check_engine_fold`] re-checks the linked engine once per process.
+/// Every name compare in Rust calls this and nothing else (a workspace
+/// clippy ban keeps raw case mappings out). Apply it to NFC input: name
+/// identity is `fold(nfc(s))` (engine rule 10).
 pub fn fold(s: &str) -> String {
-    s.to_lowercase()
+    if s.is_ascii() {
+        // A-Z is the whole ASCII part of the table.
+        #[allow(clippy::disallowed_methods)]
+        return s.to_ascii_lowercase();
+    }
+    s.chars().map(fold_char).collect()
+}
+
+/// [`fold`] of one code point.
+fn fold_char(c: char) -> char {
+    if c.is_ascii() {
+        return c.to_ascii_lowercase();
+    }
+    let table = &crate::fold_table::LOWER;
+    match table.binary_search_by_key(&c, |&(from, _)| from) {
+        Ok(i) => table[i].1,
+        Err(_) => c,
+    }
+}
+
+/// Outcome of the once-per-process engine check ([`check_engine_fold`]):
+/// `None` once the engine agreed, the refusal message once it did not.
+static ENGINE_FOLD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Refuse to write through an engine whose `lower()` is not [`fold`]
+/// (name_fold_identity_PLAN C1 as reshaped by K5). Once per process, on the
+/// first write connection: one `SELECT lower(?)` over every code point
+/// cased in Unicode 15.1 or 16.0 ([`crate::fold_table::CANARY`], under a
+/// millisecond), compared with [`fold`] of the same string. A mismatch
+/// means the linked DuckDB changed its case table (a patched or newer
+/// engine): its unique indexes and resolvers would then disagree with the
+/// core's checks, so every write is refused with [`DbError::Internal`]
+/// naming the first differing code point. This is the one check that runs
+/// in a consumer's build (an editor never runs this repo's guard tests).
+/// A failed query is returned as is and retried by the next write.
+pub(crate) fn check_engine_fold(conn: &duckdb::Connection) -> Result<(), crate::error::DbError> {
+    if let Some(outcome) = ENGINE_FOLD.get() {
+        return outcome
+            .as_ref()
+            .map_or(Ok(()), |m| Err(crate::error::DbError::Internal(m.clone())));
+    }
+    let outcome = engine_fold_mismatch(conn, fold)?;
+    let outcome = ENGINE_FOLD.get_or_init(|| outcome);
+    outcome
+        .as_ref()
+        .map_or(Ok(()), |m| Err(crate::error::DbError::Internal(m.clone())))
+}
+
+/// The engine check's comparison, with the expected fold injectable (the
+/// guard test passes a wrong one to see the refusal): `None` when the
+/// engine's `lower()` of the canary equals `expected` of it, else the
+/// refusal message naming the first differing code point.
+#[doc(hidden)]
+pub fn engine_fold_mismatch(
+    conn: &duckdb::Connection,
+    expected: impl Fn(&str) -> String,
+) -> Result<Option<String>, crate::error::DbError> {
+    let canary: String = crate::fold_table::CANARY.iter().collect();
+    let engine: String = conn.query_row("SELECT lower(?)", [&canary], |r| r.get(0))?;
+    let want = expected(&canary);
+    if engine == want {
+        return Ok(None);
+    }
+    let first = canary
+        .chars()
+        .zip(engine.chars().zip(want.chars()))
+        .find(|(_, (e, w))| e != w)
+        .map(|(c, (e, w))| {
+            format!(
+                "U+{:04X} lowers to U+{:04X} in the engine, U+{:04X} in the core",
+                c as u32, e as u32, w as u32
+            )
+        })
+        .unwrap_or_else(|| "the lowered strings differ in length".into());
+    Ok(Some(format!(
+        "the linked DuckDB's lower() is not the core's name fold ({first}): this build's \
+         engine changed its case table, so names would collide differently in the \
+         database than in the core's checks; writes are refused (see \
+         docs/dev/engine_rules.md §8 and the DuckDB upgrade procedure in CONTRIBUTING.md)"
+    )))
 }
 
 /// The store's name **hygiene floor** for classes/entities/parameters (was the

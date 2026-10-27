@@ -53,16 +53,28 @@ and re-check it after a bump. After one:
   aggregate). A stable column's type is part of the contract: add an
   explicit `CAST` in the DDL to keep the old type (then bump the
   read-surface revision), do not bump the contract major.
-- If the release notes mention Unicode or utf8proc updates (case
-  mapping), compact the dev files after the bump. The `lower(name)`
-  indexes (`ix_entity_lname`, the `uq_*_name` unique indexes over
-  `cur_name`) persist keys computed by the engine that built them, so a
-  changed case mapping could make an index lookup miss a row a scan
-  would find; compaction rebuilds every index from the DDL. A changed
-  case mapping also fails `duckdb_lower_guard` (engine_rules.md §8),
-  which pins where DuckDB's `lower()` and the Rust name fold differ; it
-  fails the same way after a Rust toolchain bump that changes
-  `to_lowercase`.
+- **A change to `lower()` is a change to name identity.** Name identity
+  is DuckDB's `lower()`, and the core's `types::fold` is a verified copy
+  of it (engine_rules.md §8). If `duckdb_lower_guard` fails after the
+  bump, the new engine lowercases some code points differently, so names
+  that were two may now be one (or the reverse). Do not edit the guard;
+  instead, in the bump branch:
+  1. find the engine's new Unicode version (the guard lists the code
+     points that changed), download that release's `UnicodeData.txt`,
+     pin its SHA-256 in `conformance/unicode/gen_lower_table.py` and
+     regenerate the table and `fold_table.rs` (the canary probe should
+     then cover the next Unicode version too);
+  2. report collisions in the dev files: names whose new folds coincide
+     within one kind (and class) were two objects and would now be one;
+     each needs a rename before the files are used with the new build;
+  3. compact the dev files: the `lower(name)` indexes (`ix_entity_lname`
+     and the `uq_*_name` unique indexes over `cur_name`) persist keys the
+     old engine computed, so an index lookup could miss a row a scan
+     finds; compaction rebuilds every index from the DDL;
+  4. record the change (release notes, the usage guide's examples of the
+     rule) and tell downstream users: their files need the same check.
+  A build that links a different engine without these steps refuses
+  every write (`types::check_engine_fold`, once per process).
 
 ## Changing the read surface
 Every change to a view or macro in `schema/070`–`120_*.sql` bumps the

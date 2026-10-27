@@ -398,10 +398,10 @@ pub fn commit_changes(
         // so no id read or minted in a rolled-back attempt is reused.
         let mut resolved_names = ResolveCache::new();
         // The resolved (parameter definition, alternative) of every segment
-        // so far: the up-front duplicate-target check folds names in Rust,
-        // which can disagree with DuckDB's `lower()` (final sigma, dotted
-        // capital I), so two targets it keeps apart may resolve to one key
-        // set. The deferred writes rely on distinct targets.
+        // so far: the second line behind the up-front duplicate-target
+        // check (`types::fold` is proven equal to DuckDB's `lower()`, engine
+        // rule 8; this holds even if that proof were bypassed). The deferred
+        // writes rely on distinct targets.
         let mut targets: HashSet<(i64, i64)> = HashSet::new();
         // Structural changes run FIRST (§4.1): a value write / rank / activation
         // later in this same commit may target a referent an earlier structural
@@ -1458,9 +1458,9 @@ enum DeleteResolution {
 /// level (class, parameter, alternative, entity) yields
 /// [`WarningKind::UnknownReferent`] and a skip; a resolved key with no live
 /// value yields [`WarningKind::NothingToDelete`]. Two keys that resolve to
-/// one value (spellings the up-front Rust fold keeps apart but DuckDB's
-/// `lower()` merges, e.g. a final sigma): the first deletes, the later ones
-/// get `NothingToDelete`, as a second per-key delete would (plan D10).
+/// one value (the up-front fold dedup makes that unreachable; this is the
+/// second line): the first deletes, the later ones get `NothingToDelete`,
+/// as a second per-key delete would (plan D10).
 /// Retention obeys the definition's `retain_content` unless the caller
 /// overrode it, as in the write path (`write_prepared`).
 ///
@@ -2098,11 +2098,11 @@ fn write_prepared(
         &mut folds,
     )?;
     // Two segments that resolve to one (parameter, alternative) would write
-    // the same value keys twice in one commit. The up-front check compares a
-    // Rust fold; this one compares the ids DuckDB resolved, so a spelling
-    // pair the two folds disagree on cannot reach the writers (with the
-    // deferred writes, a minted entity skips its probes and would
-    // otherwise end up live in two tiers).
+    // the same value keys twice in one commit. The up-front check compares
+    // `types::fold`; this one compares the ids DuckDB resolved, the second
+    // line should the two ever disagree (with the deferred writes, a minted
+    // entity skips its probes and would otherwise end up live in two
+    // tiers).
     if !targets.insert((pd_id, alt_id)) {
         return Err(DbError::Api(format!(
             "duplicate target {}:{} (alternative {:?}): resolves to the same parameter \

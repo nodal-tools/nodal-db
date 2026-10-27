@@ -1384,9 +1384,11 @@ fn api_long_array_delete_batches(db: &Path, log: &mut String) {
     // FALSE` long key (lres), an array, a scalar, a sparse rank-2 long, an
     // array under `mixed`; an UnknownReferent at each of the four levels; a
     // NothingToDelete (cap/n1 was deleted in a6); an exact duplicate
-    // (deduped up front); and a final-sigma pair that Rust's fold keeps
-    // apart ("ΑΣ" -> "ας") but DuckDB's lower() resolves to one entity
-    // ("ασ"): the first deletes, the second gets NothingToDelete.
+    // (deduped up front); and a final-sigma neighbour: "ας" is its own
+    // name under the name fold (DuckDB's lower(), no final-sigma rule), so
+    // it is an UnknownReferent while "ασ" deletes. (Until the folds were
+    // unified this key was "ΑΣ", which Rust's to_lowercase kept apart from
+    // "ασ" and DuckDB merged; the up-front dedup now refuses that pair.)
     api_commit(
         db,
         "b6 prep",
@@ -1417,7 +1419,7 @@ fn api_long_array_delete_batches(db: &Path, log: &mut String) {
             dk("demand", "Base", "nobody2"),
             dk("cap", "Base", "n1"),
             dk("lres", "Base", "n1"),
-            dk("demand", "Base", "ΑΣ"),
+            dk("demand", "Base", "ας"),
             dk("demand", "Base", "ασ"),
             dk("grid", "Base", "n1"),
             dk("mixed", "Alt3", "n1"),

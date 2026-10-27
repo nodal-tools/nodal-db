@@ -441,11 +441,14 @@ fn class_delete_is_refused() {
     );
 }
 
-/// The resolved-id check sees what the Rust fold misses: Rust folds `ΑΣ` to
-/// `ας` (final sigma) and keeps it apart from `ασ`, but DuckDB's `lower()`
-/// resolves both to one entity.
+/// `ΑΣ` and `ασ` are one name: the name fold is DuckDB's `lower()` (no
+/// final-sigma rule; engine rule 8). Rust's `to_lowercase` kept them apart,
+/// so this pair once reached only the resolved-id check; now the pure name
+/// check, using the same fold as the database, refuses it up front. (The
+/// id check stays as the second line; the container cases above still
+/// reach it.)
 #[test]
-fn a_spelling_only_duckdb_folds_together_is_refused_on_the_ids() {
+fn a_final_sigma_spelling_is_refused_by_the_name_check() {
     let (_d, db) = seeded();
     commit_changes(
         &db,
@@ -464,7 +467,7 @@ fn a_spelling_only_duckdb_folds_together_is_refused_on_the_ids() {
         vec![seg("node", "demand", "Base", scalar_batch("ΑΣ", 2.0))],
         okey(ObjectKind::Entity, Some("node"), "ασ"),
         cascade(true),
-        Path_::Ids,
+        Path_::Names,
     );
 }
 

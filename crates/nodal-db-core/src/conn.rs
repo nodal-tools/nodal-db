@@ -239,6 +239,9 @@ where
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
     let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
     assert_min_version(&conn)?;
+    // The engine's `lower()` must be the core's name fold (engine rule 8):
+    // checked on the first write of the process, then a cached answer.
+    crate::types::check_engine_fold(&conn)?;
     // An older read surface is replaced with this build's here, in its own
     // transaction before the caller's (a rollback of the caller's write must
     // not undo it, and the conflict loop must not repeat it). One version

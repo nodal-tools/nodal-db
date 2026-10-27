@@ -366,37 +366,67 @@ of the stored-position legs, in `axis_position_stored` and
 gate's `synth_axes` metrics measure the same reads on a file with 500
 axes of each sort.
 
-## 8. Name identity is DuckDB's `lower()`; the Rust fold must track it
+## 8. Name identity is DuckDB's `lower()`, and `types::fold` is it
 
-**Rule.** Names (entities, classes, parameters, alternatives, scenarios,
-value lists) are case-insensitive through DuckDB's `lower()`: the
-`cur_name` columns, their unique indexes and every SQL resolver use it.
-Rust code that compares names before they reach SQL (collision checks
-in `structural.rs`, `verbs.rs`, the write path) uses `types::fold`, and
-nothing else. Never compare names in a canonical path with another
-DuckDB string function or another Rust case mapping.
+**Rule.** Two names (entities, classes, parameters, alternatives,
+scenarios, value lists, units, class sets, dimension names) are the same
+name when their NFC forms (§10) are equal under DuckDB's `lower()`: the
+`cur_name` columns, their unique indexes, every SQL resolver and the
+read-surface macros apply it. On the bundled engine `lower()` is exactly
+Unicode 15.1.0 Simple_Lowercase_Mapping, one code point to one, with no
+context rule (no final sigma). `types::fold` is a copy of that mapping
+from the vendored table (`conformance/unicode/lower_simple_15.1.0.txt`,
+generated into `fold_table.rs`), proven equal to the engine's `lower()`.
+Every name compare in Rust calls `types::fold` and nothing else; in
+Python, `nodal_db.fold_name` (the same function) on
+`nodal_db.normalize_identifier` output. Never compare names with another
+case mapping: a workspace `clippy.toml` bans `str::to_lowercase`,
+`to_uppercase`, `to_ascii_lowercase`, `eq_ignore_ascii_case` and the
+`char` mappings, and a grep test bans `str.lower`/`casefold` in the Spine
+importer. The few non-name uses (SQL keywords, `value_kind` tags,
+reserved Arrow column names) carry a commented `#[allow]`.
 
-**Why.** `types::fold` is Rust's `str::to_lowercase`, a second case
-table that is meant to agree with DuckDB's and does not quite: on
-DuckDB 2.0.0 and Rust 1.98 they differ on 56 code points (`İ`, and case
-pairs from recent Unicode versions that DuckDB lacks) and on the
-final-sigma rule (`ΟΔΟΣ` folds to `οδοσ` in DuckDB, `οδος` in Rust).
-Where they differ, a Rust-side check passes two names that then collide
-on a DuckDB unique index mid-transaction, or the reverse. Neither table
-is pinned: Rust's moves with the toolchain, DuckDB's with the bundled
-engine. Making name identity independent of both is planned separately
-(`specs/unicode_text_rule_PLAN.md`, T11); until then the difference is
-pinned so that it cannot change unnoticed.
+**Why.** The database's check (a unique index, a resolver) and the
+core's pure checks (duplicate targets, collision checks before any SQL,
+an editor's "new or existing?" display) must agree, or a name the core
+calls new resolves in SQL to an existing object and overwrites it, or a
+pure check passes two names that then collide mid-transaction. Rust's
+own `to_lowercase` is a different function (full lowercase with
+SpecialCasing, the final-sigma rule, the toolchain's Unicode version;
+they differed on 56 code points and final sigma), and so is Python's.
+Keeping DuckDB's function as the identity means no schema change: every
+existing file is already consistent with it, and `lower(name) =
+lower('...')` stays exact for SQL users. The consequences are documented
+for users (usage guide, "Names, labels and Unicode"): final sigma is an
+ordinary letter (`ΟΔΟΣ` = `οδοσ` ≠ `οδος`), `ß` ≠ `ss`, `İ` = `I` = `i`,
+and the 27 Unicode 16 case pairs are case-sensitive. The fold's Unicode
+version (15.1) differs from the NFC tables' (16.0, §10); NFC stability is
+unaffected.
 
-**Guard.**
+Identity is tied to the bundled engine: a DuckDB release that updates
+`lower()` changes which names collide. That is an identity change, made
+deliberately (CONTRIBUTING "DuckDB upgrades"), never silently.
+
+**Guards.**
 [`crates/nodal-db-core/tests/duckdb_lower_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/duckdb_lower_guard.rs)
-compares `types::fold` with DuckDB `lower()` on every Unicode scalar
-value and asserts the differences are exactly its committed list, plus
-the final-sigma and `İ` strings. It fails after a toolchain or DuckDB
-bump that changes either side, and lists the code points that started
-or stopped differing: re-evaluate T11 with them, then update the list
-(and, when DuckDB's side changed, compact the dev files; see
-[DuckDB upgrades](https://github.com/nodal-tools/nodal-db/blob/main/CONTRIBUTING.md#duckdb-upgrades)).
+compares `types::fold` with `lower()` on every Unicode scalar value and
+checks on 20,000 random strings that `lower()` is the per-code-point
+concatenation (no context rule), which together prove equality on every
+string; it also checks the runtime check below.
+`tests/fold_table.rs` checks the Rust table against the vendored file,
+`tests/name_fold_agreement.rs` that random cased names resolve in a
+commit as `fold` predicts, and `tests/name_folded.rs` the `NameFolded`
+warning (a reference resolved to an object spelled differently). At run
+time, `types::check_engine_fold` runs once per process on the first write
+connection: one `SELECT lower(?)` over every code point cased in Unicode
+15.1 or 16.0, compared with `fold`; on a mismatch (a patched or replaced
+engine in a consumer's build) every write is refused. It is the one check
+that runs in a downstream build, which never runs this repo's tests.
+
+Out of reach (recorded, not fixed): a third-party engine with a different
+`lower()` (a Python `duckdb` a user queries with) reads the index keys our
+engine persisted, so an index-scan lookup there could miss a row a scan
+finds. Reads only.
 
 ## 9. Changing a read-surface object
 

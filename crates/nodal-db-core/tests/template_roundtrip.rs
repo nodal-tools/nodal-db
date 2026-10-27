@@ -99,3 +99,64 @@ fn load_export_reload_is_semantically_identical() {
     let (e2, _) = export(&db2).unwrap();
     assert_eq!(normalized_model(&e1), normalized_model(&e2));
 }
+
+/// A value list whose name is in the former drift set (final sigma): the
+/// template binds it by a case variant that only DuckDB's `lower()`, now
+/// also the core's fold, makes equal (`ΟΔΟΣ` = `οδοσ`; Rust's
+/// `to_lowercase` kept them apart). It loads, the export finds the list by
+/// the same fold (`export.rs` probes the vocabulary map keyed by
+/// `types::fold`) and elides the inferable types, and the export reloads to
+/// the same model (name_fold_identity_PLAN K2/K9).
+#[test]
+fn drift_set_value_list_name_round_trips() {
+    let yaml = "template: {name: t, version: \"1\"}
+value_lists:
+  - name: ΟΔΟΣ
+    members:
+      - {value: a}
+      - {value: b}
+classes:
+  - name: c
+    parameters:
+      - name: p
+        value_list: οδοσ
+";
+    let dir = tempfile::tempdir().unwrap();
+    let db1 = dir.path().join("a.duckdb");
+    init_schema(&db1).unwrap();
+    let source = parse_str(yaml).unwrap();
+    apply(
+        &db1,
+        &source,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &opts(),
+    )
+    .unwrap();
+    let (exported, _) = export(&db1).unwrap();
+    let p = &exported.classes[0].parameters[0];
+    assert_eq!(
+        p.value_list.as_deref(),
+        Some("ΟΔΟΣ"),
+        "bound to the stored list"
+    );
+    assert!(p.types.is_none(), "inferable from the list: elided");
+    let db2 = dir.path().join("b.duckdb");
+    init_schema(&db2).unwrap();
+    apply(
+        &db2,
+        &exported,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &opts(),
+    )
+    .unwrap();
+    let (again, _) = export(&db2).unwrap();
+    assert_eq!(normalized_model(&exported), normalized_model(&again));
+    assert_eq!(
+        template_content_hash(&exported),
+        template_content_hash(&again)
+    );
+}

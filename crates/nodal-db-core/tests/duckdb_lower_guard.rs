@@ -1,25 +1,24 @@
-//! Name-fold drift guard (plan T11, `specs/unicode_text_rule_PLAN.md` §1.3
-//! and §4): the Rust name fold (`types::fold`, Rust's `str::to_lowercase`)
-//! and DuckDB's `lower()` (the `cur_name` columns, their unique indexes and
-//! every SQL resolver) are two independent case tables, and they already
-//! differ. Neither is pinned by anything else: the Rust tables move with the
-//! toolchain (there is no `rust-toolchain` file), DuckDB's with the bundled
-//! engine.
+//! Name-identity equality guard (engine rule 8,
+//! `docs/dev/engine_rules.md` §8): the Rust name fold (`types::fold`) IS
+//! DuckDB's `lower()` (the `cur_name` columns, their unique indexes, every
+//! SQL resolver and the read-surface macros).
 //!
-//! Where they differ, a Rust-side collision check and the SQL unique index
-//! disagree: `ΟΔΟΣ` and `οδοσ` pass the Rust check and then collide on the
-//! DuckDB index mid-transaction. Fixing that is its own plan (T11); this
-//! guard only makes any CHANGE in the difference loud. It compares the two
-//! folds on every Unicode scalar value and asserts the set of differences
-//! is exactly the committed `KNOWN_DRIFT` list, plus the context rules a
-//! per-code-point scan cannot see (final sigma) and `İ`.
+//! `types::fold` applies the vendored Unicode 15.1.0 simple lowercase table
+//! code point by code point. That equals `lower()` exactly when (a) the two
+//! agree on every Unicode scalar value and (b) `lower()` is context-free,
+//! i.e. the lower of a string is the concatenation of the lowers of its code
+//! points (no final-sigma or other context rule). (a) is checked
+//! exhaustively; (b) on 20,000 random strings over the cased code points and
+//! the context-rule characters, plus the classic cases as strings. Together
+//! they are a proof for every string, not a sample: two per-code-point maps
+//! that agree everywhere agree on every concatenation.
 //!
-//! When it fails after a toolchain or DuckDB bump: the message lists the
-//! code points that started or stopped differing. Re-evaluate the name-fold
-//! plan (T11) with them, then update `KNOWN_DRIFT`; if DuckDB's case mapping
-//! changed, compact the dev files too (CONTRIBUTING "DuckDB upgrades": the
-//! `lower(name)` indexes persist keys computed by the engine that built
-//! them).
+//! When it fails after a DuckDB bump: the engine changed `lower()`, which
+//! changes name identity (two stored names may now be one, or the reverse).
+//! Follow CONTRIBUTING.md "DuckDB upgrades": regenerate the table at the
+//! engine's Unicode version (`conformance/unicode/gen_lower_table.py`), run a
+//! collision report on the dev files and compact them (the `lower(name)`
+//! indexes persist keys computed by the engine that built them).
 
 // Tests may use raw case mappings (as data or to build fixtures); the
 // workspace clippy.toml ban on them is for name compares in the crates.
@@ -28,90 +27,14 @@
 use std::collections::BTreeMap;
 
 use nodal_db_core::duckdb::Connection;
-use nodal_db_core::types::fold;
-
-/// The code points whose one-character fold differs, as
-/// `(code point, DuckDB lower(), Rust fold)` (DuckDB 2.0.0, Rust 1.98):
-/// `İ`, then case pairs added in recent Unicode versions that DuckDB's
-/// tables lack and Rust's have.
-#[rustfmt::skip]
-const KNOWN_DRIFT: &[(u32, &str, &str)] = &[
-    (0x0130, "i", "i\u{307}"),
-    (0x1C89, "\u{1c89}", "\u{1c8a}"),
-    (0xA7CB, "\u{a7cb}", "\u{264}"),
-    (0xA7CC, "\u{a7cc}", "\u{a7cd}"),
-    (0xA7CE, "\u{a7ce}", "\u{a7cf}"),
-    (0xA7D2, "\u{a7d2}", "\u{a7d3}"),
-    (0xA7D4, "\u{a7d4}", "\u{a7d5}"),
-    (0xA7DA, "\u{a7da}", "\u{a7db}"),
-    (0xA7DC, "\u{a7dc}", "\u{19b}"),
-    (0x10D50, "\u{10d50}", "\u{10d70}"),
-    (0x10D51, "\u{10d51}", "\u{10d71}"),
-    (0x10D52, "\u{10d52}", "\u{10d72}"),
-    (0x10D53, "\u{10d53}", "\u{10d73}"),
-    (0x10D54, "\u{10d54}", "\u{10d74}"),
-    (0x10D55, "\u{10d55}", "\u{10d75}"),
-    (0x10D56, "\u{10d56}", "\u{10d76}"),
-    (0x10D57, "\u{10d57}", "\u{10d77}"),
-    (0x10D58, "\u{10d58}", "\u{10d78}"),
-    (0x10D59, "\u{10d59}", "\u{10d79}"),
-    (0x10D5A, "\u{10d5a}", "\u{10d7a}"),
-    (0x10D5B, "\u{10d5b}", "\u{10d7b}"),
-    (0x10D5C, "\u{10d5c}", "\u{10d7c}"),
-    (0x10D5D, "\u{10d5d}", "\u{10d7d}"),
-    (0x10D5E, "\u{10d5e}", "\u{10d7e}"),
-    (0x10D5F, "\u{10d5f}", "\u{10d7f}"),
-    (0x10D60, "\u{10d60}", "\u{10d80}"),
-    (0x10D61, "\u{10d61}", "\u{10d81}"),
-    (0x10D62, "\u{10d62}", "\u{10d82}"),
-    (0x10D63, "\u{10d63}", "\u{10d83}"),
-    (0x10D64, "\u{10d64}", "\u{10d84}"),
-    (0x10D65, "\u{10d65}", "\u{10d85}"),
-    (0x16EA0, "\u{16ea0}", "\u{16ebb}"),
-    (0x16EA1, "\u{16ea1}", "\u{16ebc}"),
-    (0x16EA2, "\u{16ea2}", "\u{16ebd}"),
-    (0x16EA3, "\u{16ea3}", "\u{16ebe}"),
-    (0x16EA4, "\u{16ea4}", "\u{16ebf}"),
-    (0x16EA5, "\u{16ea5}", "\u{16ec0}"),
-    (0x16EA6, "\u{16ea6}", "\u{16ec1}"),
-    (0x16EA7, "\u{16ea7}", "\u{16ec2}"),
-    (0x16EA8, "\u{16ea8}", "\u{16ec3}"),
-    (0x16EA9, "\u{16ea9}", "\u{16ec4}"),
-    (0x16EAA, "\u{16eaa}", "\u{16ec5}"),
-    (0x16EAB, "\u{16eab}", "\u{16ec6}"),
-    (0x16EAC, "\u{16eac}", "\u{16ec7}"),
-    (0x16EAD, "\u{16ead}", "\u{16ec8}"),
-    (0x16EAE, "\u{16eae}", "\u{16ec9}"),
-    (0x16EAF, "\u{16eaf}", "\u{16eca}"),
-    (0x16EB0, "\u{16eb0}", "\u{16ecb}"),
-    (0x16EB1, "\u{16eb1}", "\u{16ecc}"),
-    (0x16EB2, "\u{16eb2}", "\u{16ecd}"),
-    (0x16EB3, "\u{16eb3}", "\u{16ece}"),
-    (0x16EB4, "\u{16eb4}", "\u{16ecf}"),
-    (0x16EB5, "\u{16eb5}", "\u{16ed0}"),
-    (0x16EB6, "\u{16eb6}", "\u{16ed1}"),
-    (0x16EB7, "\u{16eb7}", "\u{16ed2}"),
-    (0x16EB8, "\u{16eb8}", "\u{16ed3}"),
-];
+use nodal_db_core::fold_table::{CANARY, LOWER};
+use nodal_db_core::types::{engine_fold_mismatch, fold};
 
 fn hex(s: &str) -> String {
     s.chars()
         .map(|c| format!("U+{:04X}", c as u32))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `s` as a Rust string literal body, non-ASCII escaped.
-fn esc(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii() {
-                c.to_string()
-            } else {
-                format!("\\u{{{:x}}}", c as u32)
-            }
-        })
-        .collect()
 }
 
 /// DuckDB's `lower(chr(cp))` for every scalar value it changes.
@@ -134,18 +57,17 @@ fn duckdb_lower(conn: &Connection, s: &str) -> String {
 }
 
 #[test]
-fn rust_fold_and_duckdb_lower_differ_only_where_known() {
+fn rust_fold_equals_duckdb_lower_on_every_scalar_value() {
     let conn = Connection::open_in_memory().expect("open");
     let duck = duckdb_changed(&conn);
-    assert!(
-        duck.len() > 1_000,
-        "DuckDB lower() changed only {} code points",
-        duck.len()
+    assert_eq!(
+        duck.len(),
+        LOWER.len(),
+        "DuckDB lower() changes {} code points, the vendored table {}",
+        duck.len(),
+        LOWER.len()
     );
-
-    // Every scalar value: where neither side changes it, both are the
-    // identity; elsewhere compare (DuckDB's identity when it is not listed).
-    let mut drift: BTreeMap<u32, (String, String)> = BTreeMap::new();
+    let mut diffs = Vec::new();
     for cp in 1..=0x10_FFFFu32 {
         let Some(c) = char::from_u32(cp) else {
             continue; // surrogates
@@ -154,55 +76,141 @@ fn rust_fold_and_duckdb_lower_differ_only_where_known() {
         let rust = fold(&s);
         let duckdb = duck.get(&cp).cloned().unwrap_or_else(|| s.clone());
         if rust != duckdb {
-            drift.insert(cp, (duckdb, rust));
+            diffs.push(format!(
+                "  U+{cp:04X}: duckdb {} rust {}",
+                hex(&duckdb),
+                hex(&rust)
+            ));
         }
     }
+    assert!(
+        diffs.is_empty(),
+        "DuckDB lower() and the name fold differ on {} code point(s): the engine changed \
+         its case table, which changes name identity (see this file's header):\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
 
-    let known: BTreeMap<u32, (String, String)> = KNOWN_DRIFT
-        .iter()
-        .map(|(cp, d, r)| (*cp, (d.to_string(), r.to_string())))
-        .collect();
-    if drift != known {
-        let mut msg = String::from(
-            "the Rust name fold and DuckDB lower() drifted from the committed list \
-             (plan T11; see this file's header)\n",
-        );
-        for (cp, (d, r)) in &drift {
-            if known.get(cp) != Some(&(d.clone(), r.clone())) {
-                msg += &format!(
-                    "  new/changed U+{cp:04X}: duckdb {} rust {}\n",
-                    hex(d),
-                    hex(r)
-                );
-            }
-        }
-        for cp in known.keys() {
-            if !drift.contains_key(cp) {
-                msg += &format!("  no longer differs: U+{cp:04X}\n");
-            }
-        }
-        msg += "current list:\n";
-        for (cp, (d, r)) in &drift {
-            msg += &format!("    (0x{cp:04X}, \"{}\", \"{}\"),\n", esc(d), esc(r));
-        }
-        panic!("{msg}");
+/// A small deterministic PRNG (xorshift64*): reproducible strings without a
+/// dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
     }
 }
 
-/// Context rules a per-code-point scan cannot see, and the dotted capital
-/// I, pinned as strings on both sides.
 #[test]
-fn context_rule_strings_fold_as_known() {
+fn duckdb_lower_is_context_free_and_equals_the_fold_on_strings() {
     let conn = Connection::open_in_memory().expect("open");
-    // Final sigma: Rust applies the context rule, DuckDB does not, so
-    // `ΟΔΟΣ` and `οδοσ` are one name to DuckDB and two to Rust.
-    assert_eq!(duckdb_lower(&conn, "ΟΔΟΣ"), "οδοσ");
-    assert_eq!(fold("ΟΔΟΣ"), "οδος");
-    assert_eq!(duckdb_lower(&conn, "οδοσ"), "οδοσ");
-    assert_eq!(fold("οδοσ"), "οδοσ");
-    // İ (U+0130): DuckDB folds to plain i, Rust to i + U+0307.
-    assert_eq!(duckdb_lower(&conn, "\u{130}"), "i");
-    assert_eq!(fold("\u{130}"), "i\u{307}");
-    assert_eq!(duckdb_lower(&conn, "İSTANBUL"), "istanbul");
-    assert_eq!(fold("İSTANBUL"), "i\u{307}stanbul");
+    // The pool: every cased code point (and its lowercase), the
+    // context-rule characters, combining marks, punctuation and spaces.
+    let mut pool: Vec<char> = CANARY.to_vec();
+    pool.extend(LOWER.iter().map(|&(_, l)| l));
+    pool.extend(
+        [
+            'Σ', 'σ', 'ς', '\u{130}', 'I', 'i', '\u{307}', '\u{301}', '\u{345}', 'ß', 'ẞ', ' ',
+            '.', '\'', '-', '_', '\u{200d}', '0',
+        ]
+        .iter(),
+    );
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let strings: Vec<String> = (0..20_000)
+        .map(|_| {
+            let len = 1 + rng.below(12);
+            (0..len).map(|_| pool[rng.below(pool.len())]).collect()
+        })
+        .collect();
+    // One statement for all of them, and one for the pool's code points
+    // one by one (NUL separates: no string contains it, lower() keeps it).
+    let lower_each = |items: Vec<String>| -> Vec<String> {
+        let lowered = duckdb_lower(&conn, &items.join("\u{0}"));
+        let out: Vec<String> = lowered.split('\u{0}').map(str::to_string).collect();
+        assert_eq!(out.len(), items.len());
+        out
+    };
+    let single: BTreeMap<char, String> = pool
+        .iter()
+        .copied()
+        .zip(lower_each(pool.iter().map(|c| c.to_string()).collect()))
+        .collect();
+    let lowered = lower_each(strings.clone());
+    for (s, l) in strings.iter().zip(lowered) {
+        let per_cp: String = s.chars().map(|c| single[&c].as_str()).collect();
+        assert_eq!(l, per_cp, "lower() is not context-free on {}", hex(s));
+        assert_eq!(fold(s), l, "fold != lower() on {}", hex(s));
+    }
+}
+
+/// The cases where Rust's `to_lowercase` (the former fold) and `lower()`
+/// differed, as strings on both sides: they are now one function.
+#[test]
+fn the_former_drift_cases_are_equal() {
+    let conn = Connection::open_in_memory().expect("open");
+    for s in [
+        "ΟΔΟΣ",
+        "οδοσ",
+        "οδος",
+        "ΑΣ ΑΣ",
+        "\u{130}",
+        "İSTANBUL",
+        "Straße",
+        "STRASSE",
+        "ẞ",
+        "ǅ",
+        "\u{1c89}",
+        "\u{10d50}",
+        "\u{a7cb}",
+    ] {
+        assert_eq!(fold(s), duckdb_lower(&conn, s), "{}", hex(s));
+    }
+    // What the shared function means for identity (engine rule 8): final
+    // sigma is not special, İ folds to plain i, ß is not ss, and the
+    // Unicode 16 case pairs are case-sensitive.
+    assert_eq!(fold("ΟΔΟΣ"), fold("οδοσ"));
+    assert_ne!(fold("ΟΔΟΣ"), fold("οδος"));
+    assert_eq!(fold("\u{130}x"), fold("Ix"));
+    assert_ne!(fold("Straße"), fold("STRASSE"));
+    assert_ne!(fold("\u{1c89}"), fold("\u{1c8a}"));
+}
+
+/// The runtime engine check (`types::check_engine_fold`) passes on the
+/// bundled engine and refuses one whose `lower()` disagrees: here simulated
+/// by a wrong expected fold (Unicode 16's U+1C89 → U+1C8A pair).
+#[test]
+fn engine_check_passes_here_and_refuses_a_mismatch() {
+    let conn = Connection::open_in_memory().expect("open");
+    assert_eq!(engine_fold_mismatch(&conn, fold).expect("check"), None);
+    let unicode16 = |s: &str| -> String {
+        fold(s)
+            .chars()
+            .map(|c| if c == '\u{1c89}' { '\u{1c8a}' } else { c })
+            .collect()
+    };
+    let refusal = engine_fold_mismatch(&conn, unicode16)
+        .expect("check")
+        .expect("a mismatch is refused");
+    assert!(
+        refusal.contains("U+1C89 lowers to U+1C89 in the engine, U+1C8A in the core"),
+        "{refusal}"
+    );
+    // The canary covers the code points either Unicode version cases.
+    assert!(CANARY.contains(&'\u{1c89}') && CANARY.contains(&'\u{130}'));
+    // Speed: one statement, well under the plan's millisecond budget even
+    // in a debug build's timing noise.
+    let start = std::time::Instant::now();
+    engine_fold_mismatch(&conn, fold).expect("check");
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(250),
+        "{:?}",
+        start.elapsed()
+    );
 }

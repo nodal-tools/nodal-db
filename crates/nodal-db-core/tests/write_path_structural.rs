@@ -992,14 +992,15 @@ fn entities_resolved_by_earlier_segments_of_a_commit_are_reused() {
     assert_audits_clean(&db);
 }
 
-/// Two alternative spellings that Rust's `to_lowercase` keeps apart (final
-/// sigma: `"ΑΣ"` -> `"ας"`) but DuckDB's `lower()` folds together
-/// (`"ασ"`), so the up-front duplicate-target check passes while both
-/// segments resolve to one (parameter, alternative). Segment 1 writes a
-/// scalar for a NEW entity (minted, so the deferred write skips its probes),
-/// segment 2 an array to the same key. Without the resolved-id target check
-/// the commit landed with the key live in two tiers; it must be rejected as
-/// an Api error, with nothing written.
+/// Two alternative spellings that DuckDB's `lower()` folds together (final
+/// sigma is an ordinary letter: `"ΑΣ"` and `"ασ"` are one name). Rust's
+/// `to_lowercase` once kept them apart, so only the resolved-id target
+/// check caught them; the up-front duplicate-target check now uses the same
+/// fold as the database (engine rule 8) and refuses them before any DB
+/// work. Segment 1 writes a scalar for a NEW entity (minted, so the
+/// deferred write skips its probes), segment 2 an array to the same key:
+/// landing both would leave the key live in two tiers. Rejected as an Api
+/// error, with nothing written; the id check stays as the second line.
 #[test]
 fn segments_resolving_to_one_target_are_rejected() {
     use nodal_db_core::template::ir::{DimSpec, TypeDecl};
@@ -1067,11 +1068,10 @@ fn segments_resolving_to_one_target_are_rejected() {
     )
     .expect_err("one target written twice in a commit");
     assert!(matches!(err, DbError::Api(_)), "{err:?}");
-    assert_eq!(
-        err.to_string(),
-        "segment 2 (node:mixed): duplicate target node:mixed (alternative \"ασ\"): \
-         resolves to the same parameter and alternative as an earlier segment \
-         (name resolution is case-insensitive)"
+    assert!(
+        err.to_string()
+            .starts_with("duplicate target node:mixed (alternative \"ασ\") across segments"),
+        "{err}"
     );
     assert_eq!(
         (
@@ -1481,12 +1481,12 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
     assert_audits_clean(&db);
 }
 
-/// The D9 refusal on the resolved ids (`apply_deletes`), not only on the
-/// Rust name fold: Rust folds `"ΑΣ"` to `"ας"` (final sigma) and keeps it
-/// apart from `"ασ"`, but DuckDB's `lower()` resolves both to one entity.
-/// The pure check misses the pair, so the in-transaction check must refuse
-/// it, for a changed and for an identical write alike, with nothing
-/// written.
+/// D9 on a final-sigma spelling pair: `"ΑΣ"` and `"ασ"` are one entity
+/// (the name fold is DuckDB's `lower()`). Rust's `to_lowercase` once kept
+/// them apart, so only the in-transaction check on the resolved ids
+/// (`apply_deletes`) refused the pair; the pure check now uses the same
+/// fold and refuses it first, for a changed and for an identical write
+/// alike, with nothing written. The id check stays as the second line.
 #[test]
 fn a_write_and_delete_resolving_to_one_key_are_refused() {
     let (_d, db) = fresh_db();
@@ -1523,8 +1523,8 @@ fn a_write_and_delete_resolving_to_one_key_are_refused() {
             "{v}: {err}"
         );
         assert!(
-            details.resolved.is_some(),
-            "{v}: the resolved-id check must have found it: {err}"
+            details.resolved.is_none(),
+            "{v}: the up-front name check (the same fold as the database) finds it: {err}"
         );
         assert_eq!(table_counts(&db), before, "{v}");
         assert_eq!(head_commit(&db).unwrap(), head, "{v}: no commit");

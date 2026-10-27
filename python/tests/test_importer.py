@@ -989,3 +989,23 @@ def test_fixture_imports_report_no_case_folded_references(tmp_path, make):
     rep, _out = run_import(tmp_path, spine)
     assert [w for w in rep.write_warnings if w["kind"] == "name_folded"] == []
     assert "case-folded references: 0" in rep.summary()
+
+
+def test_final_sigma_case_collision_refuses(tmp_path):
+    """``ΟΔΟΣ`` and ``οδοσ`` are one name to nodal-db (its fold is DuckDB's
+    ``lower()``, no final-sigma rule), though Python's ``str.lower`` keeps
+    them apart: the importer compares with the core's fold
+    (``nodal_db.fold_name``), so the collision is refused up front."""
+    from spinedb_api import DatabaseMapping
+
+    import nodal_db
+
+    assert nodal_db.fold_name("ΟΔΟΣ") == nodal_db.fold_name("οδοσ")
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("alternative", name="ΟΔΟΣ")
+        db.add_update_item("alternative", name="οδοσ")
+        db.commit_session("final sigma collision")
+    with pytest.raises(ImportError_, match="case-colliding alternative names"):
+        run_import(tmp_path, spine)
+    assert _leftovers(tmp_path) == []

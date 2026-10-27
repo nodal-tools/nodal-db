@@ -390,7 +390,7 @@ nodal-db treats the two kinds of text differently:
   differ only in this way are one name or one label. You read back the
   NFC form, which can differ in bytes from what you wrote, in the way
   `-0.0` is read back as `0.0`. Names are also compared without regard
-  to case, as before.
+  to case (see **Case** below).
 - **String values are stored exactly as written.** This covers string
   values, value-list members, descriptions and commit messages. Two
   string values whose bytes differ are different values, even when they
@@ -425,6 +425,47 @@ arguments too, so either spelling finds the object. Some consequences:
   (a search box, an importer's duplicate check): Python's `unicodedata`
   follows the interpreter's Unicode version (15.0 on Python 3.12), which
   disagrees with 16.0.0 on a few recently added characters.
+
+**Case.** Two names are the same name when their NFC forms are equal
+after DuckDB's `lower()`, the Unicode 15.1 simple lowercase mapping
+applied letter by letter. The core's own checks use an exact copy of it,
+so the core and the database never disagree about which names collide.
+The mapping has no special rules, which gives a few results that differ
+from everyday language rules:
+
+- Greek final sigma is an ordinary letter: `ΟΔΟΣ` and `οδοσ` are one
+  name, but `οδος` (with the final form `ς`) is another.
+- `ß` is not `ss`: `Straße` and `STRASSE` are two names.
+- Turkish dotted capital `İ` lowers to plain `i`: `İx`, `Ix` and `ix` are
+  one name.
+- The case pairs added in Unicode 16 are case-sensitive.
+
+In Python, `nodal_db.fold_name(nodal_db.normalize_identifier(s))` is the
+core's identity of name `s`; use it, not `str.lower` or `str.casefold`
+(they follow the interpreter's Unicode version and apply the final-sigma
+rule), when you must predict whether two names collide. In SQL,
+`lower(name) = lower('...')` on NFC text is the same rule exactly.
+
+When a write refers to an existing object by a spelling that differs from
+the stored one only in case, the write goes to that object (names are
+case-insensitive), and the report says so with one `name_folded` warning
+per group of the call and kind of object: the number of such spellings
+and the first one, as written and as stored. `what` is the group
+(`segment`, `delete`, `object_delete` or `structural`), `object_type` the
+kind of object and `id` the object's id:
+
+```text
+{'kind': 'name_folded', 'what': 'segment', 'count': 1,
+ 'written': 'north', 'stored': 'North', 'object_type': 'entity',
+ 'name': 'node:demand/Base', 'id': 7}
+```
+
+It is not an error and not a write by itself. A client that writes back
+the spellings it read never sees one; if it does, it is about to change
+an object it may not have meant (for example, a user typed `NORTH` for a
+new entity while `North` exists). The reference that creates an object, a
+rename's new name and the verbs (`ensure_*`, which return ids) are never
+reported.
 
 ### Build a scenario
 

@@ -28,6 +28,12 @@ pub mod types;
 /// Unicode text normalization: the core's one NFC function (plan T5).
 pub mod text;
 
+/// The name fold's data (`types::fold`): Unicode 15.1 simple lowercase, the
+/// table of DuckDB's `lower()`. Generated; public for the table and guard
+/// tests.
+#[doc(hidden)]
+pub mod fold_table;
+
 /// Canonical byte encoding + 64-bit content hash (Phase 1) + value encoding
 /// (Phase 2, spec §9 / OPEN-7).
 pub mod encoding;

@@ -119,7 +119,12 @@ pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connec
     for attempt in 1..=MAX_ATTEMPTS {
         let config = core_config(mode.clone())?;
         match Connection::open_with_flags(db_path, config) {
-            Ok(conn) => return Ok(conn),
+            Ok(conn) => {
+                // A file must not shadow a built-in (engine rule 8): before
+                // any core SQL runs on it. On a refusal `conn` drops (closes).
+                guard_builtins(&conn, db_path)?;
+                return Ok(conn);
+            }
             Err(e) if is_lock_busy(&e) => {
                 if attempt == MAX_ATTEMPTS {
                     return Err(DbError::Busy {
@@ -133,6 +138,145 @@ pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connec
         }
     }
     unreachable!("loop returns on the final attempt")
+}
+
+/// The on-disk state of one database file, as the shadowing guard's cache
+/// key: `(len, mtime, and on Unix dev, inode, ctime)` of the file and of its
+/// `<db>.wal` (`None` when absent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp([Option<StatKey>; 2]);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatKey {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    unix: (u64, u64, i64, i64),
+}
+
+fn stat_key(path: &Path) -> Option<StatKey> {
+    let m = std::fs::metadata(path).ok()?;
+    Some(StatKey {
+        len: m.len(),
+        modified: m.modified().ok(),
+        #[cfg(unix)]
+        unix: {
+            use std::os::unix::fs::MetadataExt;
+            (m.dev(), m.ino(), m.ctime(), m.ctime_nsec())
+        },
+    })
+}
+
+fn file_stamp(db_path: &Path) -> Option<FileStamp> {
+    let mut wal = db_path.as_os_str().to_owned();
+    wal.push(".wal");
+    let db = stat_key(db_path)?;
+    Some(FileStamp([Some(db), stat_key(Path::new(&wal))]))
+}
+
+/// Files the shadowing guard last found clean, by [`canonical_path_key`],
+/// with the [`FileStamp`] they had then.
+static BUILTIN_GUARD_CLEAN: OnceLock<Mutex<HashMap<PathBuf, FileStamp>>> = OnceLock::new();
+
+/// Refuse a database file that defines a macro shadowing a DuckDB built-in
+/// function (engine rule 8, "A file must not shadow a built-in";
+/// [`DbError::ShadowedBuiltin`]). Run by [`open_with_retry`] on every core
+/// open, before any core SQL.
+///
+/// Why: DuckDB resolves an unqualified function name in the file's `main`
+/// schema before the built-ins, on every later connection to the file
+/// (read-only ones included) and inside the file's own generated columns,
+/// indexes and views. A persisted `CREATE MACRO lower(x) AS …` silently
+/// replaces the name fold everywhere (`cur_name`, its unique indexes, every
+/// resolver), so the unique index stops catching duplicates and `types::fold`
+/// no longer equals the SQL fold; `max`, `count`, `nextval`, `range`, … are
+/// shadowed the same way. So every built-in name is guarded, not a list.
+///
+/// Placement and cost: the catalog listing (`duckdb_functions()`, about
+/// 3,200 rows) costs about 13 ms per call (release build, DuckDB 2.0.0,
+/// measured 2026-11-03 by `tests/shadowed_builtin_guard.rs`; the scan of
+/// the built-ins dominates and no filter is pushed into it), against about
+/// 35 ms for a whole per-operation read (`head_commit`: open, one query,
+/// close). Run on every open it would add over a third to every read
+/// (invariant 1 makes opens per-operation), so the answer is cached per
+/// process by path and file
+/// state ([`FileStamp`], taken while this connection holds the file, so no
+/// other process can change it meanwhile): an unchanged file costs two
+/// `stat` calls. Any change to the file or its WAL (another process's
+/// `CREATE MACRO`, or the core's own commit) re-runs the listing on the
+/// next open, so it costs about 13 ms once per write, not per read. A
+/// refusal is never cached. The residual gap (recorded): a change that
+/// leaves the size, mtime, inode and ctime of both files equal, which needs
+/// a filesystem with coarse timestamps.
+pub(crate) fn guard_builtins(conn: &Connection, db_path: &Path) -> Result<(), DbError> {
+    let key = canonical_path_key(db_path);
+    let stamp = file_stamp(db_path);
+    let cache = BUILTIN_GUARD_CLEAN.get_or_init(Default::default);
+    if let Some(stamp) = &stamp {
+        let clean = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if clean.get(&key) == Some(stamp) {
+            return Ok(());
+        }
+    }
+    check_no_shadowed_builtins(conn)?;
+    if let Some(stamp) = stamp {
+        cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, stamp);
+    }
+    Ok(())
+}
+
+/// The uncached check of [`guard_builtins`], over every database attached to
+/// `conn` (the rebuild's `ATTACH`ed source too: it reads it under `USE`):
+/// a non-temporary macro in a `main` schema whose name is a built-in's of the
+/// same family (a scalar macro against scalar, aggregate, window and macro
+/// built-ins; a table macro against table functions and table macros) is
+/// refused. Other schemas are not on DuckDB's search path and are allowed;
+/// temporary objects are connection-local, and the core never shares a
+/// connection. The listing is read through `system.main.duckdb_functions()`
+/// (a file's own `duckdb_functions` table macro cannot answer for it) and
+/// compared in Rust, so no function the file could shadow takes part.
+pub(crate) fn check_no_shadowed_builtins(conn: &Connection) -> Result<(), DbError> {
+    use std::collections::HashSet;
+    let table_family = |kind: &str| matches!(kind, "table" | "table_macro");
+    let mut builtins: HashSet<(bool, String)> = HashSet::new();
+    let mut user: Vec<(String, String, String, String)> = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT database_name, schema_name, function_name, function_type, internal \
+         FROM system.main.duckdb_functions()",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let (database, schema): (String, String) = (row.get(0)?, row.get(1)?);
+        let (name, kind, internal): (String, String, bool) =
+            (row.get(2)?, row.get(3)?, row.get(4)?);
+        // DuckDB matches catalog names ASCII-case-insensitively; these are
+        // SQL function identifiers, not nodal-db names (engine rule 8).
+        #[allow(clippy::disallowed_methods)]
+        let folded = name.to_ascii_lowercase();
+        if internal {
+            builtins.insert((table_family(&kind), folded));
+        } else if schema == "main" && database != "temp" {
+            user.push((folded, database, name, kind));
+        }
+    }
+    user.sort();
+    for (folded, database, name, kind) in user {
+        if builtins.contains(&(table_family(&kind), folded)) {
+            return Err(DbError::ShadowedBuiltin {
+                name,
+                schema: format!("{database}.main"),
+                kind: if table_family(&kind) {
+                    "table macro".into()
+                } else {
+                    "macro".into()
+                },
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Assert the bundled DuckDB is >= the line the schema was verified on (mirrors

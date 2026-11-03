@@ -798,7 +798,7 @@ fn fold_stale_wal(db_path: &Path) -> Result<(), DbError> {
     };
     let conn = match open_with_retry(db_path, AccessMode::ReadWrite) {
         Ok(conn) => conn,
-        Err(e @ DbError::Busy { .. }) => return Err(e),
+        Err(e @ (DbError::Busy { .. } | DbError::ShadowedBuiltin { .. })) => return Err(e),
         Err(e) => return Err(refuse(e.to_string())),
     };
     let checkpointed = conn.execute_batch("CHECKPOINT");

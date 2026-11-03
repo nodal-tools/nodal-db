@@ -28,8 +28,8 @@ use nodal_db_core::types::{
 
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, CoveredWrite, DatabaseError, InternalError,
-    ReadSurfaceStale, SchemaError, SchemaMismatch, Stale, UnreplayableWal, VersionTooOld,
-    WriteAndDeleteSameKey,
+    ReadSurfaceStale, SchemaError, SchemaMismatch, ShadowedBuiltin, Stale, UnreplayableWal,
+    VersionTooOld, WriteAndDeleteSameKey,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -62,6 +62,9 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::VersionTooOld { .. } => VersionTooOld::new_err(msg),
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::UnreplayableWal { wal, cause } => unreplayable_wal_err(msg, wal, cause),
+        DbError::ShadowedBuiltin { name, schema, kind } => {
+            shadowed_builtin_err(msg, name, schema, kind)
+        }
         DbError::Duckdb(_) => DatabaseError::new_err(msg),
         DbError::Encode(_) | DbError::Canon(_) => CanonError::new_err(msg),
         DbError::Arrow(_) => ArrowError::new_err(msg),
@@ -156,6 +159,20 @@ fn unreplayable_wal_err(msg: String, wal: std::path::PathBuf, cause: String) -> 
         // Best-effort: the message carries both in any case.
         let _ = v.setattr("wal", wal.display().to_string());
         let _ = v.setattr("cause", cause);
+    });
+    err
+}
+
+/// A `ShadowedBuiltin` exception carrying `name`, `schema` and `kind` as
+/// attributes.
+fn shadowed_builtin_err(msg: String, name: String, schema: String, kind: String) -> PyErr {
+    let err = ShadowedBuiltin::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message carries all three in any case.
+        let _ = v.setattr("name", name);
+        let _ = v.setattr("schema", schema);
+        let _ = v.setattr("kind", kind);
     });
     err
 }

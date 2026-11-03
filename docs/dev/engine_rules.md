@@ -427,6 +427,45 @@ of a few context strings (final sigma, `İ`), each compared whole (about
 a consumer's build) every write is refused. It is the one check
 that runs in a downstream build, which never runs this repo's tests.
 
+**A file must not shadow a built-in.** Every core open
+(`conn::open_with_retry`, `schema_init`, and the rebuild's `ATTACH` of a
+source) runs `conn::guard_builtins` before any core SQL: a macro in a
+`main` schema whose name is a DuckDB built-in's of the same family (a
+scalar macro against scalar, aggregate, window and macro built-ins, a
+table macro against table functions) refuses the file with
+`DbError::ShadowedBuiltin { name, schema, kind }` (Python
+`nodal_db.ShadowedBuiltin`). Why: DuckDB resolves an unqualified
+function name in the file's `main` schema before the built-ins, and a
+macro persists in the file. A `CREATE MACRO lower(x) AS …` run with
+direct SQL then replaces `lower()` on every later connection, read-only
+ones included, inside the `cur_name` generated columns, the
+`lower(name)` indexes, every resolver and view, and the engine check
+above (which would pass a hijacked `lower()` or cache a refusal for the
+whole process). Verified on DuckDB 2.0.0: the unique index on `cur_name`
+then admits a second `foo` beside `Foo`; any spelling (`"LOWER"`) and
+`CREATE OR REPLACE` with another arity capture the name too; `max`,
+`count(x)`, `list`, `nextval`, `chr` and the table function `range` are
+shadowed the same way, so every built-in name is guarded. Not shadowing,
+and allowed: a macro in another schema (not on the search path), a table
+macro named like a scalar built-in, and TEMP macros (connection-local;
+the core never shares a connection). The listing
+(`system.main.duckdb_functions()`, ~13 ms) is cached per process by
+path and file state (size, mtime, inode, ctime of the file and its WAL),
+so an unchanged file costs two `stat` calls and a changed one is
+re-listed on its next open. Fully qualified `system.main.lower(…)`
+escapes a shadow (`main.lower`, `lower` and `system.lower` do not; a
+file may create a `system` schema, which makes `system.lower`
+ambiguous), but it would have to reach every `lower()` in the DDL, the
+views and the core, and a user's own queries stay unqualified, so the
+guard is the rule. Guards:
+[`tests/shadowed_builtin_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/shadowed_builtin_guard.rs)
+(the refusal on write, read, compaction, extract and init after a cached
+clean check; spellings and families; what is allowed; the shadow is
+real) and
+[`tests/shadowed_builtin_engine_check.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/shadowed_builtin_engine_check.rs)
+(a shadowed file as a process's first write is refused before the
+engine check and does not poison it).
+
 Out of reach (recorded, not fixed): a third-party engine with a different
 `lower()` (a Python `duckdb` a user queries with) reads the index keys our
 engine persisted, so an index-scan lookup there could miss a row a scan

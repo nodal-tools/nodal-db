@@ -177,6 +177,18 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    ShadowedBuiltin,
+    NodalDbError,
+    "The database file defines a macro named like a DuckDB built-in function \
+     in its `main` schema (DbError::ShadowedBuiltin), e.g. `CREATE MACRO \
+     lower(x) AS ...` run with direct SQL: DuckDB would use it instead of the \
+     built-in for every query on the file, nodal-db's name folding included. \
+     Raised by every open of the file; nothing was read or written. \
+     Attributes: `name`, `schema` (catalog.main) and `kind` (\"macro\" or \
+     \"table macro\"). Drop the macro with direct SQL, then retry."
+);
+create_exception!(
+    nodal_db,
     UnreplayableWal,
     NodalDbError,
     "Compaction refused a database whose leftover `<db>.wal` could not be \
@@ -1271,6 +1283,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SchemaError", py.get_type::<SchemaError>())?;
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;
     m.add("UnreplayableWal", py.get_type::<UnreplayableWal>())?;
+    m.add("ShadowedBuiltin", py.get_type::<ShadowedBuiltin>())?;
     m.add("CanonError", py.get_type::<CanonError>())?;
     m.add("ArrowError", py.get_type::<ArrowError>())?;
     m.add("InternalError", py.get_type::<InternalError>())?;

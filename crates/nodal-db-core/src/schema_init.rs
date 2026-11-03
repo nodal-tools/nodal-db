@@ -204,6 +204,8 @@ pub fn init_schema_from_dir_with_default(
         db_path,
         crate::conn::core_config(duckdb::AccessMode::ReadWrite)?,
     )?;
+    // The DDL's generated columns and indexes bind `lower()` (engine rule 8).
+    crate::conn::guard_builtins(&conn, db_path)?;
     apply_schema_from(&conn, dir)?;
     if let Some(name) = default_alternative {
         seed_default_alternative(&conn, name)?;
@@ -224,6 +226,8 @@ pub fn init_schema_from_sources_with_default(
         db_path,
         crate::conn::core_config(duckdb::AccessMode::ReadWrite)?,
     )?;
+    // The DDL's generated columns and indexes bind `lower()` (engine rule 8).
+    crate::conn::guard_builtins(&conn, db_path)?;
     let mut sorted: Vec<&(&str, &str)> = sources.iter().collect();
     sorted.sort_by_key(|(name, _)| *name);
     for (_, sql) in sorted {

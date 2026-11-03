@@ -585,6 +585,23 @@ pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(),
         } else {
             DbError::Duckdb(e)
         }
+    })?;
+    // The source is read under `USE` (extract), where its `main` macros
+    // resolve before the built-ins: the shadowing guard covers it too
+    // (engine rule 8). Uncached: one listing per rebuild. The refusal names
+    // the source by its own catalog name (its file name up to the first
+    // dot, as DuckDB names it), not by the alias, so its DROP hint works.
+    crate::conn::check_no_shadowed_builtins(conn).map_err(|e| match e {
+        DbError::ShadowedBuiltin { name, schema, kind } if schema == format!("{SRC}.main") => {
+            let file = src_path.file_name().unwrap_or_default().to_string_lossy();
+            let catalog = file.split('.').next().unwrap_or_default();
+            DbError::ShadowedBuiltin {
+                name,
+                schema: format!("{catalog}.main"),
+                kind,
+            }
+        }
+        e => e,
     })
 }
 

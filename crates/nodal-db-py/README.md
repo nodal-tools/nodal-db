@@ -132,7 +132,7 @@ Contract (the core's Layer-3 rules, surfaced verbatim):
 One hierarchy, mapped 1:1 from the core's `DbError` (message text is the
 core's own): `NodalDbError` (base) with `Busy`, `Conflict`, `ApiError`,
 `VersionTooOld`, `SchemaError`, `DatabaseError`, `CanonError`,
-`ArrowError`, `InternalError`, `UnreplayableWal`, and `Stale` and `SchemaMismatch` (both
+`ArrowError`, `InternalError`, `UnreplayableWal`, `ShadowedBuiltin`, and `Stale` and `SchemaMismatch` (both
 subclasses of `ApiError`).
 `Busy` and `Conflict` are defined, retryable outcomes, never hangs.
 `Stale` is raised when a write's `expect_commit=` precondition fails
@@ -146,6 +146,11 @@ refuses it); it carries `found` (the file's `schema_version`) and
 `<db>.wal` into the file (DuckDB cannot replay or remove it); nothing
 was changed, and it carries `wal` (the path) and `cause`. Move the WAL
 aside, then compact.
+`ShadowedBuiltin` is raised by any call on a file that defines a macro
+named like a DuckDB built-in function in its `main` schema (for example
+`CREATE MACRO lower(x) AS ...` run with direct SQL), which DuckDB would use
+instead of the built-in; it carries `name`, `schema` and `kind`. Drop the
+macro with direct SQL, then retry.
 
 ## Arrow interop and version coupling
 

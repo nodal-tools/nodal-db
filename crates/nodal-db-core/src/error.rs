@@ -125,6 +125,28 @@ pub enum DbError {
         cause: String,
     },
 
+    /// The database file defines a macro (`kind`: "macro" or "table
+    /// macro") named like a DuckDB built-in function, in `schema` (the
+    /// file's catalog name and `main`), where DuckDB resolves it before the
+    /// built-in on every connection: e.g. a `CREATE MACRO lower(x) AS …`
+    /// run with direct SQL would silently replace the name fold (engine
+    /// rule 8). Raised by every core open of such a file, before any core
+    /// SQL runs, so nothing was read or written. Not retryable as is: drop
+    /// the macro with direct SQL (or rename it, or move it to another
+    /// schema). Its own variant so callers can match it structurally.
+    #[error(
+        "{schema} defines a {kind} `{name}`, which shadows DuckDB's built-in function \
+         of that name for every query on this file (nodal-db's name folding included); \
+         nodal-db refuses the file until it is dropped (DROP {} {schema}.{name}) or \
+         moved to another schema",
+        if kind == "table macro" { "MACRO TABLE" } else { "MACRO" }
+    )]
+    ShadowedBuiltin {
+        name: String,
+        schema: String,
+        kind: String,
+    },
+
     /// The public write API (`api::write_parameter` / `api::ingest_segments`)
     /// was handed a batch it cannot interpret — wrong column count, a
     /// non-string entity column, an unsupported Arrow type for a dimension or

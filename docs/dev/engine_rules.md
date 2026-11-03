@@ -465,13 +465,20 @@ per process by path and file state (size, mtime, inode, ctime of the
 file and its WAL), stamped before and after the open and cached only
 when the two agree. An unchanged file costs a few `stat` calls; a file
 another client changed (a WAL-only change included) is listed on its
-next open. A commit through the core's write cycle (saves, imports,
-structural commits, erasure) re-stamps the file as clean: an explicit
+next open. A commit of the core's own write cycles, whose SQL is all
+core-owned (the `api` entry points: saves, imports, structural commits,
+object deletes; erasure; the verbs; the template apply), re-stamps the
+file as clean; the public closure family (`conn::with_write_txn` and its
+retrying forms) runs a caller's SQL and never re-stamps. The re-stamp is an explicit
 `CHECKPOINT` on the held RW connection after `COMMIT`, the stamp, the
 close, then a re-stat, and the stamp is recorded only if the close left
-it unchanged. Sound because the guard passed at this open, the stamp is
-taken while the RW connection holds the file's lock, and the core writes
-only its own rows and vetted DDL, never a user macro. Measured
+it unchanged. Sound because the guard passed at this open, the cycle's
+SQL is core-owned (its own rows and vetted DDL, never a user macro), and
+the stamp is taken while the RW connection holds the file's lock. This
+holds for core-routed access only (as for `TxnOptions::expect_commit`):
+a second DuckDB instance in the same process (Python's own `duckdb`
+module on the same file) shares the process's POSIX locks and could
+change the file between the open and the stamp. Measured
 (2026-11-03, release, medians of 200 single-value saves, 3 runs): +3.0
 to +5.3 ms per save (3–5 %), −22 ms on the next open (~90 → ~67 ms);
 the owner chose the trade. A no-op save (rolled back) and a failed

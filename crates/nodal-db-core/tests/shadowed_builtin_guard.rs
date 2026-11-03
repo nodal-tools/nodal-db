@@ -472,3 +472,46 @@ fn a_duplicate_written_under_the_macro_fails_compaction_loudly() {
         "{text}"
     );
 }
+
+/// The public closure family runs the caller's SQL, so its commit never
+/// re-stamps the file: a macro created through it is listed and refused on
+/// the next open (review probe of 1fad5b8).
+#[test]
+fn a_public_closure_commit_does_not_re_stamp() {
+    use nodal_db_core::conn::{builtin_guard_own_writes, with_write_txn};
+    let (_dir, db) = fresh_db();
+    head_commit(&db).expect("read");
+    let own = builtin_guard_own_writes(&db);
+    with_write_txn(&db, "t", "m", |conn, _| {
+        conn.execute_batch("CREATE MACRO lower(x) AS x;")?;
+        Ok(())
+    })
+    .expect("the closure commits");
+    assert_eq!(builtin_guard_own_writes(&db), own, "no re-stamp");
+    assert_shadowed(head_commit(&db), "lower", "macro");
+}
+
+/// A file changed between the core's close and its re-stat is not recorded
+/// as clean: the next open lists it.
+#[cfg(debug_assertions)]
+#[test]
+fn a_change_after_the_close_is_not_recorded() {
+    use nodal_db_core::conn::{builtin_guard_own_writes, test_hooks::after_next_close};
+    let (_dir, db) = fresh_db();
+    write(&db, &["a"], 1.0).expect("write");
+    let own = builtin_guard_own_writes(&db);
+    after_next_close(|p| {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+    });
+    write(&db, &["a"], 2.0).expect("write");
+    assert_eq!(builtin_guard_own_writes(&db), own, "not recorded");
+    let listed = builtin_guard_listings(&db);
+    head_commit(&db).expect("read");
+    assert_eq!(
+        builtin_guard_listings(&db),
+        listed + 1,
+        "the next open lists"
+    );
+}

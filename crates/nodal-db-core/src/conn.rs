@@ -9,8 +9,9 @@
 //!
 //! - [`with_write_txn`] opens RW (bounded-backoff retry on the lock error),
 //!   `BEGIN`, inserts the `commit` row as the validity edge (VMP Part 5),
-//!   runs the closure, `COMMIT`, and closes. No `CHECKPOINT` yet — a future
-//!   option once churn/compaction lands (VMP Part 5).
+//!   runs the closure, `COMMIT`, and closes. The core's own write cycles
+//!   also `CHECKPOINT` before the close, for the shadowing guard's re-stamp
+//!   (`stamp_own_write`, engine rule 8); the public closure family does not.
 //! - [`with_read`] opens a fresh read-only connection, runs, and closes; the
 //!   commit-cookie poll (#2252) is itself one such per-operation read.
 //! - **In-process serialization (api critique F1):** DuckDB's file lock
@@ -297,12 +298,23 @@ pub(crate) fn guard_builtins(
 /// then, for [`record_own_write`] after the close. `None` when the
 /// checkpoint fails (nothing is recorded; the next open lists).
 ///
-/// Why recording it as clean is sound: the guard passed at this
-/// connection's open (cached or listed), the stamp is taken while this RW
-/// connection holds the file's lock (no other process can change it), and
-/// the core writes only its own rows and its own vetted DDL (the read
-/// surface), never a user macro. [`record_own_write`] re-stats after the
-/// close, so a change by anyone after the close is not recorded.
+/// Called only for the core's own write cycles ([`Restamp::Yes`]: the `api`
+/// entry points, erasure, the verbs, the template apply), whose SQL is all
+/// core-owned; never for the public closure family ([`with_write_txn`] and
+/// its retrying forms), which runs a caller's SQL (a `CREATE MACRO lower`
+/// there must be listed on the next open).
+///
+/// Why recording it as clean is sound under that precondition: the guard
+/// passed at this connection's open (cached or listed), the core-owned SQL
+/// writes only the core's rows and its vetted DDL (the read surface), never
+/// a user macro, and the stamp is taken while this RW connection holds the
+/// file's lock, so no other process can change it meanwhile.
+/// [`record_own_write`] re-stats after the close, so a change by anyone
+/// after the close is not recorded. The guarantee holds for core-routed
+/// access only, like [`TxnOptions::expect_commit`]'s: a second DuckDB
+/// instance in the same process (Python's own `duckdb` module on the same
+/// file) shares the process's POSIX locks and could change the file between
+/// the open and the stamp.
 fn stamp_own_write(conn: &Connection, db_path: &Path) -> Option<FileStamp> {
     conn.execute_batch("CHECKPOINT").ok()?;
     file_stamp(db_path)
@@ -313,11 +325,36 @@ fn stamp_own_write(conn: &Connection, db_path: &Path) -> Option<FileStamp> {
 /// the cache as it is, and the next open lists.
 fn record_own_write(db_path: &Path, stamp: Option<FileStamp>) {
     if let Some(stamp) = stamp {
+        #[cfg(debug_assertions)]
+        test_hooks::AFTER_CLOSE.with(|h| {
+            if let Some(hook) = h.take() {
+                hook(db_path);
+            }
+        });
         if file_stamp(db_path).as_ref() == Some(&stamp) {
             let key = canonical_path_key(db_path);
             store_clean(key.clone(), stamp);
             guard_cache().entry(key).or_default().own_writes += 1;
         }
+    }
+}
+
+/// Test hooks of the guard's re-stamp (debug builds only; thread-local, so
+/// parallel tests do not interfere: the write cycle runs on the calling
+/// thread).
+#[doc(hidden)]
+pub mod test_hooks {
+    #[cfg(debug_assertions)]
+    thread_local! {
+        pub(super) static AFTER_CLOSE: std::cell::Cell<Option<fn(&std::path::Path)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Run `hook` once, on this thread's next re-stamping commit, between
+    /// the close and the re-stat (e.g. to change the file there).
+    #[cfg(debug_assertions)]
+    pub fn after_next_close(hook: fn(&std::path::Path)) {
+        AFTER_CLOSE.with(|h| h.set(Some(hook)));
     }
 }
 
@@ -416,9 +453,14 @@ pub fn with_write_txn<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> 
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
-    run_txn_once(db_path, user, message, TxnOptions::default(), |conn, c| {
-        Ok((f(conn, c)?, TxnEnd::Commit))
-    })
+    run_txn_once(
+        db_path,
+        user,
+        message,
+        TxnOptions::default(),
+        Restamp::No,
+        |conn, c| Ok((f(conn, c)?, TxnEnd::Commit)),
+    )
 }
 
 /// How a successful write cycle ends (skip_unchanged_writes_PLAN D1): a
@@ -481,6 +523,7 @@ fn run_txn_once<T, F>(
     user: &str,
     message: &str,
     txn: TxnOptions,
+    restamp: Restamp,
     f: F,
 ) -> Result<T, DbError>
 where
@@ -556,7 +599,7 @@ where
             // (`stamp_own_write`): the next open of the file then needs no
             // catalog listing. A rolled-back cycle (nothing written) leaves
             // the stamp cached at the open as it is.
-            let stamp = (end == TxnEnd::Commit)
+            let stamp = (end == TxnEnd::Commit && restamp == Restamp::Yes)
                 .then(|| stamp_own_write(&conn, db_path))
                 .flatten();
             conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
@@ -678,6 +721,10 @@ where
 /// Every attempt re-runs the checks, so a conflict retry re-checks
 /// `expect_commit` against the head inside its own fresh transaction. A
 /// [`DbError::Stale`] is returned on the attempt that sees it, never retried.
+///
+/// The public closure family ([`with_write_txn`], [`with_write_txn_retrying`]
+/// and this) runs the caller's SQL, so its commits never re-stamp the file
+/// for the shadowing guard ([`Restamp::No`]): the next open lists it.
 pub fn with_write_txn_retrying_opts<T, F>(
     db_path: &Path,
     user: &str,
@@ -688,14 +735,46 @@ pub fn with_write_txn_retrying_opts<T, F>(
 where
     F: Fn(&Connection, i64) -> Result<T, DbError>,
 {
-    with_write_txn_retrying_ends(db_path, user, message, txn, |conn, c| {
+    retry_conflicts(db_path, user, message, txn, Restamp::No, |conn, c| {
         Ok((f(conn, c)?, TxnEnd::Commit))
     })
 }
 
-/// [`with_write_txn_retrying_opts`] for a closure that also says how its
+/// [`with_write_txn_retrying`] for the core's own write cycles (erasure, the
+/// verbs, the template apply), whose SQL is all core-owned: a commit
+/// re-stamps the file for the shadowing guard ([`Restamp::Yes`]).
+pub(crate) fn core_write_txn_retrying<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
+    core_write_txn_retrying_opts(db_path, user, message, TxnOptions::default(), f)
+}
+
+/// [`core_write_txn_retrying`] with [`TxnOptions`].
+pub(crate) fn core_write_txn_retrying_opts<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
+    retry_conflicts(db_path, user, message, txn, Restamp::Yes, |conn, c| {
+        Ok((f(conn, c)?, TxnEnd::Commit))
+    })
+}
+
+/// [`core_write_txn_retrying_opts`] for a closure that also says how its
 /// cycle ends ([`TxnEnd`]): the `api` entry points, which roll back a call
-/// that wrote nothing (skip_unchanged_writes_PLAN D1).
+/// that wrote nothing (skip_unchanged_writes_PLAN D1). Core-owned SQL, so a
+/// commit re-stamps.
 pub(crate) fn with_write_txn_retrying_ends<T, F>(
     db_path: &Path,
     user: &str,
@@ -706,8 +785,33 @@ pub(crate) fn with_write_txn_retrying_ends<T, F>(
 where
     F: Fn(&Connection, i64) -> Result<(T, TxnEnd), DbError>,
 {
+    retry_conflicts(db_path, user, message, txn, Restamp::Yes, f)
+}
+
+/// Whether a committed write cycle re-stamps the file as clean for the
+/// shadowing guard ([`stamp_own_write`]). `Yes` only for the core's own
+/// write cycles, whose SQL is core-owned; not settable from outside the
+/// crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Restamp {
+    Yes,
+    No,
+}
+
+/// The conflict-retry loop shared by every retrying writer.
+fn retry_conflicts<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    restamp: Restamp,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<(T, TxnEnd), DbError>,
+{
     for attempt in 1..=MAX_CONFLICT_ATTEMPTS {
-        match run_txn_once(db_path, user, message, txn, &f) {
+        match run_txn_once(db_path, user, message, txn, restamp, &f) {
             Ok(value) => return Ok(value),
             Err(e) if is_conflict(&e) => {
                 if attempt == MAX_CONFLICT_ATTEMPTS {

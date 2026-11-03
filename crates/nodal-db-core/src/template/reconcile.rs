@@ -87,7 +87,7 @@ use crate::api::{
     lookup_unit, lookup_value_list, parse_index_kind,
 };
 use crate::conn::{
-    head_on, with_read_plain, with_write_txn_retrying, with_write_txn_retrying_opts, TxnOptions,
+    core_write_txn_retrying, core_write_txn_retrying_opts, head_on, with_read_plain, TxnOptions,
 };
 use crate::error::DbError;
 use crate::history::{
@@ -985,7 +985,7 @@ pub fn apply(
                         "template {} migration {} -> {}: progress after run {p}",
                         t.template.name, span.from, span.to
                     );
-                    let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
+                    let c = core_write_txn_retrying(db, user, &msg, |conn, c| {
                         set_metadata(conn, c, "template_migration_step", &substamp)?;
                         // The chain moved the content past any certified
                         // hash: close it so a stale certification can never
@@ -1002,7 +1002,7 @@ pub fn apply(
                         "template {} migration {} -> {}: {desc}",
                         t.template.name, span.from, span.to
                     );
-                    let effects = with_write_txn_retrying(db, user, &msg, |conn, c| {
+                    let effects = core_write_txn_retrying(db, user, &msg, |conn, c| {
                         let mut fx = StepEffects::default();
                         execute_step(conn, c, declarative, &mut fx)?;
                         // Same-commit progress substamp: atomic with the
@@ -1044,7 +1044,7 @@ pub fn apply(
             "template {} migration {} -> {}: version stamp",
             t.template.name, span.from, span.to
         );
-        let c = with_write_txn_retrying(db, user, &msg, |conn, c| {
+        let c = core_write_txn_retrying(db, user, &msg, |conn, c| {
             set_metadata(conn, c, "template_version", &span.to)?;
             clear_metadata(conn, c, "template_migration_step")?;
             Ok(c)
@@ -1111,7 +1111,7 @@ pub fn apply(
     let txn = TxnOptions {
         expect_commit: opts.expect_commit.map(|_| cursor),
     };
-    let applied = with_write_txn_retrying_opts(db, user, &msg, txn, |conn, c| {
+    let applied = core_write_txn_retrying_opts(db, user, &msg, txn, |conn, c| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
         let mut p = diff(&vocab, &chk)?;

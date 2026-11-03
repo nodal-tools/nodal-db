@@ -169,6 +169,8 @@ pub fn fold(s: &str) -> String {
 /// [`fold`] of one code point.
 fn fold_char(c: char) -> char {
     if c.is_ascii() {
+        // A-Z is the whole ASCII part of the table (inside the fold itself).
+        #[allow(clippy::disallowed_methods)]
         return c.to_ascii_lowercase();
     }
     let table = &crate::fold_table::LOWER;
@@ -184,60 +186,182 @@ static ENGINE_FOLD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::n
 
 /// Refuse to write through an engine whose `lower()` is not [`fold`]
 /// (name_fold_identity_PLAN C1 as reshaped by K5). Once per process, on the
-/// first write connection: one `SELECT lower(?)` over every code point
-/// cased in Unicode 15.1 or 16.0 ([`crate::fold_table::CANARY`], under a
-/// millisecond), compared with [`fold`] of the same string. A mismatch
+/// first write connection, [`engine_fold_mismatch`] compares the engine's
+/// `lower()` with the fold's table on every Unicode scalar value and on
+/// strings where a context rule (final sigma, `İ`) would show. A mismatch
 /// means the linked DuckDB changed its case table (a patched or newer
 /// engine): its unique indexes and resolvers would then disagree with the
 /// core's checks, so every write is refused with [`DbError::Internal`]
-/// naming the first differing code point. This is the one check that runs
-/// in a consumer's build (an editor never runs this repo's guard tests).
-/// A failed query is returned as is and retried by the next write.
+/// naming the first difference. This is the one check that runs in a
+/// consumer's build (an editor never runs this repo's guard tests). A
+/// failed query is returned as is and retried by the next write.
 pub(crate) fn check_engine_fold(conn: &duckdb::Connection) -> Result<(), crate::error::DbError> {
     if let Some(outcome) = ENGINE_FOLD.get() {
         return outcome
             .as_ref()
             .map_or(Ok(()), |m| Err(crate::error::DbError::Internal(m.clone())));
     }
-    let outcome = engine_fold_mismatch(conn, fold)?;
+    let outcome = engine_fold_mismatch(conn, &crate::fold_table::LOWER)?;
     let outcome = ENGINE_FOLD.get_or_init(|| outcome);
     outcome
         .as_ref()
         .map_or(Ok(()), |m| Err(crate::error::DbError::Internal(m.clone())))
 }
 
-/// The engine check's comparison, with the expected fold injectable (the
-/// guard test passes a wrong one to see the refusal): `None` when the
-/// engine's `lower()` of the canary equals `expected` of it, else the
-/// refusal message naming the first differing code point.
+/// Strings on which `lower()` of the whole string would differ from the
+/// code-point-by-code-point mapping if the engine applied a context rule
+/// (Unicode SpecialCasing: final sigma, which a sorted string of all code
+/// points never triggers; `İ` with its dot; the Lithuanian and Turkish
+/// dot rules; titlecase digraphs; the iota subscript), compared whole by
+/// [`engine_fold_mismatch`].
+#[doc(hidden)]
+pub const FOLD_CONTEXT_PROBES: [&str; 16] = [
+    "\u{3a3}",
+    "\u{391}\u{3a3}",
+    "\u{391}\u{3a3} ",
+    "\u{391}\u{3a3}.",
+    "\u{391}\u{3a3}\u{301}",
+    "\u{391}\u{301}\u{3a3}",
+    "\u{391}\u{3a3}\u{391}",
+    "\u{391}\u{3a3}'\u{391}",
+    "A\u{3a3}",
+    "\u{3a3}\u{3a3}",
+    "\u{130}",
+    "\u{130}\u{307}",
+    "I\u{307}",
+    "I\u{300}",
+    "\u{1c4}\u{1c5}\u{1c6}",
+    "\u{399}\u{345}",
+];
+
+/// `s` mapped code point by code point through `table` (sorted
+/// `(code point, lowercase)` pairs, like [`crate::fold_table::LOWER`]).
+fn map_by_table(table: &[(char, char)], s: &str) -> String {
+    s.chars()
+        .map(
+            |c| match table.binary_search_by_key(&c, |&(from, _)| from) {
+                Ok(i) => table[i].1,
+                Err(_) => c,
+            },
+        )
+        .collect()
+}
+
+fn hex_cps(s: &str) -> String {
+    s.chars()
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The engine check's comparison, with the expected mapping injectable (the
+/// guard test passes a wrong table to see the refusal; the core passes
+/// [`crate::fold_table::LOWER`], which is what [`fold`] applies): `None` when
+/// the engine's `lower()` is the code-point-by-code-point mapping `table`,
+/// else the refusal message naming the first difference.
+///
+/// Two statements: `lower()` of one string holding every Unicode scalar
+/// value in order (about 4.4 MB; every code point the engine changes must be
+/// exactly a `table` entry, and every entry must be changed), then `lower()`
+/// of each [`FOLD_CONTEXT_PROBES`] string, each compared whole with its
+/// mapping. Together that is every code point plus the context rules
+/// Unicode defines. It costs about 50 ms in a release build (about 120 ms
+/// in a debug build; measured 2026-11, DuckDB 2.0.0, mostly the engine's
+/// `lower()` of the long string), once per process;
+/// `tests/duckdb_lower_guard.rs` prints it.
 #[doc(hidden)]
 pub fn engine_fold_mismatch(
     conn: &duckdb::Connection,
-    expected: impl Fn(&str) -> String,
+    table: &[(char, char)],
 ) -> Result<Option<String>, crate::error::DbError> {
-    let canary: String = crate::fold_table::CANARY.iter().collect();
-    let engine: String = conn.query_row("SELECT lower(?)", [&canary], |r| r.get(0))?;
-    let want = expected(&canary);
-    if engine == want {
-        return Ok(None);
+    let refuse = |what: String| {
+        Some(format!(
+            "the linked DuckDB's lower() is not the core's name fold ({what}): this build's \
+             engine changed its case table, so names would collide differently in the \
+             database than in the core's checks; writes are refused (see \
+             docs/dev/engine_rules.md §8 and the DuckDB upgrade procedure in CONTRIBUTING.md)"
+        ))
+    };
+    // 1. Every scalar value, in one string.
+    let all: String = (0..=0x10_FFFFu32).filter_map(char::from_u32).collect();
+    let engine: String = conn.query_row("SELECT lower(?)", [&all], |r| r.get(0))?;
+    if engine.chars().count() != all.chars().count() {
+        // A one-to-many (or many-to-one) mapping: name the code point from a
+        // per-code-point probe.
+        return Ok(refuse(per_code_point_difference(conn, table)?));
     }
-    let first = canary
-        .chars()
-        .zip(engine.chars().zip(want.chars()))
-        .find(|(_, (e, w))| e != w)
-        .map(|(c, (e, w))| {
-            format!(
+    let mut entries = table.iter().peekable();
+    for (c, e) in all.chars().zip(engine.chars()) {
+        let want = match entries.peek() {
+            Some(&&(from, to)) if from == c => {
+                entries.next();
+                to
+            }
+            _ => c,
+        };
+        if e != want {
+            return Ok(refuse(format!(
                 "U+{:04X} lowers to U+{:04X} in the engine, U+{:04X} in the core",
-                c as u32, e as u32, w as u32
-            )
-        })
-        .unwrap_or_else(|| "the lowered strings differ in length".into());
-    Ok(Some(format!(
-        "the linked DuckDB's lower() is not the core's name fold ({first}): this build's \
-         engine changed its case table, so names would collide differently in the \
-         database than in the core's checks; writes are refused (see \
-         docs/dev/engine_rules.md §8 and the DuckDB upgrade procedure in CONTRIBUTING.md)"
-    )))
+                c as u32, e as u32, want as u32
+            )));
+        }
+    }
+    // 2. The context strings, whole.
+    let sql = format!(
+        "SELECT {}",
+        vec!["lower(?)"; FOLD_CONTEXT_PROBES.len()].join(", ")
+    );
+    let lowered: Vec<String> = conn.query_row(
+        &sql,
+        duckdb::params_from_iter(FOLD_CONTEXT_PROBES.iter()),
+        |r| (0..FOLD_CONTEXT_PROBES.len()).map(|i| r.get(i)).collect(),
+    )?;
+    for (probe, engine) in FOLD_CONTEXT_PROBES.iter().zip(lowered) {
+        let want = map_by_table(table, probe);
+        if engine != want {
+            return Ok(refuse(format!(
+                "the string {} lowers to {} in the engine, {} in the core",
+                hex_cps(probe),
+                hex_cps(&engine),
+                hex_cps(&want)
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// The refusal detail when `lower()` of the all-code-points string did not
+/// line up with it (a one-to-many or context mapping): the first code point
+/// whose `lower()` on its own differs from `table`, from one row per code
+/// point. Runs only on the way to a refusal.
+fn per_code_point_difference(
+    conn: &duckdb::Connection,
+    table: &[(char, char)],
+) -> Result<String, crate::error::DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT cp::UINTEGER, lower(chr(cp::INTEGER)) \
+         FROM (SELECT * FROM range(1, 55296) UNION ALL SELECT * FROM range(57344, 1114112)) t(cp) \
+         ORDER BY cp",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let cp: u32 = row.get(0)?;
+        let engine: String = row.get(1)?;
+        let c = char::from_u32(cp).unwrap_or('\u{fffd}');
+        let want = map_by_table(table, &c.to_string());
+        if engine != want {
+            return Ok(format!(
+                "U+{cp:04X} lowers to {} in the engine, {} in the core",
+                hex_cps(&engine),
+                hex_cps(&want)
+            ));
+        }
+    }
+    Ok(
+        "lower() of the string of all code points differs from lower() of each \
+        code point on its own (a context rule)"
+            .into(),
+    )
 }
 
 /// The store's name **hygiene floor** for classes/entities/parameters (was the

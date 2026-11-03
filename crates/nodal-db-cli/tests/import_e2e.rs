@@ -2126,3 +2126,52 @@ fn unicode_case_aliased_dense_entities_are_e6() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A case variant referenced from several segments is reported once per
+/// (object type, spelling), not once per segment: `NODE`/`FOO` in three
+/// segments are one class and one entity that matched.
+#[test]
+fn name_folded_is_reported_once_per_spelling_across_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let first = write_file(
+        dir.path(),
+        "first.arrows",
+        &long_segment("Node", "p", 1, &[("Foo", 0, 1.0)]),
+    );
+    let out = import(&db, &first, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut container = Vec::new();
+    for p in ["p", "q", "r"] {
+        container.extend(long_segment("NODE", p, 3, &[("FOO", 0, 2.0)]));
+    }
+    let second = write_file(dir.path(), "second.arrows", &container);
+    let out = import(&db, &second, &["--alternative", "Base", "--user", "tester"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let folded: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("spelled differently"))
+        .collect();
+    assert_eq!(folded.len(), 2, "{stdout}");
+    assert!(
+        folded[0].starts_with("warning: 1 entity_class name(s) matched")
+            && folded[0].contains("\"NODE\" is stored as \"Node\"")
+            && folded[0].contains("in 3 place(s)"),
+        "{stdout}"
+    );
+    assert!(
+        folded[1].starts_with("warning: 1 entity name(s) matched")
+            && folded[1].contains("\"FOO\" is stored as \"Foo\"")
+            && folded[1].contains("in 3 place(s)"),
+        "{stdout}"
+    );
+}

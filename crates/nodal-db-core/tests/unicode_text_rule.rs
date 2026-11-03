@@ -12,6 +12,8 @@
 //! - Names: an NFD name is stored in NFC, every lookup finds it by either
 //!   spelling (reads, value deletes, object deletes, structural renames,
 //!   the verbs, erasure), and two spellings in one call are one name.
+//! - Dimension names (Arrow field names) are names too: an NFD column is
+//!   stored in NFC and matches a declared type by either spelling.
 //! - Template names load in NFC and hash as their NFC spelling.
 
 use std::collections::HashMap;
@@ -619,6 +621,89 @@ fn structural_changes_and_object_deletes_use_nfc_names() {
         1,
         "only Base is left"
     );
+}
+
+/// Rank-1 label batch `(entity, <dim>, value)` with the dimension column
+/// named `dim`.
+fn dim_batch(dim: &str, entity: &str) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new(dim, DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![entity])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["a"])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+/// A segment of [`dim_batch`] with its label domain `["a"]`.
+fn dim_seg(dim: &str, entity: &str) -> Segment {
+    let mut s = seg("node", "heat", "Base", dim_batch(dim, entity));
+    s.domains = vec![domain(&["a"])];
+    s
+}
+
+/// "Wärme" in NFC and NFD: a dimension name.
+const WARME_NFC: &str = "W\u{e4}rme";
+const WARME_NFD: &str = "Wa\u{308}rme";
+
+#[test]
+fn an_nfd_dimension_name_is_stored_in_nfc_and_matches_both_spellings() {
+    let (_dir, db) = fresh_db();
+    let report = ingest(&db, vec![dim_seg(WARME_NFD, "n1")]).expect("write");
+    let w = text_warnings(&report);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(
+        w[0].kind,
+        WarningKind::TextNormalized {
+            what: "name".into(),
+            count: 1,
+            written: WARME_NFD.into(),
+            stored: WARME_NFC.into(),
+        }
+    );
+    assert_eq!(
+        query_strings(&db, "SELECT dimension_name FROM parameter_type_dimension"),
+        vec![WARME_NFC.to_string()]
+    );
+    // The other spelling instantiates the same declared type.
+    for (dim, entity) in [(WARME_NFC, "n2"), (WARME_NFD, "n3")] {
+        ingest(&db, vec![dim_seg(dim, entity)]).unwrap_or_else(|e| panic!("write by {dim:?}: {e}"));
+    }
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM parameter_type_dimension"),
+        1
+    );
+}
+
+#[test]
+fn an_nfd_dimension_column_matches_a_template_declared_type() {
+    let (_dir, db) = fresh_db();
+    let doc = format!(
+        "template: {{name: t, version: '1'}}\n\
+         classes:\n  - name: node\n    parameters:\n      - name: heat\n        \
+         types: [{{kind: indexed, dims: [{{name: {WARME_NFC}, kind: label}}]}}]\n"
+    );
+    let t = template::parse_str(&doc).expect("parse");
+    template::apply(
+        &db,
+        &t,
+        &template::MigrationRegistry::new(),
+        "tester",
+        "",
+        &template::ApplyOptions::default(),
+    )
+    .expect("apply");
+    let report = ingest(&db, vec![dim_seg(WARME_NFD, "n1")])
+        .expect("an NFD column instantiates the template's type");
+    assert_eq!(report.values_written, 1, "{report:?}");
+    assert_eq!(text_warnings(&report).len(), 1, "{report:?}");
 }
 
 #[test]

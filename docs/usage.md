@@ -384,8 +384,9 @@ nodal-db treats the two kinds of text differently:
 
 - **Names and index labels are stored in Unicode Normalization Form C
   (NFC).** This covers the names of classes, entities, parameters,
-  alternatives, scenarios, value lists, units and class sets, and every
-  index label (map keys and label domains). The core converts each one to
+  alternatives, scenarios, value lists, units and class sets, the
+  dimension names (a batch's dimension column names), and every index
+  label (map keys and label domains). The core converts each one to
   NFC before it compares, looks up or stores it, so two spellings that
   differ only in this way are one name or one label. You read back the
   NFC form, which can differ in bytes from what you wrote, in the way
@@ -459,6 +460,10 @@ kind of object and `id` the object's id:
  'written': 'north', 'stored': 'North', 'object_type': 'entity',
  'name': 'node:demand/Base', 'id': 7}
 ```
+
+`nodal-db import` and the Spine importer summarize these warnings once
+per kind of object and written spelling, so a case variant referenced
+from several segments counts once.
 
 It is not an error and not a write by itself. A client that writes back
 the spellings it read never sees one; if it does, it is about to change

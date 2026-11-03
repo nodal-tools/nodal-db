@@ -8,10 +8,13 @@
 //! agree on every Unicode scalar value and (b) `lower()` is context-free,
 //! i.e. the lower of a string is the concatenation of the lowers of its code
 //! points (no final-sigma or other context rule). (a) is checked
-//! exhaustively; (b) on 20,000 random strings over the cased code points and
-//! the context-rule characters, plus the classic cases as strings. Together
-//! they are a proof for every string, not a sample: two per-code-point maps
-//! that agree everywhere agree on every concatenation.
+//! exhaustively, and given (b) it covers every string: two per-code-point
+//! maps that agree everywhere agree on every concatenation. (b) cannot be
+//! checked exhaustively; it is tested, not proven: on strings built for
+//! every context rule Unicode's SpecialCasing defines (final sigma, the
+//! dot-above rules; `types::FOLD_CONTEXT_PROBES` and the drift cases below)
+//! and on a sample of 20,000 random strings over the cased code points and
+//! the context-rule characters.
 //!
 //! When it fails after a DuckDB bump: the engine changed `lower()`, which
 //! changes name identity (two stored names may now be one, or the reverse).
@@ -27,8 +30,8 @@
 use std::collections::BTreeMap;
 
 use nodal_db_core::duckdb::Connection;
-use nodal_db_core::fold_table::{CANARY, LOWER};
-use nodal_db_core::types::{engine_fold_mismatch, fold};
+use nodal_db_core::fold_table::LOWER;
+use nodal_db_core::types::{engine_fold_mismatch, fold, FOLD_CONTEXT_PROBES};
 
 fn hex(s: &str) -> String {
     s.chars()
@@ -49,6 +52,19 @@ fn duckdb_changed(conn: &Connection) -> BTreeMap<u32, String> {
         .query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))
         .expect("query");
     rows.map(|r| r.expect("row")).collect()
+}
+
+/// Every code point cased in the toolchain's Unicode (a case mapping
+/// changes it, either way): the random strings' alphabet. The toolchain's
+/// tables are newer than the fold's 15.1, so the pool also holds the
+/// Unicode 16 and 17 case pairs the fold leaves alone.
+fn cased_pool() -> Vec<char> {
+    (0..=0x10_FFFFu32)
+        .filter_map(char::from_u32)
+        .filter(|&c| {
+            !c.to_lowercase().eq(std::iter::once(c)) || !c.to_uppercase().eq(std::iter::once(c))
+        })
+        .collect()
 }
 
 fn duckdb_lower(conn: &Connection, s: &str) -> String {
@@ -113,7 +129,7 @@ fn duckdb_lower_is_context_free_and_equals_the_fold_on_strings() {
     let conn = Connection::open_in_memory().expect("open");
     // The pool: every cased code point (and its lowercase), the
     // context-rule characters, combining marks, punctuation and spaces.
-    let mut pool: Vec<char> = CANARY.to_vec();
+    let mut pool: Vec<char> = cased_pool();
     pool.extend(LOWER.iter().map(|&(_, l)| l));
     pool.extend(
         [
@@ -182,35 +198,66 @@ fn the_former_drift_cases_are_equal() {
     assert_ne!(fold("\u{1c89}"), fold("\u{1c8a}"));
 }
 
+/// `LOWER` with `from -> to` added (or replaced), still sorted.
+fn table_with(from: char, to: char) -> Vec<(char, char)> {
+    let mut t: Vec<(char, char)> = LOWER.iter().copied().filter(|&(f, _)| f != from).collect();
+    t.push((from, to));
+    t.sort();
+    t
+}
+
 /// The runtime engine check (`types::check_engine_fold`) passes on the
-/// bundled engine and refuses one whose `lower()` disagrees: here simulated
-/// by a wrong expected fold (Unicode 16's U+1C89 → U+1C8A pair).
+/// bundled engine and refuses one whose `lower()` disagrees with the table,
+/// simulated by a wrong table: a Unicode 16 pair (U+1C89 -> U+1C8A) and a
+/// Unicode 17 one (U+A7CE -> U+A7CF), which a probe of only the code points
+/// cased in 15.1 or 16.0 missed; a code point the table maps that the
+/// engine leaves alone; and a table that drops a mapping. It also reports
+/// what the check costs, and pins it under a generous bound.
 #[test]
 fn engine_check_passes_here_and_refuses_a_mismatch() {
     let conn = Connection::open_in_memory().expect("open");
-    assert_eq!(engine_fold_mismatch(&conn, fold).expect("check"), None);
-    let unicode16 = |s: &str| -> String {
-        fold(s)
-            .chars()
-            .map(|c| if c == '\u{1c89}' { '\u{1c8a}' } else { c })
-            .collect()
-    };
-    let refusal = engine_fold_mismatch(&conn, unicode16)
-        .expect("check")
-        .expect("a mismatch is refused");
-    assert!(
-        refusal.contains("U+1C89 lowers to U+1C89 in the engine, U+1C8A in the core"),
-        "{refusal}"
-    );
-    // The canary covers the code points either Unicode version cases.
-    assert!(CANARY.contains(&'\u{1c89}') && CANARY.contains(&'\u{130}'));
-    // Speed: one statement, well under the plan's millisecond budget even
-    // in a debug build's timing noise.
     let start = std::time::Instant::now();
-    engine_fold_mismatch(&conn, fold).expect("check");
-    assert!(
-        start.elapsed() < std::time::Duration::from_millis(250),
-        "{:?}",
-        start.elapsed()
-    );
+    assert_eq!(engine_fold_mismatch(&conn, &LOWER).expect("check"), None);
+    let cost = start.elapsed();
+    eprintln!("engine fold check: {cost:?}");
+    for (table, want) in [
+        (
+            table_with('\u{1c89}', '\u{1c8a}'),
+            "U+1C89 lowers to U+1C89 in the engine, U+1C8A in the core",
+        ),
+        (
+            table_with('\u{a7ce}', '\u{a7cf}'),
+            "U+A7CE lowers to U+A7CE in the engine, U+A7CF in the core",
+        ),
+        (
+            table_with('\u{16ea0}', '\u{16ebb}'),
+            "U+16EA0 lowers to U+16EA0 in the engine, U+16EBB in the core",
+        ),
+        (
+            LOWER.iter().copied().filter(|&(f, _)| f != 'Σ').collect(),
+            "U+03A3 lowers to U+03C3 in the engine, U+03A3 in the core",
+        ),
+    ] {
+        let refusal = engine_fold_mismatch(&conn, &table)
+            .expect("check")
+            .expect("a mismatch is refused");
+        assert!(refusal.contains(want), "{refusal}");
+    }
+    // Speed: once per process, so a generous bound that still catches an
+    // accidental per-code-point round trip (debug builds included).
+    assert!(cost < std::time::Duration::from_millis(1500), "{cost:?}");
+}
+
+/// The engine check's context strings: `lower()` of each, whole, is the
+/// fold (no final sigma, no SpecialCasing), and each probe is something
+/// the all-code-points string cannot show.
+#[test]
+fn the_context_probes_lower_as_the_fold() {
+    let conn = Connection::open_in_memory().expect("open");
+    for p in FOLD_CONTEXT_PROBES {
+        assert_eq!(duckdb_lower(&conn, p), fold(p), "{}", hex(p));
+    }
+    assert!(FOLD_CONTEXT_PROBES.contains(&"\u{391}\u{3a3}"));
+    assert!(FOLD_CONTEXT_PROBES.contains(&"\u{391}\u{3a3} "));
+    assert!(FOLD_CONTEXT_PROBES.contains(&"\u{130}\u{307}"));
 }

@@ -379,10 +379,11 @@ generated into `fold_table.rs`), proven equal to the engine's `lower()`.
 Every name compare in Rust calls `types::fold` and nothing else; in
 Python, `nodal_db.fold_name` (the same function) on
 `nodal_db.normalize_identifier` output. Never compare names with another
-case mapping: a workspace `clippy.toml` bans `str::to_lowercase`,
-`to_uppercase`, `to_ascii_lowercase`, `eq_ignore_ascii_case` and the
-`char` mappings, and a grep test bans `str.lower`/`casefold` in the Spine
-importer. The few non-name uses (SQL keywords, `value_kind` tags,
+case mapping: a workspace `clippy.toml` bans `to_lowercase`,
+`to_uppercase`, `to_ascii_lowercase`/`uppercase`, `make_ascii_lowercase`/
+`uppercase` and `eq_ignore_ascii_case` on `str`, `char`, `u8` and `[u8]`
+(those that exist), and a tokenizer scan bans `str.lower`/`casefold`/
+`upper` (called or passed, as in `key=str.lower`) in the Spine importer. The few non-name uses (SQL keywords, `value_kind` tags,
 reserved Arrow column names) carry a commented `#[allow]`.
 
 **Why.** The database's check (a unique index, a resolver) and the
@@ -408,18 +409,22 @@ deliberately (CONTRIBUTING "DuckDB upgrades"), never silently.
 
 **Guards.**
 [`crates/nodal-db-core/tests/duckdb_lower_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/duckdb_lower_guard.rs)
-compares `types::fold` with `lower()` on every Unicode scalar value and
-checks on 20,000 random strings that `lower()` is the per-code-point
-concatenation (no context rule), which together prove equality on every
-string; it also checks the runtime check below.
+compares `types::fold` with `lower()` on every Unicode scalar value
+(exhaustive). Equality on every string also needs `lower()` to be the
+per-code-point concatenation (no context rule); that part is tested, not
+proven: on strings built for each context rule Unicode defines (final
+sigma, the dot-above rules) and on a sample of 20,000 random strings. It
+also checks the runtime check below.
 `tests/fold_table.rs` checks the Rust table against the vendored file,
 `tests/name_fold_agreement.rs` that random cased names resolve in a
 commit as `fold` predicts, and `tests/name_folded.rs` the `NameFolded`
 warning (a reference resolved to an object spelled differently). At run
 time, `types::check_engine_fold` runs once per process on the first write
-connection: one `SELECT lower(?)` over every code point cased in Unicode
-15.1 or 16.0, compared with `fold`; on a mismatch (a patched or replaced
-engine in a consumer's build) every write is refused. It is the one check
+connection: `lower()` of one string holding every Unicode scalar value,
+compared code point by code point with the fold's table, then `lower()`
+of a few context strings (final sigma, `İ`), each compared whole (about
+50 ms in a release build); on a mismatch (a patched or replaced engine in
+a consumer's build) every write is refused. It is the one check
 that runs in a downstream build, which never runs this repo's tests.
 
 Out of reach (recorded, not fixed): a third-party engine with a different
@@ -524,7 +529,8 @@ core.
 
 **Guards.** `crates/nodal-db-core/tests/unicode_text_rule.rs` (an NFD
 name is stored in NFC and found by both spellings through every lookup
-path; NFD labels read back in NFC; stored label bytes do not depend on
+path; an NFD dimension column name is stored in NFC and matches a
+declared type by either spelling; NFD labels read back in NFC; stored label bytes do not depend on
 write order) and `crates/nodal-db-core/tests/text_nfc.rs` (the crate's
 tables against the vendored Unicode 16.0.0 data for every code point,
 and `text::nfc` against the official NormalizationTest).

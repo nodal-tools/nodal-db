@@ -5,7 +5,7 @@
 //! table's own shape. `duckdb_lower_guard.rs` then proves the table equal to
 //! the engine's `lower()`.
 
-use nodal_db_core::fold_table::{CANARY, LOWER, LOWER_UNICODE_VERSION};
+use nodal_db_core::fold_table::{LOWER, LOWER_UNICODE_VERSION};
 use nodal_db_core::types::fold;
 
 const VENDORED: &str = include_str!("../../../conformance/unicode/lower_simple_15.1.0.txt");
@@ -41,7 +41,6 @@ fn table_is_sorted_one_to_one_and_idempotent() {
         // A lowercase is its own lowercase: fold is idempotent.
         assert_eq!(fold(&to.to_string()), to.to_string(), "U+{:04X}", to as u32);
         assert_eq!(fold(&from.to_string()), to.to_string());
-        assert!(CANARY.contains(&from) && CANARY.contains(&to));
     }
     // ASCII fast path and table agree.
     for b in 0u8..128 {
@@ -49,5 +48,4 @@ fn table_is_sorted_one_to_one_and_idempotent() {
         let want = LOWER.iter().find(|&&(f, _)| f == c).map_or(c, |&(_, t)| t);
         assert_eq!(fold(&c.to_string()), want.to_string());
     }
-    assert!(CANARY.windows(2).all(|w| w[0] < w[1]));
 }

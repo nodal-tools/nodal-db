@@ -62,8 +62,7 @@ and re-check it after a bump. After one:
   1. find the engine's new Unicode version (the guard lists the code
      points that changed), download that release's `UnicodeData.txt`,
      pin its SHA-256 in `conformance/unicode/gen_lower_table.py` and
-     regenerate the table and `fold_table.rs` (the canary probe should
-     then cover the next Unicode version too);
+     regenerate the table and `fold_table.rs`;
   2. report collisions in the dev files: names whose new folds coincide
      within one kind (and class) were two objects and would now be one;
      each needs a rename before the files are used with the new build;

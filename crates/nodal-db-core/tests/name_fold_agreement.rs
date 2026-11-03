@@ -14,7 +14,6 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{ingest_segments, Segment};
-use nodal_db_core::fold_table::CANARY;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::text::nfc;
 use nodal_db_core::types::{fold, WarningKind, WriteOptions};
@@ -79,7 +78,17 @@ fn random_cased_names_resolve_as_the_fold_predicts() {
 
     // A small alphabet makes fold collisions frequent; the cased pool makes
     // every case pair reachable.
-    let mut pool: Vec<char> = CANARY.iter().copied().step_by(7).collect();
+    // Every 3rd code point cased in the toolchain's Unicode (newer than
+    // the fold's 15.1, so it includes case pairs the fold leaves alone).
+    #[allow(clippy::disallowed_methods)]
+    let cased = |c: &char| {
+        !c.to_lowercase().eq(std::iter::once(*c)) || !c.to_uppercase().eq(std::iter::once(*c))
+    };
+    let mut pool: Vec<char> = (0..=0x10_FFFFu32)
+        .filter_map(char::from_u32)
+        .filter(cased)
+        .step_by(3)
+        .collect();
     pool.extend([
         'Σ', 'σ', 'ς', '\u{130}', 'I', 'i', '\u{1c89}', '\u{1c8a}', 'A', 'a',
     ]);

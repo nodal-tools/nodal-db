@@ -169,6 +169,8 @@ pub fn fold(s: &str) -> String {
 /// [`fold`] of one code point.
 fn fold_char(c: char) -> char {
     if c.is_ascii() {
+        // A-Z is the whole ASCII part of the table (inside the fold itself).
+        #[allow(clippy::disallowed_methods)]
         return c.to_ascii_lowercase();
     }
     let table = &crate::fold_table::LOWER;
@@ -236,10 +238,12 @@ pub const FOLD_CONTEXT_PROBES: [&str; 16] = [
 /// `(code point, lowercase)` pairs, like [`crate::fold_table::LOWER`]).
 fn map_by_table(table: &[(char, char)], s: &str) -> String {
     s.chars()
-        .map(|c| match table.binary_search_by_key(&c, |&(from, _)| from) {
-            Ok(i) => table[i].1,
-            Err(_) => c,
-        })
+        .map(
+            |c| match table.binary_search_by_key(&c, |&(from, _)| from) {
+                Ok(i) => table[i].1,
+                Err(_) => c,
+            },
+        )
         .collect()
 }
 
@@ -353,9 +357,11 @@ fn per_code_point_difference(
             ));
         }
     }
-    Ok("lower() of the string of all code points differs from lower() of each \
+    Ok(
+        "lower() of the string of all code points differs from lower() of each \
         code point on its own (a context rule)"
-        .into())
+            .into(),
+    )
 }
 
 /// The store's name **hygiene floor** for classes/entities/parameters (was the

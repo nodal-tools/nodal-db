@@ -379,10 +379,11 @@ generated into `fold_table.rs`), proven equal to the engine's `lower()`.
 Every name compare in Rust calls `types::fold` and nothing else; in
 Python, `nodal_db.fold_name` (the same function) on
 `nodal_db.normalize_identifier` output. Never compare names with another
-case mapping: a workspace `clippy.toml` bans `str::to_lowercase`,
-`to_uppercase`, `to_ascii_lowercase`, `eq_ignore_ascii_case` and the
-`char` mappings, and a grep test bans `str.lower`/`casefold` in the Spine
-importer. The few non-name uses (SQL keywords, `value_kind` tags,
+case mapping: a workspace `clippy.toml` bans `to_lowercase`,
+`to_uppercase`, `to_ascii_lowercase`/`uppercase`, `make_ascii_lowercase`/
+`uppercase` and `eq_ignore_ascii_case` on `str`, `char`, `u8` and `[u8]`
+(those that exist), and a tokenizer scan bans `str.lower`/`casefold`/
+`upper` (called or passed, as in `key=str.lower`) in the Spine importer. The few non-name uses (SQL keywords, `value_kind` tags,
 reserved Arrow column names) carry a commented `#[allow]`.
 
 **Why.** The database's check (a unique index, a resolver) and the

@@ -656,8 +656,7 @@ const WARME_NFD: &str = "Wa\u{308}rme";
 #[test]
 fn an_nfd_dimension_name_is_stored_in_nfc_and_matches_both_spellings() {
     let (_dir, db) = fresh_db();
-    let report = ingest(&db, vec![dim_seg(WARME_NFD, "n1")])
-        .expect("write");
+    let report = ingest(&db, vec![dim_seg(WARME_NFD, "n1")]).expect("write");
     let w = text_warnings(&report);
     assert_eq!(w.len(), 1, "{w:?}");
     assert_eq!(
@@ -675,8 +674,7 @@ fn an_nfd_dimension_name_is_stored_in_nfc_and_matches_both_spellings() {
     );
     // The other spelling instantiates the same declared type.
     for (dim, entity) in [(WARME_NFC, "n2"), (WARME_NFD, "n3")] {
-        ingest(&db, vec![dim_seg(dim, entity)])
-            .unwrap_or_else(|e| panic!("write by {dim:?}: {e}"));
+        ingest(&db, vec![dim_seg(dim, entity)]).unwrap_or_else(|e| panic!("write by {dim:?}: {e}"));
     }
     assert_eq!(
         count(&db, "SELECT count(*) FROM parameter_type_dimension"),

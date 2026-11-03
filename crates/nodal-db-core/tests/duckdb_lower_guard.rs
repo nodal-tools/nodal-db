@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use nodal_db_core::duckdb::Connection;
 use nodal_db_core::fold_table::LOWER;
-use nodal_db_core::types::{engine_fold_mismatch, fold, FOLD_CONTEXT_PROBES};
+use nodal_db_core::types::{check_engine_fold, engine_fold_mismatch, fold, FOLD_CONTEXT_PROBES};
 
 fn hex(s: &str) -> String {
     s.chars()
@@ -260,4 +260,66 @@ fn the_context_probes_lower_as_the_fold() {
     assert!(FOLD_CONTEXT_PROBES.contains(&"\u{391}\u{3a3}"));
     assert!(FOLD_CONTEXT_PROBES.contains(&"\u{391}\u{3a3} "));
     assert!(FOLD_CONTEXT_PROBES.contains(&"\u{130}\u{307}"));
+}
+
+/// A connection whose `lower()` is shadowed by a temporary macro (DuckDB
+/// resolves an unqualified `lower` to the macro; `lcase` stays the
+/// builtin): an engine stub for the paths a real DuckDB `lower()`, which
+/// maps one code point to one, never takes.
+fn stub_engine(lower_body: &str) -> Connection {
+    let conn = Connection::open_in_memory().expect("open");
+    conn.execute_batch(&format!("CREATE TEMP MACRO lower(x) AS {lower_body};"))
+        .expect("macro");
+    conn
+}
+
+/// An engine whose `lower()` changes a string's length (`ß` -> `ss`)
+/// cannot be compared position by position: the check falls back to one
+/// row per code point and names the code point.
+#[test]
+fn engine_check_names_a_length_changing_mapping() {
+    let conn = stub_engine("replace(lcase(x), 'ß', 'ss')");
+    let refusal = engine_fold_mismatch(&conn, &LOWER)
+        .expect("check")
+        .expect("a mismatch is refused");
+    assert!(
+        refusal.contains("U+00DF lowers to U+0073 U+0073 in the engine, U+00DF in the core"),
+        "{refusal}"
+    );
+}
+
+/// An engine with a context rule the all-code-points string cannot show
+/// (final sigma) is caught by the context strings, compared whole.
+#[test]
+fn engine_check_catches_a_context_rule() {
+    let conn = stub_engine(
+        "CASE WHEN suffix(x, 'Σ') AND length(x) > 1 \
+         THEN lcase(x[1:-2]) || 'ς' ELSE lcase(x) END",
+    );
+    let refusal = engine_fold_mismatch(&conn, &LOWER)
+        .expect("check")
+        .expect("a mismatch is refused");
+    assert!(
+        refusal.contains(
+            "the string U+0391 U+03A3 lowers to U+03B1 U+03C2 in the engine, U+03B1 U+03C3 in the core"
+        ),
+        "{refusal}"
+    );
+}
+
+/// A failing `lower()` query is reported as coming from the engine check
+/// and is not cached: the next check (on a working engine) passes. The
+/// only `check_engine_fold` caller in this test binary, so no earlier pass
+/// is cached ahead of it.
+#[test]
+fn a_failing_engine_check_says_so_and_is_retried() {
+    let conn = stub_engine("error('engine stub: lower() is broken')");
+    let err = check_engine_fold(&conn).expect_err("the query fails");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("the engine fold check") && msg.contains("lower() is broken"),
+        "{msg}"
+    );
+    let ok = Connection::open_in_memory().expect("open");
+    check_engine_fold(&ok).expect("not cached: a working engine passes");
 }

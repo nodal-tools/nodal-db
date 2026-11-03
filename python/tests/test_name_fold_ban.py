@@ -6,20 +6,20 @@ NFC form. Python's ``str.lower``/``str.casefold`` are other folds: their
 case tables follow the interpreter's Unicode version and ``lower`` applies
 the final-sigma rule, so a collision check built on them disagrees with
 the core on rare letters. Rust bans its raw case mappings with clippy
-(``clippy.toml``); Python cannot, so this test scans the importer package
-with the tokenizer: any attribute named like a case mapping, called or
-not (``s.lower()``, ``key=str.lower``, ``map(str.casefold, xs)``), and any
-string literal that is exactly such a name (``getattr(s, "lower")``,
-``methodcaller("casefold")``). Comments and docstrings are not code and
-are not scanned. A genuine non-name use (a type tag) carries a
-``# not a name`` comment on its line. Stdlib only.
+(``clippy.toml``); Python cannot, so this test walks the importer
+package's syntax trees: any attribute named like a case mapping, called or
+not (``s.lower()``, ``key=str.lower``, ``map(str.casefold, xs)``, also
+inside an f-string's ``{...}``), and any string constant that is exactly
+such a name (``getattr(s, "lower")``, ``methodcaller("casefold")``).
+Comments are not in the tree, and a docstring is never exactly a method
+name. A genuine non-name use (a type tag) carries a ``# not a name``
+comment on its line. Stdlib only.
 """
 
 from __future__ import annotations
 
 import ast
 import io
-import tokenize
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[1] / "nodal_spine_import"
@@ -29,24 +29,18 @@ WAIVER = "# not a name"
 
 def offending_lines(source: str) -> list[int]:
     """Line numbers of ``source`` that use a case mapping without the waiver."""
-    # The tokenizer's own line split (str.splitlines also splits on form
-    # feeds and Unicode separators, which would shift the numbers).
+    # The tokenizer's line split (str.splitlines also splits on form feeds
+    # and Unicode separators, which would shift the numbers).
     lines = io.StringIO(source).readlines()
     hits: set[int] = set()
-    prev = None
-    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
-        if tok.type == tokenize.NAME and tok.string in MAPPINGS:
-            if prev is not None and prev.type == tokenize.OP and prev.string == ".":
-                hits.add(tok.start[0])
-        elif tok.type == tokenize.STRING:
-            try:
-                value = ast.literal_eval(tok.string)
-            except (ValueError, SyntaxError):
-                value = None
-            if isinstance(value, str) and value in MAPPINGS:
-                hits.add(tok.start[0])
-        if tok.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT):
-            prev = tok
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr in MAPPINGS:
+            # The line of the attribute name itself (a continuation line
+            # when the access is split across lines).
+            hits.add(node.end_lineno or node.lineno)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and node.value in MAPPINGS):
+            hits.add(node.lineno)
     return sorted(n for n in hits if WAIVER not in lines[n - 1])
 
 
@@ -79,6 +73,8 @@ def test_the_ban_sees_a_violation():
         'f = getattr(s, "lower")',
         "f = operator.methodcaller('casefold')",
         "t = s.title()",
+        'k = f"{n.lower()}"',
+        "k = f'{n!r:>{w}} {m.casefold()}'",
     ):
         assert len(offending_lines(bad + "\n")) == 1, bad
     for ok in (
@@ -87,5 +83,6 @@ def test_the_ban_sees_a_violation():
         '"""Use ``str.lower`` here? No."""',
         "x = s.islower() or s.lower_bound",
         'msg = "lower the bar"',
+        'k = f"lower {n}"',
     ):
         assert offending_lines(ok + "\n") == [], ok

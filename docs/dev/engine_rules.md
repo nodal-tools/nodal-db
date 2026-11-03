@@ -320,8 +320,7 @@ used by another parameter) every `value_rows` or `read_parameter` call
 cost 0.5 to 1.5 s more, scalar reads included. A pre-filter in front of
 the expansion (`WHERE axis_id IN (…)`) is pushed below the UNNEST only
 when the optimizer estimates the UNNEST as large; in one measured plan it
-was not, and the expansion ran in full. The numbers are in
-`specs/axis_position_cost_PLAN.md`.
+was not, and the expansion ran in full.
 
 **What it costs.** `value_rows` is a view and cannot see the caller's
 filter, so its in-use axis set covers every current value: each call
@@ -519,8 +518,7 @@ looking object. NFC on both sides makes the spellings one name.
 DuckDB's `nfc_normalize` uses the bundled engine's own Unicode tables,
 which are not pinned to 16.0.0 and move with an engine bump; a
 canonical path that used it could split a name the Rust side treats as
-one (characters added in recent Unicode versions normalize differently,
-`specs/unicode_text_rule_PLAN.md` §1.4). Direct-SQL users may use
+one (characters added in recent Unicode versions normalize differently). Direct-SQL users may use
 `nfc_normalize` for ad-hoc queries (the usage guide says so), never the
 core.
 

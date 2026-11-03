@@ -1,5 +1,5 @@
 //! The read-surface contract and stale read surfaces in old files
-//! (`docs/dev/read_surface.md`; `specs/read_surface_contract_PLAN.md`).
+//! (`docs/dev/read_surface.md`; `specs/Done/read_surface_contract_PLAN.md`).
 //!
 //! - the gates: the DDL hash in `130_read_surface.sql`, the `@surface` tag
 //!   census, the committed listing's header, the guarded "missing object"

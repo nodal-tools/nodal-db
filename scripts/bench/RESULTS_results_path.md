@@ -945,7 +945,7 @@ deterministic and the schema's long tier has not changed since §7.3.
 
 ## 12. Point-read macros (2026-10-26, DuckDB 2.0.0)
 
-`specs/fast_point_reads_PLAN.md`: `read_value`, `read_values`,
+`specs/Done/fast_point_reads_PLAN.md`: `read_value`, `read_values`,
 `value_rows_for` (and `value_array_asof_for`) read one value, or a few,
 without scanning the array payload of the whole table. Before/after on
 a copy of the A/B gate's full-scale synthetic fixture (10⁵ scalars,

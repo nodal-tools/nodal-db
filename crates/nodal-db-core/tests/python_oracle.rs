@@ -30,7 +30,7 @@ fn repo_root() -> PathBuf {
 /// core it checks. The Python skin (`nodal_db`, which exposes the core) is
 /// installed in the same `.venv`, so the shortcut is one import away; this
 /// fails if any oracle file imports it (plan T5,
-/// `specs/unicode_text_rule_PLAN.md` §3: the oracle normalizes text with
+/// `specs/Done/unicode_text_rule_PLAN.md` §3: the oracle normalizes text with
 /// its own code, never the core's `text::nfc`).
 #[test]
 fn oracle_never_imports_the_core() {

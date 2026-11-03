@@ -152,7 +152,7 @@ fn ensure_wellformed(axis: &CanonicalAxis) -> Result<(), DbError> {
     Ok(())
 }
 
-/// T6 guard (`specs/unicode_text_rule_PLAN.md`): an axis's text is what
+/// T6 guard (`specs/Done/unicode_text_rule_PLAN.md`): an axis's text is what
 /// canon produces: every label and tag in NFC (the text rule, `text.rs`)
 /// and no label twice in one label axis. Checked before every insert, in
 /// release builds, so a write path that bypassed canon fails loudly

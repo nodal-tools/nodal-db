@@ -1,5 +1,5 @@
 //! The read surface's version, refresh and overlay
-//! (docs/dev/read_surface.md; `specs/read_surface_contract_PLAN.md` Part B).
+//! (docs/dev/read_surface.md; `specs/Done/read_surface_contract_PLAN.md` Part B).
 //!
 //! The read surface (every view and macro of `schema/070`-`130_*.sql`) lives
 //! inside each database file, frozen at the build that created or last

@@ -1,5 +1,5 @@
 //! The per-segment label-domain index (plan T12,
-//! `specs/unicode_text_rule_PLAN.md` §5): it must give every label the
+//! `specs/Done/unicode_text_rule_PLAN.md` §5): it must give every label the
 //! ordinal the linear domain scan it replaced gave, so axis order and bytes
 //! are unchanged.
 //!

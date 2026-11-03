@@ -1,5 +1,5 @@
 //! Unicode text normalization: the one NFC definition of the core (plan T5,
-//! `specs/unicode_text_rule_PLAN.md` §3).
+//! `specs/Done/unicode_text_rule_PLAN.md` §3).
 //!
 //! Every component of the core that normalizes text calls [`nfc`]; none
 //! normalizes with its own code or tables. This mirrors

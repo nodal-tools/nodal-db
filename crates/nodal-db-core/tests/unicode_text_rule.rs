@@ -1,4 +1,4 @@
-//! The text rule (`text.rs`; `specs/unicode_text_rule_PLAN.md` T1, T2, T6,
+//! The text rule (`text.rs`; `specs/Done/unicode_text_rule_PLAN.md` T1, T2, T6,
 //! T7): names and index labels are stored and compared in NFC; string
 //! values are stored as written.
 //!

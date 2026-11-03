@@ -684,6 +684,7 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         remove_temp(&temp_path);
         return Err(DbError::Busy { attempts: 1 });
     }
+    crate::conn::forget_builtin_guard(&temp_path);
     fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
         path: temp_path.display().to_string(),
         source,
@@ -798,7 +799,7 @@ fn fold_stale_wal(db_path: &Path) -> Result<(), DbError> {
     };
     let conn = match open_with_retry(db_path, AccessMode::ReadWrite) {
         Ok(conn) => conn,
-        Err(e @ DbError::Busy { .. }) => return Err(e),
+        Err(e @ (DbError::Busy { .. } | DbError::ShadowedBuiltin { .. })) => return Err(e),
         Err(e) => return Err(refuse(e.to_string())),
     };
     let checkpointed = conn.execute_batch("CHECKPOINT");

@@ -427,6 +427,86 @@ of a few context strings (final sigma, `İ`), each compared whole (about
 a consumer's build) every write is refused. It is the one check
 that runs in a downstream build, which never runs this repo's tests.
 
+**A file must not shadow a built-in.** Every core open
+(`conn::open_with_retry`, `schema_init`, the CLI's erase pre-check, and
+the rebuild's `ATTACH` of a source) runs `conn::guard_builtins` before
+any core SQL: a macro in a `main` schema whose name is a DuckDB
+built-in's of the same family (a scalar macro against scalar, aggregate,
+window and macro built-ins, a table macro against table functions)
+refuses the file with `DbError::ShadowedBuiltin { name, schema, kind }`
+(Python `nodal_db.ShadowedBuiltin`); the message gives the `DROP MACRO
+main."…"` statement. Why: DuckDB resolves an unqualified function name
+in the file's `main` schema before the built-ins, and a macro persists
+in the file. A `CREATE MACRO lower(x) AS …` run with direct SQL then
+replaces `lower()` on every later connection, read-only ones included,
+inside the `cur_name` generated columns, the `lower(name)` indexes,
+every resolver and view, and the engine check above (which would pass a
+hijacked `lower()` or cache a refusal for the whole process). Verified
+on DuckDB 2.0.0: the unique index on `cur_name` then admits a second
+`foo` beside `Foo`; any spelling (`"LOWER"`) and `CREATE OR REPLACE`
+with another arity capture the name too; `max`, `count(x)`, `list`,
+`nextval`, `chr`, the operators `+`, `||`, `~~` (`LIKE`) and `->>`, and
+the table function `range` are shadowed the same way, so every built-in
+name is guarded. Not shadowing, and allowed: the comparison operators
+(`=`, `<>`, `<`, `IS DISTINCT FROM`, …; DuckDB binds them as
+comparisons), pragma names, a macro in another schema (not on the search
+path), a table macro named like a scalar built-in, and TEMP macros
+(connection-local; the core never shares a connection).
+
+The guard cannot repair what was written while such a macro existed: a
+duplicate name another client inserted stays after the macro is dropped
+(DuckDB records no dependency, so the drop succeeds), with index keys
+that no longer match their rows. Compaction rebuilds every index from
+the rows and fails loudly on it (`UNIQUE constraint violation: duplicate
+key …`), so the message tells the user to compact after the drop.
+
+Cost: the listing (`system.main.duckdb_functions()`, ~13 ms) is cached
+per process by path and file state (size, mtime, inode, ctime of the
+file and its WAL), stamped before and after the open and cached only
+when the two agree. An unchanged file costs a few `stat` calls; a file
+another client changed (a WAL-only change included) is listed on its
+next open. A commit of the core's own write cycles, whose SQL is all
+core-owned (the `api` entry points: saves, imports, structural commits,
+object deletes; erasure; the verbs; the template apply), re-stamps the
+file as clean; the public closure family (`conn::with_write_txn` and its
+retrying forms) runs a caller's SQL and never re-stamps. The re-stamp is an explicit
+`CHECKPOINT` on the held RW connection after `COMMIT`, the stamp, the
+close, then a re-stat, and the stamp is recorded only if the close left
+it unchanged. Sound because the guard passed at this open, the cycle's
+SQL is core-owned (its own rows and vetted DDL, never a user macro), and
+the stamp is taken while the RW connection holds the file's lock. This
+holds for core-routed access only (as for `TxnOptions::expect_commit`):
+a second DuckDB instance in the same process (Python's own `duckdb`
+module on the same file) shares the process's POSIX locks and could
+change the file between the open and the stamp. Measured
+(2026-11-03, release, medians of 200 single-value saves, 3 runs): +3.0
+to +5.3 ms per save (3–5 %), −22 ms on the next open (~90 → ~67 ms);
+the owner chose the trade. A no-op save (rolled back) and a failed
+cycle record nothing (the stamp of their open still holds or the next
+open lists). Compaction (and its leftover-WAL fold), extract and
+`schema_init` use their own connections and do not re-stamp: the next
+open lists. The core's temp files leave the cache when they go, and it
+is capped.
+
+Fully qualified `system.main.lower(…)` escapes a shadow (`main.lower`,
+`lower` and `system.lower` do not; a file may create a `system` schema,
+which makes `system.lower` ambiguous), but it would have to reach every
+`lower()` in the DDL, the views and the core, and a user's own queries
+stay unqualified, so the guard is the rule. On a DuckDB upgrade, a new
+built-in named like one of the read surface's own macros would make the
+guard refuse every file (CONTRIBUTING "DuckDB upgrades"). Guards:
+[`tests/shadowed_builtin_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/shadowed_builtin_guard.rs)
+(the refusal on write, read, compaction, extract and init after a cached
+clean check; spellings, families and operators; the DROP hint as given,
+for awkward file names; what is allowed; the listing count per open; which writers re-stamp; a
+WAL-only change; the shadow is real; compaction refuses a duplicate
+written under the macro) and
+[`tests/shadowed_builtin_engine_check.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/shadowed_builtin_engine_check.rs)
+(a shadowed file as a process's first write is refused before the
+engine check and does not poison it). Every fresh file passing the guard
+(the whole suite) shows the read surface defines no macro named like a
+built-in.
+
 Out of reach (recorded, not fixed): a third-party engine with a different
 `lower()` (a Python `duckdb` a user queries with) reads the index keys our
 engine persisted, so an index-scan lookup there could miss a row a scan

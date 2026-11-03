@@ -9,8 +9,9 @@
 //!
 //! - [`with_write_txn`] opens RW (bounded-backoff retry on the lock error),
 //!   `BEGIN`, inserts the `commit` row as the validity edge (VMP Part 5),
-//!   runs the closure, `COMMIT`, and closes. No `CHECKPOINT` yet — a future
-//!   option once churn/compaction lands (VMP Part 5).
+//!   runs the closure, `COMMIT`, and closes. The core's own write cycles
+//!   also `CHECKPOINT` before the close, for the shadowing guard's re-stamp
+//!   (`stamp_own_write`, engine rule 8); the public closure family does not.
 //! - [`with_read`] opens a fresh read-only connection, runs, and closes; the
 //!   commit-cookie poll (#2252) is itself one such per-operation read.
 //! - **In-process serialization (api critique F1):** DuckDB's file lock
@@ -118,8 +119,14 @@ pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connec
     let mut backoff = BACKOFF_START;
     for attempt in 1..=MAX_ATTEMPTS {
         let config = core_config(mode.clone())?;
+        let before = file_stamp(db_path);
         match Connection::open_with_flags(db_path, config) {
-            Ok(conn) => return Ok(conn),
+            Ok(conn) => {
+                // A file must not shadow a built-in (engine rule 8): before
+                // any core SQL runs on it. On a refusal `conn` drops (closes).
+                guard_builtins(&conn, db_path, before)?;
+                return Ok(conn);
+            }
             Err(e) if is_lock_busy(&e) => {
                 if attempt == MAX_ATTEMPTS {
                     return Err(DbError::Busy {
@@ -133,6 +140,290 @@ pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connec
         }
     }
     unreachable!("loop returns on the final attempt")
+}
+
+/// The on-disk state of one database file, as the shadowing guard's cache
+/// key: `(len, mtime, and on Unix dev, inode, ctime)` of the file and of its
+/// `<db>.wal` (`None` when absent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileStamp([Option<StatKey>; 2]);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatKey {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    unix: (u64, u64, i64, i64),
+}
+
+fn stat_key(path: &Path) -> Option<StatKey> {
+    let m = std::fs::metadata(path).ok()?;
+    Some(StatKey {
+        len: m.len(),
+        modified: m.modified().ok(),
+        #[cfg(unix)]
+        unix: {
+            use std::os::unix::fs::MetadataExt;
+            (m.dev(), m.ino(), m.ctime(), m.ctime_nsec())
+        },
+    })
+}
+
+/// `None` when the file itself cannot be stat'ed (then nothing is cached).
+pub(crate) fn file_stamp(db_path: &Path) -> Option<FileStamp> {
+    let mut wal = db_path.as_os_str().to_owned();
+    wal.push(".wal");
+    let db = stat_key(db_path)?;
+    Some(FileStamp([Some(db), stat_key(Path::new(&wal))]))
+}
+
+/// Per-path state of the shadowing guard: the [`FileStamp`] the file had
+/// when it was last found clean, and how many listings ran for it (the test
+/// hook [`builtin_guard_listings`]).
+#[derive(Default)]
+struct GuardEntry {
+    clean: Option<FileStamp>,
+    listings: u64,
+    /// Times a core commit re-stamped the file as clean ([`record_own_write`]).
+    own_writes: u64,
+}
+
+/// The guard's cache, by [`canonical_path_key`]. Bounded: the core's own
+/// temp files are forgotten when they go ([`forget_builtin_guard`]), and
+/// past [`GUARD_CACHE_CAP`] paths the map starts over (a re-listing per
+/// path, never a wrong answer).
+static BUILTIN_GUARD: OnceLock<Mutex<HashMap<PathBuf, GuardEntry>>> = OnceLock::new();
+const GUARD_CACHE_CAP: usize = 1024;
+
+fn guard_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, GuardEntry>> {
+    BUILTIN_GUARD
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
+fn store_clean(key: PathBuf, stamp: FileStamp) {
+    let mut cache = guard_cache();
+    if cache.len() >= GUARD_CACHE_CAP && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.entry(key).or_default().clean = Some(stamp);
+}
+
+/// Drop `db_path` from the guard's cache: for the core's temp files
+/// (compaction, extract), which are renamed away or removed.
+pub(crate) fn forget_builtin_guard(db_path: &Path) {
+    guard_cache().remove(&canonical_path_key(db_path));
+}
+
+/// Test hook: how many uncached listings the guard has run for `db_path`
+/// in this process (a cached open adds none).
+#[doc(hidden)]
+pub fn builtin_guard_listings(db_path: &Path) -> u64 {
+    guard_cache()
+        .get(&canonical_path_key(db_path))
+        .map_or(0, |e| e.listings)
+}
+
+/// Test hook: how many times a core commit re-stamped `db_path` as clean
+/// (`record_own_write`) in this process.
+#[doc(hidden)]
+pub fn builtin_guard_own_writes(db_path: &Path) -> u64 {
+    guard_cache()
+        .get(&canonical_path_key(db_path))
+        .map_or(0, |e| e.own_writes)
+}
+
+/// Refuse a database file that defines a macro shadowing a DuckDB built-in
+/// function (engine rule 8, "A file must not shadow a built-in";
+/// [`DbError::ShadowedBuiltin`]). Run by [`open_with_retry`] on every core
+/// open, before any core SQL; `before` is the file's [`FileStamp`] taken
+/// just before the open.
+///
+/// Why: DuckDB resolves an unqualified function name in the file's `main`
+/// schema before the built-ins, on every later connection to the file
+/// (read-only ones included) and inside the file's own generated columns,
+/// indexes and views. A persisted `CREATE MACRO lower(x) AS …` silently
+/// replaces the name fold everywhere (`cur_name`, its unique indexes, every
+/// resolver), so the unique index stops catching duplicates and `types::fold`
+/// no longer equals the SQL fold; `max`, `count`, `nextval`, `range`, `+`,
+/// `||`, … are shadowed the same way. So every built-in name is guarded, not
+/// a list.
+///
+/// Placement and cost: the catalog listing (`duckdb_functions()`, about
+/// 3,200 rows) costs about 13 ms per call (release build, DuckDB 2.0.0,
+/// measured 2026-11-03; the scan of the built-ins dominates and no filter is
+/// pushed into it), against about 35 ms for a whole per-operation read
+/// (`head_commit`: open, one query, close). Run on every open it would add
+/// over a third to every read (invariant 1 makes opens per-operation), so
+/// the answer is cached per process by path and file state ([`FileStamp`]):
+/// an unchanged file costs a few `stat` calls. The stamp is taken before
+/// and after the open and cached only when the two agree, so a change that
+/// races the open is listed again next time. Any change to the file or its
+/// WAL (another process's `CREATE MACRO`) re-runs the listing on the next
+/// open. A commit through [`run_txn_once`] does not: [`stamp_own_write`] /
+/// [`record_own_write`] re-stamp the file after it. That trade was measured
+/// (release, 2026-11-03, medians of 200 single-value saves, 3 runs): +3.0 to
+/// +5.3 ms per save (the explicit `CHECKPOINT`, about 3-5 %), -22 ms on the
+/// next open (about 90 ms to 67 ms); the owner chose it. The core's other
+/// writers (compaction and its WAL fold, extract, `schema_init`, the
+/// read-surface refresh verb) do not re-stamp: the next open lists. A
+/// refusal is never cached. The residual gap (recorded):
+/// a change that leaves the size, mtime, inode and ctime of both files
+/// equal, which needs a filesystem with coarse timestamps.
+pub(crate) fn guard_builtins(
+    conn: &Connection,
+    db_path: &Path,
+    before: Option<FileStamp>,
+) -> Result<(), DbError> {
+    let key = canonical_path_key(db_path);
+    let after = file_stamp(db_path);
+    if after.is_some() {
+        let cache = guard_cache();
+        if cache.get(&key).and_then(|e| e.clean.as_ref()) == after.as_ref() {
+            return Ok(());
+        }
+    }
+    let listed = check_no_shadowed_builtins(conn);
+    guard_cache().entry(key.clone()).or_default().listings += 1;
+    listed?;
+    if let Some(after) = after.filter(|a| before.as_ref() == Some(a)) {
+        store_clean(key, after);
+    }
+    Ok(())
+}
+
+/// After a committed write cycle on `conn`, before the close: `CHECKPOINT`
+/// (so the close has nothing left to write) and return the file's stamp
+/// then, for [`record_own_write`] after the close. `None` when the
+/// checkpoint fails (nothing is recorded; the next open lists).
+///
+/// Called only for the core's own write cycles ([`Restamp::Yes`]: the `api`
+/// entry points, erasure, the verbs, the template apply), whose SQL is all
+/// core-owned; never for the public closure family ([`with_write_txn`] and
+/// its retrying forms), which runs a caller's SQL (a `CREATE MACRO lower`
+/// there must be listed on the next open).
+///
+/// Why recording it as clean is sound under that precondition: the guard
+/// passed at this connection's open (cached or listed), the core-owned SQL
+/// writes only the core's rows and its vetted DDL (the read surface), never
+/// a user macro, and the stamp is taken while this RW connection holds the
+/// file's lock, so no other process can change it meanwhile.
+/// [`record_own_write`] re-stats after the close, so a change by anyone
+/// after the close is not recorded. The guarantee holds for core-routed
+/// access only, like [`TxnOptions::expect_commit`]'s: a second DuckDB
+/// instance in the same process (Python's own `duckdb` module on the same
+/// file) shares the process's POSIX locks and could change the file between
+/// the open and the stamp.
+fn stamp_own_write(conn: &Connection, db_path: &Path) -> Option<FileStamp> {
+    conn.execute_batch("CHECKPOINT").ok()?;
+    file_stamp(db_path)
+}
+
+/// Record [`stamp_own_write`]'s stamp as clean once the connection is
+/// closed, only if the file still has it (re-stat'ed now); otherwise leave
+/// the cache as it is, and the next open lists.
+fn record_own_write(db_path: &Path, stamp: Option<FileStamp>) {
+    if let Some(stamp) = stamp {
+        #[cfg(debug_assertions)]
+        test_hooks::AFTER_CLOSE.with(|h| {
+            if let Some(hook) = h.take() {
+                hook(db_path);
+            }
+        });
+        if file_stamp(db_path).as_ref() == Some(&stamp) {
+            let key = canonical_path_key(db_path);
+            store_clean(key.clone(), stamp);
+            guard_cache().entry(key).or_default().own_writes += 1;
+        }
+    }
+}
+
+/// Test hooks of the guard's re-stamp (debug builds only; thread-local, so
+/// parallel tests do not interfere: the write cycle runs on the calling
+/// thread).
+#[doc(hidden)]
+pub mod test_hooks {
+    #[cfg(debug_assertions)]
+    thread_local! {
+        pub(super) static AFTER_CLOSE: std::cell::Cell<Option<fn(&std::path::Path)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Run `hook` once, on this thread's next re-stamping commit, between
+    /// the close and the re-stat (e.g. to change the file there).
+    #[cfg(debug_assertions)]
+    pub fn after_next_close(hook: fn(&std::path::Path)) {
+        AFTER_CLOSE.with(|h| h.set(Some(hook)));
+    }
+}
+
+/// The uncached check of [`guard_builtins`], over every database attached to
+/// `conn` (the rebuild's `ATTACH`ed source too: it reads it under `USE`):
+/// a non-temporary macro in a `main` schema whose name is a built-in's of the
+/// same family (a scalar macro against scalar, aggregate, window and macro
+/// built-ins; a table macro against table functions and table macros) is
+/// refused. Not counted as built-ins: pragmas (not called as functions) and
+/// the comparison operators, which DuckDB binds as comparisons, never
+/// through a macro of that name (verified on 2.0.0; `+`, `||`, `~~` (LIKE)
+/// and `->>` are shadowed and stay guarded). Other schemas are not on
+/// DuckDB's search path and are allowed; temporary objects are
+/// connection-local, and the core never shares a connection. The listing is
+/// read through `system.main.duckdb_functions()` (a file's own
+/// `duckdb_functions` table macro cannot answer for it) and compared in
+/// Rust, so no function the file could shadow takes part.
+pub(crate) fn check_no_shadowed_builtins(conn: &Connection) -> Result<(), DbError> {
+    use std::collections::HashSet;
+    const NOT_SHADOWABLE: [&str; 9] = [
+        "=",
+        "!=",
+        "<>",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "is distinct from",
+        "is not distinct from",
+    ];
+    let table_family = |kind: &str| matches!(kind, "table" | "table_macro");
+    let mut builtins: HashSet<(bool, String)> = HashSet::new();
+    let mut user: Vec<(String, String, String)> = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT database_name, schema_name, function_name, function_type, internal \
+         FROM system.main.duckdb_functions()",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let (database, schema): (String, String) = (row.get(0)?, row.get(1)?);
+        let (name, kind, internal): (String, String, bool) =
+            (row.get(2)?, row.get(3)?, row.get(4)?);
+        // DuckDB matches catalog names ASCII-case-insensitively; these are
+        // SQL function identifiers, not nodal-db names (engine rule 8).
+        #[allow(clippy::disallowed_methods)]
+        let folded = name.to_ascii_lowercase();
+        if internal {
+            if kind != "pragma" && !NOT_SHADOWABLE.contains(&folded.as_str()) {
+                builtins.insert((table_family(&kind), folded));
+            }
+        } else if schema == "main" && database != "temp" {
+            user.push((folded, name, kind));
+        }
+    }
+    user.sort();
+    for (folded, name, kind) in user {
+        if builtins.contains(&(table_family(&kind), folded)) {
+            return Err(DbError::ShadowedBuiltin {
+                name,
+                schema: "main".into(),
+                kind: if table_family(&kind) {
+                    "table macro".into()
+                } else {
+                    "macro".into()
+                },
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Assert the bundled DuckDB is >= the line the schema was verified on (mirrors
@@ -162,9 +453,14 @@ pub fn with_write_txn<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> 
 where
     F: FnOnce(&Connection, i64) -> Result<T, DbError>,
 {
-    run_txn_once(db_path, user, message, TxnOptions::default(), |conn, c| {
-        Ok((f(conn, c)?, TxnEnd::Commit))
-    })
+    run_txn_once(
+        db_path,
+        user,
+        message,
+        TxnOptions::default(),
+        Restamp::No,
+        |conn, c| Ok((f(conn, c)?, TxnEnd::Commit)),
+    )
 }
 
 /// How a successful write cycle ends (skip_unchanged_writes_PLAN D1): a
@@ -227,6 +523,7 @@ fn run_txn_once<T, F>(
     user: &str,
     message: &str,
     txn: TxnOptions,
+    restamp: Restamp,
     f: F,
 ) -> Result<T, DbError>
 where
@@ -293,12 +590,20 @@ where
             TxnEnd::Commit => conn.execute_batch("COMMIT")?,
             TxnEnd::Rollback => conn.execute_batch("ROLLBACK")?,
         }
-        Ok(value)
+        Ok((value, end))
     })();
 
     match result {
-        Ok(value) => {
+        Ok((value, end)) => {
+            // The shadowing guard's re-stamp after the core's own commit
+            // (`stamp_own_write`): the next open of the file then needs no
+            // catalog listing. A rolled-back cycle (nothing written) leaves
+            // the stamp cached at the open as it is.
+            let stamp = (end == TxnEnd::Commit && restamp == Restamp::Yes)
+                .then(|| stamp_own_write(&conn, db_path))
+                .flatten();
             conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
+            record_own_write(db_path, stamp);
             Ok(value)
         }
         Err(e) => {
@@ -416,6 +721,10 @@ where
 /// Every attempt re-runs the checks, so a conflict retry re-checks
 /// `expect_commit` against the head inside its own fresh transaction. A
 /// [`DbError::Stale`] is returned on the attempt that sees it, never retried.
+///
+/// The public closure family ([`with_write_txn`], [`with_write_txn_retrying`]
+/// and this) runs the caller's SQL, so its commits never re-stamp the file
+/// for the shadowing guard ([`Restamp::No`]): the next open lists it.
 pub fn with_write_txn_retrying_opts<T, F>(
     db_path: &Path,
     user: &str,
@@ -426,14 +735,46 @@ pub fn with_write_txn_retrying_opts<T, F>(
 where
     F: Fn(&Connection, i64) -> Result<T, DbError>,
 {
-    with_write_txn_retrying_ends(db_path, user, message, txn, |conn, c| {
+    retry_conflicts(db_path, user, message, txn, Restamp::No, |conn, c| {
         Ok((f(conn, c)?, TxnEnd::Commit))
     })
 }
 
-/// [`with_write_txn_retrying_opts`] for a closure that also says how its
+/// [`with_write_txn_retrying`] for the core's own write cycles (erasure, the
+/// verbs, the template apply), whose SQL is all core-owned: a commit
+/// re-stamps the file for the shadowing guard ([`Restamp::Yes`]).
+pub(crate) fn core_write_txn_retrying<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
+    core_write_txn_retrying_opts(db_path, user, message, TxnOptions::default(), f)
+}
+
+/// [`core_write_txn_retrying`] with [`TxnOptions`].
+pub(crate) fn core_write_txn_retrying_opts<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<T, DbError>,
+{
+    retry_conflicts(db_path, user, message, txn, Restamp::Yes, |conn, c| {
+        Ok((f(conn, c)?, TxnEnd::Commit))
+    })
+}
+
+/// [`core_write_txn_retrying_opts`] for a closure that also says how its
 /// cycle ends ([`TxnEnd`]): the `api` entry points, which roll back a call
-/// that wrote nothing (skip_unchanged_writes_PLAN D1).
+/// that wrote nothing (skip_unchanged_writes_PLAN D1). Core-owned SQL, so a
+/// commit re-stamps.
 pub(crate) fn with_write_txn_retrying_ends<T, F>(
     db_path: &Path,
     user: &str,
@@ -444,8 +785,33 @@ pub(crate) fn with_write_txn_retrying_ends<T, F>(
 where
     F: Fn(&Connection, i64) -> Result<(T, TxnEnd), DbError>,
 {
+    retry_conflicts(db_path, user, message, txn, Restamp::Yes, f)
+}
+
+/// Whether a committed write cycle re-stamps the file as clean for the
+/// shadowing guard ([`stamp_own_write`]). `Yes` only for the core's own
+/// write cycles, whose SQL is core-owned; not settable from outside the
+/// crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Restamp {
+    Yes,
+    No,
+}
+
+/// The conflict-retry loop shared by every retrying writer.
+fn retry_conflicts<T, F>(
+    db_path: &Path,
+    user: &str,
+    message: &str,
+    txn: TxnOptions,
+    restamp: Restamp,
+    f: F,
+) -> Result<T, DbError>
+where
+    F: Fn(&Connection, i64) -> Result<(T, TxnEnd), DbError>,
+{
     for attempt in 1..=MAX_CONFLICT_ATTEMPTS {
-        match run_txn_once(db_path, user, message, txn, &f) {
+        match run_txn_once(db_path, user, message, txn, restamp, &f) {
             Ok(value) => return Ok(value),
             Err(e) if is_conflict(&e) => {
                 if attempt == MAX_CONFLICT_ATTEMPTS {

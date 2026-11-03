@@ -125,6 +125,36 @@ pub enum DbError {
         cause: String,
     },
 
+    /// The database file defines a macro (`kind`: "macro" or "table
+    /// macro") named like a DuckDB built-in function in its `main` schema
+    /// (`schema`, always "main" today), where DuckDB resolves it before the
+    /// built-in on every connection: e.g. a `CREATE MACRO lower(x) AS …`
+    /// run with direct SQL would silently replace the name fold (engine
+    /// rule 8). Raised by every core open of such a file, before any core
+    /// SQL runs, so nothing was read or written now. Not retryable as is:
+    /// drop the macro with direct SQL (the message gives the statement).
+    /// Anything another client wrote while the macro existed may have left
+    /// duplicate names or name-index keys that do not match their rows
+    /// (the macro computed them; the drop does not recompute them);
+    /// compaction rebuilds every index and fails loudly on a duplicate, so
+    /// compact the file after the drop. Its own variant so callers can
+    /// match it structurally.
+    #[error(
+        "the database file defines a {kind} `{name}` in its `{schema}` schema, which \
+         shadows DuckDB's built-in function of that name for every query on the file \
+         (nodal-db's name folding included); nodal-db refuses the file until it is \
+         dropped ({}) or moved to another schema. Anything written to the file while \
+         it existed may have left duplicate names or name-index keys that do not \
+         match their rows: after the drop, compact the file (nodal-db maintain \
+         compact), which fails loudly on such a duplicate",
+        drop_macro_sql(kind, schema, name)
+    )]
+    ShadowedBuiltin {
+        name: String,
+        schema: String,
+        kind: String,
+    },
+
     /// The public write API (`api::write_parameter` / `api::ingest_segments`)
     /// was handed a batch it cannot interpret — wrong column count, a
     /// non-string entity column, an unsupported Arrow type for a dimension or
@@ -233,6 +263,20 @@ pub struct WriteAndDeleteSameKeyDetails {
     /// from the up-front name check.
     pub resolved: Option<(i64, i64, i64)>,
     pub message: String,
+}
+
+/// The statement that drops a [`DbError::ShadowedBuiltin`] macro, valid for
+/// any name: quoted, with `"` doubled, and schema-qualified only (the user's
+/// connection may name the file's catalog differently).
+fn drop_macro_sql(kind: &str, schema: &str, name: &str) -> String {
+    let table = if kind == "table macro" { " TABLE" } else { "" };
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let schema = if schema == "main" {
+        "main".to_string()
+    } else {
+        q(schema)
+    };
+    format!("DROP MACRO{table} {schema}.{}", q(name))
 }
 
 fn malformed_axis_message(

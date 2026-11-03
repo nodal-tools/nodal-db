@@ -53,7 +53,7 @@ use std::path::Path;
 
 use duckdb::{params, Connection};
 
-use crate::conn::{with_read_plain, with_write_txn_retrying};
+use crate::conn::{core_write_txn_retrying, with_read_plain};
 use crate::error::DbError;
 use crate::object_delete::{erase_scope_legs, EraseLeg};
 use crate::types::{ObjectDeleteKey, ObjectKind, ObjectRef, TableCount};
@@ -290,7 +290,7 @@ pub fn erase_alternative(
     // must return Err to roll back, which cannot carry the report).
     let noop_id = std::cell::Cell::new(0i64);
 
-    let outcome = with_write_txn_retrying(db, user, &message, |conn, commit_id| {
+    let outcome = core_write_txn_retrying(db, user, &message, |conn, commit_id| {
         // Resolve fresh inside every (re)try — never reuse pre-conflict state.
         let resolved = resolve_alternative_any(conn, &name)?.ok_or_else(|| {
             DbError::Api(format!(

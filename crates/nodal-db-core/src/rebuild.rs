@@ -585,7 +585,11 @@ pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(),
         } else {
             DbError::Duckdb(e)
         }
-    })
+    })?;
+    // The source is read under `USE` (extract), where its `main` macros
+    // resolve before the built-ins: the shadowing guard covers it too
+    // (engine rule 8). Uncached: one listing per rebuild.
+    crate::conn::check_no_shadowed_builtins(conn)
 }
 
 /// Restore each fresh sequence to the source's state (B2, confirmed on bundled
@@ -726,6 +730,7 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
 
 /// Remove a temp file and its WAL sidecar (abort cleanup).
 pub(crate) fn remove_temp(temp_path: &Path) {
+    crate::conn::forget_builtin_guard(temp_path);
     let _ = fs::remove_file(temp_path);
     let mut wal = temp_path.as_os_str().to_os_string();
     wal.push(".wal");

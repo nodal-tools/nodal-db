@@ -372,6 +372,7 @@ def test_exception_hierarchy(db):
         nodal_db.ArrowError,
         nodal_db.InternalError,
         nodal_db.UnreplayableWal,
+        nodal_db.ShadowedBuiltin,
     ):
         assert issubclass(exc, nodal_db.NodalDbError)
     assert issubclass(nodal_db.NodalDbError, Exception)
@@ -751,6 +752,30 @@ def test_compact(db):
     for flag in (True, False):
         with pytest.raises(TypeError, match="not a bool"):
             db.compact(if_needed=True, max_commits=flag)
+
+
+def test_a_file_shadowing_lower_is_refused(db, tmp_path):
+    # Engine rule 8: a persisted macro named like a DuckDB built-in would
+    # replace it in every query on the file, nodal-db's name folding included.
+    duckdb = pytest.importorskip(
+        "duckdb", reason="python 'duckdb' package missing (pip install 'nodal-db[test]')"
+    )
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
+    path = str(tmp_path / "t.duckdb")
+    con = duckdb.connect(path)
+    con.execute("CREATE MACRO lower(x) AS x")
+    con.close()
+    with pytest.raises(nodal_db.ShadowedBuiltin, match='DROP MACRO main."lower"') as ei:
+        db.head_commit()
+    assert (ei.value.name, ei.value.schema, ei.value.kind) == ("lower", "main", "macro")
+    assert "compact the file" in str(ei.value)
+    with pytest.raises(nodal_db.ShadowedBuiltin):
+        db.write_parameter("unit", "capacity", "Base", scalar_batch(["U1"], [2.0]), user="t")
+    con = duckdb.connect(path)
+    con.execute("DROP MACRO lower")
+    con.close()
+    db.write_parameter("unit", "capacity", "Base", scalar_batch(["U1"], [2.0]), user="t")
+    assert db.read_parameter("unit", "capacity", "Base").num_rows == 1
 
 
 def test_compact_refuses_an_unreplayable_wal(db, tmp_path):

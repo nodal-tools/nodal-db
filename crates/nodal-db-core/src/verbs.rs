@@ -37,7 +37,7 @@ use crate::api::{
     insert_alternative_row, lookup_alternative, lookup_entity, lookup_entity_class,
     lookup_parameter, lookup_scenario, lookup_value_list,
 };
-use crate::conn::{with_read_plain, with_write_txn_retrying};
+use crate::conn::{core_write_txn_retrying, with_read_plain};
 use crate::error::DbError;
 use crate::structural::{
     apply_create_entity, apply_create_entity_class, apply_create_parameter,
@@ -105,7 +105,7 @@ pub fn ensure_alternative(
         return Ok(id); // idempotent no-op: no commit
     }
     let msg = format!("ensure_alternative {name}");
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         if let Some(id) = lookup_alternative(conn, name)? {
             return Ok(id); // raced: created since the pre-check
         }
@@ -193,7 +193,7 @@ pub fn set_scenario_alternatives(
     // The shared A-min applier is the ONE scenario_alternative writer (invariant
     // 2, critique F2): the verb and the composable channel produce identical
     // history for the same logical op.
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_set_scenario_alternatives(conn, c, scenario, alternatives, &mut no_report())
             .map(|(sid, _)| sid)
     })
@@ -268,7 +268,7 @@ pub fn set_entity_activation(
         active
     );
     // The shared applier is the ONE entity_alternative writer (invariant 2).
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_set_entity_activation(
             conn,
             c,
@@ -309,7 +309,7 @@ pub fn set_class_active_by_default(
         return Ok(());
     }
     let msg = format!("set_class_active_by_default {class} = {active_by_default}");
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
             DbError::Api(format!(
                 "set_class_active_by_default: class {class:?} not found"
@@ -349,7 +349,7 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
         return Ok(());
     }
     let msg = format!("drop_value_list {list}");
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         let Some(lid) = lookup_value_list(conn, list)? else {
             return Ok(()); // raced away between the read pre-check and here
         };
@@ -409,7 +409,7 @@ pub fn ensure_entity_class(
     }
     let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
     // The shared applier is the one class-create body (invariant 2).
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_entity_class(conn, c, name, dims, &mut no_report()).map(|(id, _)| id)
     })
 }
@@ -473,7 +473,7 @@ pub fn ensure_parameter_definition(
 
     let msg = format!("ensure_parameter_definition {class}.{name}");
     // The shared applier is the one definition+type-member create body.
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_parameter(
             conn,
             c,
@@ -540,7 +540,7 @@ pub fn ensure_entity(
 
     let msg = format!("ensure_entity {class}:{effective_name}");
     // The shared applier is the one entity+element create body (invariant 2).
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_entity(conn, c, class, name, elements, &mut no_report()).map(|(id, _)| id)
     })
 }
@@ -632,7 +632,7 @@ pub fn stamp_template_identity(
         return Ok(());
     }
     let msg = format!("stamp_template_identity {name} version {version}");
-    with_write_txn_retrying(db, user, &msg, |conn, c| {
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
         let existing = read_stamp(conn)?;
         if guard(&existing, name, version, overwrite)? {
             return Ok(()); // raced into the desired stamp

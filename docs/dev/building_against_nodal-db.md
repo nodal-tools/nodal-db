@@ -71,6 +71,15 @@ answer will be a served API, not a protocol document.
   It is not retryable as is; tell the user to move the WAL aside. A
   compaction that finds a new WAL just before its swap (another process
   wrote meanwhile) fails with `Busy` and can be retried.
+- A file that defines a macro named like a DuckDB built-in function in
+  its `main` schema (a `CREATE MACRO lower(x) AS …` run with direct SQL)
+  is refused by every open: `ShadowedBuiltin`
+  (`DbError::ShadowedBuiltin { name, schema, kind }`,
+  `nodal_db.ShadowedBuiltin` with `name`, `schema` and `kind`
+  attributes; `schema` is `"main"`). Not retryable as is: the user drops
+  the macro (the message gives the statement), then compacts the file,
+  which fails loudly on a duplicate name written while the macro
+  existed.
 - **Never call a table macro through an attached database.** Views of
   an attached file (`ATTACH … AS other`, then `other.<view>`) read that
   file, but a table macro called as `other.<macro>(…)` resolves its

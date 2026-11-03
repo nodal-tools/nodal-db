@@ -110,6 +110,21 @@ pub enum DbError {
         message: String,
     },
 
+    /// Compaction refused a database whose leftover `<db>.wal` (a writer
+    /// crashed after committing) could not be folded into the file: DuckDB
+    /// could not replay it (a foreign WAL, an older generation of this
+    /// file's WAL, an unreadable header) or the read-write open and
+    /// `CHECKPOINT` of the original failed (a read-only file, a WAL held
+    /// open on Windows). Nothing was changed and the WAL is never deleted:
+    /// a person decides whether its content matters. Not retryable as is;
+    /// move the WAL aside, then compact. `cause` is DuckDB's or the core's
+    /// reason.
+    #[error("{} could not be replayed or removed: {cause}; move it aside to compact", wal.display())]
+    UnreplayableWal {
+        wal: std::path::PathBuf,
+        cause: String,
+    },
+
     /// The public write API (`api::write_parameter` / `api::ingest_segments`)
     /// was handed a batch it cannot interpret — wrong column count, a
     /// non-string entity column, an unsupported Arrow type for a dimension or

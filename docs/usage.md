@@ -1106,6 +1106,15 @@ the file's `schema_version`, `expected` this build's. It is never
 retried. Re-create the database with this build (init, then import), or
 use a nodal-db build that matches the file.
 
+Compaction first folds a leftover `<db>.wal` (left by a writer that
+crashed after committing) into the file. When DuckDB cannot replay or
+remove that WAL (another file's WAL, an old one of this file, an
+unreadable one, or the file cannot be opened read-write), compaction
+refuses with `UnreplayableWal` (`DbError::UnreplayableWal { wal, cause }`
+in Rust, `nodal_db.UnreplayableWal` with `wal` and `cause` attributes in
+Python). Nothing is changed and the WAL is not deleted. Inspect it, move
+it aside, then compact again.
+
 ### DuckDB version
 
 !!! warning "Readers need DuckDB 2.0 or newer"

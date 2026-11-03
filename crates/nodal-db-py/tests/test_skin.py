@@ -371,6 +371,7 @@ def test_exception_hierarchy(db):
         nodal_db.CanonError,
         nodal_db.ArrowError,
         nodal_db.InternalError,
+        nodal_db.UnreplayableWal,
     ):
         assert issubclass(exc, nodal_db.NodalDbError)
     assert issubclass(nodal_db.NodalDbError, Exception)
@@ -750,6 +751,18 @@ def test_compact(db):
     for flag in (True, False):
         with pytest.raises(TypeError, match="not a bool"):
             db.compact(if_needed=True, max_commits=flag)
+
+
+def test_compact_refuses_an_unreplayable_wal(db, tmp_path):
+    wal = tmp_path / "t.duckdb.wal"
+    wal.write_bytes(b"stale wal from a crashed writer")
+    with pytest.raises(nodal_db.UnreplayableWal, match="move it aside") as ei:
+        db.compact()
+    assert ei.value.wal == str(wal)
+    assert "survived a CHECKPOINT" in ei.value.cause
+    assert wal.read_bytes() == b"stale wal from a crashed writer"
+    wal.unlink()
+    assert db.compact()["swapped"]
 
 
 def test_compact_if_needed_fires_on_commit_count(db):

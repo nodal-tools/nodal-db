@@ -28,7 +28,8 @@ use nodal_db_core::types::{
 
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, CoveredWrite, DatabaseError, InternalError,
-    ReadSurfaceStale, SchemaError, SchemaMismatch, Stale, VersionTooOld, WriteAndDeleteSameKey,
+    ReadSurfaceStale, SchemaError, SchemaMismatch, Stale, UnreplayableWal, VersionTooOld,
+    WriteAndDeleteSameKey,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -60,6 +61,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         } => read_surface_stale_err(msg, found, expected),
         DbError::VersionTooOld { .. } => VersionTooOld::new_err(msg),
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
+        DbError::UnreplayableWal { wal, cause } => unreplayable_wal_err(msg, wal, cause),
         DbError::Duckdb(_) => DatabaseError::new_err(msg),
         DbError::Encode(_) | DbError::Canon(_) => CanonError::new_err(msg),
         DbError::Arrow(_) => ArrowError::new_err(msg),
@@ -141,6 +143,19 @@ fn schema_mismatch_err(msg: String, found: String, expected: String) -> PyErr {
         // Best-effort: the message carries both versions in any case.
         let _ = v.setattr("found", found);
         let _ = v.setattr("expected", expected);
+    });
+    err
+}
+
+/// An `UnreplayableWal` exception carrying `wal` (the WAL's path, as a str)
+/// and `cause` as attributes.
+fn unreplayable_wal_err(msg: String, wal: std::path::PathBuf, cause: String) -> PyErr {
+    let err = UnreplayableWal::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message carries both in any case.
+        let _ = v.setattr("wal", wal.display().to_string());
+        let _ = v.setattr("cause", cause);
     });
     err
 }

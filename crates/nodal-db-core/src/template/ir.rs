@@ -1037,11 +1037,22 @@ impl MigrationStep {
 /// rules, seed entities and memberships, migration steps), and seed entity
 /// names and elements. Data text stays as written: list members, defaults,
 /// audit-rule branch values, `map_values`, the member values of member
-/// steps, descriptions, versions and `run:` program names; so do the
-/// dimension names of type declarations. Parsing applies it, and so do
+/// steps, descriptions, versions and `run:` program names. The dimension
+/// names of type declarations are names ([`nfc_dim_names`]). Parsing applies it, and so do
 /// [`super::plan`], [`super::apply`] and [`normalized_model`] (hence
 /// [`template_content_hash`]), so a template written with NFD names loads
 /// and hashes as its NFC spelling.
+/// Apply `n` (an NFC normalizer) to every dimension name of `types`: they
+/// are names (stored in `parameter_type_dimension`, matched against a
+/// batch's NFC column names), so every declaration path (the template
+/// loader, the structural `CreateParameter`, `ensure_parameter_definition`)
+/// stores them in NFC.
+pub(crate) fn nfc_dim_names(types: &mut [TypeDecl], mut n: impl FnMut(&mut String)) {
+    for d in types.iter_mut().flat_map(|t| t.dims.iter_mut().flatten()) {
+        n(&mut d.name);
+    }
+}
+
 pub fn nfc_names(t: &Template) -> Template {
     fn n(s: &mut String) {
         if let std::borrow::Cow::Owned(x) = crate::text::nfc(s) {
@@ -1072,6 +1083,9 @@ pub fn nfc_names(t: &Template) -> Template {
         }
         for p in &mut c.parameters {
             n(&mut p.name);
+            if let Some(types) = &mut p.types {
+                nfc_dim_names(types, n);
+            }
             on(&mut p.value_list);
             on(&mut p.unit);
             on(&mut p.group);

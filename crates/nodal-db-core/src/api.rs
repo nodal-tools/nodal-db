@@ -649,11 +649,13 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
         StructuralChange::CreateParameter {
             class,
             name,
+            types,
             value_list,
             ..
         } => {
             n.nfc_in_place(class);
             n.nfc_in_place(name);
+            crate::template::ir::nfc_dim_names(types, |d| n.nfc_in_place(d));
             if let Some(list) = value_list {
                 n.nfc_in_place(list);
             }

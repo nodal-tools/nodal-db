@@ -99,14 +99,25 @@ fn folded(report: &WriteReport) -> Vec<Folded> {
                 count,
                 written,
                 stored,
-            } => Some((
-                what.clone(),
-                w.object_type.clone(),
-                w.name.clone(),
-                *count,
-                written.clone(),
-                stored.clone(),
-            )),
+                spellings,
+            } => Some({
+                // The list is the warning; count and the first pair repeat it.
+                assert_eq!(*count, spellings.len(), "{w:?}");
+                let first = &spellings[0];
+                assert_eq!(
+                    (&first.written, &first.stored, first.id),
+                    (written, stored, w.id),
+                    "{w:?}"
+                );
+                (
+                    what.clone(),
+                    w.object_type.clone(),
+                    w.name.clone(),
+                    *count,
+                    written.clone(),
+                    stored.clone(),
+                )
+            }),
             _ => None,
         })
         .collect()
@@ -372,4 +383,43 @@ fn a_conflict_retry_and_the_resolve_cache_do_not_change_the_counts() {
     let (_d3, uncached) = seeded();
     let r = without_resolve_cache(|| write(&uncached, segments()));
     assert_eq!(warnings(r), reference, "the cache is invisible");
+}
+
+/// The warning lists every (written spelling, resolved row) pair: one
+/// spelling that resolves to entities of two classes in one group is two
+/// references (two objects), and a repeated reference is listed once.
+#[test]
+fn spellings_list_each_object_a_spelling_resolved_to() {
+    let (_dir, db) = seeded();
+    write(&db, vec![seg("Unit", "Cap", "High", scalar(&["N1"], 1.0))]);
+    let activation = |class: &str| StructuralChange::SetEntityActivation {
+        class: class.into(),
+        entity: "n1".into(),
+        alternative: "High".into(),
+        active: Some(false),
+    };
+    let r = commit(
+        &db,
+        Vec::new(),
+        vec![activation("Node"), activation("Unit"), activation("Node")],
+        Vec::new(),
+        Vec::new(),
+    );
+    let w = r
+        .warnings
+        .iter()
+        .find(|w| w.object_type == "entity")
+        .expect("entity warning");
+    let WarningKind::NameFolded { spellings, .. } = &w.kind else {
+        panic!("{w:?}")
+    };
+    assert_eq!(spellings.len(), 2, "{spellings:?}");
+    assert!(spellings
+        .iter()
+        .all(|s| s.written == "n1" && s.stored == "N1"));
+    assert_ne!(spellings[0].id, spellings[1].id);
+    assert_eq!(
+        folded(&r),
+        vec![f("structural", "entity", "", 2, "n1", "N1")]
+    );
 }

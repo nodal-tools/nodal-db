@@ -444,6 +444,13 @@ pub fn ensure_parameter_definition(
     let (class, name) = (&*nfc(class), &*nfc(name));
     let value_list = value_list.map(nfc);
     let value_list = value_list.as_deref();
+    let mut types = types.to_vec();
+    crate::template::ir::nfc_dim_names(&mut types, |d| {
+        if let std::borrow::Cow::Owned(x) = nfc(d) {
+            *d = x;
+        }
+    });
+    let types = types.as_slice();
     require_user(user)?;
     require_name("class", class)?;
     if !charset_ok(name) {

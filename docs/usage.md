@@ -450,20 +450,24 @@ rule), when you must predict whether two names collide. In SQL,
 When a write refers to an existing object by a spelling that differs from
 the stored one only in case, the write goes to that object (names are
 case-insensitive), and the report says so with one `name_folded` warning
-per group of the call and kind of object: the number of such spellings
-and the first one, as written and as stored. `what` is the group
-(`segment`, `delete`, `object_delete` or `structural`), `object_type` the
-kind of object and `id` the object's id:
+per group of the call and kind of object. `spellings` lists each such
+reference once: the spelling as written, as stored, and the id of the
+object it resolved to (one spelling that resolved to two objects, such as
+entities of two classes, is listed twice). `count` is the length of the
+list, and `written`, `stored` and `id` repeat its first entry. `what` is
+the group (`segment`, `delete`, `object_delete` or `structural`) and
+`object_type` the kind of object:
 
 ```text
 {'kind': 'name_folded', 'what': 'segment', 'count': 1,
  'written': 'north', 'stored': 'North', 'object_type': 'entity',
- 'name': 'node:demand/Base', 'id': 7}
+ 'name': 'node:demand/Base', 'id': 7,
+ 'spellings': [{'written': 'north', 'stored': 'North', 'id': 7}]}
 ```
 
-`nodal-db import` and the Spine importer summarize these warnings once
-per kind of object and written spelling, so a case variant referenced
-from several segments counts once.
+`nodal-db import` and the Spine importer summarize these warnings by kind
+of object, counting each (object, written spelling) once, so a case
+variant referenced from several segments counts once.
 
 It is not an error and not a write by itself. A client that writes back
 the spellings it read never sees one; if it does, it is about to change

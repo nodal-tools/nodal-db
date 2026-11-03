@@ -29,7 +29,7 @@ use std::collections::HashSet;
 
 use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
 
-use crate::types::{Warning, WarningKind};
+use crate::types::{FoldedSpelling, Warning, WarningKind};
 
 /// The Unicode version of the normalization tables (spec §3.4.1.1 pins
 /// 16.0.0; `tests/text_nfc.rs` fails when the crate pin moves it).
@@ -141,8 +141,8 @@ impl Normalized {
 /// the object deletes, the structural changes) that resolved to an
 /// existing object whose stored spelling is not byte-equal to the
 /// written (NFC) one, for the [`WarningKind::NameFolded`] warnings: one
-/// warning per referent table, `count` distinct written spellings, the
-/// first pair and its resolved id. A lookup found the row, so the two
+/// warning per referent table, listing every distinct (written spelling,
+/// resolved row) pair in input order. A lookup found the row, so the two
 /// spellings are equal under the name fold by construction; no fold is
 /// computed here. Lives in one transaction attempt, so a conflict retry
 /// does not count twice.
@@ -152,10 +152,10 @@ pub(crate) struct NameFolds {
     kinds: Vec<(&'static str, FoldedSpellings)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct FoldedSpellings {
-    written: HashSet<String>,
-    first: (String, String, i64),
+    seen: HashSet<(String, i64)>,
+    list: Vec<FoldedSpelling>,
 }
 
 impl NameFolds {
@@ -166,17 +166,20 @@ impl NameFolds {
         if written == stored {
             return;
         }
-        match self.kinds.iter_mut().find(|(k, _)| *k == referent) {
-            Some((_, f)) => {
-                f.written.insert(written.to_string());
+        let i = match self.kinds.iter().position(|(k, _)| *k == referent) {
+            Some(i) => i,
+            None => {
+                self.kinds.push((referent, FoldedSpellings::default()));
+                self.kinds.len() - 1
             }
-            None => self.kinds.push((
-                referent,
-                FoldedSpellings {
-                    written: HashSet::from([written.to_string()]),
-                    first: (written.to_string(), stored.to_string(), id),
-                },
-            )),
+        };
+        let f = &mut self.kinds[i].1;
+        if f.seen.insert((written.to_string(), id)) {
+            f.list.push(FoldedSpelling {
+                written: written.to_string(),
+                stored: stored.to_string(),
+                id,
+            });
         }
     }
 
@@ -187,16 +190,20 @@ impl NameFolds {
     pub(crate) fn warnings(&self, what: &str, name: &str) -> Vec<Warning> {
         self.kinds
             .iter()
-            .map(|(referent, f)| Warning {
-                kind: WarningKind::NameFolded {
-                    what: what.to_string(),
-                    count: f.written.len(),
-                    written: f.first.0.clone(),
-                    stored: f.first.1.clone(),
-                },
-                object_type: (*referent).to_string(),
-                name: name.to_string(),
-                id: f.first.2,
+            .map(|(referent, f)| {
+                let first = &f.list[0];
+                Warning {
+                    kind: WarningKind::NameFolded {
+                        what: what.to_string(),
+                        count: f.list.len(),
+                        written: first.written.clone(),
+                        stored: first.stored.clone(),
+                        spellings: f.list.clone(),
+                    },
+                    object_type: (*referent).to_string(),
+                    name: name.to_string(),
+                    id: first.id,
+                }
             })
             .collect()
     }

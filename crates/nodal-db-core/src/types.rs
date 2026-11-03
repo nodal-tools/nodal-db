@@ -194,14 +194,25 @@ static ENGINE_FOLD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::n
 /// core's checks, so every write is refused with [`DbError::Internal`]
 /// naming the first difference. This is the one check that runs in a
 /// consumer's build (an editor never runs this repo's guard tests). A
-/// failed query is returned as is and retried by the next write.
-pub(crate) fn check_engine_fold(conn: &duckdb::Connection) -> Result<(), crate::error::DbError> {
+/// failed query is not cached (the next write retries it) and says it
+/// came from this check. Public only for the guard test, which runs it on
+/// a connection whose `lower()` it has shadowed.
+#[doc(hidden)]
+pub fn check_engine_fold(conn: &duckdb::Connection) -> Result<(), crate::error::DbError> {
     if let Some(outcome) = ENGINE_FOLD.get() {
         return outcome
             .as_ref()
             .map_or(Ok(()), |m| Err(crate::error::DbError::Internal(m.clone())));
     }
-    let outcome = engine_fold_mismatch(conn, &crate::fold_table::LOWER)?;
+    // A query failure is not cached (the next write retries), but it says
+    // where it came from: a write failing here never reached its own SQL.
+    let outcome = engine_fold_mismatch(conn, &crate::fold_table::LOWER).map_err(|e| {
+        crate::error::DbError::Internal(format!(
+            "the engine fold check (docs/dev/engine_rules.md §8: the linked DuckDB's \
+             lower() against the core's name fold, once per process before the first \
+             write) could not run its query: {e}"
+        ))
+    })?;
     let outcome = ENGINE_FOLD.get_or_init(|| outcome);
     outcome
         .as_ref()
@@ -497,8 +508,10 @@ pub enum WarningKind {
     /// (they return ids, not reports) or reads. One warning per group and
     /// referent table, never one per string: `what` is the group
     /// (`"segment"`, `"delete"`, `"object_delete"` or `"structural"`),
-    /// `count` the number of distinct written spellings that resolved this
-    /// way, `written`/`stored` the first such pair in input order.
+    /// `spellings` every distinct (written spelling, resolved row) pair that
+    /// resolved this way, in input order (one spelling resolving to two rows,
+    /// e.g. entities of two classes, is two entries), `count` its length,
+    /// and `written`/`stored` the first entry's pair.
     /// `object_type` is the referent table (`"entity_class"`,
     /// `"parameter_definition"`, `"alternative"`, `"entity"`,
     /// `"scenario"`, `"parameter_value_list"`), `name` the segment
@@ -510,7 +523,21 @@ pub enum WarningKind {
         count: usize,
         written: String,
         stored: String,
+        spellings: Vec<FoldedSpelling>,
     },
+}
+
+/// One reference of a [`WarningKind::NameFolded`] warning: the spelling
+/// written (NFC), the stored spelling it resolved to, and that row's id in
+/// the warning's referent table (`object_type`). The id says which object
+/// (two entities of different classes can share a spelling); a summary
+/// over several warnings counts a name once per (`object_type`, `id`,
+/// `written`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FoldedSpelling {
+    pub written: String,
+    pub stored: String,
+    pub id: i64,
 }
 
 /// The delete that covers a dropped write ([`WarningKind::DroppedByDelete`]).

@@ -706,6 +706,101 @@ fn an_nfd_dimension_column_matches_a_template_declared_type() {
     assert_eq!(text_warnings(&report).len(), 1, "{report:?}");
 }
 
+/// `heat`'s one declared member: indexed by a label dimension named `dim`.
+fn heat_types(dim: &str) -> Vec<template::ir::TypeDecl> {
+    vec![template::ir::TypeDecl {
+        kind: "indexed".into(),
+        dims: Some(vec![template::ir::DimSpec {
+            name: dim.into(),
+            kind: "label".into(),
+        }]),
+    }]
+}
+
+/// A dimension name DECLARED in NFD (a template, built in code so the
+/// parser's NFC pass is bypassed; a structural `CreateParameter`;
+/// `ensure_parameter_definition`) is stored in NFC, and a batch column of
+/// either spelling instantiates it.
+#[test]
+fn an_nfd_declared_dimension_name_is_stored_in_nfc_and_matches_both_spellings() {
+    type Declare = fn(&std::path::Path);
+    let by_template: Declare = |db| {
+        let doc = "template: {name: t, version: '1'}\n\
+                   classes:\n  - name: node\n    parameters:\n      - name: heat\n        \
+                   types: [{kind: indexed, dims: [{name: x, kind: label}]}]\n";
+        let mut t = template::parse_str(doc).expect("parse");
+        t.classes[0].parameters[0].types = Some(heat_types(WARME_NFD));
+        template::apply(
+            db,
+            &t,
+            &template::MigrationRegistry::new(),
+            "tester",
+            "",
+            &template::ApplyOptions::default(),
+        )
+        .expect("apply");
+    };
+    let by_structural: Declare = |db| {
+        let report = commit_structural(
+            db,
+            vec![
+                StructuralChange::CreateEntityClass {
+                    name: "node".into(),
+                    dims: vec![],
+                },
+                StructuralChange::CreateParameter {
+                    class: "node".into(),
+                    name: "heat".into(),
+                    types: heat_types(WARME_NFD),
+                    value_list: None,
+                    description: None,
+                },
+            ],
+            "tester",
+            "",
+            WriteOptions::default(),
+        )
+        .expect("structural");
+        let w = text_warnings(&report);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            matches!(&w[0].kind, WarningKind::TextNormalized { written, stored, .. }
+                if written == WARME_NFD && stored == WARME_NFC),
+            "{w:?}"
+        );
+    };
+    let by_verb: Declare = |db| {
+        verbs::ensure_entity_class(db, "node", &[], "tester").expect("class");
+        verbs::ensure_parameter_definition(
+            db,
+            "node",
+            "heat",
+            &heat_types(WARME_NFD),
+            None,
+            None,
+            "tester",
+        )
+        .expect("definition");
+    };
+    for (path, declare) in [
+        ("template", by_template),
+        ("structural", by_structural),
+        ("verb", by_verb),
+    ] {
+        let (_dir, db) = fresh_db();
+        declare(&db);
+        assert_eq!(
+            query_strings(&db, "SELECT dimension_name FROM parameter_type_dimension"),
+            vec![WARME_NFC.to_string()],
+            "{path}"
+        );
+        for (dim, entity) in [(WARME_NFD, "n1"), (WARME_NFC, "n2")] {
+            ingest(&db, vec![dim_seg(dim, entity)])
+                .unwrap_or_else(|e| panic!("{path}: write by {dim:?}: {e}"));
+        }
+    }
+}
+
 #[test]
 fn template_names_load_and_hash_in_nfc() {
     let doc = |class: &str| {
@@ -727,5 +822,13 @@ fn template_names_load_and_hash_in_nfc() {
     assert_eq!(
         template::template_content_hash(&built),
         template::template_content_hash(&nfc)
+    );
+    // So does one whose type declaration names a dimension in NFD.
+    let (mut nfd_dim, mut nfc_dim) = (nfc.clone(), nfc.clone());
+    nfd_dim.classes[0].parameters[0].types = Some(heat_types(WARME_NFD));
+    nfc_dim.classes[0].parameters[0].types = Some(heat_types(WARME_NFC));
+    assert_eq!(
+        template::template_content_hash(&nfd_dim),
+        template::template_content_hash(&nfc_dim)
     );
 }

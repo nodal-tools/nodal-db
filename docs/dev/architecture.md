@@ -482,7 +482,15 @@ foreign-key order (clustered with current rows first, see below), restore sequen
 state, run a full-content self-check, fsync, and atomically rename over
 the original. It is non-destructive (all history, commits and axes
 survive at the query level) and crash-safe by construction: the original
-is only read until the final rename. Compaction holds the per-path lock
+is only read until the final rename. The one exception comes first: a
+`<db>.wal` left by a writer that crashed after committing is folded into
+the original before anything is copied (a read-write open, `CHECKPOINT`,
+close: DuckDB's own crash-safe recovery), never deleted. A WAL that
+survives the checkpoint (DuckDB could not replay it) refuses the
+compaction and touches nothing, and a WAL that appears while compacting
+(another process wrote) aborts it before the swap. So the swap never
+removes a WAL, and no crash can leave the original without its WAL's
+commits. Compaction holds the per-path lock
 for the whole operation and runs outside any write transaction, so a
 failed compaction can never roll back a commit.
 `erasure::erase_alternative_and_compact` chains an erase with a compaction.

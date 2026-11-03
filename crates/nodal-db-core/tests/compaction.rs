@@ -568,131 +568,27 @@ fn clustered_current_scan_is_measurably_faster() {
     );
 }
 
-// --- (h2) valid-WAL replay pin (LOAD-BEARING engine behavior) ----------------
+// --- (h) leftover-WAL fold (R2 crash window, option (b)) --------------------
+//
+// A `<db>.wal` left by a writer that crashed after committing is folded into
+// the ORIGINAL at compaction start (read-write open + CHECKPOINT through the
+// core's open path), never deleted; the swap then has no WAL to deal with.
 
-/// PIN of the engine behavior the pre-rename WAL unlink rests on: DuckDB
-/// (1.5.5; re-verified on 2.0.0) REPLAYS a valid `<db>.wal` on read-only
-/// open/ATTACH, so a
-/// crashed-writer's committed-but-uncheckpointed content is carried into the
-/// compaction copy BEFORE the stale sidecar is removed — nothing durable is
-/// ever discarded. Like the guard's consumer-shape sweep, this is a permanent
-/// engine-upgrade tripwire (the claim is behavioral, not documented contract):
-/// if a future engine stops replaying WALs on RO open, this test fails and
-/// the unlink strategy must be redesigned — never weaken it to keep CI green.
-///
-/// The crashed writer is simulated exactly: a connection with
-/// checkpoint-on-shutdown disabled commits a row (durable in the WAL only)
-/// and closes — the same on-disk state a SIGKILLed post-commit writer leaves.
-#[test]
-fn compact_carries_stale_wal_content_and_unlinks_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = build_bloated(dir.path(), 5);
-    let wal = {
-        let mut w = db.as_os_str().to_os_string();
-        w.push(".wal");
-        std::path::PathBuf::from(w)
-    };
-
-    // Leave a VALID wal holding one committed row the main file lacks.
-    let conn = Connection::open(&db).unwrap();
-    conn.execute_batch(
-        "PRAGMA disable_checkpoint_on_shutdown; \
-         INSERT INTO \"commit\" (user, message) \
-           VALUES ('walpin', 'committed only to the wal');",
-    )
-    .unwrap();
-    conn.close().unwrap();
-    assert!(wal.exists(), "fixture: a valid WAL must remain after close");
-
-    let report = compact(&db).expect("compact with a valid stale wal");
-    assert!(report.swapped);
-    assert!(!wal.exists(), "the stale wal must be gone after the swap");
-    assert_eq!(
-        scalar(
-            &db,
-            "SELECT count(*) FROM \"commit\" WHERE message = 'committed only to the wal'"
-        ),
-        1,
-        "the WAL-only commit must survive INTO the compacted file (RO replay)"
-    );
+fn wal_of(db: &Path) -> std::path::PathBuf {
+    let mut w = db.as_os_str().to_os_string();
+    w.push(".wal");
+    std::path::PathBuf::from(w)
 }
 
-// --- (h) stale-WAL sidecar hygiene (erasure plan §7 item 7 / critique m7b) --
-
-/// A `<db>.wal` left by a previously-crashed writer must not survive a
-/// compaction swap: its content is already in the copied file (the RO
-/// open/ATTACH replays it), and replaying it against the freshly-swapped file
-/// on the next RW open is the hazard. DuckDB silently tolerates an
-/// unparseable WAL (verified on 1.5.5; re-verified on 2.0.0), so the unlink is hygiene + hazard removal, not
-/// crash-recovery interference.
-#[test]
-fn compact_unlinks_stale_wal_sidecar_after_swap() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = build_bloated(dir.path(), 5);
-    let wal = {
-        let mut w = db.as_os_str().to_os_string();
-        w.push(".wal");
-        std::path::PathBuf::from(w)
-    };
-    // Simulate the crashed-writer leftover (header-invalid: DuckDB ignores it
-    // on open, so the compaction's source probe still succeeds — verified
-    // engine semantics on 1.5.5; re-verified on 2.0.0).
-    std::fs::write(&wal, b"stale wal from a crashed writer").unwrap();
-
-    let report = compact(&db).expect("compact with stale wal present");
-    assert!(report.swapped);
-    assert!(
-        !wal.exists(),
-        "stale <db>.wal must be unlinked after the swap"
-    );
-
-    // Next RW open + write works on the swapped file.
-    write_scalar(&db, "Widget", "size", "Base", "w_after_wal", 7.0);
-    let n = scalar(
-        &db,
-        "SELECT count(*) FROM entity WHERE cur_name = 'w_after_wal'",
-    );
-    assert_eq!(n, 1);
-}
-
-/// Editor request R2 (`nodal-editor/specs/core_requests_2026-10-27.md`): the
-/// stale-WAL unlink must not run before the temp is durable. The two tests
-/// above already pin that a stale WAL present at compaction time is handled
-/// (removed, content carried, file usable afterwards); this test pins the
-/// same outcome again on a LARGER, non-trivial WAL (closer to what a real
-/// crashed writer leaves than a one-line invalid header). It does NOT pin
-/// the ordering: the ordering has no externally observable effect on the
-/// success path, only on a crash mid-compaction, so this test would also
-/// pass with the unlink moved back before the fsyncs.
-///
-/// A true crash-window test (kill the process between the unlink and the
-/// rename, then assert the pre-compaction original still has its WAL) is
-/// not added: `compact_locked` has no fault-injection seam (no hook to
-/// interrupt it between two specific syscalls), and the codebase's testing
-/// rules call for deterministic tests, not a timing race against a real
-/// `SIGKILL`. The ordering fix is reasoned instead, in the comment at the
-/// unlink site in `compaction.rs`: moving the unlink to immediately before
-/// the rename (after both fsyncs) cannot reopen the "unlink after rename"
-/// race the existing comment there rules out (it is still strictly before
-/// the rename), and it shrinks the lost-update window from "the two fsyncs'
-/// duration" to "the gap between one unlink syscall and the next rename
-/// syscall".
-#[test]
-fn compact_removes_stale_wal_only_once_the_rebuild_is_durable() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = build_bloated(dir.path(), 8);
-    let wal = {
-        let mut w = db.as_os_str().to_os_string();
-        w.push(".wal");
-        std::path::PathBuf::from(w)
-    };
-
-    // A bigger stale WAL than a one-line header: several committed rows,
-    // left by a writer that crashed before checkpointing.
-    let conn = Connection::open(&db).unwrap();
+/// Leave a VALID WAL holding `n` committed `commit` rows the main file lacks:
+/// a connection with checkpoint-on-shutdown disabled commits them (durable
+/// in the WAL only) and closes, the same on-disk state a SIGKILLed
+/// post-commit writer leaves.
+fn leave_wal_commits(db: &Path, n: usize) {
+    let conn = Connection::open(db).unwrap();
     conn.execute_batch("PRAGMA disable_checkpoint_on_shutdown;")
         .unwrap();
-    for i in 0..20 {
+    for i in 0..n {
         conn.execute(
             "INSERT INTO \"commit\" (user, message) VALUES ('walpin', ?)",
             [format!("wal-only commit {i}")],
@@ -700,14 +596,51 @@ fn compact_removes_stale_wal_only_once_the_rebuild_is_durable() {
         .unwrap();
     }
     conn.close().unwrap();
-    assert!(wal.exists(), "fixture: the WAL must remain after close");
+    assert!(
+        wal_of(db).exists(),
+        "fixture: a valid WAL must remain after close"
+    );
+}
+
+fn temps_left(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.contains(".compact."))
+        .collect()
+}
+
+/// The WAL-only commits end up IN the compacted file and no WAL remains.
+#[test]
+fn compact_folds_a_stale_wal_and_carries_its_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 5);
+    leave_wal_commits(&db, 1);
+
+    let report = compact(&db).expect("compact with a valid stale wal");
+    assert!(report.swapped);
+    assert!(!wal_of(&db).exists(), "no wal may remain after compaction");
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT count(*) FROM \"commit\" WHERE message = 'wal-only commit 0'"
+        ),
+        1,
+        "the WAL-only commit must survive INTO the compacted file"
+    );
+}
+
+/// The same on a larger WAL (several commits), and the compacted file is
+/// immediately usable by the next writer.
+#[test]
+fn compact_folds_a_sizeable_stale_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 8);
+    leave_wal_commits(&db, 20);
 
     let report = compact(&db).expect("compact with a sizeable stale wal");
     assert!(report.swapped);
-    assert!(
-        !wal.exists(),
-        "the stale wal must be unlinked only as part of a completed swap"
-    );
+    assert!(!wal_of(&db).exists(), "no wal may remain after compaction");
     assert_eq!(
         scalar(
             &db,
@@ -716,9 +649,6 @@ fn compact_removes_stale_wal_only_once_the_rebuild_is_durable() {
         20,
         "every WAL-only commit must survive into the compacted, swapped-in file"
     );
-
-    // The file is immediately usable: a crash-safe swap leaves no residue
-    // that blocks the next writer.
     write_scalar(&db, "Widget", "size", "Base", "w_after_big_wal", 3.0);
     assert_eq!(
         scalar(
@@ -726,6 +656,90 @@ fn compact_removes_stale_wal_only_once_the_rebuild_is_durable() {
             "SELECT count(*) FROM entity WHERE cur_name = 'w_after_big_wal'"
         ),
         1
+    );
+}
+
+/// A WAL DuckDB cannot replay (here an unreadable header) survives the
+/// fold's CHECKPOINT (DuckDB 2.0.0: the RW open succeeds, the checkpoint is
+/// a no-op, the WAL stays). Compaction refuses loudly and touches nothing:
+/// the WAL and the original are byte-identical, no temp is left.
+#[test]
+fn compact_refuses_an_unreplayable_wal_and_touches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 5);
+    let junk = b"stale wal from a crashed writer";
+    std::fs::write(wal_of(&db), junk).unwrap();
+    let before = std::fs::read(&db).unwrap();
+
+    let err = compact(&db).expect_err("an unreplayable wal must refuse compaction");
+    assert!(
+        matches!(&err, DbError::Api(m) if m.contains("survived a CHECKPOINT")),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        std::fs::read(wal_of(&db)).unwrap(),
+        junk,
+        "the wal was touched"
+    );
+    assert!(
+        std::fs::read(&db).unwrap() == before,
+        "the original was changed"
+    );
+    assert!(temps_left(dir.path()).is_empty(), "a temp was left behind");
+
+    // Once a person moves the WAL aside, compaction proceeds.
+    std::fs::remove_file(wal_of(&db)).unwrap();
+    assert!(compact(&db).expect("compact after the wal is gone").swapped);
+}
+
+/// Without a WAL, compaction never opens the original read-write: with the
+/// original made read-only on disk it still compacts (a read-write open
+/// would fail). The control half shows the test can tell: with a WAL
+/// present, the same read-only original makes the fold's read-write open
+/// fail, and nothing is lost (the WAL and its content survive, and the next
+/// compaction folds them once the file is writable again).
+#[cfg(unix)]
+#[test]
+fn compact_without_a_wal_never_opens_the_original_read_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let set_mode = |p: &Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 5);
+    // Fingerprint first: the helper opens read-write.
+    let before = fingerprint(&db, "SELECT * FROM \"commit\"");
+    set_mode(&db, 0o444);
+    if std::fs::OpenOptions::new().write(true).open(&db).is_ok() {
+        eprintln!("skipped: permissions are not enforced (running as root?)");
+        return;
+    }
+    let report = compact(&db).expect("the no-WAL path needs only read access");
+    assert!(report.swapped);
+    assert!(!wal_of(&db).exists());
+    assert_eq!(fingerprint(&db, "SELECT * FROM \"commit\""), before);
+
+    // Control: a WAL present on a read-only original.
+    set_mode(&db, 0o644);
+    leave_wal_commits(&db, 3);
+    set_mode(&db, 0o444);
+    assert!(
+        compact(&db).is_err(),
+        "with a WAL the fold must open the original read-write (and fail here)"
+    );
+    assert!(wal_of(&db).exists(), "the WAL must be left in place");
+    assert!(temps_left(dir.path()).is_empty(), "a temp was left behind");
+
+    set_mode(&db, 0o644);
+    assert!(compact(&db).expect("compact once writable").swapped);
+    assert!(!wal_of(&db).exists());
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT count(*) FROM \"commit\" WHERE message LIKE 'wal-only commit%'"
+        ),
+        3
     );
 }
 

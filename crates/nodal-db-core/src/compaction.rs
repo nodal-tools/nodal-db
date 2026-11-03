@@ -43,22 +43,35 @@
 //! [`CompactionReport::kept_original`]). A swap of a rebuild that is not
 //! smaller is reported in [`CompactionReport::warning`].
 //!
-//! The kept-original path is the self-check-abort path: the original is never
-//! written, so crash safety and invariant 3 are unchanged.
+//! The kept-original path is the self-check-abort path: the repack never
+//! writes the original (only a leftover WAL is folded into it first, see
+//! "Crash safety"), so crash safety and invariant 3 are unchanged.
 //!
 //! ## Crash safety (§3)
-//! The original is only ever *read* (attached RO) until the final `rename`.
+//! The original is only ever *read* (attached RO) until the final `rename`,
+//! with one sanctioned exception at the very start: a leftover `<db>.wal`
+//! (a writer crashed after committing, before its checkpoint).
 //! A crash before the rename leaves the intact original + an orphan
 //! `*.compact.*.tmp` (swept on the next [`compact`]); a crash during/after the
 //! rename leaves the complete new file (the temp is fsync'd, and the directory
-//! entry, before the rename flips it). One residual exception: when a crashed
-//! writer left a stale `<db>.wal`, it is unlinked immediately before the
-//! rename (see the stale-WAL comment in `compact_locked`), so a kill in the
-//! gap between that unlink and the rename (or a power loss before the final
-//! directory fsync makes the rename durable) leaves the original WITHOUT that
-//! WAL's commits; they survive only in the orphan temp, which the next
-//! compaction sweeps. POSIX `rename` over an existing path is
+//! entry, before the rename flips it). POSIX `rename` over an existing path is
 //! atomic — a reader sees the old inode or the new one, never a splice.
+//!
+//! **A leftover WAL is folded first, never deleted (R2 crash window, option
+//! (b), owner decision 2026-11-03).** Before anything is measured or copied,
+//! `fold_stale_wal` opens the original read-write (the core's open path),
+//! runs `CHECKPOINT` and closes: DuckDB replays the WAL and folds it into
+//! the file by its own crash-safe recovery protocol, and removes it. A WAL
+//! that survives (one DuckDB could not replay: foreign or corrupt) refuses
+//! the compaction, touching nothing. So compaction writes the original only
+//! in that case, once, and never with anything but DuckDB's own checkpoint.
+//! The swap therefore never has a stale WAL to remove, and the old
+//! unlink-before-rename is gone, which closes the window it left (a kill
+//! between that unlink and the rename left the still-live original without
+//! the WAL's commits). A `<db>.wal` that is present at swap time anyway was
+//! created after the fold by another process writing to the original; the
+//! compaction then aborts (temp removed, original and WAL untouched) rather
+//! than orphan it.
 //!
 //! **Windows single-writer assumption (§3):** `rename`-over-an-open-file fails
 //! on Windows while any handle to the target is open. Both connections (the temp
@@ -71,7 +84,11 @@
 //! ## Lock discipline (invariants #1/#2, §4)
 //! Compaction is an exclusive whole-DB rewrite: it holds [`conn::path_lock`] for
 //! the entire op (init, copy, self-check, swap) and holds the source's file lock
-//! via the RO `ATTACH` so no concurrent commit races the swap. A busy source
+//! via the RO `ATTACH` so no concurrent commit races the copy. When a WAL is
+//! folded, the fold's read-write open briefly takes the source's exclusive
+//! file lock (one per-operation connection, closed before the RO probe), so
+//! in that case a reader holding the file open in another process makes the
+//! compaction wait and then fail as busy, like a commit would. A busy source
 //! surfaces as [`DbError::Busy`]. It runs as a distinct locked phase (never
 //! inside a write transaction) so a compaction failure can never roll back a
 //! durable commit. It moves already-canonicalized bytes verbatim — it computes
@@ -480,9 +497,14 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // are always incomplete-and-orphaned; the live DB is authoritative.
     sweep_orphan_temps(db_path);
 
+    // Fold a leftover `<db>.wal` into the original BEFORE anything is
+    // measured or copied (R2 crash window, option (b); module docs, "Crash
+    // safety"): from here on the swap never has a stale WAL to remove.
+    fold_stale_wal(db_path)?;
+
     let bytes_before = fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     // The size guard's measure of the source: the file plus its WAL, the
-    // same measure as the rebuild's (a stale WAL's content is in the copy).
+    // same measure as the rebuild's (after the fold above, no WAL is left).
     let source_bytes = on_disk_bytes(db_path);
 
     // ---- Cheap source probe: schema_version gate (R2) + block metrics -------
@@ -587,7 +609,7 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     };
     if keeps_original(trigger, bytes_rebuilt, source_bytes) {
         // Automatic trigger, no gain: keep the original (the self-check-abort
-        // path: the original is never written). Reset the baseline anyway, so
+        // path: the repack never writes the original). Reset the baseline anyway, so
         // the commit backstop waits another N commits instead of retrying on
         // every save; the size is the original's, which is what stays.
         remove_temp(&temp_path);
@@ -608,49 +630,37 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         });
     }
 
-    // Stale-WAL hygiene (erasure_compaction_plan §7 item 7 / critique m7b),
-    // BEFORE the rename so the removal can only ever hit a WAL of the OLD
-    // inode era: a `<db>.wal` present here was left by a writer that crashed
-    // before this compaction (normal closes checkpoint and remove it; we hold
-    // the per-path lock, and the source's file lock was held through the
-    // copy). Its committed content is already IN the temp: the RO source
-    // probe/ATTACH replays valid WALs (pinned by
-    // `compact_carries_stale_wal_content_and_unlinks_it`), and a corrupt WAL
-    // fails that open loudly, aborting long before this point. Left in place,
-    // it would be replayed against the freshly-swapped file on the next RW
-    // open — the hazard. Unlinking after the rename instead would race a
-    // second process's NEW live WAL on the swapped-in file; before the
-    // rename, no writer can have the new inode yet.
-    //
-    // The unlink itself runs AFTER the fsyncs, immediately before the rename
-    // (editor request R2, `nodal-editor/specs/core_requests_2026-10-27.md`):
-    // doing it first (the original ordering) opened a crash window where a
-    // kill between the unlink and the rename leaves the OLD file (still the
-    // live one — the rename has not happened yet) without its WAL, losing
-    // whatever commits existed only in that WAL. Moving the unlink to just
-    // before the rename does not reopen the race the comment above rules
-    // out (it is still strictly before the rename, so it can only ever see
-    // the old inode's WAL) and it shrinks the lost-update window to the gap
-    // between the unlink and the very next syscall, rather than spanning two
-    // fsyncs. Renaming the stale WAL aside instead of deleting it would close
-    // that last sliver too, but it is not worth the extra failure mode (a
-    // leftover sidecar to clean up on every future compaction) for a window
-    // this narrow — the content is already durably in the fsynced temp, so
-    // the only thing a kill in this window can do is leave the pre-compaction
-    // original without its WAL, which is exactly the hazard being minimized,
-    // not a new one.
-    let stale_wal = {
-        let mut w = db_path.as_os_str().to_os_string();
-        w.push(".wal");
-        PathBuf::from(w)
-    };
-
     // Durability + atomic swap (§3): fsync the temp bytes and its directory
     // entry, rename over the original, fsync the directory again.
     fsync_file(&temp_path)?;
     let dir = parent_dir(db_path);
     fsync_dir(dir);
-    let _ = fs::remove_file(&stale_wal);
+
+    // No WAL is ever unlinked here (R2 crash window, option (b)). The stale
+    // WAL a crashed writer leaves was folded into the original at the start
+    // ([`fold_stale_wal`]), so on the normal path there is none. The old
+    // unlink-before-rename (it deleted such a WAL after the fsyncs) left a
+    // one-syscall window where a kill between the unlink and the rename
+    // left the still-live original without that WAL's commits; it is gone,
+    // and with it the window.
+    //
+    // A `<db>.wal` present NOW appeared after the fold: another process
+    // opened the original read-write in a gap where compaction held no file
+    // lock (between the fold and the source ATTACH, or after the DETACH).
+    // Its commits may not be in the temp, and it belongs to the OLD inode, so
+    // swapping would orphan it (or let DuckDB replay it against the new
+    // file). Abort instead: the original and its WAL stay exactly as they
+    // are, and the next compaction folds the WAL first. Deleting it here as
+    // defense-in-depth would reintroduce the very window option (b) closes.
+    if wal_path(db_path).exists() {
+        remove_temp(&temp_path);
+        return Err(DbError::Api(format!(
+            "compaction aborted: {} appeared while compacting (another process wrote \
+             to the database); the original and its WAL are left intact, retry the \
+             compaction",
+            wal_path(db_path).display()
+        )));
+    }
     fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
         path: temp_path.display().to_string(),
         source,
@@ -712,10 +722,56 @@ pub fn keeps_original(trigger: CompactionTrigger, rebuilt: u64, source: u64) -> 
 
 /// A database file's on-disk bytes: the main file plus its WAL, if any.
 fn on_disk_bytes(path: &Path) -> u64 {
-    let mut wal = path.as_os_str().to_os_string();
-    wal.push(".wal");
     let len = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    len(path) + len(Path::new(&wal))
+    len(path) + len(&wal_path(path))
+}
+
+/// `<db>.wal`, DuckDB's write-ahead log next to `db_path`.
+fn wal_path(db_path: &Path) -> PathBuf {
+    let mut w = db_path.as_os_str().to_os_string();
+    w.push(".wal");
+    PathBuf::from(w)
+}
+
+/// R2 crash window, option (b) (owner decision 2026-11-03; module docs,
+/// "Crash safety"): when `<db>.wal` exists, open the original read-write
+/// through the core's open path ([`open_with_retry`], so [`crate::conn::core_config`]
+/// applies), `CHECKPOINT`, close, and require the WAL to be gone. DuckDB
+/// replays the WAL on the open and folds it into the file on the checkpoint,
+/// crash-safely (its own recovery protocol: the WAL is dropped only once the
+/// checkpoint is durable).
+///
+/// Without a WAL this is one `stat`: the original is never opened
+/// read-write, so the usual run stays read-only on the source. With one,
+/// compaction writes the original once (the accepted trade-off). A busy file
+/// surfaces as [`DbError::Busy`]; the caller holds the per-path lock, which
+/// is why the open bypasses `conn::with_rw_conn` (it would re-take it).
+///
+/// A WAL that survives the checkpoint is an error, never deleted: DuckDB
+/// keeps a WAL it could not replay (an unreadable header, e.g. a foreign or
+/// corrupt file: verified on 2.0.0 — the open succeeds, the checkpoint is a
+/// no-op, the WAL stays), and only a person can tell whether its content
+/// matters. The original and the WAL are left as they are.
+fn fold_stale_wal(db_path: &Path) -> Result<(), DbError> {
+    let wal = wal_path(db_path);
+    if !wal.exists() {
+        return Ok(());
+    }
+    let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
+    let checkpointed = conn.execute_batch("CHECKPOINT");
+    let closed = conn.close().map_err(|(_, e)| DbError::Duckdb(e));
+    checkpointed?;
+    closed?;
+    if wal.exists() {
+        return Err(DbError::Api(format!(
+            "compaction refused: {} survived a CHECKPOINT of {} (DuckDB could not replay \
+             it, so it may be foreign or corrupt); the database and the WAL are left as \
+             they are. Inspect the WAL, then move it aside or delete it to compact",
+            wal.display(),
+            db_path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// What [`repack_into`] produced: the per-table copied counts, the

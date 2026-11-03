@@ -184,8 +184,10 @@ create_exception!(
      lower(x) AS ...` run with direct SQL: DuckDB would use it instead of the \
      built-in for every query on the file, nodal-db's name folding included. \
      Raised by every open of the file; nothing was read or written. \
-     Attributes: `name`, `schema` (catalog.main) and `kind` (\"macro\" or \
-     \"table macro\"). Drop the macro with direct SQL, then retry."
+     Attributes: `name`, `schema` (\"main\") and `kind` (\"macro\" or \
+     \"table macro\"). Drop the macro with direct SQL (the message gives the \
+     statement), then compact the file: anything written while the macro \
+     existed may have left duplicate names, which compaction refuses loudly."
 );
 create_exception!(
     nodal_db,

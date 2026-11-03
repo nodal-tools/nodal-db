@@ -150,7 +150,9 @@ aside, then compact.
 named like a DuckDB built-in function in its `main` schema (for example
 `CREATE MACRO lower(x) AS ...` run with direct SQL), which DuckDB would use
 instead of the built-in; it carries `name`, `schema` and `kind`. Drop the
-macro with direct SQL, then retry.
+macro with direct SQL (the message gives the statement), then compact the
+file: anything written while the macro existed may have left duplicate
+names, which compaction refuses loudly.
 
 ## Arrow interop and version coupling
 

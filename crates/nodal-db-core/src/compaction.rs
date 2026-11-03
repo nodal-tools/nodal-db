@@ -684,6 +684,7 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         remove_temp(&temp_path);
         return Err(DbError::Busy { attempts: 1 });
     }
+    crate::conn::forget_builtin_guard(&temp_path);
     fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
         path: temp_path.display().to_string(),
         source,

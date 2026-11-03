@@ -765,9 +765,10 @@ def test_a_file_shadowing_lower_is_refused(db, tmp_path):
     con = duckdb.connect(path)
     con.execute("CREATE MACRO lower(x) AS x")
     con.close()
-    with pytest.raises(nodal_db.ShadowedBuiltin, match="DROP MACRO t.main.lower") as ei:
+    with pytest.raises(nodal_db.ShadowedBuiltin, match='DROP MACRO main."lower"') as ei:
         db.head_commit()
-    assert (ei.value.name, ei.value.schema, ei.value.kind) == ("lower", "t.main", "macro")
+    assert (ei.value.name, ei.value.schema, ei.value.kind) == ("lower", "main", "macro")
+    assert "compact the file" in str(ei.value)
     with pytest.raises(nodal_db.ShadowedBuiltin):
         db.write_parameter("unit", "capacity", "Base", scalar_batch(["U1"], [2.0]), user="t")
     con = duckdb.connect(path)

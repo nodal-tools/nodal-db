@@ -118,11 +118,12 @@ pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connec
     let mut backoff = BACKOFF_START;
     for attempt in 1..=MAX_ATTEMPTS {
         let config = core_config(mode.clone())?;
+        let before = file_stamp(db_path);
         match Connection::open_with_flags(db_path, config) {
             Ok(conn) => {
                 // A file must not shadow a built-in (engine rule 8): before
                 // any core SQL runs on it. On a refusal `conn` drops (closes).
-                guard_builtins(&conn, db_path)?;
+                guard_builtins(&conn, db_path, before)?;
                 return Ok(conn);
             }
             Err(e) if is_lock_busy(&e) => {
@@ -144,7 +145,7 @@ pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connec
 /// key: `(len, mtime, and on Unix dev, inode, ctime)` of the file and of its
 /// `<db>.wal` (`None` when absent).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FileStamp([Option<StatKey>; 2]);
+pub(crate) struct FileStamp([Option<StatKey>; 2]);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StatKey {
@@ -167,21 +168,65 @@ fn stat_key(path: &Path) -> Option<StatKey> {
     })
 }
 
-fn file_stamp(db_path: &Path) -> Option<FileStamp> {
+/// `None` when the file itself cannot be stat'ed (then nothing is cached).
+pub(crate) fn file_stamp(db_path: &Path) -> Option<FileStamp> {
     let mut wal = db_path.as_os_str().to_owned();
     wal.push(".wal");
     let db = stat_key(db_path)?;
     Some(FileStamp([Some(db), stat_key(Path::new(&wal))]))
 }
 
-/// Files the shadowing guard last found clean, by [`canonical_path_key`],
-/// with the [`FileStamp`] they had then.
-static BUILTIN_GUARD_CLEAN: OnceLock<Mutex<HashMap<PathBuf, FileStamp>>> = OnceLock::new();
+/// Per-path state of the shadowing guard: the [`FileStamp`] the file had
+/// when it was last found clean, and how many listings ran for it (the test
+/// hook [`builtin_guard_listings`]).
+#[derive(Default)]
+struct GuardEntry {
+    clean: Option<FileStamp>,
+    listings: u64,
+}
+
+/// The guard's cache, by [`canonical_path_key`]. Bounded: the core's own
+/// temp files are forgotten when they go ([`forget_builtin_guard`]), and
+/// past [`GUARD_CACHE_CAP`] paths the map starts over (a re-listing per
+/// path, never a wrong answer).
+static BUILTIN_GUARD: OnceLock<Mutex<HashMap<PathBuf, GuardEntry>>> = OnceLock::new();
+const GUARD_CACHE_CAP: usize = 1024;
+
+fn guard_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, GuardEntry>> {
+    BUILTIN_GUARD
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
+fn store_clean(key: PathBuf, stamp: FileStamp) {
+    let mut cache = guard_cache();
+    if cache.len() >= GUARD_CACHE_CAP && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.entry(key).or_default().clean = Some(stamp);
+}
+
+/// Drop `db_path` from the guard's cache: for the core's temp files
+/// (compaction, extract), which are renamed away or removed.
+pub(crate) fn forget_builtin_guard(db_path: &Path) {
+    guard_cache().remove(&canonical_path_key(db_path));
+}
+
+/// Test hook: how many uncached listings the guard has run for `db_path`
+/// in this process (a cached open adds none).
+#[doc(hidden)]
+pub fn builtin_guard_listings(db_path: &Path) -> u64 {
+    guard_cache()
+        .get(&canonical_path_key(db_path))
+        .map_or(0, |e| e.listings)
+}
 
 /// Refuse a database file that defines a macro shadowing a DuckDB built-in
 /// function (engine rule 8, "A file must not shadow a built-in";
 /// [`DbError::ShadowedBuiltin`]). Run by [`open_with_retry`] on every core
-/// open, before any core SQL.
+/// open, before any core SQL; `before` is the file's [`FileStamp`] taken
+/// just before the open.
 ///
 /// Why: DuckDB resolves an unqualified function name in the file's `main`
 /// schema before the built-ins, on every later connection to the file
@@ -189,41 +234,46 @@ static BUILTIN_GUARD_CLEAN: OnceLock<Mutex<HashMap<PathBuf, FileStamp>>> = OnceL
 /// indexes and views. A persisted `CREATE MACRO lower(x) AS …` silently
 /// replaces the name fold everywhere (`cur_name`, its unique indexes, every
 /// resolver), so the unique index stops catching duplicates and `types::fold`
-/// no longer equals the SQL fold; `max`, `count`, `nextval`, `range`, … are
-/// shadowed the same way. So every built-in name is guarded, not a list.
+/// no longer equals the SQL fold; `max`, `count`, `nextval`, `range`, `+`,
+/// `||`, … are shadowed the same way. So every built-in name is guarded, not
+/// a list.
 ///
 /// Placement and cost: the catalog listing (`duckdb_functions()`, about
 /// 3,200 rows) costs about 13 ms per call (release build, DuckDB 2.0.0,
-/// measured 2026-11-03 by `tests/shadowed_builtin_guard.rs`; the scan of
-/// the built-ins dominates and no filter is pushed into it), against about
-/// 35 ms for a whole per-operation read (`head_commit`: open, one query,
-/// close). Run on every open it would add over a third to every read
-/// (invariant 1 makes opens per-operation), so the answer is cached per
-/// process by path and file
-/// state ([`FileStamp`], taken while this connection holds the file, so no
-/// other process can change it meanwhile): an unchanged file costs two
-/// `stat` calls. Any change to the file or its WAL (another process's
-/// `CREATE MACRO`, or the core's own commit) re-runs the listing on the
-/// next open, so it costs about 13 ms once per write, not per read. A
-/// refusal is never cached. The residual gap (recorded): a change that
-/// leaves the size, mtime, inode and ctime of both files equal, which needs
-/// a filesystem with coarse timestamps.
-pub(crate) fn guard_builtins(conn: &Connection, db_path: &Path) -> Result<(), DbError> {
+/// measured 2026-11-03; the scan of the built-ins dominates and no filter is
+/// pushed into it), against about 35 ms for a whole per-operation read
+/// (`head_commit`: open, one query, close). Run on every open it would add
+/// over a third to every read (invariant 1 makes opens per-operation), so
+/// the answer is cached per process by path and file state ([`FileStamp`]):
+/// an unchanged file costs a few `stat` calls. The stamp is taken before
+/// and after the open and cached only when the two agree, so a change that
+/// races the open is listed again next time. Any change to the file or its
+/// WAL (another process's `CREATE MACRO`, or the core's own commit) re-runs
+/// the listing on the next open, so a save costs one listing on the open
+/// after it. Re-stamping after the core's own commit (an explicit
+/// `CHECKPOINT` before the close, then the stamp) was measured and not
+/// taken: it saved ~22 ms on the next open but added 3-5 ms (3-5 %) to
+/// every save (release, 2026-11-03). A refusal is never cached. The residual gap (recorded):
+/// a change that leaves the size, mtime, inode and ctime of both files
+/// equal, which needs a filesystem with coarse timestamps.
+pub(crate) fn guard_builtins(
+    conn: &Connection,
+    db_path: &Path,
+    before: Option<FileStamp>,
+) -> Result<(), DbError> {
     let key = canonical_path_key(db_path);
-    let stamp = file_stamp(db_path);
-    let cache = BUILTIN_GUARD_CLEAN.get_or_init(Default::default);
-    if let Some(stamp) = &stamp {
-        let clean = cache.lock().unwrap_or_else(|p| p.into_inner());
-        if clean.get(&key) == Some(stamp) {
+    let after = file_stamp(db_path);
+    if after.is_some() {
+        let cache = guard_cache();
+        if cache.get(&key).and_then(|e| e.clean.as_ref()) == after.as_ref() {
             return Ok(());
         }
     }
-    check_no_shadowed_builtins(conn)?;
-    if let Some(stamp) = stamp {
-        cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(key, stamp);
+    let listed = check_no_shadowed_builtins(conn);
+    guard_cache().entry(key.clone()).or_default().listings += 1;
+    listed?;
+    if let Some(after) = after.filter(|a| before.as_ref() == Some(a)) {
+        store_clean(key, after);
     }
     Ok(())
 }
@@ -233,16 +283,31 @@ pub(crate) fn guard_builtins(conn: &Connection, db_path: &Path) -> Result<(), Db
 /// a non-temporary macro in a `main` schema whose name is a built-in's of the
 /// same family (a scalar macro against scalar, aggregate, window and macro
 /// built-ins; a table macro against table functions and table macros) is
-/// refused. Other schemas are not on DuckDB's search path and are allowed;
-/// temporary objects are connection-local, and the core never shares a
-/// connection. The listing is read through `system.main.duckdb_functions()`
-/// (a file's own `duckdb_functions` table macro cannot answer for it) and
-/// compared in Rust, so no function the file could shadow takes part.
+/// refused. Not counted as built-ins: pragmas (not called as functions) and
+/// the comparison operators, which DuckDB binds as comparisons, never
+/// through a macro of that name (verified on 2.0.0; `+`, `||`, `~~` (LIKE)
+/// and `->>` are shadowed and stay guarded). Other schemas are not on
+/// DuckDB's search path and are allowed; temporary objects are
+/// connection-local, and the core never shares a connection. The listing is
+/// read through `system.main.duckdb_functions()` (a file's own
+/// `duckdb_functions` table macro cannot answer for it) and compared in
+/// Rust, so no function the file could shadow takes part.
 pub(crate) fn check_no_shadowed_builtins(conn: &Connection) -> Result<(), DbError> {
     use std::collections::HashSet;
+    const NOT_SHADOWABLE: [&str; 9] = [
+        "=",
+        "!=",
+        "<>",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "is distinct from",
+        "is not distinct from",
+    ];
     let table_family = |kind: &str| matches!(kind, "table" | "table_macro");
     let mut builtins: HashSet<(bool, String)> = HashSet::new();
-    let mut user: Vec<(String, String, String, String)> = Vec::new();
+    let mut user: Vec<(String, String, String)> = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT database_name, schema_name, function_name, function_type, internal \
          FROM system.main.duckdb_functions()",
@@ -257,17 +322,19 @@ pub(crate) fn check_no_shadowed_builtins(conn: &Connection) -> Result<(), DbErro
         #[allow(clippy::disallowed_methods)]
         let folded = name.to_ascii_lowercase();
         if internal {
-            builtins.insert((table_family(&kind), folded));
+            if kind != "pragma" && !NOT_SHADOWABLE.contains(&folded.as_str()) {
+                builtins.insert((table_family(&kind), folded));
+            }
         } else if schema == "main" && database != "temp" {
-            user.push((folded, database, name, kind));
+            user.push((folded, name, kind));
         }
     }
     user.sort();
-    for (folded, database, name, kind) in user {
+    for (folded, name, kind) in user {
         if builtins.contains(&(table_family(&kind), folded)) {
             return Err(DbError::ShadowedBuiltin {
                 name,
-                schema: format!("{database}.main"),
+                schema: "main".into(),
                 kind: if table_family(&kind) {
                     "table macro".into()
                 } else {

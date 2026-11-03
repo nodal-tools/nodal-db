@@ -373,11 +373,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             // DB that happens to contain run rows is not caught. Warning
             // only — never a refusal (no flag surface in v1).
             {
-                use nodal_db_core::duckdb::{AccessMode, Connection};
-                let config = nodal_db_core::conn::core_config(AccessMode::ReadOnly)?;
-                let conn = Connection::open_with_flags(&db, config)?;
-                let runs: i64 = conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?;
-                let _ = conn.close();
+                // Through the core's read path: per-path lock, Busy retry
+                // and the shadowing guard (engine rule 8).
+                let runs: i64 = nodal_db_core::conn::with_read(&db, |conn| {
+                    Ok(conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?)
+                })?;
                 if runs == 0 {
                     eprintln!(
                         "warning: {} has no `run` provenance rows — this looks like a \

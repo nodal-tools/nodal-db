@@ -246,27 +246,89 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                  {stored:?} (spellings that differ only in normalization are one {what})",
                 w.name
             ),
-            WarningKind::NameFolded {
-                what,
-                count,
-                written,
-                stored,
-            } => {
-                let at = if w.name.is_empty() {
-                    what.clone()
-                } else {
-                    format!("{what} {}", w.name)
-                };
-                println!(
-                    "warning: {count} {} name(s) of {at} matched an existing {} spelled \
-                     differently (names are case-insensitive), e.g. {written:?} is stored as \
-                     {stored:?} (id {})",
-                    w.object_type, w.object_type, w.id
-                )
-            }
+            // Summarized below, once per spelling across the segments.
+            WarningKind::NameFolded { .. } => {}
         }
     }
+    for line in name_folded_lines(&report.warnings) {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// The `NameFolded` warnings of one import, one line per (object type,
+/// written spelling) instead of one per segment: a class or an entity
+/// referenced from several segments under one case variant is one name
+/// that matched, not one per segment. The core reports each segment's
+/// distinct spellings as a count plus the first of them, so the group of a
+/// spelling takes the largest count among its segments.
+fn name_folded_lines(warnings: &[nodal_db_core::types::Warning]) -> Vec<String> {
+    struct Group<'a> {
+        object_type: &'a str,
+        written: &'a str,
+        stored: &'a str,
+        id: i64,
+        count: usize,
+        segments: Vec<String>,
+    }
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    for w in warnings {
+        let WarningKind::NameFolded {
+            what,
+            count,
+            written,
+            stored,
+        } = &w.kind
+        else {
+            continue;
+        };
+        let at = if w.name.is_empty() {
+            what.clone()
+        } else {
+            format!("{what} {}", w.name)
+        };
+        match groups
+            .iter_mut()
+            .find(|g| g.object_type == w.object_type && g.written == written.as_str())
+        {
+            Some(g) => {
+                g.count = g.count.max(*count);
+                g.segments.push(at);
+            }
+            None => groups.push(Group {
+                object_type: &w.object_type,
+                written,
+                stored,
+                id: w.id,
+                count: *count,
+                segments: vec![at],
+            }),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|g| {
+            let shown: Vec<&str> = g.segments.iter().take(3).map(String::as_str).collect();
+            let more = if g.segments.len() > 3 {
+                format!(", and {} more", g.segments.len() - 3)
+            } else {
+                String::new()
+            };
+            format!(
+                "warning: {} {} name(s) matched an existing {} spelled differently (names \
+                 are case-insensitive), e.g. {:?} is stored as {:?} (id {}); in {} \
+                 place(s): {}{more}",
+                g.count,
+                g.object_type,
+                g.object_type,
+                g.written,
+                g.stored,
+                g.id,
+                g.segments.len(),
+                shown.join(", ")
+            )
+        })
+        .collect()
 }
 
 /// Resolve the commit author (spec §8.2): `--user` if given (must be

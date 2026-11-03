@@ -512,15 +512,19 @@ class ImportReport:
         # object spelled differently (the core's `name_folded`). Spine names
         # are referenced by id and checked for case collisions up front, so
         # an import should never produce one: any is reported loudly.
-        folded = [w for w in self.write_warnings if w.get("kind") == "name_folded"]
+        folded = _name_folded_groups(self.write_warnings)
         lines.append(
-            f"case-folded references: {sum(w['count'] for w in folded)} "
-            "(names that matched an existing object spelled differently)")
-        for w in folded[:50]:
-            where = f" in {w['name']}" if w["name"] else ""
+            f"case-folded names: {sum(g['count'] for g in folded)} "
+            "(names that matched an existing object spelled differently, "
+            "once per object type and spelling)")
+        for g in folded[:50]:
+            places = ", ".join(g["places"][:3])
+            if len(g["places"]) > 3:
+                places += f", and {len(g['places']) - 3} more"
             lines.append(
-                f"  case-folded {w['object_type']} ({w['what']}{where}): "
-                f"{w['count']}, e.g. {w['written']!r} is stored as {w['stored']!r}")
+                f"  case-folded {g['object_type']}: {g['count']}, e.g. "
+                f"{g['written']!r} is stored as {g['stored']!r} "
+                f"(in {len(g['places'])} place(s): {places})")
         for t in self.trimmed_names[:50]:
             lines.append(f"  trimmed name: {t.describe()}")
         for w in normalized[:50]:
@@ -535,6 +539,34 @@ class ImportReport:
         for d in self.drift_table[:50]:
             lines.append(f"  drift: {d}")
         return "\n".join(lines)
+
+
+def _name_folded_groups(warnings: list) -> list[dict]:
+    """The core's ``name_folded`` warnings, one group per (object type,
+    written spelling) instead of one per write group: a class or an entity
+    referenced from several segments under one case variant is one name
+    that matched, not one per segment. The core reports each segment's
+    distinct spellings as a count plus the first of them, so a spelling's
+    group takes the largest count among its segments."""
+    groups: dict[tuple, dict] = {}
+    for w in warnings:
+        if w.get("kind") != "name_folded":
+            continue
+        place = f"{w['what']} {w['name']}" if w["name"] else w["what"]
+        key = (w["object_type"], w["written"])
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {
+                "object_type": w["object_type"],
+                "written": w["written"],
+                "stored": w["stored"],
+                "count": w["count"],
+                "places": [place],
+            }
+        else:
+            g["count"] = max(g["count"], w["count"])
+            g["places"].append(place)
+    return list(groups.values())
 
 
 def _wal_of(path: Path) -> Path:

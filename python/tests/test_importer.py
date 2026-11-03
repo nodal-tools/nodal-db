@@ -988,7 +988,31 @@ def test_fixture_imports_report_no_case_folded_references(tmp_path, make):
     spine = make_basic_spine(tmp_path) if make == "basic" else make_padded_spine(tmp_path)
     rep, _out = run_import(tmp_path, spine)
     assert [w for w in rep.write_warnings if w["kind"] == "name_folded"] == []
-    assert "case-folded references: 0" in rep.summary()
+    assert "case-folded names: 0" in rep.summary()
+
+
+def test_case_folded_summary_counts_each_spelling_once():
+    """The core warns ``name_folded`` once per segment; one case variant
+    referenced from three segments is one name that matched, not three
+    (the summary groups by object type and written spelling)."""
+    from nodal_spine_import.importer import ImportReport
+
+    def warn(object_type, written, stored, seg, count=1):
+        return {"kind": "name_folded", "what": "segment", "count": count,
+                "written": written, "stored": stored,
+                "object_type": object_type, "name": seg, "id": 1}
+
+    rep = ImportReport(write_warnings=[
+        w for seg in ("NODE:p/Base", "NODE:q/Base", "NODE:r/Base")
+        for w in (warn("entity_class", "NODE", "Node", seg),
+                  warn("entity", "FOO", "Foo", seg))
+    ] + [warn("entity", "BAR", "Bar", "NODE:q/Base", count=2)])
+    summary = rep.summary()
+    assert "case-folded names: 4 " in summary, summary
+    assert ("  case-folded entity_class: 1, e.g. 'NODE' is stored as 'Node' "
+            "(in 3 place(s): segment NODE:p/Base, segment NODE:q/Base, "
+            "segment NODE:r/Base)") in summary, summary
+    assert "  case-folded entity: 2, e.g. 'BAR' is stored as 'Bar' " in summary
 
 
 def test_final_sigma_case_collision_refuses(tmp_path):

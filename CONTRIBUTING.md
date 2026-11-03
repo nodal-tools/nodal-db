@@ -47,6 +47,11 @@ and re-check it after a bump. After one:
   dict-cache data guard in `point_read_index_scan` fails with it (its
   positive control no longer raises): re-evaluate engine_rules.md §6
   then.
+- If every core open fails with `ShadowedBuiltin` after the bump, the
+  new DuckDB added a built-in function named like one of the read
+  surface's own macros (engine_rules.md §8, "A file must not shadow a
+  built-in"): rename the macro (a read-surface change, §9), do not
+  weaken the guard.
 - If `just docs-check` reports the read-surface listing
   (`schema/read_surface_contract.tsv`) stale after the bump with no DDL
   change, the new DuckDB infers a column type differently (a literal or an

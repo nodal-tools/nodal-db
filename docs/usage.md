@@ -586,9 +586,13 @@ Do not create a macro named like a DuckDB built-in function (`lower`,
 use it instead of the built-in in every later query on the file,
 including the name lookups and unique indexes nodal-db relies on, so
 nodal-db refuses to open such a file (`ShadowedBuiltin`, naming the
-macro) until you drop it with `DROP MACRO main.<name>` (`DROP MACRO
-TABLE` for a table macro). Put your own macros under another name or in
-another schema (`CREATE SCHEMA my; CREATE MACRO my.lower(x) AS …`).
+macro and the `DROP MACRO` statement that removes it) until you drop
+it. Anything written to the file while the macro existed may have left
+duplicate names that the name indexes no longer catch, so compact the
+file after the drop (`nodal-db maintain compact FILE`): compaction
+rebuilds the indexes and fails loudly on such a duplicate. Put your own
+macros under another name or in another schema (`CREATE SCHEMA my;
+CREATE MACRO my.lower(x) AS …`).
 
 Commonly used parts of the read surface:
 

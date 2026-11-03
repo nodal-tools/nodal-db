@@ -76,7 +76,10 @@ answer will be a served API, not a protocol document.
   is refused by every open: `ShadowedBuiltin`
   (`DbError::ShadowedBuiltin { name, schema, kind }`,
   `nodal_db.ShadowedBuiltin` with `name`, `schema` and `kind`
-  attributes). Not retryable as is; the user drops the macro.
+  attributes; `schema` is `"main"`). Not retryable as is: the user drops
+  the macro (the message gives the statement), then compacts the file,
+  which fails loudly on a duplicate name written while the macro
+  existed.
 - **Never call a table macro through an attached database.** Views of
   an attached file (`ATTACH … AS other`, then `other.<view>`) read that
   file, but a table macro called as `other.<macro>(…)` resolves its

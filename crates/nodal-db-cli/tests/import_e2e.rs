@@ -2128,17 +2128,21 @@ fn unicode_case_aliased_dense_entities_are_e6() {
 }
 
 /// A case variant referenced from several segments is reported once per
-/// (object type, spelling), not once per segment: `NODE`/`FOO` in three
-/// segments are one class and one entity that matched.
+/// (object type, object, spelling), not once per segment, and the union is
+/// exact: segments {FOO, BAR}, {FOO, BAZ}, {FOO} are three entity names,
+/// and `FOO` of another class is a fourth (another object).
 #[test]
 fn name_folded_is_reported_once_per_spelling_across_segments() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
-    let first = write_file(
-        dir.path(),
-        "first.arrows",
-        &long_segment("Node", "p", 1, &[("Foo", 0, 1.0)]),
+    let mut container = long_segment(
+        "Node",
+        "p",
+        2,
+        &[("Foo", 0, 1.0), ("Bar", 0, 1.0), ("Baz", 0, 1.0)],
     );
+    container.extend(long_segment("Other", "p", 2, &[("Foo", 0, 1.0)]));
+    let first = write_file(dir.path(), "first.arrows", &container);
     let out = import(&db, &first, &["--alternative", "Base", "--user", "tester"]);
     assert!(
         out.status.success(),
@@ -2146,8 +2150,14 @@ fn name_folded_is_reported_once_per_spelling_across_segments() {
         String::from_utf8_lossy(&out.stderr)
     );
     let mut container = Vec::new();
-    for p in ["p", "q", "r"] {
-        container.extend(long_segment("NODE", p, 3, &[("FOO", 0, 2.0)]));
+    for (class, p, ents) in [
+        ("NODE", "p", &["FOO", "BAR"][..]),
+        ("NODE", "q", &["FOO", "BAZ"][..]),
+        ("NODE", "r", &["FOO"][..]),
+        ("Other", "q", &["FOO"][..]),
+    ] {
+        let rows: Vec<(&str, i64, f64)> = ents.iter().map(|e| (*e, 0, 2.0)).collect();
+        container.extend(long_segment(class, p, 4, &rows));
     }
     let second = write_file(dir.path(), "second.arrows", &container);
     let out = import(&db, &second, &["--alternative", "Base", "--user", "tester"]);
@@ -2169,9 +2179,10 @@ fn name_folded_is_reported_once_per_spelling_across_segments() {
         "{stdout}"
     );
     assert!(
-        folded[1].starts_with("warning: 1 entity name(s) matched")
+        folded[1].starts_with("warning: 4 entity name(s) matched")
             && folded[1].contains("\"FOO\" is stored as \"Foo\"")
-            && folded[1].contains("in 3 place(s)"),
+            && folded[1].contains("in 4 place(s)")
+            && folded[1].contains(", and 1 more"),
         "{stdout}"
     );
 }

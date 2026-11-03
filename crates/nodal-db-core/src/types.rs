@@ -497,8 +497,10 @@ pub enum WarningKind {
     /// (they return ids, not reports) or reads. One warning per group and
     /// referent table, never one per string: `what` is the group
     /// (`"segment"`, `"delete"`, `"object_delete"` or `"structural"`),
-    /// `count` the number of distinct written spellings that resolved this
-    /// way, `written`/`stored` the first such pair in input order.
+    /// `spellings` every distinct (written spelling, resolved row) pair that
+    /// resolved this way, in input order (one spelling resolving to two rows,
+    /// e.g. entities of two classes, is two entries), `count` its length,
+    /// and `written`/`stored` the first entry's pair.
     /// `object_type` is the referent table (`"entity_class"`,
     /// `"parameter_definition"`, `"alternative"`, `"entity"`,
     /// `"scenario"`, `"parameter_value_list"`), `name` the segment
@@ -510,7 +512,21 @@ pub enum WarningKind {
         count: usize,
         written: String,
         stored: String,
+        spellings: Vec<FoldedSpelling>,
     },
+}
+
+/// One reference of a [`WarningKind::NameFolded`] warning: the spelling
+/// written (NFC), the stored spelling it resolved to, and that row's id in
+/// the warning's referent table (`object_type`). The id says which object
+/// (two entities of different classes can share a spelling); a summary
+/// over several warnings counts a name once per (`object_type`, `id`,
+/// `written`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FoldedSpelling {
+    pub written: String,
+    pub stored: String,
+    pub id: i64,
 }
 
 /// The delete that covers a dropped write ([`WarningKind::DroppedByDelete`]).

@@ -1111,6 +1111,11 @@ def test_case_variant_reference_reports_name_folded(db):
         ("segment", "entity_class", 1, "node", "Node", "node:p/Base"),
     ]
     assert all(w["id"] > 0 for w in rep["warnings"] if w["kind"] == "name_folded")
+    # Each warning lists its references: (written, stored, resolved id).
+    for w in rep["warnings"]:
+        if w["kind"] == "name_folded":
+            assert w["spellings"] == [
+                {"written": w["written"], "stored": w["stored"], "id": w["id"]}]
 
 
 def test_nfd_names_and_labels_read_back_in_nfc(db):

@@ -578,11 +578,21 @@ fn warning_to_py<'py>(py: Python<'py>, w: &Warning) -> PyResult<Bound<'py, PyDic
             count,
             written,
             stored,
+            spellings,
         } => {
             d.set_item("what", what)?;
             d.set_item("count", count)?;
             d.set_item("written", written)?;
             d.set_item("stored", stored)?;
+            let list = PyList::empty(py);
+            for s in spellings {
+                let e = PyDict::new(py);
+                e.set_item("written", &s.written)?;
+                e.set_item("stored", &s.stored)?;
+                e.set_item("id", s.id)?;
+                list.append(e)?;
+            }
+            d.set_item("spellings", list)?;
             "name_folded"
         }
     };

@@ -991,28 +991,39 @@ def test_fixture_imports_report_no_case_folded_references(tmp_path, make):
     assert "case-folded names: 0" in rep.summary()
 
 
-def test_case_folded_summary_counts_each_spelling_once():
-    """The core warns ``name_folded`` once per segment; one case variant
-    referenced from three segments is one name that matched, not three
-    (the summary groups by object type and written spelling)."""
+def test_case_folded_summary_counts_each_name_once(tmp_path):
+    """The core warns ``name_folded`` once per segment and lists the
+    references; the summary unions them: segments {FOO, BAR}, {FOO, BAZ}
+    and {FOO} refer to three entity names, ``FOO`` of another class is a
+    fourth, and ``NODE`` is one class name. The warnings are the core's
+    own (a real write), not hand-built."""
+    import nodal_db
+    import pyarrow as pa
+
     from nodal_spine_import.importer import ImportReport
 
-    def warn(object_type, written, stored, seg, count=1):
-        return {"kind": "name_folded", "what": "segment", "count": count,
-                "written": written, "stored": stored,
-                "object_type": object_type, "name": seg, "id": 1}
+    def seg(cls, param, ents):
+        return {"class": cls, "parameter": param, "alternative": "Base",
+                "batch": pa.record_batch({
+                    "entity": pa.array(ents, pa.string()),
+                    "value": pa.array([1.0] * len(ents))})}
 
-    rep = ImportReport(write_warnings=[
-        w for seg in ("NODE:p/Base", "NODE:q/Base", "NODE:r/Base")
-        for w in (warn("entity_class", "NODE", "Node", seg),
-                  warn("entity", "FOO", "Foo", seg))
-    ] + [warn("entity", "BAR", "Bar", "NODE:q/Base", count=2)])
-    summary = rep.summary()
-    assert "case-folded names: 4 " in summary, summary
+    db = nodal_db.init(str(tmp_path / "f.duckdb"), default_alternative="Base")
+    db.commit_changes(segments=[seg("Node", "p", ["Foo", "Bar", "Baz"]),
+                                seg("Other", "p", ["Foo"])], user="t")
+    rep = db.commit_changes(segments=[
+        seg("NODE", "p", ["FOO", "BAR"]), seg("NODE", "q", ["FOO", "BAZ"]),
+        seg("NODE", "r", ["FOO"]), seg("Other", "q", ["FOO"]),
+    ], user="t")
+    report = ImportReport(write_warnings=rep["warnings"])
+    summary = report.summary()
+    assert "case-folded names: 5 " in summary, summary
     assert ("  case-folded entity_class: 1, e.g. 'NODE' is stored as 'Node' "
             "(in 3 place(s): segment NODE:p/Base, segment NODE:q/Base, "
             "segment NODE:r/Base)") in summary, summary
-    assert "  case-folded entity: 2, e.g. 'BAR' is stored as 'Bar' " in summary
+    assert ("  case-folded entity: 4, e.g. 'FOO' is stored as 'Foo' "
+            "(in 4 place(s): segment NODE:p/Base, segment NODE:q/Base, "
+            "segment NODE:r/Base, and 1 more)") in summary, summary
 
 
 def test_final_sigma_case_collision_refuses(tmp_path):

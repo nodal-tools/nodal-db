@@ -514,16 +514,17 @@ class ImportReport:
         # an import should never produce one: any is reported loudly.
         folded = _name_folded_groups(self.write_warnings)
         lines.append(
-            f"case-folded names: {sum(g['count'] for g in folded)} "
+            f"case-folded names: {sum(len(g['names']) for g in folded)} "
             "(names that matched an existing object spelled differently, "
-            "once per object type and spelling)")
+            "each counted once)")
         for g in folded[:50]:
             places = ", ".join(g["places"][:3])
             if len(g["places"]) > 3:
                 places += f", and {len(g['places']) - 3} more"
+            first = g["names"][0]
             lines.append(
-                f"  case-folded {g['object_type']}: {g['count']}, e.g. "
-                f"{g['written']!r} is stored as {g['stored']!r} "
+                f"  case-folded {g['object_type']}: {len(g['names'])}, e.g. "
+                f"{first['written']!r} is stored as {first['stored']!r} "
                 f"(in {len(g['places'])} place(s): {places})")
         for t in self.trimmed_names[:50]:
             lines.append(f"  trimmed name: {t.describe()}")
@@ -542,31 +543,27 @@ class ImportReport:
 
 
 def _name_folded_groups(warnings: list) -> list[dict]:
-    """The core's ``name_folded`` warnings, one group per (object type,
-    written spelling) instead of one per write group: a class or an entity
-    referenced from several segments under one case variant is one name
-    that matched, not one per segment. The core reports each segment's
-    distinct spellings as a count plus the first of them, so a spelling's
-    group takes the largest count among its segments."""
-    groups: dict[tuple, dict] = {}
+    """The core's ``name_folded`` warnings, one group per object type
+    instead of one per write group. Each warning lists its references
+    (``spellings``: the written spelling, the stored one and the row id it
+    resolved to); a name is counted once per (object type, row id, written
+    spelling), however many segments refer to it. The row id keeps two
+    objects that share a spelling apart (entities of different classes)."""
+    groups: dict[str, dict] = {}
     for w in warnings:
         if w.get("kind") != "name_folded":
             continue
-        place = f"{w['what']} {w['name']}" if w["name"] else w["what"]
-        key = (w["object_type"], w["written"])
-        g = groups.get(key)
-        if g is None:
-            groups[key] = {
-                "object_type": w["object_type"],
-                "written": w["written"],
-                "stored": w["stored"],
-                "count": w["count"],
-                "places": [place],
-            }
-        else:
-            g["count"] = max(g["count"], w["count"])
-            g["places"].append(place)
-    return list(groups.values())
+        g = groups.setdefault(w["object_type"], {
+            "object_type": w["object_type"], "names": [], "seen": set(),
+            "places": [],
+        })
+        g["places"].append(f"{w['what']} {w['name']}" if w["name"] else w["what"])
+        for sp in w["spellings"]:
+            key = (sp["id"], sp["written"])
+            if key not in g["seen"]:
+                g["seen"].add(key)
+                g["names"].append(sp)
+    return [g for g in groups.values() if g["names"]]
 
 
 def _wal_of(path: Path) -> Path:

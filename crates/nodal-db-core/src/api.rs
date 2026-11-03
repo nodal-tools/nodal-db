@@ -1939,7 +1939,10 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
     let mut inferred: Vec<(String, IndexKind)> = Vec::with_capacity(rank);
     for i in 0..rank {
         let field = batch.schema().field(i + 1).clone();
-        inferred.push((field.name().clone(), index_kind(field.data_type())?));
+        // Dimension names are names: NFC (the text rule), recorded for the
+        // segment's `TextNormalized` warning like the other names.
+        let dim = seg_names.nfc(field.name()).into_owned();
+        inferred.push((dim, index_kind(field.data_type())?));
     }
 
     // Effective label domains: the in-process arg, plus any Arrow field-metadata

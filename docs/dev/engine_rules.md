@@ -524,7 +524,8 @@ core.
 
 **Guards.** `crates/nodal-db-core/tests/unicode_text_rule.rs` (an NFD
 name is stored in NFC and found by both spellings through every lookup
-path; NFD labels read back in NFC; stored label bytes do not depend on
+path; an NFD dimension column name is stored in NFC and matches a
+declared type by either spelling; NFD labels read back in NFC; stored label bytes do not depend on
 write order) and `crates/nodal-db-core/tests/text_nfc.rs` (the crate's
 tables against the vendored Unicode 16.0.0 data for every code point,
 and `text::nfc` against the official NormalizationTest).

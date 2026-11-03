@@ -132,7 +132,7 @@ Contract (the core's Layer-3 rules, surfaced verbatim):
 One hierarchy, mapped 1:1 from the core's `DbError` (message text is the
 core's own): `NodalDbError` (base) with `Busy`, `Conflict`, `ApiError`,
 `VersionTooOld`, `SchemaError`, `DatabaseError`, `CanonError`,
-`ArrowError`, `InternalError`, and `Stale` and `SchemaMismatch` (both
+`ArrowError`, `InternalError`, `UnreplayableWal`, and `Stale` and `SchemaMismatch` (both
 subclasses of `ApiError`).
 `Busy` and `Conflict` are defined, retryable outcomes, never hangs.
 `Stale` is raised when a write's `expect_commit=` precondition fails
@@ -142,6 +142,10 @@ written, and it carries `expected` and `found` as attributes.
 schema version (a write fails on it, or compaction, extract or erase
 refuses it); it carries `found` (the file's `schema_version`) and
 `expected` (this build's).
+`UnreplayableWal` is raised when compaction cannot fold a leftover
+`<db>.wal` into the file (DuckDB cannot replay or remove it); nothing
+was changed, and it carries `wal` (the path) and `cause`. Move the WAL
+aside, then compact.
 
 ## Arrow interop and version coupling
 

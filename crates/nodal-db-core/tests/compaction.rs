@@ -662,34 +662,84 @@ fn compact_folds_a_sizeable_stale_wal() {
 /// A WAL DuckDB cannot replay (here an unreadable header) survives the
 /// fold's CHECKPOINT (DuckDB 2.0.0: the RW open succeeds, the checkpoint is
 /// a no-op, the WAL stays). Compaction refuses loudly and touches nothing:
-/// the WAL and the original are byte-identical, no temp is left.
+/// the WAL and the original are byte-identical, no temp is left. (An
+/// ordinary write would discard such a WAL; refusing is still the choice.)
 #[test]
 fn compact_refuses_an_unreplayable_wal_and_touches_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_bloated(dir.path(), 5);
     let junk = b"stale wal from a crashed writer";
     std::fs::write(wal_of(&db), junk).unwrap();
-    let before = std::fs::read(&db).unwrap();
 
-    let err = compact(&db).expect_err("an unreplayable wal must refuse compaction");
-    assert!(
-        matches!(&err, DbError::Api(m) if m.contains("survived a CHECKPOINT")),
-        "unexpected error: {err:?}"
-    );
-    assert_eq!(
-        std::fs::read(wal_of(&db)).unwrap(),
-        junk,
-        "the wal was touched"
-    );
-    assert!(
-        std::fs::read(&db).unwrap() == before,
-        "the original was changed"
-    );
-    assert!(temps_left(dir.path()).is_empty(), "a temp was left behind");
+    assert_refused_untouched(&db, junk, "survived a CHECKPOINT");
 
     // Once a person moves the WAL aside, compaction proceeds.
     std::fs::remove_file(wal_of(&db)).unwrap();
     assert!(compact(&db).expect("compact after the wal is gone").swapped);
+}
+
+/// Compaction refuses `db` with `UnreplayableWal` whose cause contains
+/// `cause_part`, its message names the WAL, and the WAL (`wal_bytes`) and
+/// the original are byte-identical afterwards, with no temp left.
+fn assert_refused_untouched(db: &Path, wal_bytes: &[u8], cause_part: &str) {
+    let before = std::fs::read(db).unwrap();
+    let err = compact(db).expect_err("an unreplayable wal must refuse compaction");
+    match &err {
+        DbError::UnreplayableWal { wal, cause } => {
+            assert_eq!(wal, &wal_of(db));
+            assert!(cause.contains(cause_part), "unexpected cause: {cause}");
+        }
+        other => panic!("expected UnreplayableWal, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("could not be replayed or removed") && msg.contains("move it aside"),
+        "{msg}"
+    );
+    assert_eq!(
+        std::fs::read(wal_of(db)).unwrap(),
+        wal_bytes,
+        "the wal was touched"
+    );
+    assert!(
+        std::fs::read(db).unwrap() == before,
+        "the original was changed"
+    );
+    assert!(
+        temps_left(db.parent().unwrap()).is_empty(),
+        "a temp was left behind"
+    );
+}
+
+/// Another file's WAL: DuckDB 2.0.0 fails the read-write open ("WAL does
+/// not match database file"); compaction refuses, touching nothing.
+#[test]
+fn compact_refuses_a_foreign_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 3);
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = build_bloated(other_dir.path(), 3);
+    leave_wal_commits(&other, 1);
+    std::fs::copy(wal_of(&other), wal_of(&db)).unwrap();
+    let bytes = std::fs::read(wal_of(&db)).unwrap();
+
+    assert_refused_untouched(&db, &bytes, "WAL does not match database file");
+}
+
+/// An older generation of this file's own WAL (left beside it after the
+/// file was checkpointed): DuckDB 2.0.0 fails the read-write open ("the WAL
+/// checkpoint iteration does not match"); compaction refuses.
+#[test]
+fn compact_refuses_an_older_generation_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_bloated(dir.path(), 3);
+    leave_wal_commits(&db, 1);
+    let old = std::fs::read(wal_of(&db)).unwrap();
+    checkpoint(&db);
+    assert!(!wal_of(&db).exists());
+    std::fs::write(wal_of(&db), &old).unwrap();
+
+    assert_refused_untouched(&db, &old, "checkpoint iteration does not match");
 }
 
 /// Without a WAL, compaction never opens the original read-write: with the
@@ -724,9 +774,11 @@ fn compact_without_a_wal_never_opens_the_original_read_write() {
     set_mode(&db, 0o644);
     leave_wal_commits(&db, 3);
     set_mode(&db, 0o444);
+    let err = compact(&db).expect_err("with a WAL the fold opens the original read-write");
     assert!(
-        compact(&db).is_err(),
-        "with a WAL the fold must open the original read-write (and fail here)"
+        matches!(&err, DbError::UnreplayableWal { cause, .. }
+            if cause.contains("Permission denied")),
+        "expected the fold's read-write open to fail on permissions, got {err:?}"
     );
     assert!(wal_of(&db).exists(), "the WAL must be left in place");
     assert!(temps_left(dir.path()).is_empty(), "a temp was left behind");

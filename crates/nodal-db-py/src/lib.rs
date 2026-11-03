@@ -177,6 +177,17 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    UnreplayableWal,
+    NodalDbError,
+    "Compaction refused a database whose leftover `<db>.wal` could not be \
+     replayed or removed (DbError::UnreplayableWal): a foreign WAL, an older \
+     generation of this file's WAL, an unreadable one, or a failed read-write \
+     open of the file. Nothing was changed and the WAL was not deleted. \
+     Attributes: `wal` (its path) and `cause` (the reason). Not retryable as \
+     is: move the WAL aside, then compact."
+);
+create_exception!(
+    nodal_db,
     CanonError,
     NodalDbError,
     "A canonicalization-pipeline error (DbError::Canon / DbError::Encode)."
@@ -1259,6 +1270,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("VersionTooOld", py.get_type::<VersionTooOld>())?;
     m.add("SchemaError", py.get_type::<SchemaError>())?;
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;
+    m.add("UnreplayableWal", py.get_type::<UnreplayableWal>())?;
     m.add("CanonError", py.get_type::<CanonError>())?;
     m.add("ArrowError", py.get_type::<ArrowError>())?;
     m.add("InternalError", py.get_type::<InternalError>())?;

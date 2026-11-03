@@ -65,6 +65,12 @@ answer will be a served API, not a protocol document.
   fails on it and from compaction, extract and erase. Match the variant,
   not the message text. See
   [connection discipline](../usage.md#connection-discipline).
+- Compaction can refuse a file whose leftover `<db>.wal` cannot be
+  replayed or removed: `UnreplayableWal`
+  (`DbError::UnreplayableWal { wal, cause }`, `nodal_db.UnreplayableWal`).
+  It is not retryable as is; tell the user to move the WAL aside. A
+  compaction that finds a new WAL just before its swap (another process
+  wrote meanwhile) fails with `Busy` and can be retried.
 - **Never call a table macro through an attached database.** Views of
   an attached file (`ATTACH … AS other`, then `other.<view>`) read that
   file, but a table macro called as `other.<macro>(…)` resolves its

@@ -486,9 +486,16 @@ is only read until the final rename. The one exception comes first: a
 `<db>.wal` left by a writer that crashed after committing is folded into
 the original before anything is copied (a read-write open, `CHECKPOINT`,
 close: DuckDB's own crash-safe recovery), never deleted. A WAL that
-survives the checkpoint (DuckDB could not replay it) refuses the
-compaction and touches nothing, and a WAL that appears while compacting
-(another process wrote) aborts it before the swap. So the swap never
+cannot be replayed or removed refuses the compaction with
+`DbError::UnreplayableWal` and touches nothing: on DuckDB 2.0.0 a
+foreign WAL or an older generation of the file's own WAL fails the
+read-write open, a WAL with an unreadable header survives the
+checkpoint, and any other failed open or checkpoint (a read-only file, a
+WAL held open on Windows) lands there too. An ordinary write would
+discard an unreadable-header WAL anyway; compaction refuses all the
+same, since only a person can tell whether a WAL matters. A WAL that
+appears while compacting (another process wrote) aborts the compaction
+before the swap with the retryable `DbError::Busy`. So the swap never
 removes a WAL, and no crash can leave the original without its WAL's
 commits. Compaction holds the per-path lock
 for the whole operation and runs outside any write transaction, so a

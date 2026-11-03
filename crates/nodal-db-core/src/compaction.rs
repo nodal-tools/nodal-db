@@ -61,17 +61,25 @@
 //! (b), owner decision 2026-11-03).** Before anything is measured or copied,
 //! `fold_stale_wal` opens the original read-write (the core's open path),
 //! runs `CHECKPOINT` and closes: DuckDB replays the WAL and folds it into
-//! the file by its own crash-safe recovery protocol, and removes it. A WAL
-//! that survives (one DuckDB could not replay: foreign or corrupt) refuses
-//! the compaction, touching nothing. So compaction writes the original only
-//! in that case, once, and never with anything but DuckDB's own checkpoint.
+//! the file by its own crash-safe recovery protocol, and removes it. So
+//! compaction writes the original only when a WAL exists, once, and never
+//! with anything but DuckDB's own checkpoint. A WAL that cannot be replayed
+//! or removed refuses the compaction with [`DbError::UnreplayableWal`],
+//! touching nothing: a foreign WAL or an older generation of this file's
+//! WAL fails the open (DuckDB 2.0.0), one with an unreadable header survives
+//! the checkpoint, and any other open/checkpoint failure (a read-only file,
+//! a WAL held open on Windows) lands there too. An ordinary write would
+//! discard an unreadable-header WAL anyway; refusing is still the choice
+//! (see `fold_stale_wal`).
+//!
 //! The swap therefore never has a stale WAL to remove, and the old
 //! unlink-before-rename is gone, which closes the window it left (a kill
 //! between that unlink and the rename left the still-live original without
 //! the WAL's commits). A `<db>.wal` that is present at swap time anyway was
 //! created after the fold by another process writing to the original; the
-//! compaction then aborts (temp removed, original and WAL untouched) rather
-//! than orphan it.
+//! compaction then aborts with [`DbError::Busy`] (retryable; temp removed,
+//! original and WAL untouched) rather than orphan it. It also aborts if the
+//! rebuilt temp's own WAL is not empty.
 //!
 //! **Windows single-writer assumption (§3):** `rename`-over-an-open-file fails
 //! on Windows while any handle to the target is open. Both connections (the temp
@@ -652,14 +660,29 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // file). Abort instead: the original and its WAL stay exactly as they
     // are, and the next compaction folds the WAL first. Deleting it here as
     // defense-in-depth would reintroduce the very window option (b) closes.
+    //
+    // The error is `Busy`: the cause is another connection on the file, and
+    // the outcome is the same as a lock that could not be had (nothing
+    // changed, retry later), so callers already treat it as retryable (the
+    // CLI's E9, Python's `nodal_db.Busy`). `attempts: 1`, as for the busy
+    // source ATTACH (`rebuild::attach_source_ro`): no retry loop ran.
+    #[cfg(test)]
+    tests::before_swap_hook(db_path);
+    // The temp's own WAL must be empty or gone after its CHECKPOINT and
+    // close; renaming the temp away from a non-empty one would orphan the
+    // content it holds.
+    let temp_wal = wal_path(&temp_path);
+    if fs::metadata(&temp_wal).is_ok_and(|m| m.len() > 0) {
+        remove_temp(&temp_path);
+        return Err(DbError::Internal(format!(
+            "compaction aborted: the rebuilt file's WAL {} is not empty after its \
+             checkpoint; the original is left intact",
+            temp_wal.display()
+        )));
+    }
     if wal_path(db_path).exists() {
         remove_temp(&temp_path);
-        return Err(DbError::Api(format!(
-            "compaction aborted: {} appeared while compacting (another process wrote \
-             to the database); the original and its WAL are left intact, retry the \
-             compaction",
-            wal_path(db_path).display()
-        )));
+        return Err(DbError::Busy { attempts: 1 });
     }
     fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
         path: temp_path.display().to_string(),
@@ -747,27 +770,45 @@ fn wal_path(db_path: &Path) -> PathBuf {
 /// surfaces as [`DbError::Busy`]; the caller holds the per-path lock, which
 /// is why the open bypasses `conn::with_rw_conn` (it would re-take it).
 ///
-/// A WAL that survives the checkpoint is an error, never deleted: DuckDB
-/// keeps a WAL it could not replay (an unreadable header, e.g. a foreign or
-/// corrupt file: verified on 2.0.0 — the open succeeds, the checkpoint is a
-/// no-op, the WAL stays), and only a person can tell whether its content
-/// matters. The original and the WAL are left as they are.
+/// Every other failure is [`DbError::UnreplayableWal`], and the WAL is
+/// never deleted: only a person can tell whether its content matters. The
+/// cases, verified on DuckDB 2.0.0:
+/// - a foreign WAL (another file's): the open fails, "WAL does not match
+///   database file";
+/// - an older generation of this file's WAL: the open fails, "the WAL
+///   checkpoint iteration does not match";
+/// - an unreadable header: the open succeeds, the checkpoint is a no-op and
+///   the WAL survives it. An ordinary write would discard such a WAL anyway
+///   (a normal read-write commit succeeds and the junk WAL is gone after
+///   its checkpoint); refusing is still the choice, since compaction is not
+///   the place to decide that a file nobody can read is junk;
+/// - any other open, checkpoint or close failure (a read-only file, a full
+///   disk, a WAL held open on Windows).
+///
+/// The original is left as it was: DuckDB changes nothing when the replay
+/// fails or there is nothing to checkpoint.
 fn fold_stale_wal(db_path: &Path) -> Result<(), DbError> {
     let wal = wal_path(db_path);
     if !wal.exists() {
         return Ok(());
     }
-    let conn = open_with_retry(db_path, AccessMode::ReadWrite)?;
+    let refuse = |cause: String| DbError::UnreplayableWal {
+        wal: wal.clone(),
+        cause,
+    };
+    let conn = match open_with_retry(db_path, AccessMode::ReadWrite) {
+        Ok(conn) => conn,
+        Err(e @ DbError::Busy { .. }) => return Err(e),
+        Err(e) => return Err(refuse(e.to_string())),
+    };
     let checkpointed = conn.execute_batch("CHECKPOINT");
-    let closed = conn.close().map_err(|(_, e)| DbError::Duckdb(e));
-    checkpointed?;
-    closed?;
+    let closed = conn.close().map_err(|(_, e)| e);
+    checkpointed.map_err(|e| refuse(e.to_string()))?;
+    closed.map_err(|e| refuse(e.to_string()))?;
     if wal.exists() {
-        return Err(DbError::Api(format!(
-            "compaction refused: {} survived a CHECKPOINT of {} (DuckDB could not replay \
-             it, so it may be foreign or corrupt); the database and the WAL are left as \
-             they are. Inspect the WAL, then move it aside or delete it to compact",
-            wal.display(),
+        return Err(refuse(format!(
+            "it survived a CHECKPOINT of {} (DuckDB could not read it, so it may be \
+             foreign or corrupt)",
             db_path.display()
         )));
     }
@@ -1042,6 +1083,60 @@ mod tests {
         let db = dir.path().join(name);
         init_schema(&db).expect("init schema");
         db
+    }
+
+    type SwapHook = Box<dyn Fn(&Path)>;
+
+    thread_local! {
+        /// Test seam: run by `compact_locked` just before its pre-rename
+        /// checks (temp durable, rename next). Per thread, so parallel
+        /// tests never see each other's hook.
+        static BEFORE_SWAP: std::cell::RefCell<Option<SwapHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_swap_hook(db_path: &Path) {
+        BEFORE_SWAP.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(db_path)
+            }
+        });
+    }
+
+    /// A `<db>.wal` that appears after the fold (another process wrote to
+    /// the original while compaction held no file lock) aborts the swap
+    /// with the retryable `Busy`: the temp is removed, and the original and
+    /// the WAL are byte-identical.
+    #[test]
+    fn a_wal_appearing_before_the_swap_aborts_with_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = fresh(&dir, "late_wal.duckdb");
+        let wal = wal_path(&db);
+        let junk = b"a wal written by another process after the fold".to_vec();
+        let before = fs::read(&db).unwrap();
+        {
+            let junk = junk.clone();
+            BEFORE_SWAP.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |p: &Path| {
+                    fs::write(wal_path(p), &junk).unwrap();
+                }))
+            });
+        }
+        let out = compact(&db);
+        BEFORE_SWAP.with(|h| *h.borrow_mut() = None);
+
+        assert!(
+            matches!(out, Err(DbError::Busy { .. })),
+            "expected Busy, got {out:?}"
+        );
+        assert_eq!(fs::read(&wal).unwrap(), junk, "the wal was touched");
+        assert!(fs::read(&db).unwrap() == before, "the original was changed");
+        let temps: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.contains(".compact."))
+            .collect();
+        assert!(temps.is_empty(), "temp left behind: {temps:?}");
     }
 
     #[test]

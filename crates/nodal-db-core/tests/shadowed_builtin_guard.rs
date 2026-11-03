@@ -260,19 +260,159 @@ fn a_normal_file_is_listed_once_until_it_changes() {
     }
     assert_eq!(listings(), base, "an unchanged file is not listed again");
 
-    // A save changes the file: the open after it lists once, then none.
+    // The core's own save re-stamps the file: the opens after it list none.
     write(&db, &["a"], 1.0).expect("write");
     let after_save = listings();
     head_commit(&db).expect("read");
-    assert_eq!(listings(), after_save + 1, "one listing after a save");
     read_parameter(&db, "unit", "capacity", "Base").expect("read");
+    write(&db, &["a"], 2.0).expect("write");
     head_commit(&db).expect("read");
-    assert_eq!(listings(), after_save + 1, "and none after that");
+    assert_eq!(listings(), after_save, "no listing after the core's saves");
 
-    // Another client's change is listed (and a macro caught) on the next open.
+    // Another client's change after the save is listed (and a macro caught)
+    // on the next open.
     direct_sql(&db, "CREATE MACRO lower(x) AS x;");
     assert_shadowed(head_commit(&db), "lower", "macro");
-    assert_eq!(listings(), after_save + 2);
+    assert_eq!(listings(), after_save + 1);
+}
+
+/// Which writers re-stamp the file as clean after their commit (the core's
+/// write cycle, `conn::run_txn_once`) and which leave the next open to list
+/// (their own connections, or a cycle that wrote nothing or failed).
+#[test]
+fn which_writers_re_stamp_the_file() {
+    use nodal_db_core::api::{commit_structural, ingest_segments, Segment};
+    use nodal_db_core::conn::builtin_guard_own_writes;
+    use nodal_db_core::erasure::{erase_alternative, EraseOpts};
+    use nodal_db_core::types::{ObjectDeleteKey, ObjectKind, ObjectRef, StructuralChange};
+
+    let (dir, db) = fresh_db();
+    let counts = |p: &Path| (builtin_guard_listings(p), builtin_guard_own_writes(p));
+    // Run `op`, then open the file once: (re-stamped, listed on that open).
+    let after = |p: &Path, op: &dyn Fn() -> bool| {
+        let (_, w0) = counts(p);
+        let ok = op();
+        let (l1, w1) = counts(p);
+        head_commit(p).expect("open");
+        let (l2, _) = counts(p);
+        (ok, w1 > w0, l2 > l1)
+    };
+
+    // Commits through the write cycle re-stamp; the next open lists nothing.
+    assert_eq!(
+        after(&db, &|| write(&db, &["a"], 1.0).is_ok()),
+        (true, true, false),
+        "a save"
+    );
+    let seg = || Segment {
+        class: "unit".into(),
+        parameter: "capacity".into(),
+        alternative: "Base".into(),
+        batches: vec![scalar(&["b"], 1.0)],
+        domains: Vec::new(),
+    };
+    let import = || ingest_segments(&db, vec![seg()], "t", "m", WriteOptions::default()).is_ok();
+    assert_eq!(
+        after(&db, &import),
+        (true, true, false),
+        "an import (CLI and skin)"
+    );
+    let structural = |name: &str| {
+        commit_structural(
+            &db,
+            vec![StructuralChange::CreateAlternative {
+                name: name.into(),
+                description: None,
+            }],
+            "t",
+            "m",
+            WriteOptions::default(),
+        )
+        .is_ok()
+    };
+    assert_eq!(
+        after(&db, &|| structural("run1")),
+        (true, true, false),
+        "structural"
+    );
+    let erase = || {
+        let key = ObjectDeleteKey {
+            kind: ObjectKind::Alternative,
+            class: None,
+            target: ObjectRef::Name("run1".into()),
+        };
+        erase_alternative(&db, &key, &EraseOpts::default(), "t").is_ok()
+    };
+    assert_eq!(after(&db, &erase), (true, true, false), "an erase");
+
+    // A no-op save (skip-unchanged: rolled back, no commit row) writes
+    // nothing: no re-stamp, and the stamp of its open still holds.
+    let head = head_commit(&db).unwrap();
+    assert_eq!(
+        after(&db, &|| write(&db, &["a"], 1.0).is_ok()),
+        (true, false, false),
+        "a no-op save"
+    );
+    assert_eq!(head_commit(&db).unwrap(), head, "no commit");
+
+    // A failed cycle (a stale precondition, rolled back) is never re-stamped.
+    let stale = || {
+        let opts = WriteOptions {
+            expect_commit: Some(head - 1),
+            ..Default::default()
+        };
+        write_parameter(
+            &db,
+            "unit",
+            "capacity",
+            "Base",
+            scalar(&["a"], 9.0),
+            &[],
+            opts,
+            "t",
+            "m",
+        )
+        .is_ok()
+    };
+    assert_eq!(after(&db, &stale), (false, false, false), "a stale write");
+
+    // The core's other writers use their own connections: no re-stamp, and
+    // the next open lists the changed file.
+    assert_eq!(
+        after(&db, &|| compact(&db).is_ok()),
+        (true, false, true),
+        "compaction"
+    );
+    let mut wal = db.as_os_str().to_owned();
+    wal.push(".wal");
+    direct_sql(
+        &db,
+        "PRAGMA disable_checkpoint_on_shutdown; CREATE TABLE user_t (i INTEGER);",
+    );
+    assert!(Path::new(&wal).exists());
+    head_commit(&db).expect("open");
+    assert_eq!(
+        after(&db, &|| compact(&db).is_ok()),
+        (true, false, true),
+        "compaction with a leftover-WAL fold"
+    );
+    let dest = dir.path().join("x.duckdb");
+    let opts = ExtractOpts {
+        user: "t",
+        ..Default::default()
+    };
+    assert_eq!(
+        after(&dest, &|| extract(&db, &dest, &opts).is_ok()),
+        (true, false, true),
+        "extract (the new file)"
+    );
+    let fresh = dir.path().join("y.duckdb");
+    assert_eq!(
+        after(&fresh, &|| init_schema_with_default(&fresh, Some("Base"))
+            .is_ok()),
+        (true, false, true),
+        "schema_init"
+    );
 }
 
 /// A change that only reaches the WAL (the other client skipped its

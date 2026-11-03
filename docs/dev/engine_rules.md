@@ -463,12 +463,23 @@ key …`), so the message tells the user to compact after the drop.
 Cost: the listing (`system.main.duckdb_functions()`, ~13 ms) is cached
 per process by path and file state (size, mtime, inode, ctime of the
 file and its WAL), stamped before and after the open and cached only
-when the two agree. An unchanged file costs a few `stat` calls; a
-changed one (a save, another client, a WAL-only change) is listed on its
-next open. Re-stamping after the core's own commit (an explicit
-`CHECKPOINT` before the close) was measured and not taken: it saved
-~22 ms on the next open but added 3–5 % to every save (2026-11-03).
-The core's temp files leave the cache when they go, and it is capped.
+when the two agree. An unchanged file costs a few `stat` calls; a file
+another client changed (a WAL-only change included) is listed on its
+next open. A commit through the core's write cycle (saves, imports,
+structural commits, erasure) re-stamps the file as clean: an explicit
+`CHECKPOINT` on the held RW connection after `COMMIT`, the stamp, the
+close, then a re-stat, and the stamp is recorded only if the close left
+it unchanged. Sound because the guard passed at this open, the stamp is
+taken while the RW connection holds the file's lock, and the core writes
+only its own rows and vetted DDL, never a user macro. Measured
+(2026-11-03, release, medians of 200 single-value saves, 3 runs): +3.0
+to +5.3 ms per save (3–5 %), −22 ms on the next open (~90 → ~67 ms);
+the owner chose the trade. A no-op save (rolled back) and a failed
+cycle record nothing (the stamp of their open still holds or the next
+open lists). Compaction (and its leftover-WAL fold), extract and
+`schema_init` use their own connections and do not re-stamp: the next
+open lists. The core's temp files leave the cache when they go, and it
+is capped.
 
 Fully qualified `system.main.lower(…)` escapes a shadow (`main.lower`,
 `lower` and `system.lower` do not; a file may create a `system` schema,
@@ -480,7 +491,7 @@ guard refuse every file (CONTRIBUTING "DuckDB upgrades"). Guards:
 [`tests/shadowed_builtin_guard.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/shadowed_builtin_guard.rs)
 (the refusal on write, read, compaction, extract and init after a cached
 clean check; spellings, families and operators; the DROP hint as given,
-for awkward file names; what is allowed; the listing count per open; a
+for awkward file names; what is allowed; the listing count per open; which writers re-stamp; a
 WAL-only change; the shadow is real; compaction refuses a duplicate
 written under the macro) and
 [`tests/shadowed_builtin_engine_check.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/shadowed_builtin_engine_check.rs)

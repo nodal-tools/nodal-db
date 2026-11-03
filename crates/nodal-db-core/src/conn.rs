@@ -183,6 +183,8 @@ pub(crate) fn file_stamp(db_path: &Path) -> Option<FileStamp> {
 struct GuardEntry {
     clean: Option<FileStamp>,
     listings: u64,
+    /// Times a core commit re-stamped the file as clean ([`record_own_write`]).
+    own_writes: u64,
 }
 
 /// The guard's cache, by [`canonical_path_key`]. Bounded: the core's own
@@ -222,6 +224,15 @@ pub fn builtin_guard_listings(db_path: &Path) -> u64 {
         .map_or(0, |e| e.listings)
 }
 
+/// Test hook: how many times a core commit re-stamped `db_path` as clean
+/// (`record_own_write`) in this process.
+#[doc(hidden)]
+pub fn builtin_guard_own_writes(db_path: &Path) -> u64 {
+    guard_cache()
+        .get(&canonical_path_key(db_path))
+        .map_or(0, |e| e.own_writes)
+}
+
 /// Refuse a database file that defines a macro shadowing a DuckDB built-in
 /// function (engine rule 8, "A file must not shadow a built-in";
 /// [`DbError::ShadowedBuiltin`]). Run by [`open_with_retry`] on every core
@@ -248,12 +259,15 @@ pub fn builtin_guard_listings(db_path: &Path) -> u64 {
 /// an unchanged file costs a few `stat` calls. The stamp is taken before
 /// and after the open and cached only when the two agree, so a change that
 /// races the open is listed again next time. Any change to the file or its
-/// WAL (another process's `CREATE MACRO`, or the core's own commit) re-runs
-/// the listing on the next open, so a save costs one listing on the open
-/// after it. Re-stamping after the core's own commit (an explicit
-/// `CHECKPOINT` before the close, then the stamp) was measured and not
-/// taken: it saved ~22 ms on the next open but added 3-5 ms (3-5 %) to
-/// every save (release, 2026-11-03). A refusal is never cached. The residual gap (recorded):
+/// WAL (another process's `CREATE MACRO`) re-runs the listing on the next
+/// open. A commit through [`run_txn_once`] does not: [`stamp_own_write`] /
+/// [`record_own_write`] re-stamp the file after it. That trade was measured
+/// (release, 2026-11-03, medians of 200 single-value saves, 3 runs): +3.0 to
+/// +5.3 ms per save (the explicit `CHECKPOINT`, about 3-5 %), -22 ms on the
+/// next open (about 90 ms to 67 ms); the owner chose it. The core's other
+/// writers (compaction and its WAL fold, extract, `schema_init`, the
+/// read-surface refresh verb) do not re-stamp: the next open lists. A
+/// refusal is never cached. The residual gap (recorded):
 /// a change that leaves the size, mtime, inode and ctime of both files
 /// equal, which needs a filesystem with coarse timestamps.
 pub(crate) fn guard_builtins(
@@ -276,6 +290,35 @@ pub(crate) fn guard_builtins(
         store_clean(key, after);
     }
     Ok(())
+}
+
+/// After a committed write cycle on `conn`, before the close: `CHECKPOINT`
+/// (so the close has nothing left to write) and return the file's stamp
+/// then, for [`record_own_write`] after the close. `None` when the
+/// checkpoint fails (nothing is recorded; the next open lists).
+///
+/// Why recording it as clean is sound: the guard passed at this
+/// connection's open (cached or listed), the stamp is taken while this RW
+/// connection holds the file's lock (no other process can change it), and
+/// the core writes only its own rows and its own vetted DDL (the read
+/// surface), never a user macro. [`record_own_write`] re-stats after the
+/// close, so a change by anyone after the close is not recorded.
+fn stamp_own_write(conn: &Connection, db_path: &Path) -> Option<FileStamp> {
+    conn.execute_batch("CHECKPOINT").ok()?;
+    file_stamp(db_path)
+}
+
+/// Record [`stamp_own_write`]'s stamp as clean once the connection is
+/// closed, only if the file still has it (re-stat'ed now); otherwise leave
+/// the cache as it is, and the next open lists.
+fn record_own_write(db_path: &Path, stamp: Option<FileStamp>) {
+    if let Some(stamp) = stamp {
+        if file_stamp(db_path).as_ref() == Some(&stamp) {
+            let key = canonical_path_key(db_path);
+            store_clean(key.clone(), stamp);
+            guard_cache().entry(key).or_default().own_writes += 1;
+        }
+    }
 }
 
 /// The uncached check of [`guard_builtins`], over every database attached to
@@ -504,12 +547,20 @@ where
             TxnEnd::Commit => conn.execute_batch("COMMIT")?,
             TxnEnd::Rollback => conn.execute_batch("ROLLBACK")?,
         }
-        Ok(value)
+        Ok((value, end))
     })();
 
     match result {
-        Ok(value) => {
+        Ok((value, end)) => {
+            // The shadowing guard's re-stamp after the core's own commit
+            // (`stamp_own_write`): the next open of the file then needs no
+            // catalog listing. A rolled-back cycle (nothing written) leaves
+            // the stamp cached at the open as it is.
+            let stamp = (end == TxnEnd::Commit)
+                .then(|| stamp_own_write(&conn, db_path))
+                .flatten();
             conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
+            record_own_write(db_path, stamp);
             Ok(value)
         }
         Err(e) => {

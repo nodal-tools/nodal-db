@@ -673,9 +673,13 @@ impl UnmappedValues {
 /// plan output shows the blast radius before apply (delete preview).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MigrationStep {
+    /// Rename a class. `missing_source` (default tolerate) as on
+    /// `RenameParameter`: an absent source is a note and a no-op (the
+    /// rename already applied, or the class never materialized).
     RenameClass {
         from: String,
         to: String,
+        missing_source: MissingSource,
     },
     /// Rename a definition within its class. v2 extensions: `on_collision`
     /// (G2 — v28/v66's drop-stale-source), and `map_values` (G6 — v65's
@@ -739,32 +743,22 @@ pub enum MigrationStep {
     /// D14/G1: explicit versioned close-out of a definition + its values
     /// (object-delete Parameter cascade). Target absent ⇒ no-op with a note
     /// (close-out intent already satisfied).
-    DropParameter {
-        class: String,
-        parameter: String,
-    },
+    DropParameter { class: String, parameter: String },
     /// D14/G1: explicit versioned close-out of a class + its entities,
     /// definitions, values, and dependent dimension classes (object-delete
     /// Class cascade, cross-kind closure).
-    DropClass {
-        class: String,
-    },
+    DropClass { class: String },
     /// D14/G1: close out an ORPHAN value list (+ its member rows). Refuses
     /// while any current definition binds it — there is no cascade here to
     /// share, and dropping a bound list would strand the binding (drop the
     /// definitions first, or rebind them via reconcile).
-    DropValueList {
-        list: String,
-    },
+    DropValueList { list: String },
     /// D14/G1: close out one string list member. While current values or
     /// defaults still hold the string the step SKIPS, which PAUSES the chain
     /// (no substamp, no span version stamp; a re-apply retries) — a drop
     /// never strands data; rewrite first (`merge_list_member` /
     /// `rename_list_member`) or delete the values.
-    DropListMember {
-        list: String,
-        value: String,
-    },
+    DropListMember { list: String, value: String },
     /// Layer 3: a named tool-side program executed through the ordinary write
     /// API (`MigrationRegistry`). The IR records identity/ordering only.
     Run(String),
@@ -786,6 +780,8 @@ enum StepDef {
     RenameClass {
         from: String,
         to: String,
+        #[serde(default, skip_serializing_if = "MissingSource::is_default")]
+        missing_source: MissingSource,
     },
     RenameParameter {
         class: String,
@@ -957,7 +953,18 @@ impl MigrationStep {
     /// One-line rendering for plans and commit messages.
     pub fn describe(&self) -> String {
         match self {
-            MigrationStep::RenameClass { from, to } => format!("rename_class {from} -> {to}"),
+            MigrationStep::RenameClass {
+                from,
+                to,
+                missing_source,
+            } => format!(
+                "rename_class {from} -> {to}{}",
+                if *missing_source == MissingSource::Error {
+                    " (missing_source: error)"
+                } else {
+                    ""
+                }
+            ),
             MigrationStep::RenameParameter {
                 class,
                 from,
@@ -1118,7 +1125,7 @@ pub fn nfc_names(t: &Template) -> Template {
     for m in &mut t.migrations {
         for s in &mut m.steps {
             match s {
-                MigrationStep::RenameClass { from, to } => {
+                MigrationStep::RenameClass { from, to, .. } => {
                     n(from);
                     n(to);
                 }

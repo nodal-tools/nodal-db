@@ -1314,7 +1314,7 @@ fn simulate_span(
 ) {
     for step in &m.steps {
         match step {
-            MigrationStep::RenameClass { from, to } => {
+            MigrationStep::RenameClass { from, to, .. } => {
                 if let Some(mut c) = vocab.classes.remove(&fold(from)) {
                     c.name = to.clone();
                     vocab.classes.insert(fold(to), c);
@@ -1616,6 +1616,7 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     //     reshape) ---
     for c in &t.classes {
         match vocab.classes.get(&fold(&c.name)) {
+            None if renamed_away_class(vocab, t, c, &mut p.blocked) => {}
             None => {
                 p.actions.push(Action::CreateClass {
                     name: c.name.clone(),
@@ -1729,6 +1730,9 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
             let eff = &chk.effective_types[&(ci, pi)];
             let db_param = db_class.and_then(|dc| dc.params.get(&fold(&param.name)));
             match db_param {
+                None if db_class.is_some_and(|dc| {
+                    renamed_away_parameter(vocab, dc, c, param, &mut p.blocked)
+                }) => {}
                 None => {
                     p.actions.push(Action::CreateParameter {
                         class: c.name.clone(),
@@ -1947,6 +1951,89 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     p.actions.sort_by_key(action_rank);
     p.no_op = p.actions.is_empty() && p.blocked.is_empty();
     Ok(p)
+}
+
+/// The renamed-away blocker for a declared class missing from the database
+/// (class_param_rename_PLAN §6.2, critique S2): when its folded name is an
+/// earlier spelling of a live class (a user renamed it away, e.g. in the
+/// editor), re-creating it would fork the class into a second, empty one
+/// (its parameters with template defaults, its seeds) while the renamed
+/// class keeps the data. Blocks, naming the rename, unless the template
+/// also declares that class's current name: then the template itself
+/// renamed it through its own history and a new class under the old name
+/// is what it means. Returns whether it blocked.
+fn renamed_away_class(
+    vocab: &DbVocab,
+    t: &Template,
+    c: &ir::Class,
+    blocked: &mut Vec<String>,
+) -> bool {
+    let Some(olds) = vocab.renamed_classes.get(&fold(&c.name)) else {
+        return false;
+    };
+    let declared = |name: &str| t.classes.iter().any(|x| fold(&x.name) == fold(name));
+    let mut hit = false;
+    for r in olds {
+        let Some(live) = vocab.classes.values().find(|x| x.id == r.id) else {
+            continue;
+        };
+        if declared(&live.name) {
+            continue;
+        }
+        hit = true;
+        blocked.push(format!(
+            "class {:?}: the template declares it, but the database's class {:?} was \
+             renamed to {:?} (commit {}) — re-creating {:?} would fork it into a second, \
+             empty class. Rename it back, or ship a rename_class hint ({} -> {}) and \
+             declare {:?}",
+            c.name, r.old_name, live.name, r.at_commit, c.name, r.old_name, live.name, live.name
+        ));
+    }
+    hit
+}
+
+/// [`renamed_away_class`] for a declared parameter of a matched class `dc`
+/// whose folded name is an earlier spelling of a live parameter of that
+/// same class (a moved parameter is not a rename and never blocks).
+fn renamed_away_parameter(
+    vocab: &DbVocab,
+    dc: &super::dbvocab::DbClass,
+    c: &ir::Class,
+    param: &Parameter,
+    blocked: &mut Vec<String>,
+) -> bool {
+    let Some(olds) = vocab.renamed_parameters.get(&(dc.id, fold(&param.name))) else {
+        return false;
+    };
+    let declared = |name: &str| c.parameters.iter().any(|x| fold(&x.name) == fold(name));
+    let mut hit = false;
+    for r in olds {
+        let Some(live) = dc.params.values().find(|x| x.id == r.id) else {
+            continue;
+        };
+        if declared(&live.name) {
+            continue;
+        }
+        hit = true;
+        blocked.push(format!(
+            "parameter {}.{}: the template declares it, but the database's parameter \
+             {}.{} was renamed to {:?} (commit {}) — re-creating {:?} would fork it into \
+             a second, empty parameter. Rename it back, or ship a rename_parameter hint \
+             ({}.{} -> {}) and declare {:?}",
+            c.name,
+            param.name,
+            dc.name,
+            r.old_name,
+            live.name,
+            r.at_commit,
+            param.name,
+            c.name,
+            r.old_name,
+            live.name,
+            live.name
+        ));
+    }
+    hit
 }
 
 /// The apply precedence of an action kind (see the sort above).
@@ -3577,14 +3664,37 @@ fn execute_step(
     fx: &mut StepEffects,
 ) -> Result<(), DbError> {
     match step {
-        MigrationStep::RenameClass { from, to } => {
+        MigrationStep::RenameClass {
+            from,
+            to,
+            missing_source,
+        } => {
             if !charset_ok(to) {
                 return Err(DbError::Api(format!(
                     "rename_class: target {to:?} must be non-empty, trimmed, and free of control characters"
                 )));
             }
-            let id = lookup_entity_class(conn, from)?
-                .ok_or_else(|| DbError::Api(format!("rename_class: {from:?} not found")))?;
+            // Absent-source tolerance, as on `rename_parameter`: the rename
+            // may already be applied (by an earlier partial chain, or by a
+            // user rename of the database the hint now catches up with) or
+            // the class may never have materialized; the final reconcile
+            // owns the end state. `missing_source: error` opts out.
+            let Some(id) = lookup_entity_class(conn, from)? else {
+                if *missing_source == MissingSource::Error {
+                    return Err(DbError::Api(format!(
+                        "rename_class: {from:?} not found (missing_source: error)"
+                    )));
+                }
+                fx.notes.push(format!(
+                    "rename_class {from} -> {to}: source absent — {}; nothing to rename",
+                    if lookup_entity_class(conn, to)?.is_some() {
+                        "target live, already applied"
+                    } else {
+                        "never materialized or already superseded"
+                    }
+                ));
+                return Ok(());
+            };
             // Exclude-by-id, not by Rust fold (R4 critique K6,
             // name_fold_identity_PLAN §10; the same ruling as structural
             // renames' `rename_identity`): a Rust-fold pre-filter here would

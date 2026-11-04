@@ -1752,3 +1752,238 @@ fn export_drops_stale_audit_rule_names_with_a_warning() {
     );
     nodal_db_core::template::validate(&t).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Template reconcile after a rename (tests 25-27, S2 + RenameClass hint)
+// ---------------------------------------------------------------------------
+
+fn tmpl(version: &str, body: &str) -> nodal_db_core::template::Template {
+    parse_str(&format!(
+        "template: {{name: t, version: \"{version}\"}}\n{body}"
+    ))
+    .unwrap()
+}
+
+fn apply_t(
+    db: &Path,
+    t: &nodal_db_core::template::Template,
+) -> Result<nodal_db_core::template::ApplyOutcome, DbError> {
+    apply(
+        db,
+        t,
+        &MigrationRegistry::new(),
+        "t",
+        "",
+        &ApplyOptions::default(),
+    )
+}
+
+const NODE_V: &str =
+    "classes:\n  - name: node\n    parameters:\n      - {name: demand, types: [{kind: float}]}\n";
+
+#[test]
+fn reconcile_blocks_a_declared_class_renamed_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    apply_t(&db, &tmpl("1", NODE_V)).unwrap();
+    call(
+        &db,
+        vec![seg("node", "demand", "Base", "n1", 5.0)],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    cs(&db, vec![allowed(ren_class("node", "bus"))]);
+    // The same template again: the hash short-circuit keeps the rename.
+    let out = apply_t(&db, &tmpl("1", NODE_V)).unwrap();
+    assert!(out.no_op);
+    assert!(class_id(&db, "bus") > 0);
+    // A changed template: blocked, naming the rename; nothing created.
+    let t2 = tmpl("2", NODE_V);
+    let p = nodal_db_core::template::plan(&db, &t2).unwrap();
+    assert!(
+        p.blocked.iter().any(|b| b.contains("renamed to \"bus\"")),
+        "{:?}",
+        p.blocked
+    );
+    let m = api_err(apply_t(&db, &t2).map(|_| WriteReport::default()));
+    assert!(m.contains("renamed to \"bus\""), "{m}");
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name = 'node'"
+        ),
+        0
+    );
+    // The precision case: the template declares the current name too, so
+    // a new `node` is what it means — no block.
+    let both = format!("{NODE_V}  - name: bus\n    parameters:\n      - {{name: demand, types: [{{kind: float}}]}}\n");
+    apply_t(&db, &tmpl("3", &both)).unwrap();
+    assert!(class_id(&db, "node") != class_id(&db, "bus"));
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM read_parameter('bus', 'demand')"),
+        1
+    );
+}
+
+#[test]
+fn reconcile_blocks_a_declared_parameter_renamed_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    apply_t(&db, &tmpl("1", NODE_V)).unwrap();
+    cs(&db, vec![allowed(ren_param("node", "demand", "load"))]);
+    let m = api_err(apply_t(&db, &tmpl("2", NODE_V)).map(|_| WriteReport::default()));
+    assert!(
+        m.contains("parameter node.demand") && m.contains("renamed to \"load\""),
+        "{m}"
+    );
+    // Declaring both: the old name is created anew, the renamed one kept.
+    let both = "classes:\n  - name: node\n    parameters:\n      - {name: demand, types: [{kind: float}]}\n      - {name: load, types: [{kind: float}]}\n";
+    apply_t(&db, &tmpl("3", both)).unwrap();
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE valid_to_commit IS NULL"
+        ),
+        2
+    );
+}
+
+#[test]
+fn reconcile_ignores_a_case_only_rename_and_description_edits_come_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let v = "classes:\n  - name: node\n    description: \"From the template.\"\n";
+    apply_t(&db, &tmpl("1", v)).unwrap();
+    // A case-only rename and a description edit need no flag.
+    cs(&db, vec![ren_class("node", "Node")]);
+    cs(&db, vec![desc_class("Node", "Local text.")]);
+    let out = apply_t(&db, &tmpl("2", v)).unwrap();
+    assert!(out.plan.blocked.is_empty());
+    // The spelling survives; the template's description is written back.
+    assert_eq!(
+        qopt(
+            &db,
+            "SELECT name || ':' || description FROM entity_class WHERE cur_name = 'node'"
+        ),
+        Some("Node:From the template.".into())
+    );
+}
+
+#[test]
+fn reconcile_blocks_a_renamed_dimension_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let v = "classes:\n  - name: unit\n  - name: node\n  - name: unit__node\n    dimensions: [unit, node]\n";
+    apply_t(&db, &tmpl("1", v)).unwrap();
+    cs(&db, vec![allowed(ren_class("node", "bus"))]);
+    let p = nodal_db_core::template::plan(&db, &tmpl("2", v)).unwrap();
+    assert!(
+        p.blocked
+            .iter()
+            .any(|b| b.contains("declared dimensions differ")),
+        "{:?}",
+        p.blocked
+    );
+    assert!(
+        p.blocked.iter().any(|b| b.contains("renamed to \"bus\"")),
+        "{:?}",
+        p.blocked
+    );
+}
+
+#[test]
+fn rename_class_hint_already_applied_is_a_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    apply_t(&db, &tmpl("1", NODE_V)).unwrap();
+    // The user renamed it first; the template's own hint catches up.
+    cs(&db, vec![allowed(ren_class("node", "bus"))]);
+    let v2 = "classes:\n  - name: bus\n    parameters:\n      - {name: demand, types: [{kind: float}]}\n\
+              migrations:\n  - from: \"1\"\n    to: \"2\"\n    steps:\n      - rename_class: {from: node, to: bus}\n";
+    let out = apply_t(&db, &tmpl("2", v2)).unwrap();
+    assert!(
+        out.notes.iter().any(|n| n.contains("already applied")),
+        "{:?}",
+        out.notes
+    );
+    assert!(out.converged);
+    // `missing_source: error` refuses instead.
+    let dir2 = tempfile::tempdir().unwrap();
+    let db2 = fresh_db(&dir2);
+    apply_t(&db2, &tmpl("1", NODE_V)).unwrap();
+    cs(&db2, vec![allowed(ren_class("node", "bus"))]);
+    let strict = v2.replace(
+        "{from: node, to: bus}",
+        "{from: node, to: bus, missing_source: error}",
+    );
+    let m = api_err(apply_t(&db2, &tmpl("2", &strict)).map(|_| WriteReport::default()));
+    assert!(m.contains("missing_source: error"), "{m}");
+}
+
+// ---------------------------------------------------------------------------
+// History-free extract after a rename (test 28)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn history_free_extract_after_a_rename_keeps_the_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded(&dir);
+    let id = class_id(&db, "node");
+    let before = q1(&db, "SELECT max(id) FROM commit");
+    cs(
+        &db,
+        vec![ren_class("node", "bus"), ren_param("bus", "demand", "load")],
+    );
+    let dest = dir.path().join("x.duckdb");
+    nodal_db_core::extract::extract(
+        &db,
+        &dest,
+        &nodal_db_core::extract::ExtractOpts {
+            as_of: None,
+            user: "t",
+            note: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(class_id(&dest, "bus"), id);
+    assert_eq!(closed(&dest, "entity_class"), 0);
+    assert_eq!(closed(&dest, "parameter_definition"), 0);
+    assert_eq!(
+        q1(&dest, "SELECT count(*) FROM read_parameter('bus', 'load')"),
+        1
+    );
+    // The source keeps the history: the old name as of before the rename.
+    assert_eq!(
+        qopt(
+            &db,
+            &format!("SELECT name FROM entity_class_asof({before}) WHERE id = {id}")
+        ),
+        Some("node".into())
+    );
+    // An as-of extract before the rename carries the old name.
+    let dest2 = dir.path().join("y.duckdb");
+    nodal_db_core::extract::extract(
+        &db,
+        &dest2,
+        &nodal_db_core::extract::ExtractOpts {
+            as_of: Some(before),
+            user: "t",
+            note: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(class_id(&dest2, "node"), id);
+    // The extract forgets the renamed-away spelling (no closed rows): a
+    // later changed-template reconcile cannot see the rename any more.
+    let conn = Connection::open(&dest).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM entity_class WHERE lower(name) = 'node'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0);
+}

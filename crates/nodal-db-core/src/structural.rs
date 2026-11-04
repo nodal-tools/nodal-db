@@ -328,22 +328,26 @@ impl CallRenames {
             && self.parameters.is_empty()
     }
 
-    /// The current name of the class `name` was renamed away from in this
-    /// call, when `name` no longer resolves (a same-call create of the old
-    /// name makes it resolve again, to the new object).
     /// Did a rename of this call change any class or parameter name's
     /// bytes (so the name-keyed metadata documents may need a rewrite)?
     pub(crate) fn renamed_vocabulary(&self) -> bool {
         !self.class_original.is_empty() || !self.parameter_original.is_empty()
     }
 
+    /// The current name of the class `name` was renamed away from in this
+    /// call, when `name` no longer resolves (a same-call create of the old
+    /// name makes it resolve again, to the new object). The name is read
+    /// by id from the open transaction, so it is the object's name now,
+    /// whatever renamed it later in the call.
     pub(crate) fn renamed_class(
         &self,
         conn: &Connection,
         name: &str,
     ) -> Result<Option<String>, DbError> {
         match self.classes.get(&fold(name)) {
-            Some((_, to)) if lookup_entity_class(conn, name)?.is_none() => Ok(Some(to.clone())),
+            Some((id, _)) if lookup_entity_class(conn, name)?.is_none() => {
+                current_name(conn, "entity_class", *id)
+            }
             _ => Ok(None),
         }
     }
@@ -363,7 +367,9 @@ impl CallRenames {
             return Ok(None);
         };
         match self.parameters.get(&(cid, fold(name))) {
-            Some((_, to)) if lookup_parameter(conn, cid, name)?.is_none() => Ok(Some(to.clone())),
+            Some((id, _)) if lookup_parameter(conn, cid, name)?.is_none() => {
+                current_name(conn, "parameter_definition", *id)
+            }
             _ => Ok(None),
         }
     }
@@ -374,7 +380,9 @@ impl CallRenames {
         name: &str,
     ) -> Result<Option<String>, DbError> {
         match self.alternatives.get(&fold(name)) {
-            Some((_, to)) if lookup_alternative(conn, name)?.is_none() => Ok(Some(to.clone())),
+            Some((id, _)) if lookup_alternative(conn, name)?.is_none() => {
+                current_name(conn, "alternative", *id)
+            }
             _ => Ok(None),
         }
     }
@@ -385,9 +393,24 @@ impl CallRenames {
         name: &str,
     ) -> Result<Option<String>, DbError> {
         match self.scenarios.get(&fold(name)) {
-            Some((_, to)) if lookup_scenario(conn, name)?.is_none() => Ok(Some(to.clone())),
+            Some((id, _)) if lookup_scenario(conn, name)?.is_none() => {
+                current_name(conn, "scenario", *id)
+            }
             _ => Ok(None),
         }
+    }
+}
+
+/// The current name of `table`'s object `id` (in the open transaction).
+fn current_name(conn: &Connection, table: &str, id: i64) -> Result<Option<String>, DbError> {
+    match conn.query_row(
+        &format!("SELECT name FROM {table} WHERE cur_id = ?"),
+        params![id],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(n) => Ok(Some(n)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -1759,10 +1782,15 @@ pub(crate) fn prepare_structural(
         } => Some((fold(current), current, new_name)),
         _ => None,
     })?;
+    // A description-only item (`new_name == current`, as written) carries no
+    // rename intent of its own, so it does not count as a second rename of
+    // its source: a description edit then a rename of the same class is
+    // allowed in either order (the in-transaction swap guard and uniqueness
+    // check are unaffected; same for parameters below).
     check_rename_coherence(changes, |ch| match ch {
         StructuralChange::RenameEntityClass {
             current, new_name, ..
-        } => Some((fold(current), current, new_name)),
+        } if current != new_name => Some((fold(current), current, new_name)),
         _ => None,
     })?;
     // Parameters: keyed by (class as written, parameter). A class renamed
@@ -1775,7 +1803,7 @@ pub(crate) fn prepare_structural(
             current,
             new_name,
             ..
-        } => Some((
+        } if current != new_name => Some((
             format!("{}\u{0}{}", fold(class), fold(current)),
             current,
             new_name,

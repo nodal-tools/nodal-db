@@ -2025,3 +2025,121 @@ fn a_rename_hint_whose_source_a_user_renamed_elsewhere_is_blocked() {
         2
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review follow-ups
+// ---------------------------------------------------------------------------
+
+/// A rename hint's "declared" exemption looks only at the hint's own class:
+/// another class declaring the user's new name does not make it a chain
+/// that ran further.
+#[test]
+fn a_parameter_hint_exemption_looks_only_at_its_own_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let v1 =
+        "classes:\n  - name: node\n    parameters:\n      - {name: cap, types: [{kind: float}]}\n\
+              \x20 - name: unit\n    parameters:\n      - {name: size, types: [{kind: float}]}\n";
+    apply_t(&db, &tmpl("1", v1)).unwrap();
+    cs(&db, vec![allowed(ren_param("node", "cap", "size"))]);
+    let v2 = "classes:\n  - name: node\n    parameters:\n      - {name: capacity, types: [{kind: float}]}\n\
+              \x20 - name: unit\n    parameters:\n      - {name: size, types: [{kind: float}]}\n\
+              migrations:\n  - from: \"1\"\n    to: \"2\"\n    steps:\n      \
+              - rename_parameter: {class: node, from: cap, to: capacity}\n";
+    let m = api_err(apply_t(&db, &tmpl("2", v2)).map(|_| WriteReport::default()));
+    assert!(m.contains("renamed to \"size\""), "{m}");
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name = 'capacity'"
+        ),
+        0
+    );
+}
+
+/// A description edit and a rename of the same object are allowed in one
+/// call in either order (a description-only item is no second rename).
+#[test]
+fn a_description_edit_and_a_rename_of_one_object_in_either_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded(&dir);
+    let r = cs(
+        &db,
+        vec![
+            desc_class("node", "Buses."),
+            ren_class("node", "bus"),
+            desc_param("bus", "demand", "MW"),
+            ren_param("bus", "demand", "load"),
+        ],
+    );
+    let effects: Vec<SE> = r.structural.iter().map(|o| o.effect).collect();
+    assert_eq!(
+        effects,
+        vec![SE::Updated, SE::Renamed, SE::Updated, SE::Renamed]
+    );
+    let r = cs(
+        &db,
+        vec![
+            ren_class("bus", "grid"),
+            desc_class("grid", "Grid."),
+            ren_param("grid", "load", "demand"),
+            desc_param("grid", "demand", "kW"),
+        ],
+    );
+    let effects: Vec<SE> = r.structural.iter().map(|o| o.effect).collect();
+    assert_eq!(
+        effects,
+        vec![SE::Renamed, SE::Updated, SE::Renamed, SE::Updated]
+    );
+    // One version bump per call.
+    assert_eq!(
+        qopt(
+            &db,
+            "SELECT version || ':' || description FROM entity_class WHERE cur_name = 'grid'"
+        ),
+        Some("3:Grid.".into())
+    );
+    assert_eq!(
+        qopt(&db, "SELECT version || ':' || description FROM parameter_definition WHERE cur_name = 'demand'"),
+        Some("3:kW".into())
+    );
+    // A description edit by the old name after the rename still fails.
+    let m = api_err(call(
+        &db,
+        vec![],
+        vec![ren_class("grid", "net"), desc_class("grid", "x")],
+        vec![],
+        vec![],
+    ));
+    assert!(m.contains("does not exist"), "{m}");
+}
+
+/// The renamed-away refusal names the object's name at the end of the
+/// structural changes, after a chain.
+#[test]
+fn the_renamed_away_refusal_names_the_current_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded(&dir);
+    let m = api_err(call(
+        &db,
+        vec![seg("node", "demand", "Base", "n1", 1.0)],
+        vec![ren_class("node", "bus"), ren_class("bus", "grid")],
+        vec![],
+        vec![],
+    ));
+    assert!(m.contains("class \"node\" was renamed to \"grid\""), "{m}");
+    let m = api_err(call(
+        &db,
+        vec![seg("node", "demand", "Base", "n1", 1.0)],
+        vec![
+            ren_param("node", "demand", "load"),
+            ren_param("node", "load", "Load2"),
+        ],
+        vec![],
+        vec![],
+    ));
+    assert!(
+        m.contains("parameter \"demand\" was renamed to \"Load2\""),
+        "{m}"
+    );
+}

@@ -260,6 +260,47 @@ do either.
     `api::commit_changes` combines writes, deletions and structural
     changes in one commit.
 
+#### Values of several types for one parameter
+
+A parameter can declare several value types, for example a `float` and
+a `string` constant, or a constant and an indexed series. Each value is
+held to the declared types when it is written: a batch must match
+exactly one of them (value kind, number of index dimensions, their kinds
+and names), and a write never adds a type to the declaration. A batch
+that matches none is refused with nothing written, as
+`DbError::UndeclaredValueType` in Rust and `nodal_db.UndeclaredValueType`
+in Python (an `ApiError` subclass). It names the target
+(`segment_index`, `class`/`class_name`, `parameter`, `alternative`), the
+first `entity` of the refused batch and its `entity_count`, the batch's
+`value_kind` and `dimensions` (`(name, kind)` pairs, empty for a
+constant) and the `declared` types.
+
+Values of different types for one parameter and alternative can go in
+one commit: give the segment one batch per type. The core groups a
+segment's batches by their column types; batches of the same types are
+one table, as always, and each group is checked against the declared
+types on its own. An entity can appear in one group only, since it has
+one value. If the parameter has no declared type yet, the first group
+declares it, and a group of another type is then refused like any
+undeclared type.
+
+```python
+db.ensure_entity_class("node", user="alice")
+db.ensure_parameter_definition(
+    "node", "level", types=[{"kind": "float"}, {"kind": "string"}],
+    user="alice")
+north = pa.record_batch({"entity": ["north"], "value": [12.0]})
+south = pa.record_batch({"entity": ["south"], "value": ["high"]})
+db.commit_changes(
+    segments=[{"class": "node", "parameter": "level", "alternative": "Base",
+               "batch": [north, south]}],          # a list: one batch per type
+    user="alice")
+```
+
+In Rust, put both batches in `Segment::batches`. Writing a value of
+another type for an entity that already has one (a string where a float
+was) replaces it, as a write of the same type would.
+
 ### Writing a value that has not changed
 
 A value equal to the one already stored is not written again: no new

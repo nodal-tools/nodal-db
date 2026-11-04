@@ -80,6 +80,15 @@ answer will be a served API, not a protocol document.
   the macro (the message gives the statement), then compacts the file,
   which fails loudly on a duplicate name written while the macro
   existed.
+- A value batch whose type the parameter does not declare is refused
+  with nothing written: `UndeclaredValueType`
+  (`DbError::UndeclaredValueType`, `nodal_db.UndeclaredValueType`, an
+  `ApiError` subclass) naming the segment, target, first entity, entity
+  count and the batch's type. One segment may carry batches of several
+  declared types (one parameter and alternative, values of several types
+  in one commit); each group of batches with the same column types is
+  checked on its own. See
+  [Values of several types for one parameter](../usage.md#values-of-several-types-for-one-parameter).
 - Renames keep ids, so store ids (or re-read names) rather than caching
   class and parameter names across commits. Within one call, address an
   object by the name it has at that point (after a rename, its new name);

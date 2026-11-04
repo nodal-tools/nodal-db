@@ -233,11 +233,14 @@ fn read_identity(conn: &Connection, table: &str, id: i64) -> Result<IdentityRow,
     )?)
 }
 
-/// Versioned identity rename (close + same-id successor, version+1), with the
-/// same-commit in-place edit (D-S5) and the self-excluding uniqueness check (m5).
-type Revise = fn(&Connection, i64, i64, &str, Option<&str>, i64) -> Result<(), DbError>;
+/// An identity table's one revision site (`revise_alternative_row` /
+/// `revise_scenario_row`: `(conn, c, id, name, description, version,
+/// valid_from)`), which holds the same-commit in-place branch (D-S5).
+type Revise = fn(&Connection, i64, i64, &str, Option<&str>, i64, i64) -> Result<(), DbError>;
 type Lookup = fn(&Connection, &str) -> Result<Option<i64>, DbError>;
 
+/// Versioned identity rename (close + same-id successor, version+1), with the
+/// same-commit in-place edit (D-S5) and the self-excluding uniqueness check (m5).
 #[allow(clippy::too_many_arguments)]
 fn rename_identity(
     conn: &Connection,
@@ -260,35 +263,55 @@ fn rename_identity(
             )));
         }
     }
-    // A rename that differs only in case or Unicode form IS a real rename
-    // (editor request R4, `nodal-editor/specs/core_requests_2026-10-27.md`,
-    // owner decision 2026-10-27: the client decides whether case matters,
-    // not the core). `new_name` arrives already NFC (`nfc_structural_names`,
-    // the text rule's API-entry-point normalization) and the stored
-    // `row.name` is NFC too (every writer of this table goes through the
-    // same rule), so a plain byte comparison is exactly "byte-identical
-    // post-NFC" — no Rust-side fold here, matching the owner's ruling that
-    // the fold belongs only in the uniqueness lookup above (self-excluded
-    // by id), never in front of it.
-    let name_same = row.name == new_name;
-    let desc_change = description.is_some() && description != row.description.as_deref();
-    if name_same && !desc_change {
+    let Some(rev) = decide_revision(&row.name, row.description.as_deref(), new_name, description)
+    else {
         return Ok(StructuralEffect::NoOp);
+    };
+    revise(
+        conn,
+        c,
+        id,
+        new_name,
+        rev.description.as_deref(),
+        row.version,
+        row.valid_from,
+    )?;
+    Ok(rev.effect)
+}
+
+/// What one rename or description revision does to its row
+/// (class_param_rename_PLAN §4.4): the row's description after it, and the
+/// effect to report. `None` from [`decide_revision`] is a `NoOp`.
+pub(crate) struct Revision {
+    pub(crate) description: Option<String>,
+    pub(crate) effect: StructuralEffect,
+}
+
+/// The one decision step of the four rename ops (alternative, scenario,
+/// entity class, parameter definition).
+///
+/// A rename that differs only in case or Unicode form IS a real rename
+/// (editor request R4, owner decision 2026-10-27: the client decides
+/// whether case matters, not the core). `new_name` arrives already NFC
+/// (`nfc_structural_names`, the text rule's API-entry-point normalization)
+/// and the stored `row_name` is NFC too, so a plain byte comparison is
+/// exactly "byte-identical post-NFC" — no Rust-side fold here: the fold
+/// belongs only in the uniqueness lookup (self-excluded by id).
+pub(crate) fn decide_revision(
+    row_name: &str,
+    row_desc: Option<&str>,
+    new_name: &str,
+    description: Option<&str>,
+) -> Option<Revision> {
+    let name_same = row_name == new_name;
+    let desc_change = description.is_some() && description != row_desc;
+    if name_same && !desc_change {
+        return None;
     }
-    let new_desc = description.or(row.description.as_deref());
-    if row.valid_from == c {
-        // Created THIS commit: edit the not-yet-visible row in place (D-S5).
-        conn.execute(
-            &format!(
-                "UPDATE {table} SET name = ?, description = ? \
-                 WHERE id = ? AND valid_to_commit IS NULL"
-            ),
-            params![new_name, crate::text::stored_description(new_desc), id],
-        )?;
-    } else {
-        revise(conn, c, id, new_name, new_desc, row.version)?;
-    }
-    Ok(StructuralEffect::Renamed)
+    Some(Revision {
+        description: description.or(row_desc).map(str::to_string),
+        effect: StructuralEffect::Renamed,
+    })
 }
 
 pub(crate) fn apply_rename_alternative(

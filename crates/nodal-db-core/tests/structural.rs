@@ -288,6 +288,113 @@ fn same_commit_create_then_rename_is_in_place() {
     );
 }
 
+fn ren_alt(current: &str, new_name: &str) -> SC {
+    SC::RenameAlternative {
+        current: current.into(),
+        new_name: new_name.into(),
+        description: None,
+    }
+}
+
+fn ren_scen(current: &str, new_name: &str) -> SC {
+    SC::RenameScenario {
+        current: current.into(),
+        new_name: new_name.into(),
+        description: None,
+    }
+}
+
+fn closed(db: &Path, table: &str) -> i64 {
+    q1(
+        db,
+        &format!("SELECT count(*) FROM {table} WHERE valid_to_commit IS NOT NULL"),
+    )
+}
+
+/// A chain in one call (`a -> b`, `b -> c`): one version bump, one closed
+/// row — the second item edits the successor the first wrote (D-S5).
+#[test]
+fn rename_chain_in_one_call_bumps_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let id = cs(&db, vec![create_alt("a")]).structural[0].object_id;
+    cs(
+        &db,
+        vec![SC::CreateScenario {
+            name: "s".into(),
+            description: None,
+        }],
+    );
+    let r = cs(
+        &db,
+        vec![
+            ren_alt("a", "b"),
+            ren_alt("b", "c"),
+            ren_scen("s", "t"),
+            ren_scen("t", "u"),
+        ],
+    );
+    assert!(r.structural.iter().all(|o| o.effect == SE::Renamed));
+    assert_eq!(r.structural[1].object_id, id);
+    assert_eq!(
+        q1(&db, "SELECT version FROM alternative WHERE cur_name = 'c'"),
+        2
+    );
+    assert_eq!(closed(&db, "alternative"), 1);
+    assert_eq!(
+        q1(&db, "SELECT version FROM scenario WHERE cur_name = 'u'"),
+        2
+    );
+    assert_eq!(closed(&db, "scenario"), 1);
+}
+
+/// A swap through temporary names over two commits: every name a rename
+/// takes was freed by an earlier commit, never earlier in the same call.
+#[test]
+fn rename_swap_over_two_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let r = cs(&db, vec![create_alt("a"), create_alt("b")]);
+    let (ida, idb) = (r.structural[0].object_id, r.structural[1].object_id);
+    cs(&db, vec![ren_alt("a", "t1"), ren_alt("b", "t2")]);
+    cs(&db, vec![ren_alt("t1", "b"), ren_alt("t2", "a")]);
+    assert_eq!(
+        q1(&db, "SELECT id FROM alternative WHERE cur_name = 'b'"),
+        ida
+    );
+    assert_eq!(
+        q1(&db, "SELECT id FROM alternative WHERE cur_name = 'a'"),
+        idb
+    );
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT max(version) FROM alternative WHERE valid_to_commit IS NULL"
+        ),
+        3
+    );
+}
+
+/// Create, then a case-only rename in one call: an in-place UPDATE onto the
+/// same `cur_name` key; version 1, no closed rows (D-S5, R4).
+#[test]
+fn same_commit_create_then_case_only_rename_is_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let r = cs(&db, vec![create_alt("foo"), ren_alt("foo", "FOO")]);
+    assert_eq!(r.structural[1].effect, SE::Renamed);
+    let conn = Connection::open(&db).unwrap();
+    let (name, version): (String, i64) = conn
+        .query_row(
+            "SELECT name, version FROM alternative WHERE cur_name = 'foo'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((name.as_str(), version), ("FOO", 1));
+    assert_eq!(closed(&db, "alternative"), 0);
+}
+
 #[test]
 fn create_rename_scenario() {
     let dir = tempfile::tempdir().unwrap();

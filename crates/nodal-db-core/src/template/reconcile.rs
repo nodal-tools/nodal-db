@@ -2289,23 +2289,27 @@ fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, D
     Ok(n)
 }
 
-struct PdRow {
-    id: i64,
-    entity_class_id: i64,
-    name: String,
-    description: Option<String>,
-    parameter_value_list_id: Option<i64>,
-    unit_id: Option<i64>,
-    required: bool,
-    display_order: Option<i64>,
-    retain_content: bool,
-    version: i64,
+pub(crate) struct PdRow {
+    pub(crate) id: i64,
+    pub(crate) entity_class_id: i64,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) parameter_value_list_id: Option<i64>,
+    pub(crate) unit_id: Option<i64>,
+    pub(crate) required: bool,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) retain_content: bool,
+    pub(crate) version: i64,
+    /// The current row's `valid_from_commit`: equal to the writing commit
+    /// when this commit created or already revised it (the D-S5 branch of
+    /// [`revise_pd_row`]).
+    pub(crate) valid_from: i64,
 }
 
-fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
+pub(crate) fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
     Ok(conn.query_row(
         "SELECT id, entity_class_id, name, description, parameter_value_list_id, unit_id, \
-                required, display_order, retain_content, version \
+                required, display_order, retain_content, version, valid_from_commit \
          FROM parameter_definition WHERE cur_id = ?",
         params![pd_id],
         |r| {
@@ -2320,14 +2324,39 @@ fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
                 display_order: r.get(7)?,
                 retain_content: r.get(8)?,
                 version: r.get(9)?,
+                valid_from: r.get(10)?,
             })
         },
     )?)
 }
 
 /// The one `parameter_definition` revision site: close the current row, insert
-/// the successor (same id, `version + 1`) from `row`.
-fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> {
+/// the successor (same id, `version + 1`) from `row`. A row this commit
+/// created or already revised (`valid_from == c`) is edited in place instead
+/// (D-S5: it was never visible; closing it would trip the span CHECK), so
+/// two revisions of one definition in one commit bump its version once.
+pub(crate) fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> {
+    let description = stored_description(row.description.as_deref());
+    if row.valid_from == c {
+        conn.execute(
+            "UPDATE parameter_definition SET entity_class_id = ?, name = ?, description = ?, \
+                    parameter_value_list_id = ?, unit_id = ?, required = ?, \
+                    display_order = ?, retain_content = ? \
+             WHERE id = ? AND valid_to_commit IS NULL",
+            params![
+                row.entity_class_id,
+                row.name,
+                description,
+                row.parameter_value_list_id,
+                row.unit_id,
+                row.required,
+                row.display_order,
+                row.retain_content,
+                row.id
+            ],
+        )?;
+        return Ok(());
+    }
     close_row(conn, c, "parameter_definition", row.id)?;
     conn.execute(
         "INSERT INTO parameter_definition \
@@ -2338,7 +2367,7 @@ fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> 
             row.id,
             row.entity_class_id,
             row.name,
-            stored_description(row.description.as_deref()),
+            description,
             row.parameter_value_list_id,
             row.unit_id,
             row.required,
@@ -2359,11 +2388,15 @@ pub(crate) struct EcRow {
     pub(crate) required: bool,
     pub(crate) display_order: Option<i64>,
     pub(crate) version: i64,
+    /// The current row's `valid_from_commit` (the D-S5 branch of
+    /// [`revise_ec_row`]).
+    pub(crate) valid_from: i64,
 }
 
 pub(crate) fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> {
     Ok(conn.query_row(
-        "SELECT id, name, description, active_by_default, required, display_order, version \
+        "SELECT id, name, description, active_by_default, required, display_order, version, \
+                valid_from_commit \
          FROM entity_class WHERE cur_id = ?",
         params![id],
         |r| {
@@ -2375,12 +2408,33 @@ pub(crate) fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> 
                 required: r.get(4)?,
                 display_order: r.get(5)?,
                 version: r.get(6)?,
+                valid_from: r.get(7)?,
             })
         },
     )?)
 }
 
+/// The one `entity_class` revision site: close the current row, insert the
+/// same-id successor at `version + 1`; or, for a row this commit created or
+/// already revised (`valid_from == c`), edit it in place (D-S5).
 pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<(), DbError> {
+    let description = stored_description(row.description.as_deref());
+    if row.valid_from == c {
+        conn.execute(
+            "UPDATE entity_class SET name = ?, description = ?, active_by_default = ?, \
+                    required = ?, display_order = ? \
+             WHERE id = ? AND valid_to_commit IS NULL",
+            params![
+                row.name,
+                description,
+                row.active_by_default,
+                row.required,
+                row.display_order,
+                row.id
+            ],
+        )?;
+        return Ok(());
+    }
     close_row(conn, c, "entity_class", row.id)?;
     conn.execute(
         "INSERT INTO entity_class \
@@ -2390,7 +2444,7 @@ pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<()
         params![
             row.id,
             row.name,
-            stored_description(row.description.as_deref()),
+            description,
             row.active_by_default,
             row.required,
             row.display_order,
@@ -2419,7 +2473,8 @@ pub(crate) fn insert_scenario_row(
 }
 
 /// Versioned scenario rename (close current row + insert same-id successor,
-/// version+1) — mirrors [`revise_list_row`].
+/// version+1) — mirrors [`revise_list_row`]. A row this commit created or
+/// already revised (`valid_from == c`) is edited in place (D-S5).
 pub(crate) fn revise_scenario_row(
     conn: &Connection,
     c: i64,
@@ -2427,19 +2482,24 @@ pub(crate) fn revise_scenario_row(
     name: &str,
     description: Option<&str>,
     version: i64,
+    valid_from: i64,
 ) -> Result<(), DbError> {
-    close_row(conn, c, "scenario", id)?;
-    conn.execute(
-        "INSERT INTO scenario (id, name, description, valid_from_commit, version) \
-         VALUES (?, ?, ?, ?, ?)",
-        params![id, name, stored_description(description), c, version + 1],
-    )?;
-    Ok(())
+    revise_identity_row(
+        conn,
+        c,
+        "scenario",
+        id,
+        name,
+        description,
+        version,
+        valid_from,
+    )
 }
 
 /// Versioned alternative rename (close + same-id successor, version+1) — mirrors
 /// [`revise_list_row`]. The insert site for a NEW alternative stays
-/// `api::insert_alternative_row`.
+/// `api::insert_alternative_row`. A row this commit created or already
+/// revised (`valid_from == c`) is edited in place (D-S5).
 pub(crate) fn revise_alternative_row(
     conn: &Connection,
     c: i64,
@@ -2447,16 +2507,53 @@ pub(crate) fn revise_alternative_row(
     name: &str,
     description: Option<&str>,
     version: i64,
+    valid_from: i64,
 ) -> Result<(), DbError> {
-    close_row(conn, c, "alternative", id)?;
+    revise_identity_row(
+        conn,
+        c,
+        "alternative",
+        id,
+        name,
+        description,
+        version,
+        valid_from,
+    )
+}
+
+/// The shared body of the two name-only identity tables' revision sites.
+#[allow(clippy::too_many_arguments)]
+fn revise_identity_row(
+    conn: &Connection,
+    c: i64,
+    table: &str,
+    id: i64,
+    name: &str,
+    description: Option<&str>,
+    version: i64,
+    valid_from: i64,
+) -> Result<(), DbError> {
+    let description = stored_description(description);
+    if valid_from == c {
+        conn.execute(
+            &format!(
+                "UPDATE {table} SET name = ?, description = ? \
+                 WHERE id = ? AND valid_to_commit IS NULL"
+            ),
+            params![name, description, id],
+        )?;
+        return Ok(());
+    }
+    close_row(conn, c, table, id)?;
     conn.execute(
-        "INSERT INTO alternative (id, name, description, valid_from_commit, version) \
-         VALUES (?, ?, ?, ?, ?)",
-        params![id, name, stored_description(description), c, version + 1],
+        &format!(
+            "INSERT INTO {table} (id, name, description, valid_from_commit, version) \
+             VALUES (?, ?, ?, ?, ?)"
+        ),
+        params![id, name, description, c, version + 1],
     )?;
     Ok(())
 }
-
 /// The one `membership` INSERT site (structural_write_api_plan §4.2): base
 /// (`alternative_id = None` ⇒ stored NULL, NEVER 0 — critique M4) and
 /// alternative-scoped rows both insert here. The loader's seed base row

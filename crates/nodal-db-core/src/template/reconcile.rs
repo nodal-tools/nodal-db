@@ -1372,6 +1372,10 @@ fn simulate_span(
                 ..
             } => {
                 if let Some(c) = vocab.classes.get(&fold(class)) {
+                    // The template's declaration of the hint's own class
+                    // (named as it is at this point of the simulated
+                    // chain); none means nothing of it is declared.
+                    let t_class = t.classes.iter().find(|tc| fold(&tc.name) == fold(class));
                     if !c.params.contains_key(&fold(from)) && !c.params.contains_key(&fold(to)) {
                         // As for rename_class: a source a user renamed to a
                         // third name.
@@ -1384,7 +1388,7 @@ fn simulate_span(
                             let Some(live) = c.params.values().find(|p| p.id == r.id) else {
                                 continue;
                             };
-                            let declared = t.classes.iter().any(|tc| {
+                            let declared = t_class.is_some_and(|tc| {
                                 tc.parameters
                                     .iter()
                                     .any(|p| fold(&p.name) == fold(&live.name))

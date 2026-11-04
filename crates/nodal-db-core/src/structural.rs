@@ -138,8 +138,13 @@ pub(crate) fn apply_structural(
             let (id, e) = apply_create_entity(conn, c, class, name.as_deref(), elements, folds)?;
             (StructuralKind::Entity, id, e)
         }
-        StructuralChange::CreateEntityClass { name, dims } => {
-            let (id, e) = apply_create_entity_class(conn, c, name, dims, folds)?;
+        StructuralChange::CreateEntityClass {
+            name,
+            dims,
+            description,
+        } => {
+            let (id, e) =
+                apply_create_entity_class(conn, c, name, dims, description.as_deref(), folds)?;
             (StructuralKind::EntityClass, id, e)
         }
         StructuralChange::CreateParameter {
@@ -278,7 +283,7 @@ fn rename_identity(
                 "UPDATE {table} SET name = ?, description = ? \
                  WHERE id = ? AND valid_to_commit IS NULL"
             ),
-            params![new_name, new_desc, id],
+            params![new_name, crate::text::stored_description(new_desc), id],
         )?;
     } else {
         revise(conn, c, id, new_name, new_desc, row.version)?;
@@ -750,6 +755,7 @@ pub(crate) fn apply_create_entity_class(
     c: i64,
     name: &str,
     dims: &[String],
+    description: Option<&str>,
     folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
     if let Some(f) = find_entity_class(conn, name)? {
@@ -771,7 +777,7 @@ pub(crate) fn apply_create_entity_class(
             .noted(folds, "entity_class", d);
         dim_ids.push(id);
     }
-    let cid = insert_class_row(conn, c, name, None, true, false, None)?;
+    let cid = insert_class_row(conn, c, name, description, true, false, None)?;
     for (i, did) in dim_ids.iter().enumerate() {
         insert_class_dim_row(conn, c, cid, (i + 1) as i64, Some(*did), None)?;
     }
@@ -1205,7 +1211,7 @@ pub(crate) fn prepare_structural(
             StructuralChange::CreateScenario { name, .. } if clash_scen(name) => {
                 return Err(orphan("scenario", name));
             }
-            StructuralChange::CreateEntityClass { name, dims } => {
+            StructuralChange::CreateEntityClass { name, dims, .. } => {
                 if clash_class(name) {
                     return Err(orphan("class", name));
                 }
@@ -1326,7 +1332,7 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             }
             Ok(())
         }
-        StructuralChange::CreateEntityClass { name, dims } => {
+        StructuralChange::CreateEntityClass { name, dims, .. } => {
             require_charset("class", name)?;
             if dims.len() > 4 {
                 return Err(DbError::Api(format!(

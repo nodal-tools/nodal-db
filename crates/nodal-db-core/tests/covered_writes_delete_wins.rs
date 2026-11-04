@@ -916,6 +916,7 @@ fn a_structural_create_and_an_object_delete_of_it_are_refused() {
                 StructuralChange::CreateEntityClass {
                     name: "k".into(),
                     dims: vec![],
+                    description: None,
                 },
                 okey(ObjectKind::Class, None, "K"),
             ),

@@ -877,8 +877,14 @@ pub enum StructuralChange {
         name: Option<String>,
         elements: Vec<String>,
     },
-    /// Idempotent entity-class create (0-D or N-D).
-    CreateEntityClass { name: String, dims: Vec<String> },
+    /// Idempotent entity-class create (0-D or N-D). `description` applies on
+    /// create only (an existing class is a NoOp that checks the dims and
+    /// ignores it); `Some("")` stores no description.
+    CreateEntityClass {
+        name: String,
+        dims: Vec<String>,
+        description: Option<String>,
+    },
     /// Idempotent, typed parameter-definition create.
     CreateParameter {
         class: String,

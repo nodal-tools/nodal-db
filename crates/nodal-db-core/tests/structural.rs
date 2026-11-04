@@ -469,6 +469,7 @@ fn class(name: &str) -> SC {
     SC::CreateEntityClass {
         name: name.into(),
         dims: vec![],
+        description: None,
     }
 }
 

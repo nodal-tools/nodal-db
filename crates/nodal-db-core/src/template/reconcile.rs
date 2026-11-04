@@ -98,6 +98,7 @@ use crate::object_delete::{
     apply_object_delete, prepare_object_deletes, preview_one,
     resolve_element as resolve_element_in_dim,
 };
+use crate::text::stored_description;
 use crate::types::{
     fold, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind, ObjectRef,
     ScalarValue, ValueKind, WriteReport,
@@ -2337,7 +2338,7 @@ fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> 
             row.id,
             row.entity_class_id,
             row.name,
-            row.description,
+            stored_description(row.description.as_deref()),
             row.parameter_value_list_id,
             row.unit_id,
             row.required,
@@ -2389,7 +2390,7 @@ pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<()
         params![
             row.id,
             row.name,
-            row.description,
+            stored_description(row.description.as_deref()),
             row.active_by_default,
             row.required,
             row.display_order,
@@ -2412,7 +2413,7 @@ pub(crate) fn insert_scenario_row(
 ) -> Result<i64, DbError> {
     Ok(conn.query_row(
         "INSERT INTO scenario (name, description, valid_from_commit) VALUES (?, ?, ?) RETURNING id",
-        params![name, description, c],
+        params![name, stored_description(description), c],
         |r| r.get(0),
     )?)
 }
@@ -2431,7 +2432,7 @@ pub(crate) fn revise_scenario_row(
     conn.execute(
         "INSERT INTO scenario (id, name, description, valid_from_commit, version) \
          VALUES (?, ?, ?, ?, ?)",
-        params![id, name, description, c, version + 1],
+        params![id, name, stored_description(description), c, version + 1],
     )?;
     Ok(())
 }
@@ -2451,7 +2452,7 @@ pub(crate) fn revise_alternative_row(
     conn.execute(
         "INSERT INTO alternative (id, name, description, valid_from_commit, version) \
          VALUES (?, ?, ?, ?, ?)",
-        params![id, name, description, c, version + 1],
+        params![id, name, stored_description(description), c, version + 1],
     )?;
     Ok(())
 }
@@ -2653,7 +2654,7 @@ pub(crate) fn insert_class_row(
          VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
         params![
             name,
-            description,
+            stored_description(description),
             active_by_default,
             required,
             display_order,
@@ -2705,7 +2706,7 @@ pub(crate) fn insert_definition_row(
         params![
             class_id,
             name,
-            description,
+            stored_description(description),
             list_id,
             unit_id,
             required,

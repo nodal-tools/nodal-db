@@ -1159,7 +1159,36 @@ pub fn nfc_names(t: &Template) -> Template {
             }
         }
     }
+    empty_descriptions_absent(&mut t);
     t
+}
+
+/// The core's description rule (`text::stored_description`): a stored
+/// description is never the empty string, so a template's `description:
+/// ""` is no description. Applied with [`nfc_names`] (on parse, in plan and
+/// apply, and in the content hash), so a template declaring `""` and a
+/// database whose description was cleared compare equal and the reconcile
+/// never revises one into the other.
+fn empty_descriptions_absent(t: &mut Template) {
+    fn d(s: &mut Option<String>) {
+        if s.as_deref() == Some("") {
+            *s = None;
+        }
+    }
+    d(&mut t.template.description);
+    t.units.iter_mut().for_each(|u| d(&mut u.description));
+    for l in &mut t.value_lists {
+        d(&mut l.description);
+        l.members.iter_mut().for_each(|m| d(&mut m.description));
+    }
+    t.class_sets.iter_mut().for_each(|s| d(&mut s.description));
+    for c in &mut t.classes {
+        d(&mut c.description);
+        c.parameters.iter_mut().for_each(|p| d(&mut p.description));
+    }
+    if let Some(seed) = &mut t.seed {
+        seed.entities.iter_mut().for_each(|e| d(&mut e.description));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -642,7 +642,7 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             }
             elements.iter_mut().for_each(|e| n.nfc_in_place(e));
         }
-        StructuralChange::CreateEntityClass { name, dims } => {
+        StructuralChange::CreateEntityClass { name, dims, .. } => {
             n.nfc_in_place(name);
             dims.iter_mut().for_each(|d| n.nfc_in_place(d));
         }
@@ -2856,7 +2856,11 @@ pub(crate) fn insert_alternative_row(
     Ok(conn.query_row(
         "INSERT INTO alternative (name, description, valid_from_commit) \
          VALUES (?, ?, ?) RETURNING id",
-        params![name, description, commit_id],
+        params![
+            name,
+            crate::text::stored_description(description),
+            commit_id
+        ],
         |r| r.get(0),
     )?)
 }

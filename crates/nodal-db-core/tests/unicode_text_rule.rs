@@ -747,6 +747,7 @@ fn an_nfd_declared_dimension_name_is_stored_in_nfc_and_matches_both_spellings() 
                 StructuralChange::CreateEntityClass {
                     name: "node".into(),
                     dims: vec![],
+                    description: None,
                 },
                 StructuralChange::CreateParameter {
                     class: "node".into(),

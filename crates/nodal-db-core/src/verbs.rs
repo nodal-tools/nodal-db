@@ -194,8 +194,15 @@ pub fn set_scenario_alternatives(
     // 2, critique F2): the verb and the composable channel produce identical
     // history for the same logical op.
     core_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_set_scenario_alternatives(conn, c, scenario, alternatives, &mut no_report())
-            .map(|(sid, _)| sid)
+        apply_set_scenario_alternatives(
+            conn,
+            c,
+            scenario,
+            alternatives,
+            &mut no_report(),
+            &crate::structural::CallRenames::default(),
+        )
+        .map(|(sid, _)| sid)
     })
 }
 
@@ -410,7 +417,7 @@ pub fn ensure_entity_class(
     let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
     // The shared applier is the one class-create body (invariant 2).
     core_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_entity_class(conn, c, name, dims, &mut no_report()).map(|(id, _)| id)
+        apply_create_entity_class(conn, c, name, dims, None, &mut no_report()).map(|(id, _)| id)
     })
 }
 

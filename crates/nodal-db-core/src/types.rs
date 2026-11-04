@@ -837,9 +837,18 @@ pub enum StructuralChange {
         name: String,
         description: Option<String>,
     },
-    /// Versioned rename (close-out + successor, id preserved). `description`
-    /// None keeps the current description; Some(_) revises it. Renaming to the
-    /// current folded name with no description change is a no-op.
+    /// Versioned rename and/or description revision (close-out + same-id
+    /// successor, version + 1). A `new_name` that differs from the stored
+    /// name at all (case or Unicode form included, after NFC) is a rename,
+    /// reported `Renamed`; the same bytes with a description change is a
+    /// description-only revision, reported `Updated`. `description: None`
+    /// keeps the stored description, `Some("")` clears it (a stored
+    /// description is never the empty string), `Some(d)` sets it. The same
+    /// bytes with no description change is a `NoOp`. The new name may not
+    /// fold to a name an earlier rename of the same call freed (in-call
+    /// swaps take two commits), and later items, segments and deletes of
+    /// the call may not address the old name (it is refused unless a
+    /// same-call create made the name exist again).
     RenameAlternative {
         current: String,
         new_name: String,
@@ -849,6 +858,7 @@ pub enum StructuralChange {
         name: String,
         description: Option<String>,
     },
+    /// As [`StructuralChange::RenameAlternative`], for a scenario.
     RenameScenario {
         current: String,
         new_name: String,
@@ -877,8 +887,47 @@ pub enum StructuralChange {
         name: Option<String>,
         elements: Vec<String>,
     },
-    /// Idempotent entity-class create (0-D or N-D).
-    CreateEntityClass { name: String, dims: Vec<String> },
+    /// Idempotent entity-class create (0-D or N-D). `description` applies on
+    /// create only (an existing class is a NoOp that checks the dims and
+    /// ignores it); `Some("")` stores no description.
+    CreateEntityClass {
+        name: String,
+        dims: Vec<String>,
+        description: Option<String>,
+    },
+    /// Versioned rename and/or description revision of an entity class,
+    /// with [`StructuralChange::RenameAlternative`]'s rules (effects,
+    /// description, swaps, old-name references). The id is preserved, so
+    /// dimensions, entities, parameters, values and N-D classes that use it
+    /// follow the rename; class names are unique across the database.
+    ///
+    /// On a template-stamped database (metadata `template_name` present) a
+    /// rename that changes the folded name of a class that existed before
+    /// the call is refused with [`crate::error::DbError::TemplateStampedRename`]
+    /// unless `allow_on_template` is true: the core cannot tell which
+    /// classes the template declares, and a renamed declared class blocks
+    /// the next reconcile of a changed template. Case-only and
+    /// description-only revisions need no flag.
+    RenameEntityClass {
+        current: String,
+        new_name: String,
+        description: Option<String>,
+        #[serde(default)]
+        allow_on_template: bool,
+    },
+    /// Versioned rename and/or description revision of one parameter
+    /// definition of `class` (addressed by its name at this point of the
+    /// call), with [`StructuralChange::RenameEntityClass`]'s rules; names
+    /// are unique per class. Values, defaults, type members and units follow
+    /// the id; no value is rewritten.
+    RenameParameter {
+        class: String,
+        current: String,
+        new_name: String,
+        description: Option<String>,
+        #[serde(default)]
+        allow_on_template: bool,
+    },
     /// Idempotent, typed parameter-definition create.
     CreateParameter {
         class: String,
@@ -899,7 +948,7 @@ pub enum StructuralChange {
 }
 
 /// Which structural object an outcome concerns (structural_write_api_plan §2.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StructuralKind {
     Alternative,
     Scenario,

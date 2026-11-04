@@ -98,6 +98,7 @@ use crate::object_delete::{
     apply_object_delete, prepare_object_deletes, preview_one,
     resolve_element as resolve_element_in_dim,
 };
+use crate::text::stored_description;
 use crate::types::{
     fold, IndexKind, ObjectDeleteKey, ObjectDeleteOpts, ObjectDeleteResult, ObjectKind, ObjectRef,
     ScalarValue, ValueKind, WriteReport,
@@ -703,7 +704,7 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
                     })
                     .collect(),
             });
-            simulate_span(&mut vocab, m, &mut warnings, &mut chain_blocked);
+            simulate_span(&mut vocab, t, m, &mut warnings, &mut chain_blocked);
         }
         let mut p = diff(&vocab, &chk)?;
         p.db_commit = db_commit;
@@ -915,7 +916,7 @@ pub fn apply(
         chain_guards(&vocab, t, opts)?;
         let spans = pending_spans(&vocab, t);
         for m in &spans {
-            simulate_span(&mut vocab, m, &mut w, &mut chain_blocked);
+            simulate_span(&mut vocab, t, m, &mut w, &mut chain_blocked);
         }
         let mut sim = diff(&vocab, &chk)?;
         sim.blocked.splice(0..0, chain_blocked);
@@ -1304,16 +1305,19 @@ fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
 /// Apply one span's renames/moves/merges/drops to the in-memory snapshot so
 /// the plan's diff reflects post-migration names. `run:` steps are opaque
 /// (noted). Conditions apply would REFUSE on (a `drop_value_list` whose list
-/// is still bound after the simulated prior steps) land in `blocked`.
+/// is still bound after the simulated prior steps) land in `blocked`, and so
+/// does a rename hint whose source a user renamed to a name the template
+/// does not declare (`t` answers "declared").
 fn simulate_span(
     vocab: &mut DbVocab,
+    t: &Template,
     m: &Migration,
     warnings: &mut Vec<String>,
     blocked: &mut Vec<String>,
 ) {
     for step in &m.steps {
         match step {
-            MigrationStep::RenameClass { from, to } => {
+            MigrationStep::RenameClass { from, to, .. } => {
                 if let Some(mut c) = vocab.classes.remove(&fold(from)) {
                     c.name = to.clone();
                     vocab.classes.insert(fold(to), c);
@@ -1337,6 +1341,27 @@ fn simulate_span(
                             }
                         }
                     }
+                } else if !vocab.classes.contains_key(&fold(to)) {
+                    // Neither side live: if the source is an earlier
+                    // spelling of a live class (a user renamed it to a third
+                    // name), the hint has nothing to rename and the final
+                    // reconcile would create an empty target beside it.
+                    // A live name the template declares is a chain that
+                    // already ran further (end-stamped field databases).
+                    for r in vocab.renamed_classes.get(&fold(from)).into_iter().flatten() {
+                        let Some(live) = vocab.classes.values().find(|c| c.id == r.id) else {
+                            continue;
+                        };
+                        if !t.classes.iter().any(|c| fold(&c.name) == fold(&live.name)) {
+                            blocked.push(format!(
+                                "rename_class {from} -> {to}: the database's class {:?} was \
+                                 renamed to {:?} (commit {}), so the hint finds nothing to \
+                                 rename and {to:?} would be created empty beside it; rename \
+                                 {:?} to {to:?} (or back to {from:?}) first",
+                                r.old_name, live.name, r.at_commit, live.name
+                            ));
+                        }
+                    }
                 }
             }
             MigrationStep::RenameParameter {
@@ -1346,6 +1371,41 @@ fn simulate_span(
                 on_collision,
                 ..
             } => {
+                if let Some(c) = vocab.classes.get(&fold(class)) {
+                    // The template's declaration of the hint's own class
+                    // (named as it is at this point of the simulated
+                    // chain); none means nothing of it is declared.
+                    let t_class = t.classes.iter().find(|tc| fold(&tc.name) == fold(class));
+                    if !c.params.contains_key(&fold(from)) && !c.params.contains_key(&fold(to)) {
+                        // As for rename_class: a source a user renamed to a
+                        // third name.
+                        for r in vocab
+                            .renamed_parameters
+                            .get(&(c.id, fold(from)))
+                            .into_iter()
+                            .flatten()
+                        {
+                            let Some(live) = c.params.values().find(|p| p.id == r.id) else {
+                                continue;
+                            };
+                            let declared = t_class.is_some_and(|tc| {
+                                tc.parameters
+                                    .iter()
+                                    .any(|p| fold(&p.name) == fold(&live.name))
+                            });
+                            if !declared {
+                                blocked.push(format!(
+                                    "rename_parameter {class}.{from} -> {to}: the database's \
+                                     parameter {class}.{} was renamed to {:?} (commit {}), so \
+                                     the hint finds nothing to rename and {to:?} would be \
+                                     created empty beside it; rename {:?} to {to:?} (or back \
+                                     to {from:?}) first",
+                                    r.old_name, live.name, r.at_commit, live.name
+                                ));
+                            }
+                        }
+                    }
+                }
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
                     if *on_collision == OnCollision::DropSource
                         && c.params.contains_key(&fold(to))
@@ -1615,6 +1675,7 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     //     reshape) ---
     for c in &t.classes {
         match vocab.classes.get(&fold(&c.name)) {
+            None if renamed_away_class(vocab, t, c, &mut p.blocked) => {}
             None => {
                 p.actions.push(Action::CreateClass {
                     name: c.name.clone(),
@@ -1728,6 +1789,9 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
             let eff = &chk.effective_types[&(ci, pi)];
             let db_param = db_class.and_then(|dc| dc.params.get(&fold(&param.name)));
             match db_param {
+                None if db_class.is_some_and(|dc| {
+                    renamed_away_parameter(vocab, dc, c, param, &mut p.blocked)
+                }) => {}
                 None => {
                     p.actions.push(Action::CreateParameter {
                         class: c.name.clone(),
@@ -1946,6 +2010,89 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     p.actions.sort_by_key(action_rank);
     p.no_op = p.actions.is_empty() && p.blocked.is_empty();
     Ok(p)
+}
+
+/// The renamed-away blocker for a declared class missing from the database
+/// (class_param_rename_PLAN §6.2, critique S2): when its folded name is an
+/// earlier spelling of a live class (a user renamed it away, e.g. in the
+/// editor), re-creating it would fork the class into a second, empty one
+/// (its parameters with template defaults, its seeds) while the renamed
+/// class keeps the data. Blocks, naming the rename, unless the template
+/// also declares that class's current name: then the template itself
+/// renamed it through its own history and a new class under the old name
+/// is what it means. Returns whether it blocked.
+fn renamed_away_class(
+    vocab: &DbVocab,
+    t: &Template,
+    c: &ir::Class,
+    blocked: &mut Vec<String>,
+) -> bool {
+    let Some(olds) = vocab.renamed_classes.get(&fold(&c.name)) else {
+        return false;
+    };
+    let declared = |name: &str| t.classes.iter().any(|x| fold(&x.name) == fold(name));
+    let mut hit = false;
+    for r in olds {
+        let Some(live) = vocab.classes.values().find(|x| x.id == r.id) else {
+            continue;
+        };
+        if declared(&live.name) {
+            continue;
+        }
+        hit = true;
+        blocked.push(format!(
+            "class {:?}: the template declares it, but the database's class {:?} was \
+             renamed to {:?} (commit {}) — re-creating {:?} would fork it into a second, \
+             empty class. Rename it back, or ship a rename_class hint ({} -> {}) and \
+             declare {:?}",
+            c.name, r.old_name, live.name, r.at_commit, c.name, r.old_name, live.name, live.name
+        ));
+    }
+    hit
+}
+
+/// [`renamed_away_class`] for a declared parameter of a matched class `dc`
+/// whose folded name is an earlier spelling of a live parameter of that
+/// same class (a moved parameter is not a rename and never blocks).
+fn renamed_away_parameter(
+    vocab: &DbVocab,
+    dc: &super::dbvocab::DbClass,
+    c: &ir::Class,
+    param: &Parameter,
+    blocked: &mut Vec<String>,
+) -> bool {
+    let Some(olds) = vocab.renamed_parameters.get(&(dc.id, fold(&param.name))) else {
+        return false;
+    };
+    let declared = |name: &str| c.parameters.iter().any(|x| fold(&x.name) == fold(name));
+    let mut hit = false;
+    for r in olds {
+        let Some(live) = dc.params.values().find(|x| x.id == r.id) else {
+            continue;
+        };
+        if declared(&live.name) {
+            continue;
+        }
+        hit = true;
+        blocked.push(format!(
+            "parameter {}.{}: the template declares it, but the database's parameter \
+             {}.{} was renamed to {:?} (commit {}) — re-creating {:?} would fork it into \
+             a second, empty parameter. Rename it back, or ship a rename_parameter hint \
+             ({}.{} -> {}) and declare {:?}",
+            c.name,
+            param.name,
+            dc.name,
+            r.old_name,
+            live.name,
+            r.at_commit,
+            param.name,
+            c.name,
+            r.old_name,
+            live.name,
+            live.name
+        ));
+    }
+    hit
 }
 
 /// The apply precedence of an action kind (see the sort above).
@@ -2288,23 +2435,27 @@ fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, D
     Ok(n)
 }
 
-struct PdRow {
-    id: i64,
-    entity_class_id: i64,
-    name: String,
-    description: Option<String>,
-    parameter_value_list_id: Option<i64>,
-    unit_id: Option<i64>,
-    required: bool,
-    display_order: Option<i64>,
-    retain_content: bool,
-    version: i64,
+pub(crate) struct PdRow {
+    pub(crate) id: i64,
+    pub(crate) entity_class_id: i64,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) parameter_value_list_id: Option<i64>,
+    pub(crate) unit_id: Option<i64>,
+    pub(crate) required: bool,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) retain_content: bool,
+    pub(crate) version: i64,
+    /// The current row's `valid_from_commit`: equal to the writing commit
+    /// when this commit created or already revised it (the D-S5 branch of
+    /// [`revise_pd_row`]).
+    pub(crate) valid_from: i64,
 }
 
-fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
+pub(crate) fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
     Ok(conn.query_row(
         "SELECT id, entity_class_id, name, description, parameter_value_list_id, unit_id, \
-                required, display_order, retain_content, version \
+                required, display_order, retain_content, version, valid_from_commit \
          FROM parameter_definition WHERE cur_id = ?",
         params![pd_id],
         |r| {
@@ -2319,14 +2470,39 @@ fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbError> {
                 display_order: r.get(7)?,
                 retain_content: r.get(8)?,
                 version: r.get(9)?,
+                valid_from: r.get(10)?,
             })
         },
     )?)
 }
 
 /// The one `parameter_definition` revision site: close the current row, insert
-/// the successor (same id, `version + 1`) from `row`.
-fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> {
+/// the successor (same id, `version + 1`) from `row`. A row this commit
+/// created or already revised (`valid_from == c`) is edited in place instead
+/// (D-S5: it was never visible; closing it would trip the span CHECK), so
+/// two revisions of one definition in one commit bump its version once.
+pub(crate) fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> {
+    let description = stored_description(row.description.as_deref());
+    if row.valid_from == c {
+        conn.execute(
+            "UPDATE parameter_definition SET entity_class_id = ?, name = ?, description = ?, \
+                    parameter_value_list_id = ?, unit_id = ?, required = ?, \
+                    display_order = ?, retain_content = ? \
+             WHERE id = ? AND valid_to_commit IS NULL",
+            params![
+                row.entity_class_id,
+                row.name,
+                description,
+                row.parameter_value_list_id,
+                row.unit_id,
+                row.required,
+                row.display_order,
+                row.retain_content,
+                row.id
+            ],
+        )?;
+        return Ok(());
+    }
     close_row(conn, c, "parameter_definition", row.id)?;
     conn.execute(
         "INSERT INTO parameter_definition \
@@ -2337,7 +2513,7 @@ fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> 
             row.id,
             row.entity_class_id,
             row.name,
-            row.description,
+            description,
             row.parameter_value_list_id,
             row.unit_id,
             row.required,
@@ -2358,11 +2534,15 @@ pub(crate) struct EcRow {
     pub(crate) required: bool,
     pub(crate) display_order: Option<i64>,
     pub(crate) version: i64,
+    /// The current row's `valid_from_commit` (the D-S5 branch of
+    /// [`revise_ec_row`]).
+    pub(crate) valid_from: i64,
 }
 
 pub(crate) fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> {
     Ok(conn.query_row(
-        "SELECT id, name, description, active_by_default, required, display_order, version \
+        "SELECT id, name, description, active_by_default, required, display_order, version, \
+                valid_from_commit \
          FROM entity_class WHERE cur_id = ?",
         params![id],
         |r| {
@@ -2374,12 +2554,33 @@ pub(crate) fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> 
                 required: r.get(4)?,
                 display_order: r.get(5)?,
                 version: r.get(6)?,
+                valid_from: r.get(7)?,
             })
         },
     )?)
 }
 
+/// The one `entity_class` revision site: close the current row, insert the
+/// same-id successor at `version + 1`; or, for a row this commit created or
+/// already revised (`valid_from == c`), edit it in place (D-S5).
 pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<(), DbError> {
+    let description = stored_description(row.description.as_deref());
+    if row.valid_from == c {
+        conn.execute(
+            "UPDATE entity_class SET name = ?, description = ?, active_by_default = ?, \
+                    required = ?, display_order = ? \
+             WHERE id = ? AND valid_to_commit IS NULL",
+            params![
+                row.name,
+                description,
+                row.active_by_default,
+                row.required,
+                row.display_order,
+                row.id
+            ],
+        )?;
+        return Ok(());
+    }
     close_row(conn, c, "entity_class", row.id)?;
     conn.execute(
         "INSERT INTO entity_class \
@@ -2389,7 +2590,7 @@ pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<()
         params![
             row.id,
             row.name,
-            row.description,
+            description,
             row.active_by_default,
             row.required,
             row.display_order,
@@ -2412,13 +2613,14 @@ pub(crate) fn insert_scenario_row(
 ) -> Result<i64, DbError> {
     Ok(conn.query_row(
         "INSERT INTO scenario (name, description, valid_from_commit) VALUES (?, ?, ?) RETURNING id",
-        params![name, description, c],
+        params![name, stored_description(description), c],
         |r| r.get(0),
     )?)
 }
 
 /// Versioned scenario rename (close current row + insert same-id successor,
-/// version+1) — mirrors [`revise_list_row`].
+/// version+1) — mirrors [`revise_list_row`]. A row this commit created or
+/// already revised (`valid_from == c`) is edited in place (D-S5).
 pub(crate) fn revise_scenario_row(
     conn: &Connection,
     c: i64,
@@ -2426,19 +2628,24 @@ pub(crate) fn revise_scenario_row(
     name: &str,
     description: Option<&str>,
     version: i64,
+    valid_from: i64,
 ) -> Result<(), DbError> {
-    close_row(conn, c, "scenario", id)?;
-    conn.execute(
-        "INSERT INTO scenario (id, name, description, valid_from_commit, version) \
-         VALUES (?, ?, ?, ?, ?)",
-        params![id, name, description, c, version + 1],
-    )?;
-    Ok(())
+    revise_identity_row(
+        conn,
+        c,
+        "scenario",
+        id,
+        name,
+        description,
+        version,
+        valid_from,
+    )
 }
 
 /// Versioned alternative rename (close + same-id successor, version+1) — mirrors
 /// [`revise_list_row`]. The insert site for a NEW alternative stays
-/// `api::insert_alternative_row`.
+/// `api::insert_alternative_row`. A row this commit created or already
+/// revised (`valid_from == c`) is edited in place (D-S5).
 pub(crate) fn revise_alternative_row(
     conn: &Connection,
     c: i64,
@@ -2446,16 +2653,53 @@ pub(crate) fn revise_alternative_row(
     name: &str,
     description: Option<&str>,
     version: i64,
+    valid_from: i64,
 ) -> Result<(), DbError> {
-    close_row(conn, c, "alternative", id)?;
+    revise_identity_row(
+        conn,
+        c,
+        "alternative",
+        id,
+        name,
+        description,
+        version,
+        valid_from,
+    )
+}
+
+/// The shared body of the two name-only identity tables' revision sites.
+#[allow(clippy::too_many_arguments)]
+fn revise_identity_row(
+    conn: &Connection,
+    c: i64,
+    table: &str,
+    id: i64,
+    name: &str,
+    description: Option<&str>,
+    version: i64,
+    valid_from: i64,
+) -> Result<(), DbError> {
+    let description = stored_description(description);
+    if valid_from == c {
+        conn.execute(
+            &format!(
+                "UPDATE {table} SET name = ?, description = ? \
+                 WHERE id = ? AND valid_to_commit IS NULL"
+            ),
+            params![name, description, id],
+        )?;
+        return Ok(());
+    }
+    close_row(conn, c, table, id)?;
     conn.execute(
-        "INSERT INTO alternative (id, name, description, valid_from_commit, version) \
-         VALUES (?, ?, ?, ?, ?)",
+        &format!(
+            "INSERT INTO {table} (id, name, description, valid_from_commit, version) \
+             VALUES (?, ?, ?, ?, ?)"
+        ),
         params![id, name, description, c, version + 1],
     )?;
     Ok(())
 }
-
 /// The one `membership` INSERT site (structural_write_api_plan §4.2): base
 /// (`alternative_id = None` ⇒ stored NULL, NEVER 0 — critique M4) and
 /// alternative-scoped rows both insert here. The loader's seed base row
@@ -2653,7 +2897,7 @@ pub(crate) fn insert_class_row(
          VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
         params![
             name,
-            description,
+            stored_description(description),
             active_by_default,
             required,
             display_order,
@@ -2705,7 +2949,7 @@ pub(crate) fn insert_definition_row(
         params![
             class_id,
             name,
-            description,
+            stored_description(description),
             list_id,
             unit_id,
             required,
@@ -3479,14 +3723,37 @@ fn execute_step(
     fx: &mut StepEffects,
 ) -> Result<(), DbError> {
     match step {
-        MigrationStep::RenameClass { from, to } => {
+        MigrationStep::RenameClass {
+            from,
+            to,
+            missing_source,
+        } => {
             if !charset_ok(to) {
                 return Err(DbError::Api(format!(
                     "rename_class: target {to:?} must be non-empty, trimmed, and free of control characters"
                 )));
             }
-            let id = lookup_entity_class(conn, from)?
-                .ok_or_else(|| DbError::Api(format!("rename_class: {from:?} not found")))?;
+            // Absent-source tolerance, as on `rename_parameter`: the rename
+            // may already be applied (by an earlier partial chain, or by a
+            // user rename of the database the hint now catches up with) or
+            // the class may never have materialized; the final reconcile
+            // owns the end state. `missing_source: error` opts out.
+            let Some(id) = lookup_entity_class(conn, from)? else {
+                if *missing_source == MissingSource::Error {
+                    return Err(DbError::Api(format!(
+                        "rename_class: {from:?} not found (missing_source: error)"
+                    )));
+                }
+                fx.notes.push(format!(
+                    "rename_class {from} -> {to}: source absent — {}; nothing to rename",
+                    if lookup_entity_class(conn, to)?.is_some() {
+                        "target live, already applied"
+                    } else {
+                        "never materialized or already superseded"
+                    }
+                ));
+                return Ok(());
+            };
             // Exclude-by-id, not by Rust fold (R4 critique K6,
             // name_fold_identity_PLAN §10; the same ruling as structural
             // renames' `rename_identity`): a Rust-fold pre-filter here would

@@ -80,6 +80,16 @@ answer will be a served API, not a protocol document.
   the macro (the message gives the statement), then compacts the file,
   which fails loudly on a duplicate name written while the macro
   existed.
+- Renames keep ids, so store ids (or re-read names) rather than caching
+  class and parameter names across commits. Within one call, address an
+  object by the name it has at that point (after a rename, its new name);
+  send renames before creates; swap two names over two commits. On a
+  template-stamped database a class or parameter rename is refused with
+  `TemplateStampedRename` (`DbError::TemplateStampedRename`,
+  `nodal_db.TemplateStampedRename`, an `ApiError` subclass) listing every
+  refused item; resend the ones the user allows with
+  `allow_on_template: true`. See
+  [Renaming objects](../usage.md#renaming-objects-and-editing-descriptions).
 - **Never call a table macro through an attached database.** Views of
   an attached file (`ATTACH … AS other`, then `other.<view>`) read that
   file, but a table macro called as `other.<macro>(…)` resolves its

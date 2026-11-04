@@ -185,6 +185,23 @@ pub struct DbVocab {
     pub template_version: Option<String>,
     pub template_content_hash: Option<String>,
     pub schema_version: Option<String>,
+    /// Closed-out spellings of LIVE classes whose fold differs from the
+    /// class's current name (the renames in the file's history), keyed by
+    /// the folded old name. The reconcile's renamed-away blocker reads it.
+    pub renamed_classes: BTreeMap<String, Vec<RenamedAway>>,
+    /// The same for live parameter definitions, keyed by (the class id the
+    /// closed row had, folded old name).
+    pub renamed_parameters: BTreeMap<(i64, String), Vec<RenamedAway>>,
+}
+
+/// One earlier spelling of a live object (a class or a parameter
+/// definition): its id, the old name as stored, and the commit that closed
+/// the last row carrying it.
+#[derive(Clone, Debug)]
+pub struct RenamedAway {
+    pub id: i64,
+    pub old_name: String,
+    pub at_commit: i64,
 }
 
 fn scalar_from_row(
@@ -200,6 +217,16 @@ fn scalar_from_row(
         "bool" => b.map(ScalarValue::Bool),
         "string" => s.map(ScalarValue::Str),
         _ => None, // date_time/duration: no v1 literal form
+    }
+}
+
+/// Add `r` to one folded old name's list, keeping one entry per id (the
+/// latest commit; two case spellings of one old name are one name).
+fn push_renamed(list: &mut Vec<RenamedAway>, r: RenamedAway) {
+    match list.iter_mut().find(|x| x.id == r.id) {
+        Some(x) if x.at_commit < r.at_commit => *x = r,
+        Some(_) => {}
+        None => list.push(r),
     }
 }
 
@@ -641,6 +668,78 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
                 member: m.name.clone(),
                 included,
             });
+        }
+    }
+
+    // --- renamed-away spellings (the reconcile's renamed-away blocker) ---
+    // The vocabulary tables are small, so the closed rows are read whole.
+    // Only spellings of live ids whose fold differs from the live name are
+    // kept: a case-only rename frees no name.
+    {
+        let live_class: BTreeMap<i64, String> =
+            v.classes.values().map(|c| (c.id, fold(&c.name))).collect();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, max(valid_to_commit) FROM entity_class \
+             WHERE valid_to_commit IS NOT NULL GROUP BY id, name ORDER BY id, name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, old_name, at_commit) = row?;
+            if live_class
+                .get(&id)
+                .is_some_and(|live| *live != fold(&old_name))
+            {
+                push_renamed(
+                    v.renamed_classes.entry(fold(&old_name)).or_default(),
+                    RenamedAway {
+                        id,
+                        old_name,
+                        at_commit,
+                    },
+                );
+            }
+        }
+        let live_param: BTreeMap<i64, String> = v
+            .classes
+            .values()
+            .flat_map(|c| c.params.values().map(|p| (p.id, fold(&p.name))))
+            .collect();
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_class_id, name, max(valid_to_commit) FROM parameter_definition \
+             WHERE valid_to_commit IS NOT NULL GROUP BY id, entity_class_id, name \
+             ORDER BY id, name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, cid, old_name, at_commit) = row?;
+            if live_param
+                .get(&id)
+                .is_some_and(|live| *live != fold(&old_name))
+            {
+                push_renamed(
+                    v.renamed_parameters
+                        .entry((cid, fold(&old_name)))
+                        .or_default(),
+                    RenamedAway {
+                        id,
+                        old_name,
+                        at_commit,
+                    },
+                );
+            }
         }
     }
 

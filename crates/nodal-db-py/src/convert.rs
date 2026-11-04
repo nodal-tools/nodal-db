@@ -28,8 +28,8 @@ use nodal_db_core::types::{
 
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, CoveredWrite, DatabaseError, InternalError,
-    ReadSurfaceStale, SchemaError, SchemaMismatch, ShadowedBuiltin, Stale, UnreplayableWal,
-    VersionTooOld, WriteAndDeleteSameKey,
+    ReadSurfaceStale, SchemaError, SchemaMismatch, ShadowedBuiltin, Stale, TemplateStampedRename,
+    UnreplayableWal, VersionTooOld, WriteAndDeleteSameKey,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -62,6 +62,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::VersionTooOld { .. } => VersionTooOld::new_err(msg),
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::UnreplayableWal { wal, cause } => unreplayable_wal_err(msg, wal, cause),
+        DbError::TemplateStampedRename(d) => template_stamped_rename_err(msg, *d),
         DbError::ShadowedBuiltin { name, schema, kind } => {
             shadowed_builtin_err(msg, name, schema, kind)
         }
@@ -173,6 +174,33 @@ fn shadowed_builtin_err(msg: String, name: String, schema: String, kind: String)
         let _ = v.setattr("name", name);
         let _ = v.setattr("schema", schema);
         let _ = v.setattr("kind", kind);
+    });
+    err
+}
+
+/// A `TemplateStampedRename` exception carrying the stamped template and
+/// every refused rename (`renames`: dicts) as attributes.
+fn template_stamped_rename_err(
+    msg: String,
+    d: nodal_db_core::error::TemplateStampedRenameDetails,
+) -> PyErr {
+    let err = TemplateStampedRename::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message lists the same items in any case.
+        let _ = v.setattr("template_name", d.template_name);
+        let _ = v.setattr("template_version", d.template_version);
+        let renames = PyList::empty(py);
+        for r in d.renames {
+            let item = PyDict::new(py);
+            let _ = item.set_item("change_index", r.change_index);
+            let _ = item.set_item("kind", structural_kind_tag(r.kind));
+            let _ = item.set_item("class_name", r.class);
+            let _ = item.set_item("current", r.current);
+            let _ = item.set_item("new_name", r.new_name);
+            let _ = renames.append(item);
+        }
+        let _ = v.setattr("renames", renames);
     });
     err
 }
@@ -503,6 +531,20 @@ pub(crate) fn structural_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Stru
         "create_entity_class" => StructuralChange::CreateEntityClass {
             name: req_str(obj, &op, "name")?,
             dims: str_list(obj, "dims")?,
+            description: opt_str(obj, "description")?,
+        },
+        "rename_entity_class" => StructuralChange::RenameEntityClass {
+            current: req_str(obj, &op, "current")?,
+            new_name: req_str(obj, &op, "new_name")?,
+            description: opt_str(obj, "description")?,
+            allow_on_template: opt_bool(obj, "allow_on_template")?.unwrap_or(false),
+        },
+        "rename_parameter" => StructuralChange::RenameParameter {
+            class: req_str(obj, &op, "class")?,
+            current: req_str(obj, &op, "current")?,
+            new_name: req_str(obj, &op, "new_name")?,
+            description: opt_str(obj, "description")?,
+            allow_on_template: opt_bool(obj, "allow_on_template")?.unwrap_or(false),
         },
         "create_parameter" => {
             let types = match obj.get_item("types") {

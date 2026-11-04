@@ -963,6 +963,70 @@ def test_verb_stamp_template_identity(db):
     )
 
 
+def test_class_and_parameter_rename_ops(db):
+    db.write_parameter("node", "demand", "Base", scalar_batch(["n1"], [1.0]), user="t")
+    rep = db.commit_structural(
+        [
+            {"op": "create_entity_class", "name": "unit", "dims": [],
+             "description": "Generators."},
+            {"op": "rename_entity_class", "current": "node", "new_name": "bus"},
+            {"op": "rename_parameter", "class": "bus", "current": "demand",
+             "new_name": "load", "description": "MW"},
+            {"op": "rename_entity_class", "current": "unit", "new_name": "unit",
+             "description": ""},
+        ],
+        user="t",
+    )
+    got = [(o["kind"], o["effect"]) for o in rep["structural"]]
+    assert got == [
+        ("entity_class", "created"),
+        ("entity_class", "renamed"),
+        ("parameter", "renamed"),
+        # A description cleared on the row this call created: an update.
+        ("entity_class", "updated"),
+    ]
+    assert one_value(db, "SELECT count(*) FROM read_parameter('bus', 'load')") == 1
+    assert (
+        one_value(db, "SELECT description FROM entity_class WHERE cur_name = 'unit'")
+        is None
+    )
+    # A refusal is an ApiError (the in-call swap guard).
+    with pytest.raises(nodal_db.ApiError, match="renamed away"):
+        db.commit_structural(
+            [
+                {"op": "rename_entity_class", "current": "bus", "new_name": "t"},
+                {"op": "rename_entity_class", "current": "unit", "new_name": "bus"},
+            ],
+            user="t",
+        )
+
+
+def test_template_stamped_rename_is_typed_and_resendable(db):
+    db.write_parameter("node", "demand", "Base", scalar_batch(["n1"], [1.0]), user="t")
+    db.stamp_template_identity("flextool", "40", user="t")
+    changes = [
+        {"op": "rename_entity_class", "current": "node", "new_name": "bus"},
+        {"op": "rename_parameter", "class": "bus", "current": "demand",
+         "new_name": "load"},
+    ]
+    with pytest.raises(nodal_db.TemplateStampedRename) as ei:
+        db.commit_structural(changes, user="t")
+    e = ei.value
+    assert isinstance(e, nodal_db.ApiError)
+    assert (e.template_name, e.template_version) == ("flextool", "40")
+    assert e.renames == [
+        {"change_index": 0, "kind": "entity_class", "class_name": None,
+         "current": "node", "new_name": "bus"},
+        {"change_index": 1, "kind": "parameter", "class_name": "bus",
+         "current": "demand", "new_name": "load"},
+    ]
+    # The client asks its user, then resends the allowed items flagged.
+    for c in changes:
+        c["allow_on_template"] = True
+    rep = db.commit_structural(changes, user="t")
+    assert [o["effect"] for o in rep["structural"]] == ["renamed", "renamed"]
+
+
 def test_stamped_db_refuses_unregistered_ladder_program(db, tmp_path):
     """A mid-version stamp arms the template's migration ladder, and
     template_apply refuses loudly while a pending `run:` program is

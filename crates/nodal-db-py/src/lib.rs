@@ -177,6 +177,23 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    TemplateStampedRename,
+    ApiError,
+    "A commit renamed classes or parameters of a template-stamped database \
+     (metadata template_name present) without allow_on_template on the item \
+     (DbError::TemplateStampedRename). The core cannot tell which classes and \
+     parameters the template declares, and a renamed declared one blocks the \
+     next apply of a changed template, so such renames are refused by default; \
+     nothing was written. Attributes: `template_name`, `template_version` \
+     (None when not stamped) and `renames`, a list of dicts (`change_index`, \
+     `kind` - \"entity_class\" or \"parameter\" - `class_name` (None for a \
+     class), `current`, `new_name`), one per refused item. Ask the user, then \
+     resend the allowed items with \"allow_on_template\": True. Case-only \
+     renames and description-only revisions need no flag. A subclass of \
+     ApiError, so `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
     ShadowedBuiltin,
     NodalDbError,
     "The database file defines a macro named like a DuckDB built-in function \
@@ -441,7 +458,22 @@ impl Database {
     ///   `{"op": "set_scenario_alternatives", "scenario": "s", "alternatives":
     ///   [...]}`). Applied FIRST, so a same-save value write can target a
     ///   referent a structural item just created. Per-item outcomes land in the
-    ///   report's `"structural"` list.
+    ///   report's `"structural"` list. The ops: `create_alternative`,
+    ///   `rename_alternative`, `create_scenario`, `rename_scenario`,
+    ///   `set_scenario_alternatives`, `set_entity_activation`,
+    ///   `create_entity`, `create_entity_class` (`name`, `dims`,
+    ///   `description`?), `rename_entity_class` (`current`, `new_name`,
+    ///   `description`?, `allow_on_template`?), `create_parameter`,
+    ///   `rename_parameter` (`class`, `current`, `new_name`, `description`?,
+    ///   `allow_on_template`?) and `set_membership`. A rename keeps the id;
+    ///   `new_name == current` with a `description` revises only the
+    ///   description (effect `"updated"`), and `description: ""` clears it.
+    ///   Within one call a rename may not take a name an earlier rename
+    ///   freed (swaps take two commits), and later items, segments and
+    ///   deletes must use the new name. On a template-stamped database a
+    ///   class or parameter rename that changes the folded name needs
+    ///   `"allow_on_template": True`, else `TemplateStampedRename` lists the
+    ///   refused items.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
     /// * `covered_writes`: `"refuse"` (the default) or `"delete_wins"`; see
@@ -1286,6 +1318,10 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;
     m.add("UnreplayableWal", py.get_type::<UnreplayableWal>())?;
     m.add("ShadowedBuiltin", py.get_type::<ShadowedBuiltin>())?;
+    m.add(
+        "TemplateStampedRename",
+        py.get_type::<TemplateStampedRename>(),
+    )?;
     m.add("CanonError", py.get_type::<CanonError>())?;
     m.add("ArrowError", py.get_type::<ArrowError>())?;
     m.add("InternalError", py.get_type::<InternalError>())?;

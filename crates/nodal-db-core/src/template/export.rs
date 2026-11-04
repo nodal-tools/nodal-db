@@ -50,6 +50,56 @@ pub fn export(db: &Path) -> Result<(Template, Vec<String>), DbError> {
     Ok((t, warnings))
 }
 
+/// The stored audit rules restricted to what the exported vocabulary
+/// declares: a rule whose class is not exported or whose selector is not a
+/// parameter of it is dropped, and so is a `require` entry that is not a
+/// parameter of the class, each with a warning, so the exported template
+/// loads (the loader refuses such rules). A stale document can arise from
+/// direct SQL or a history-free extract; renames rewrite the document.
+fn declared_audit_rules(
+    mut rules: AuditRules,
+    classes: &[Class],
+    warnings: &mut Vec<String>,
+) -> Option<AuditRules> {
+    rules.conditional_requirements.retain_mut(|r| {
+        let Some(c) = classes.iter().find(|c| fold(&c.name) == fold(&r.class)) else {
+            warnings.push(format!(
+                "audit_rules: rule for class {:?} omitted from the export (no such class)",
+                r.class
+            ));
+            return false;
+        };
+        let has = |p: &str| c.parameters.iter().any(|x| fold(&x.name) == fold(p));
+        if !has(&r.selector) {
+            warnings.push(format!(
+                "audit_rules: rule for class {:?} omitted from the export (selector {:?} is \
+                 not a parameter of it)",
+                r.class, r.selector
+            ));
+            return false;
+        }
+        for w in r.when.0.values_mut() {
+            w.require.retain(|p| {
+                let ok = has(p);
+                if !ok {
+                    warnings.push(format!(
+                        "audit_rules: class {:?} requires {p:?}, which is not a parameter \
+                         of it; omitted from the export",
+                        r.class
+                    ));
+                }
+                ok
+            });
+        }
+        true
+    });
+    if rules.conditional_requirements.is_empty() {
+        None
+    } else {
+        Some(rules)
+    }
+}
+
 fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbError> {
     let name = v.template_name.clone().unwrap_or_else(|| {
         warnings
@@ -265,7 +315,7 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
     let audit_rules: Option<AuditRules> = match &v.audit_rules {
         None => None,
         Some(doc) => match serde_json::from_str::<AuditRules>(doc) {
-            Ok(r) => Some(r),
+            Ok(r) => declared_audit_rules(r, &classes, warnings),
             Err(e) => {
                 warnings.push(format!(
                     "audit_rules metadata document does not parse as the IR block ({e}); \

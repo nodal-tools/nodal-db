@@ -1987,3 +1987,41 @@ fn history_free_extract_after_a_rename_keeps_the_id() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+#[test]
+fn a_rename_hint_whose_source_a_user_renamed_elsewhere_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    apply_t(&db, &tmpl("1", NODE_V)).unwrap();
+    cs(&db, vec![allowed(ren_class("node", "grid"))]);
+    let v2 = "classes:\n  - name: bus\n    parameters:\n      - {name: demand, types: [{kind: float}]}\n\
+              migrations:\n  - from: \"1\"\n    to: \"2\"\n    steps:\n      - rename_class: {from: node, to: bus}\n";
+    let m = api_err(apply_t(&db, &tmpl("2", v2)).map(|_| WriteReport::default()));
+    assert!(m.contains("renamed to \"grid\""), "{m}");
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM entity_class WHERE cur_name = 'bus'"
+        ),
+        0
+    );
+    // A chain that already ran further (the live name is declared) is not
+    // blocked: every step is a note.
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    apply_t(&db, &tmpl("1", NODE_V)).unwrap();
+    cs(&db, vec![allowed(ren_class("node", "mid"))]);
+    cs(&db, vec![allowed(ren_class("mid", "bus"))]);
+    let chain = "classes:\n  - name: bus\n    parameters:\n      - {name: demand, types: [{kind: float}]}\n\
+                 migrations:\n  - from: \"1\"\n    to: \"2\"\n    steps:\n      \
+                 - rename_class: {from: node, to: mid}\n      - rename_class: {from: mid, to: bus}\n";
+    let out = apply_t(&db, &tmpl("2", chain)).unwrap();
+    assert!(out.converged, "{:?}", out.warnings);
+    assert_eq!(
+        out.notes
+            .iter()
+            .filter(|n| n.contains("source absent"))
+            .count(),
+        2
+    );
+}

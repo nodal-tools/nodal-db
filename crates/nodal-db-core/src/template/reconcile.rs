@@ -704,7 +704,7 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
                     })
                     .collect(),
             });
-            simulate_span(&mut vocab, m, &mut warnings, &mut chain_blocked);
+            simulate_span(&mut vocab, t, m, &mut warnings, &mut chain_blocked);
         }
         let mut p = diff(&vocab, &chk)?;
         p.db_commit = db_commit;
@@ -916,7 +916,7 @@ pub fn apply(
         chain_guards(&vocab, t, opts)?;
         let spans = pending_spans(&vocab, t);
         for m in &spans {
-            simulate_span(&mut vocab, m, &mut w, &mut chain_blocked);
+            simulate_span(&mut vocab, t, m, &mut w, &mut chain_blocked);
         }
         let mut sim = diff(&vocab, &chk)?;
         sim.blocked.splice(0..0, chain_blocked);
@@ -1305,9 +1305,12 @@ fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
 /// Apply one span's renames/moves/merges/drops to the in-memory snapshot so
 /// the plan's diff reflects post-migration names. `run:` steps are opaque
 /// (noted). Conditions apply would REFUSE on (a `drop_value_list` whose list
-/// is still bound after the simulated prior steps) land in `blocked`.
+/// is still bound after the simulated prior steps) land in `blocked`, and so
+/// does a rename hint whose source a user renamed to a name the template
+/// does not declare (`t` answers "declared").
 fn simulate_span(
     vocab: &mut DbVocab,
+    t: &Template,
     m: &Migration,
     warnings: &mut Vec<String>,
     blocked: &mut Vec<String>,
@@ -1338,6 +1341,27 @@ fn simulate_span(
                             }
                         }
                     }
+                } else if !vocab.classes.contains_key(&fold(to)) {
+                    // Neither side live: if the source is an earlier
+                    // spelling of a live class (a user renamed it to a third
+                    // name), the hint has nothing to rename and the final
+                    // reconcile would create an empty target beside it.
+                    // A live name the template declares is a chain that
+                    // already ran further (end-stamped field databases).
+                    for r in vocab.renamed_classes.get(&fold(from)).into_iter().flatten() {
+                        let Some(live) = vocab.classes.values().find(|c| c.id == r.id) else {
+                            continue;
+                        };
+                        if !t.classes.iter().any(|c| fold(&c.name) == fold(&live.name)) {
+                            blocked.push(format!(
+                                "rename_class {from} -> {to}: the database's class {:?} was \
+                                 renamed to {:?} (commit {}), so the hint finds nothing to \
+                                 rename and {to:?} would be created empty beside it; rename \
+                                 {:?} to {to:?} (or back to {from:?}) first",
+                                r.old_name, live.name, r.at_commit, live.name
+                            ));
+                        }
+                    }
                 }
             }
             MigrationStep::RenameParameter {
@@ -1347,6 +1371,37 @@ fn simulate_span(
                 on_collision,
                 ..
             } => {
+                if let Some(c) = vocab.classes.get(&fold(class)) {
+                    if !c.params.contains_key(&fold(from)) && !c.params.contains_key(&fold(to)) {
+                        // As for rename_class: a source a user renamed to a
+                        // third name.
+                        for r in vocab
+                            .renamed_parameters
+                            .get(&(c.id, fold(from)))
+                            .into_iter()
+                            .flatten()
+                        {
+                            let Some(live) = c.params.values().find(|p| p.id == r.id) else {
+                                continue;
+                            };
+                            let declared = t.classes.iter().any(|tc| {
+                                tc.parameters
+                                    .iter()
+                                    .any(|p| fold(&p.name) == fold(&live.name))
+                            });
+                            if !declared {
+                                blocked.push(format!(
+                                    "rename_parameter {class}.{from} -> {to}: the database's \
+                                     parameter {class}.{} was renamed to {:?} (commit {}), so \
+                                     the hint finds nothing to rename and {to:?} would be \
+                                     created empty beside it; rename {:?} to {to:?} (or back \
+                                     to {from:?}) first",
+                                    r.old_name, live.name, r.at_commit, live.name
+                                ));
+                            }
+                        }
+                    }
+                }
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
                     if *on_collision == OnCollision::DropSource
                         && c.params.contains_key(&fold(to))

@@ -33,11 +33,13 @@ use crate::api::{
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
 use crate::template::dbvocab::read_metadata_key;
+use crate::template::ir::{normalize_audit_rules, AuditRules};
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
     insert_class_dim_row, insert_class_row, insert_definition_row, insert_entity_element_row,
     insert_entity_row, insert_membership_row, insert_scenario_row, insert_type_member, read_ec_row,
     read_pd_row, revise_alternative_row, revise_ec_row, revise_pd_row, revise_scenario_row,
+    set_metadata,
 };
 use crate::text::NameFolds;
 use crate::types::{
@@ -329,6 +331,12 @@ impl CallRenames {
     /// The current name of the class `name` was renamed away from in this
     /// call, when `name` no longer resolves (a same-call create of the old
     /// name makes it resolve again, to the new object).
+    /// Did a rename of this call change any class or parameter name's
+    /// bytes (so the name-keyed metadata documents may need a rewrite)?
+    pub(crate) fn renamed_vocabulary(&self) -> bool {
+        !self.class_original.is_empty() || !self.parameter_original.is_empty()
+    }
+
     pub(crate) fn renamed_class(
         &self,
         conn: &Connection,
@@ -381,6 +389,176 @@ impl CallRenames {
             _ => Ok(None),
         }
     }
+}
+
+/// One class a rename of this call touched: its name before the call and
+/// now, and the original -> current names of its parameters that the
+/// document rewrite must follow.
+struct DocClass {
+    original: String,
+    current: String,
+    /// (name before the call, name now); every current parameter when the
+    /// class itself was renamed, else only the renamed ones.
+    parameters: Vec<(String, String)>,
+}
+
+/// The original and current names of every class and parameter a rename of
+/// this call changed (by id, so chains and same-call re-creates of an old
+/// name resolve to the right object).
+fn doc_classes(conn: &Connection, calls: &CallRenames) -> Result<Vec<DocClass>, DbError> {
+    let mut ids: Vec<i64> = calls.class_original.keys().copied().collect();
+    ids.extend(calls.parameter_original.values().map(|(cid, _)| *cid));
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out = Vec::with_capacity(ids.len());
+    for cid in ids {
+        let current: String = conn.query_row(
+            "SELECT name FROM entity_class WHERE cur_id = ?",
+            params![cid],
+            |r| r.get(0),
+        )?;
+        let original = calls
+            .class_original
+            .get(&cid)
+            .cloned()
+            .unwrap_or_else(|| current.clone());
+        let mut stmt = conn.prepare(
+            "SELECT id, name FROM parameter_definition \
+             WHERE entity_class_id = ? AND valid_to_commit IS NULL ORDER BY id",
+        )?;
+        let params_now: Vec<(i64, String)> = stmt
+            .query_map(params![cid], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let class_renamed = calls.class_original.contains_key(&cid);
+        let parameters = params_now
+            .into_iter()
+            .filter_map(|(pid, name)| match calls.parameter_original.get(&pid) {
+                Some((_, old)) => Some((old.clone(), name)),
+                None if class_renamed => Some((name.clone(), name)),
+                None => None,
+            })
+            .collect();
+        out.push(DocClass {
+            original,
+            current,
+            parameters,
+        });
+    }
+    Ok(out)
+}
+
+/// Rewrite the two name-keyed metadata documents after the call's renames
+/// (class_param_rename_PLAN §5.2, OD8): the `presentation` document's
+/// `parameter_group_membership` keys (`"{class}.{parameter}"`) and the
+/// `audit_rules` document's `class`, `selector` and `require[]` names. Runs
+/// ONCE per call, after the last structural item (B1: `set_metadata`
+/// closes the current row, so a second write of one document in one commit
+/// would trip the span CHECK), and writes a document only when a name in it
+/// changed.
+///
+/// Membership keys are matched by fold against keys BUILT from the original
+/// class and parameter names, never by splitting on `.` (a class `a.b` with
+/// parameter `c` and a class `a` with parameter `b.c` give the same key: a
+/// known limitation). A renamed entry wins over a stale one that lands on
+/// the same key. `audit_rules` is parsed as the IR block and serialized
+/// through [`normalize_audit_rules`], the one canonical form; a document
+/// that does not parse is left as it is (template export reports it).
+pub(crate) fn rewrite_name_documents(
+    conn: &Connection,
+    c: i64,
+    calls: &CallRenames,
+) -> Result<(), DbError> {
+    if !calls.renamed_vocabulary() {
+        return Ok(());
+    }
+    let presentation = read_metadata_key(conn, "presentation")?;
+    let audit_rules = read_metadata_key(conn, "audit_rules")?;
+    if presentation.is_none() && audit_rules.is_none() {
+        return Ok(());
+    }
+    let classes = doc_classes(conn, calls)?;
+
+    if let Some(doc) = presentation {
+        if let Ok(serde_json::Value::Object(mut root)) = serde_json::from_str(&doc) {
+            if let Some(serde_json::Value::Object(m)) = root.get("parameter_group_membership") {
+                let mut renamed: HashMap<String, String> = HashMap::new();
+                for dc in &classes {
+                    for (old, new) in &dc.parameters {
+                        let from = format!("{}.{old}", dc.original);
+                        let to = format!("{}.{new}", dc.current);
+                        if from != to {
+                            renamed.insert(fold(&from), to);
+                        }
+                    }
+                }
+                let mut changed = false;
+                let mut kept = serde_json::Map::new();
+                let mut moved = serde_json::Map::new();
+                for (k, v) in m {
+                    match renamed.get(&fold(k)) {
+                        Some(to) => {
+                            changed = true;
+                            moved.insert(to.clone(), v.clone());
+                        }
+                        None => {
+                            kept.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                if changed {
+                    kept.extend(moved);
+                    root.insert(
+                        "parameter_group_membership".into(),
+                        serde_json::Value::Object(kept),
+                    );
+                    let text = serde_json::to_string(&serde_json::Value::Object(root))
+                        .expect("a JSON value serializes");
+                    set_metadata(conn, c, "presentation", &text)?;
+                }
+            }
+        }
+    }
+
+    if let Some(doc) = audit_rules {
+        if let Ok(mut rules) = serde_json::from_str::<AuditRules>(&doc) {
+            let mut changed = false;
+            for r in &mut rules.conditional_requirements {
+                let Some(dc) = classes
+                    .iter()
+                    .find(|dc| fold(&dc.original) == fold(&r.class))
+                else {
+                    continue;
+                };
+                if r.class != dc.current {
+                    r.class = dc.current.clone();
+                    changed = true;
+                }
+                let rename = |name: &mut String, changed: &mut bool| {
+                    if let Some((_, new)) = dc
+                        .parameters
+                        .iter()
+                        .find(|(old, new)| old != new && fold(old) == fold(name))
+                    {
+                        *name = new.clone();
+                        *changed = true;
+                    }
+                };
+                rename(&mut r.selector, &mut changed);
+                for w in r.when.0.values_mut() {
+                    for req in &mut w.require {
+                        rename(req, &mut changed);
+                    }
+                }
+            }
+            if changed {
+                if let Some(v) = normalize_audit_rules(&rules) {
+                    let text = serde_json::to_string(&v).expect("a JSON value serializes");
+                    set_metadata(conn, c, "audit_rules", &text)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The template-stamp check (class_param_rename_PLAN OD7, §6.1), after the

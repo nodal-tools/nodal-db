@@ -2300,7 +2300,14 @@ pub fn normalized_model(t: &Template) -> Value {
 /// metadata key and compared by the reconcile diff — one normalization, three
 /// uses (hash, storage, diff), so they cannot drift.
 pub fn normalized_audit_rules(t: &Template) -> Option<Value> {
-    let rules = t.audit_rules.as_ref()?;
+    normalize_audit_rules(t.audit_rules.as_ref()?)
+}
+
+/// [`normalized_audit_rules`] over the block itself: the one canonical form
+/// of an `audit_rules` document, also used when a class or parameter rename
+/// rewrites the stored document (class_param_rename_PLAN §5.2), so a
+/// rewritten document is exactly what a template with those names stores.
+pub fn normalize_audit_rules(rules: &AuditRules) -> Option<Value> {
     if rules.conditional_requirements.is_empty() {
         return None;
     }

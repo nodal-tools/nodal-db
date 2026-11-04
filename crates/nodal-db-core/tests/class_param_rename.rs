@@ -1547,3 +1547,208 @@ fn renames_on_an_unstamped_db_need_no_flag() {
     let r = cs(&db, vec![ren_class("node", "bus")]);
     assert_eq!(r.structural[0].effect, SE::Renamed);
 }
+
+// ---------------------------------------------------------------------------
+// The name-keyed metadata documents (test 23-24, OD8 + B1 + S1)
+// ---------------------------------------------------------------------------
+
+const DOCS_TEMPLATE: &str = "\
+template: {name: t, version: \"1\"}
+value_lists:
+  - name: method
+    members: [{value: a}, {value: b}]
+parameter_groups:
+  - {name: basics}
+classes:
+  - name: unit
+    parameters:
+      - {name: method, value_list: method, group: basics}
+      - {name: eff, types: [{kind: float}], group: basics}
+      - {name: rate, types: [{kind: float}]}
+  - name: node
+    parameters:
+      - {name: demand, types: [{kind: float}], group: basics}
+audit_rules:
+  conditional_requirements:
+    - class: unit
+      selector: method
+      when:
+        a: {require: [eff]}
+        b: {require: [rate, eff]}
+";
+
+fn docs_db(dir: &tempfile::TempDir) -> PathBuf {
+    let db = fresh_db(dir);
+    apply(
+        &db,
+        &parse_str(DOCS_TEMPLATE).unwrap(),
+        &MigrationRegistry::new(),
+        "t",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
+    db
+}
+
+fn metadata(db: &Path, key: &str) -> serde_json::Value {
+    serde_json::from_str(
+        &qopt(
+            db,
+            &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn metadata_versions(db: &Path, key: &str) -> (i64, i64) {
+    (
+        q1(
+            db,
+            &format!(
+                "SELECT count(*) FROM metadata WHERE lower(name) = '{key}' \
+                 AND valid_to_commit IS NOT NULL"
+            ),
+        ),
+        q1(
+            db,
+            &format!("SELECT count(*) FROM metadata WHERE cur_name = '{key}'"),
+        ),
+    )
+}
+
+#[test]
+fn renames_rewrite_the_name_documents_once_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = docs_db(&dir);
+    assert_eq!(metadata_versions(&db, "presentation"), (0, 1));
+    assert_eq!(metadata_versions(&db, "audit_rules"), (0, 1));
+    // Two class renames and one parameter rename, every one matching keys
+    // of both documents: one closed version per document.
+    cs(
+        &db,
+        vec![
+            allowed(ren_class("unit", "gen")),
+            allowed(ren_class("node", "bus")),
+            allowed(ren_param("gen", "eff", "efficiency")),
+        ],
+    );
+    assert_eq!(metadata_versions(&db, "presentation"), (1, 1));
+    assert_eq!(metadata_versions(&db, "audit_rules"), (1, 1));
+    let p = metadata(&db, "presentation");
+    let keys: Vec<&String> = p["parameter_group_membership"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(keys, vec!["bus.demand", "gen.efficiency", "gen.method"]);
+    let rules = metadata(&db, "audit_rules");
+    let r = &rules["conditional_requirements"][0];
+    assert_eq!(r["class"], "gen");
+    assert_eq!(r["selector"], "method");
+    assert_eq!(r["when"]["a"]["require"], serde_json::json!(["efficiency"]));
+    // `require` re-sorted into the canonical order after the rename.
+    assert_eq!(
+        r["when"]["b"]["require"],
+        serde_json::json!(["efficiency", "rate"])
+    );
+
+    // Export, then load: the exported template validates and keeps the
+    // groups; its canonical audit rules are exactly the stored document.
+    let (t, _warnings) = nodal_db_core::template::export(&db).unwrap();
+    nodal_db_core::template::validate(&t).unwrap();
+    let gen = t.classes.iter().find(|c| c.name == "gen").unwrap();
+    let eff = gen
+        .parameters
+        .iter()
+        .find(|p| p.name == "efficiency")
+        .unwrap();
+    assert_eq!(eff.group.as_deref(), Some("basics"));
+    assert_eq!(
+        nodal_db_core::template::ir::normalized_audit_rules(&t).unwrap(),
+        rules
+    );
+    let reloaded = parse_str(&nodal_db_core::template::to_yaml(&t).unwrap()).unwrap();
+    nodal_db_core::template::validate(&reloaded).unwrap();
+}
+
+#[test]
+fn a_selector_rename_and_a_chain_rewrite_by_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = docs_db(&dir);
+    // A chain (unit -> x -> gen) and a selector rename; a new class takes
+    // the old name in the same call and gets nothing of the documents.
+    cs(
+        &db,
+        vec![
+            allowed(ren_class("unit", "x")),
+            allowed(ren_param("x", "method", "mode")),
+            allowed(ren_class("x", "gen")),
+            class("unit"),
+        ],
+    );
+    assert_eq!(metadata_versions(&db, "audit_rules"), (1, 1));
+    let rules = metadata(&db, "audit_rules");
+    assert_eq!(rules["conditional_requirements"][0]["class"], "gen");
+    assert_eq!(rules["conditional_requirements"][0]["selector"], "mode");
+    let p = metadata(&db, "presentation");
+    let m = p["parameter_group_membership"].as_object().unwrap();
+    assert!(
+        m.contains_key("gen.mode") && m.contains_key("gen.eff"),
+        "{m:?}"
+    );
+    assert!(!m.keys().any(|k| k.starts_with("unit.")), "{m:?}");
+    // A description-only revision and a rename that matches no key leave
+    // the documents alone.
+    cs(
+        &db,
+        vec![
+            desc_class("gen", "G."),
+            allowed(ren_param("gen", "rate", "rate")),
+            allowed(ren_class("unit", "other")),
+        ],
+    );
+    assert_eq!(metadata_versions(&db, "audit_rules"), (1, 1));
+    assert_eq!(metadata_versions(&db, "presentation"), (1, 1));
+}
+
+#[test]
+fn export_drops_stale_audit_rule_names_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = docs_db(&dir);
+    // An object delete does not rewrite the documents: `rate` stays in a
+    // `require` list.
+    call(
+        &db,
+        vec![],
+        vec![],
+        vec![],
+        vec![okey(ObjectKind::Parameter, Some("unit"), "rate")],
+    )
+    .unwrap();
+    let (t, warnings) = nodal_db_core::template::export(&db).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("requires \"rate\"")),
+        "{warnings:?}"
+    );
+    nodal_db_core::template::validate(&t).unwrap();
+    // A rule whose class is gone is dropped whole.
+    call(
+        &db,
+        vec![],
+        vec![],
+        vec![],
+        vec![okey(ObjectKind::Class, None, "unit")],
+    )
+    .unwrap();
+    let (t, warnings) = nodal_db_core::template::export(&db).unwrap();
+    assert!(t.audit_rules.is_none());
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("rule for class \"unit\"")),
+        "{warnings:?}"
+    );
+    nodal_db_core::template::validate(&t).unwrap();
+}

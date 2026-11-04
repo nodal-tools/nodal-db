@@ -56,7 +56,8 @@ use crate::object_delete::{
     written_value_covered, PreparedObjectDelete, WrittenIds,
 };
 use crate::structural::{
-    apply_structural, prepare_structural, refuse_template_stamped_renames, CallRenames,
+    apply_structural, prepare_structural, refuse_template_stamped_renames, rewrite_name_documents,
+    CallRenames,
 };
 use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
@@ -486,6 +487,9 @@ pub fn commit_changes(
                 &prepared_object_deletes,
             )?;
         }
+        // The name-keyed metadata documents follow the renames, once per
+        // document per call (OD8, B1).
+        rewrite_name_documents(conn, commit_id, &calls)?;
         // `DeleteWins`: what the deletes cover, resolved after the
         // structural changes (a delete may name a referent one of them
         // created or renamed) and before any write.

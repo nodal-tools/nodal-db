@@ -139,6 +139,23 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    UndeclaredValueType,
+    ApiError,
+    "A value write whose batch instantiates none of the parameter's declared \
+     member types, e.g. a string batch for a parameter declared float only \
+     (DbError::UndeclaredValueType). A write never widens the declared type \
+     set; nothing was written. One segment may carry batches of several \
+     types (pass a list of batches); the check runs per group of batches \
+     with the same column types. Attributes: `segment_index` (0-based), \
+     `class_name`, `parameter`, `alternative`, `entity` (the first entity \
+     of the refused group), `entity_count` (the entities that group \
+     carries), `value_kind` (its value column's kind, e.g. \"bool\"), \
+     `dimensions` (a list of (name, kind) tuples, empty at rank 0) and \
+     `declared` (descriptions of the declared member types). A subclass of \
+     ApiError, so `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
     ReadSurfaceStale,
     ApiError,
     "A read needed a view or macro that the database file lacks because its \
@@ -447,6 +464,12 @@ impl Database {
     ///
     /// * `segments`: list of dicts `{"class", "parameter", "alternative",
     ///   "batch", "domains"?}` (see `write_parameter` for the batch shape).
+    ///   `batch` may also be a list of Arrow objects whose schemas differ:
+    ///   one parameter and alternative with values of several declared
+    ///   types in one call (e.g. a float batch and a string batch). Each
+    ///   group of batches with the same column types binds to the declared
+    ///   member type it instantiates (else `UndeclaredValueType`); an
+    ///   entity may appear in one group only.
     /// * `deletes`: list of `(class, parameter, alternative, entity)` tuples
     ///   (resolved case-insensitively, never auto-created; a missing referent
     ///   is a warning + skip, never an error).
@@ -1307,6 +1330,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "WriteAndDeleteSameKey",
         py.get_type::<WriteAndDeleteSameKey>(),
     )?;
+    m.add("UndeclaredValueType", py.get_type::<UndeclaredValueType>())?;
     m.add("SchemaMismatch", py.get_type::<SchemaMismatch>())?;
     m.add("ReadSurfaceStale", py.get_type::<ReadSurfaceStale>())?;
     m.add(

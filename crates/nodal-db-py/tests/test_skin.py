@@ -209,6 +209,61 @@ def test_identical_write_is_unchanged_and_commits_nothing(db):
     assert ei.value.resolved is None  # the up-front name check, not resolved ids
 
 
+def test_commit_changes_mixed_value_types_in_one_segment(db):
+    # One parameter declared float and string; one segment whose `batch` is
+    # a list of batches of different types writes both in one commit.
+    db.ensure_entity_class("node", user="t")
+    db.ensure_parameter_definition(
+        "node", "level", types=[{"kind": "float"}, {"kind": "string"}], user="t"
+    )
+    head = db.head_commit()
+    rep = db.commit_changes(
+        segments=[{"class": "node", "parameter": "level", "alternative": "Base",
+                   "batch": [scalar_batch(["north"], [12.0]),
+                             scalar_batch(["south"], ["high"])]}],
+        user="t",
+    )
+    assert rep["commit_id"] == head + 1 == db.head_commit()
+    assert rep["values_written"] == 2
+    t = db.read_parameter("node", "level", "Base").to_pylist()
+    got = sorted((r["entity"], r["value_kind"], r["v_float"], r["v_str"]) for r in t)
+    assert got == [("north", "float", 12.0, None), ("south", "string", None, "high")]
+
+    # A batch type the parameter does not declare: the typed refusal (an
+    # ApiError subclass), nothing written.
+    with pytest.raises(nodal_db.UndeclaredValueType) as ei:
+        db.commit_changes(
+            segments=[{"class": "node", "parameter": "level", "alternative": "Base",
+                       "batch": [scalar_batch(["north"], [1.0]),
+                                 scalar_batch(["east", "west"], [True, False])]}],
+            user="t",
+        )
+    e = ei.value
+    assert isinstance(e, nodal_db.ApiError)
+    assert (e.segment_index, e.class_name, e.parameter, e.alternative) == (
+        0, "node", "level", "Base",
+    )
+    assert (e.entity, e.entity_count, e.value_kind) == ("east", 2, "bool")
+    assert e.dimensions == []
+    assert e.declared == ["float rank 0", "string rank 0"]
+    assert db.head_commit() == head + 1
+
+    # A rank-1 batch: `dimensions` lists its (name, kind) pairs.
+    series = pa.record_batch({"entity": ["east", "east"],
+                              "t": pa.array([0, 1], pa.int64()),
+                              "value": [1.0, 2.0]})
+    with pytest.raises(nodal_db.UndeclaredValueType) as ei:
+        db.commit_changes(
+            segments=[{"class": "node", "parameter": "level", "alternative": "Base",
+                       "batch": [scalar_batch(["north"], [1.0]), series]}],
+            user="t",
+        )
+    e = ei.value
+    assert (e.entity, e.entity_count, e.value_kind) == ("east", 1, "float")
+    assert e.dimensions == [("t", "integer")]
+    assert db.head_commit() == head + 1
+
+
 def test_query_returns_arrow_reader(db):
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
     reader = db.query("SELECT count(*) AS n FROM entity")

@@ -195,7 +195,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; one set-based writer per tier and the set-based delete (rounds per commit). |
 | `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `read_values`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
-| `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, and entity / class / parameter creation. |
+| `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, entity / class / parameter creation, and class / parameter renames and description revisions (with the per-call rename checks and the rewrite of the name-keyed template documents). |
 | `verbs` | Idempotent single-purpose write verbs (`ensure_entity`, `set_scenario_alternatives`, …) used by template migration programs and importers; thin wrappers over the `structural` and `api` paths. |
 | `erasure` | Hard erasure of one alternative's data, with an `erasure_marker` trace, in one transaction. |
 | `compaction` | Physical repack: rebuild into a fresh file, full-content self-check, atomic rename. |
@@ -300,8 +300,9 @@ drop stands only if a covering delete takes effect (a value delete, or
 an object delete that ends `Deleted` or whose target did not exist);
 otherwise, as for a RESTRICT delete that ends `Restricted`, the call is
 refused and rolled back. Under either policy an object delete that
-reaches an object a structural change of the same call created is
-refused, since the same-commit guard would leave that object live. Direct `history`
+reaches an object a structural change of the same call created, renamed
+or revised is refused, since the same-commit guard would leave the row
+that change wrote live. Direct `history`
 callers in their own transaction still commit.
 
 Canonical encodings: axes and values serialize to a pinned byte layout

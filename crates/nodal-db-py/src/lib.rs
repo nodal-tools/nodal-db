@@ -458,7 +458,22 @@ impl Database {
     ///   `{"op": "set_scenario_alternatives", "scenario": "s", "alternatives":
     ///   [...]}`). Applied FIRST, so a same-save value write can target a
     ///   referent a structural item just created. Per-item outcomes land in the
-    ///   report's `"structural"` list.
+    ///   report's `"structural"` list. The ops: `create_alternative`,
+    ///   `rename_alternative`, `create_scenario`, `rename_scenario`,
+    ///   `set_scenario_alternatives`, `set_entity_activation`,
+    ///   `create_entity`, `create_entity_class` (`name`, `dims`,
+    ///   `description`?), `rename_entity_class` (`current`, `new_name`,
+    ///   `description`?, `allow_on_template`?), `create_parameter`,
+    ///   `rename_parameter` (`class`, `current`, `new_name`, `description`?,
+    ///   `allow_on_template`?) and `set_membership`. A rename keeps the id;
+    ///   `new_name == current` with a `description` revises only the
+    ///   description (effect `"updated"`), and `description: ""` clears it.
+    ///   Within one call a rename may not take a name an earlier rename
+    ///   freed (swaps take two commits), and later items, segments and
+    ///   deletes must use the new name. On a template-stamped database a
+    ///   class or parameter rename that changes the folded name needs
+    ///   `"allow_on_template": True`, else `TemplateStampedRename` lists the
+    ///   refused items.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
     /// * `covered_writes`: `"refuse"` (the default) or `"delete_wins"`; see

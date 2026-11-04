@@ -499,43 +499,89 @@ precedence.
 
 The CLI has no scenario commands; use Python or Rust, or a template.
 
-### Renaming an alternative or scenario
+### Renaming objects and editing descriptions
 
-`RenameAlternative` / `RenameScenario` close the current identity row and
-open a same-id successor (`version + 1`) whenever `new_name` differs from
-the stored spelling **at all**, once both sides are compared in NFC — so
-`"High" -> "HIGH"` and a pure Unicode re-spelling (NFD -> NFC of the same
-text) are each a real, committed rename, not just a byte-identical name
-that collapses two different but case/Unicode-equivalent spellings into
-one object. Only a spelling that is already byte-identical after NFC,
-with no description change, is a no-op (`StructuralEffect::NoOp`,
-`commit_id` 0 if that is the whole call):
+Four structural changes rename an object or revise its description:
+`RenameAlternative`, `RenameScenario`, `RenameEntityClass` and
+`RenameParameter` (Python ops `rename_alternative`, `rename_scenario`,
+`rename_entity_class`, `rename_parameter`). Each takes the object's
+`current` name, a `new_name` and an optional `description`;
+`RenameParameter` also takes the `class` the parameter belongs to.
 
 ```python
-# A pure case restyle is a real rename: version bumps, new spelling stored.
-rep = db.commit_structural(
-    [{"op": "rename_alternative", "current": "high_demand",
-      "new_name": "HIGH_DEMAND"}],
-    user="alice")
-rep["structural"][0]["effect"]  # "renamed"
-
-# Renaming to the exact current spelling (post-NFC) is a no-op.
-rep = db.commit_structural(
-    [{"op": "rename_alternative", "current": "HIGH_DEMAND",
-      "new_name": "HIGH_DEMAND"}],
-    user="alice")
-rep["structural"][0]["effect"], rep["commit_id"]  # ("no_op", 0)
+db.commit_structural([
+    {"op": "rename_entity_class", "current": "node", "new_name": "bus"},
+    {"op": "rename_parameter", "class": "bus", "current": "demand",
+     "new_name": "load", "description": "Hourly load, MW"},
+], user="alice")
 ```
 
-Renaming to a spelling that is already a DIFFERENT, live object (by the
-database's case-insensitive name resolution) still collides and is
-refused — self-collision is excluded by id, not by the rename's case or
-Unicode form, so renaming an object to its own case-restyled spelling
-never collides with itself. A caller that wants the OLD (pre-2026-10-27)
-behavior — case/Unicode-form-only renames treated as nothing to do —
-checks the stored spelling itself before calling `rename_alternative` /
-`rename_scenario` and skips the call, or ignores the `renamed` effect
-when its own `current` and `new_name` differ only this way.
+A rename keeps the object's id and closes the current row with a
+same-id successor (`version + 1`), so history is continuous: values,
+entities, dimensions, defaults and type declarations refer to the id
+and follow the rename with no rewrite, an N-D class that uses a renamed
+class as a dimension shows the new name, and `<table>_asof(commit)`
+shows the old name at earlier commits. Class names are unique in the
+database; parameter names are unique within their class.
+
+- **What counts as a rename.** Any difference from the stored spelling
+  after NFC is a rename, case-only and Unicode-form-only changes
+  included (`"High" -> "HIGH"`), reported with the effect `Renamed`.
+  Renaming to a name that is already a *different* live object (by the
+  case-insensitive name identity) is refused; renaming an object to its
+  own case-restyled spelling never collides with itself. A caller that
+  wants case-only renames treated as nothing to do checks the stored
+  spelling itself and skips the call.
+- **Descriptions.** `new_name` equal to the stored spelling with a
+  `description` revises only the description; the effect is `Updated`.
+  A missing `description` (`None`) keeps the stored one, and `""` clears
+  it: a stored description is never the empty string, anywhere in the
+  database (creates and templates follow the same rule). The same name
+  with no description change, or `""` on an object with no description,
+  is `NoOp`; a call of only no-ops makes no commit (`commit_id` 0).
+  `CreateEntityClass` also takes a `description`, applied only when the
+  class is created.
+- **Several changes in one call** apply in order. Address an object by
+  the name it has at that point of the call: after `node -> bus`, a
+  later item, segment or delete uses `bus`. A reference by the old name
+  is refused (it would otherwise create a new, empty object or delete
+  nothing), unless an earlier item of the call created a new object
+  under that name. A rename may not take a name that an earlier rename
+  of the same call freed, so swapping two names (`a -> t`, `b -> a`,
+  `t -> b`) is refused: rename both to temporary names in one commit
+  and to their final names in the next. A chain (`a -> b`, then
+  `b -> c`) is one rename. A rename and an object delete of the same
+  object in one call are refused; do them in separate calls. When a
+  client stages creates and renames together, it should send the renames
+  first: a create of an existing name does nothing, so a create sent
+  before the rename of that name lands on the object being renamed.
+- **Template-stamped databases.** On a database that a template stamped
+  (`template_name` in `metadata`), renaming a class or parameter is
+  refused by default with `TemplateStampedRename`
+  (`DbError::TemplateStampedRename`, `nodal_db.TemplateStampedRename`,
+  an `ApiError` subclass). nodal-db cannot tell which classes and
+  parameters the template declares, so the refusal covers all of them.
+  The error lists every refused item (`change_index`, kind, class,
+  `current`, `new_name`) so a client can ask its user once; to go ahead,
+  resend the allowed items with `allow_on_template: true`
+  (`"allow_on_template": True` in Python). Case-only renames,
+  description edits and objects created in the same call need no flag.
+  After such a rename, applying a *changed* template that still declares
+  the old name stops with a message naming the rename (rename it back,
+  or have the template rename it with a `rename_class` /
+  `rename_parameter` hint) instead of creating a second, empty object
+  under the old name; re-applying the same template does nothing. A
+  changed template also writes its own descriptions back over edited
+  ones. A history-free extract forgets the old names, after which a
+  changed template creates the old name anew.
+- **Template documents.** The template-owned parameter groups and audit
+  rules (the `presentation` and `audit_rules` metadata documents) name
+  classes and parameters; a rename updates them in the same commit.
+- **Outside the database.** Names that other programs store (Arrow import
+  files, results templates, saved SQL such as
+  `read_parameter('node', 'demand')`) are not updated: after a rename a
+  read by the old name returns no rows, and a write by it creates a new
+  object. Update those references together with the rename.
 
 ### Read with SQL
 

@@ -277,12 +277,21 @@ constant) and the `declared` types.
 
 Values of different types for one parameter and alternative can go in
 one commit: give the segment one batch per type. The core groups a
-segment's batches by their column types; batches of the same types are
-one table, as always, and each group is checked against the declared
-types on its own. An entity can appear in one group only, since it has
-one value. If the parameter has no declared type yet, the first group
-declares it, and a group of another type is then refused like any
-undeclared type.
+segment's batches by their column types and dimension names; batches
+with the same types and names are one table, as always, and each group
+is checked against the declared types on its own. So a `t` batch and a
+`time` batch are two groups, each matched by its own dimension name. An
+entity can appear in one group only, since it has one value. If the
+parameter has no declared type yet, the first group declares it, and a
+group of another type is then refused like any undeclared type.
+
+Label domains given by position (the `domains` argument) apply to the
+dimension that the first group with a label dimension at that position
+has. A group whose label dimension at that position has another name
+does not get that domain; give it its own in the column's
+`spinal:label_domain` field metadata. In a segment of one group nothing
+changes: the `domains` argument wins over field metadata at the same
+position.
 
 ```python
 db.ensure_entity_class("node", user="alice")

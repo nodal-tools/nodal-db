@@ -15,6 +15,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{commit_changes, commit_structural, head_commit, DeleteKey, Segment};
+use nodal_db_core::canon::LabelDomain;
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::template::ir::{DimSpec, TypeDecl};
@@ -594,6 +595,12 @@ fn auto_created_parameter_takes_the_first_groups_type_only() {
         ("south", "string")
     );
     assert_eq!(d.declared, vec!["float rank 0"]);
+    assert!(
+        d.message
+            .contains("set by an earlier group of batches in this call"),
+        "{}",
+        d.message
+    );
     assert_eq!(head_commit(&db).unwrap(), head);
     assert_eq!(count(&db, "SELECT count(*) FROM parameter_definition"), 0);
 }
@@ -637,4 +644,224 @@ fn delete_wins_dropping_a_whole_group_skips_its_type_check() {
         read_back(&db),
         vec![row(&["north", "scalar", "float", "-", "12.0"])]
     );
+}
+
+/// An indexed declared type over one dimension `name` of `kind`.
+fn indexed(name: &str, kind: &str) -> TypeDecl {
+    TypeDecl {
+        kind: "indexed".into(),
+        dims: Some(vec![DimSpec {
+            name: name.into(),
+            kind: kind.into(),
+        }]),
+    }
+}
+
+/// A rank-1 batch for `entity` over dimension `dim` (its column, typed by
+/// `index`), with optional `spinal:label_domain` field metadata.
+fn dim_batch(
+    entity: &str,
+    dim: &str,
+    index: ArrayRef,
+    value: ArrayRef,
+    metadata_domain: Option<&[&str]>,
+) -> RecordBatch {
+    let n = index.len();
+    let mut field = Field::new(dim, index.data_type().clone(), false);
+    if let Some(labels) = metadata_domain {
+        let js = serde_json::to_string(labels).unwrap();
+        field = field.with_metadata(std::collections::HashMap::from([(
+            "spinal:label_domain".to_string(),
+            js,
+        )]));
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        field,
+        Field::new("value", value.data_type().clone(), false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![entity; n])) as ArrayRef,
+            index,
+            value,
+        ],
+    )
+    .unwrap()
+}
+
+fn ints(v: &[i64]) -> ArrayRef {
+    Arc::new(Int64Array::from(v.to_vec()))
+}
+
+fn labels(v: &[&str]) -> ArrayRef {
+    Arc::new(StringArray::from(v.to_vec()))
+}
+
+fn fl(v: &[f64]) -> ArrayRef {
+    Arc::new(Float64Array::from(v.to_vec()))
+}
+
+/// Each current value's bound member by its dimension name.
+fn bound_dims(db: &Path) -> Vec<Vec<String>> {
+    query::<String>(
+        db,
+        "SELECT DISTINCT e.name, d.dimension_name FROM ( \
+           SELECT entity_id, parameter_type_id FROM value_scalar WHERE valid_to_commit IS NULL \
+           UNION ALL SELECT entity_id, parameter_type_id FROM value_long WHERE valid_to_commit IS NULL \
+           UNION ALL SELECT entity_id, parameter_type_id FROM value_array) v \
+         JOIN entity e ON e.id = v.entity_id \
+         JOIN parameter_type_dimension d ON d.parameter_type_id = v.parameter_type_id \
+         ORDER BY 1",
+    )
+}
+
+/// Two declared types told apart only by their dimension names: batches
+/// with a `t` and a `time` column are two groups in one call, each bound
+/// by its own names, as two separate commits would bind them.
+#[test]
+fn types_differing_only_in_dimension_names_bind_by_name() {
+    let (_d, db) = fresh_db();
+    declare(
+        &db,
+        vec![indexed("t", "integer"), indexed("time", "integer")],
+    );
+    write(
+        &db,
+        vec![segment(vec![
+            dim_batch("north", "t", ints(&[0, 1]), fl(&[1.0, 2.0]), None),
+            dim_batch("south", "time", ints(&[0, 1]), fl(&[3.0, 4.0]), None),
+        ])],
+        vec![],
+        WriteOptions::default(),
+    )
+    .expect("t and time in one call");
+    assert_eq!(
+        bound_dims(&db),
+        vec![row(&["north", "t"]), row(&["south", "time"])]
+    );
+    assert_audits_clean(&db);
+
+    // One entity's rows split over a `t` and a `time` batch: two values.
+    let err = write(
+        &db,
+        vec![segment(vec![
+            dim_batch("east", "t", ints(&[0]), fl(&[1.0]), None),
+            dim_batch("east", "time", ints(&[1]), fl(&[2.0]), None),
+        ])],
+        vec![],
+        WriteOptions::default(),
+    )
+    .expect_err("one entity, two dimension names");
+    assert!(err.to_string().contains("two value types"), "{err}");
+
+    // A name neither type declares is refused, naming the batch's names,
+    // while the other group matches.
+    let head = head_commit(&db).unwrap();
+    let err = write(
+        &db,
+        vec![segment(vec![
+            dim_batch("north", "t", ints(&[0]), fl(&[9.0]), None),
+            dim_batch("south", "step", ints(&[0]), fl(&[9.0]), None),
+        ])],
+        vec![],
+        WriteOptions::default(),
+    )
+    .expect_err("step is not declared");
+    let DbError::UndeclaredValueType(d) = &err else {
+        panic!("expected UndeclaredValueType, got {err:?}");
+    };
+    assert_eq!(d.entity, "south");
+    assert_eq!(
+        d.dimensions,
+        vec![("step".to_string(), "integer".to_string())]
+    );
+    assert_eq!(head_commit(&db).unwrap(), head);
+}
+
+/// A positional domain (`Segment::domains`) belongs to the dimension the
+/// first group with a label dimension at that position has; another
+/// group's label dimension there keeps its own field-metadata domain.
+#[test]
+fn positional_domains_go_to_the_first_groups_dimension_only() {
+    let (_d, db) = fresh_db();
+    declare(
+        &db,
+        vec![
+            scalar("float"),
+            indexed("scen", "label"),
+            indexed("season", "label"),
+        ],
+    );
+    let mut seg = segment(vec![
+        floats(&["east"], &[1.0]), // rank 0: no dimension at position 1
+        dim_batch("north", "scen", labels(&["a", "b"]), fl(&[1.0, 2.0]), None),
+        dim_batch(
+            "south",
+            "season",
+            labels(&["w", "s"]),
+            fl(&[3.0, 4.0]),
+            Some(&["w", "s"]),
+        ),
+    ]);
+    seg.domains = vec![LabelDomain {
+        position: 1,
+        labels: vec!["a".into(), "b".into()],
+    }];
+    write(&db, vec![seg], vec![], WriteOptions::default()).expect("each its own domain");
+    assert_eq!(
+        bound_dims(&db),
+        vec![row(&["north", "scen"]), row(&["south", "season"])]
+    );
+    let labels_read = query::<String>(
+        &db,
+        "SELECT entity, idx1_text FROM read_parameter('node', 'level') \
+         WHERE idx1_text IS NOT NULL ORDER BY entity, idx1_ordinal",
+    );
+    assert_eq!(
+        labels_read,
+        vec![
+            row(&["north", "a"]),
+            row(&["north", "b"]),
+            row(&["south", "w"]),
+            row(&["south", "s"]),
+        ]
+    );
+    assert_audits_clean(&db);
+}
+
+/// A single-group segment keeps the precedence it had: the positional
+/// argument wins over the field metadata at its position.
+#[test]
+fn single_group_domain_precedence_is_unchanged() {
+    let order = |arg: Option<&[&str]>, meta: Option<&[&str]>| {
+        let (_d, db) = fresh_db();
+        declare(&db, vec![indexed("scen", "label")]);
+        let mut seg = segment(vec![dim_batch(
+            "north",
+            "scen",
+            labels(&["x", "y"]),
+            fl(&[1.0, 2.0]),
+            meta,
+        )]);
+        if let Some(a) = arg {
+            seg.domains = vec![LabelDomain {
+                position: 1,
+                labels: a.iter().map(|s| s.to_string()).collect(),
+            }];
+        }
+        write(&db, vec![seg], vec![], WriteOptions::default()).expect("write");
+        query::<String>(
+            &db,
+            "SELECT idx1_text FROM read_parameter('node', 'level') ORDER BY idx1_ordinal",
+        )
+    };
+    let by_arg = order(Some(&["y", "x"]), None);
+    let by_meta = order(None, Some(&["x", "y"]));
+    assert_ne!(
+        by_arg, by_meta,
+        "the two domains order the labels differently"
+    );
+    assert_eq!(order(Some(&["y", "x"]), Some(&["x", "y"])), by_arg);
 }

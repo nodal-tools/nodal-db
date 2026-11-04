@@ -248,6 +248,21 @@ def test_commit_changes_mixed_value_types_in_one_segment(db):
     assert e.declared == ["float rank 0", "string rank 0"]
     assert db.head_commit() == head + 1
 
+    # A rank-1 batch: `dimensions` lists its (name, kind) pairs.
+    series = pa.record_batch({"entity": ["east", "east"],
+                              "t": pa.array([0, 1], pa.int64()),
+                              "value": [1.0, 2.0]})
+    with pytest.raises(nodal_db.UndeclaredValueType) as ei:
+        db.commit_changes(
+            segments=[{"class": "node", "parameter": "level", "alternative": "Base",
+                       "batch": [scalar_batch(["north"], [1.0]), series]}],
+            user="t",
+        )
+    e = ei.value
+    assert (e.entity, e.entity_count, e.value_kind) == ("east", 1, "float")
+    assert e.dimensions == [("t", "integer")]
+    assert db.head_commit() == head + 1
+
 
 def test_query_returns_arrow_reader(db):
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")

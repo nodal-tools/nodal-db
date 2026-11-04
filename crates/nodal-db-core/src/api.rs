@@ -2096,15 +2096,26 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
     }
     // Group the batches by column types, first-seen order. Batches of one
     // group concatenate exactly as before (same column count and types).
-    let mut keys: Vec<Vec<&DataType>> = Vec::new();
+    // The key also holds the dimension names (NFC, as the declared names
+    // they are matched against): two batches whose columns differ only in
+    // a dimension's name may instantiate two declared members that only
+    // their names tell apart (the reason the binding is persisted, D11),
+    // so they are two groups, each matched by its own names.
+    type GroupKey<'a> = (Vec<&'a DataType>, Vec<String>);
+    let mut keys: Vec<GroupKey<'_>> = Vec::new();
     let mut members: Vec<Vec<&RecordBatch>> = Vec::new();
     for b in &seg.batches {
-        let key: Vec<&DataType> = b
-            .schema_ref()
-            .fields()
-            .iter()
-            .map(|f| f.data_type())
-            .collect();
+        let fields = b.schema_ref().fields();
+        let n = fields.len();
+        let key: GroupKey<'_> = (
+            fields.iter().map(|f| f.data_type()).collect(),
+            fields
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i > 0 && *i + 1 < n)
+                .map(|(_, f)| nfc(f.name()).into_owned())
+                .collect(),
+        );
         match keys.iter().position(|k| *k == key) {
             Some(g) => members[g].push(b),
             None => {
@@ -2135,11 +2146,45 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
     let mut names: Vec<String> = Vec::new();
     let mut group_of: Vec<usize> = Vec::new();
     let mut rows: Vec<Vec<u32>> = Vec::new();
+    // The caller's positional label domains (`Segment::domains`) name a
+    // dimension by position only. When groups put different dimensions at
+    // one position, a domain belongs to the dimension the FIRST group with
+    // a label dimension there has (matched by the name fold); a group whose
+    // label dimension at that position has another name does not get it
+    // and keeps its own `spinal:label_domain` field metadata, if any. The
+    // alternative — the argument applying to every group — would give one
+    // dimension's labels to another and shadow the metadata the other
+    // batch carries for exactly that purpose. A single-group segment is
+    // unchanged: the argument wins over field metadata at its positions.
+    let anchors: Vec<Option<String>> = seg
+        .domains
+        .iter()
+        .map(|d| {
+            group_batches
+                .iter()
+                .find_map(|b| label_dim_fold(b, d.position))
+        })
+        .collect();
     for (g, batch) in group_batches.iter().enumerate() {
+        let provided: Cow<'_, [LabelDomain]> = if group_batches.len() == 1 {
+            Cow::Borrowed(&seg.domains)
+        } else {
+            Cow::Owned(
+                seg.domains
+                    .iter()
+                    .zip(&anchors)
+                    .filter(|(d, anchor)| match anchor {
+                        None => true,
+                        Some(a) => label_dim_fold(batch, d.position).as_ref() == Some(a),
+                    })
+                    .map(|(d, _)| d.clone())
+                    .collect(),
+            )
+        };
         groups.push(prepare_group(
             batch,
             g,
-            &seg.domains,
+            &provided,
             &mut seg_names,
             &mut labels,
             &mut prep_warnings,
@@ -2183,7 +2228,7 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
                 return Err(DbError::Api(format!(
                     "entity {name:?} appears in batches of two value types in one \
                      segment ({}; {}); one entity has one value: send its rows in \
-                     batches of one type",
+                     batches of one type (same column types and dimension names)",
                     groups[group_of[idx]].desc(),
                     groups[g].desc()
                 )));
@@ -2206,6 +2251,18 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
         group_of,
         rows,
     })
+}
+
+/// The folded NFC name of `batch`'s dimension at 1-based `position` when it
+/// is a label dimension (a Utf8 column between the entity and the value
+/// columns), else `None`.
+fn label_dim_fold(batch: &RecordBatch, position: u8) -> Option<String> {
+    let i = usize::from(position);
+    let fields = batch.schema_ref().fields();
+    if i == 0 || i + 1 >= fields.len() || fields[i].data_type() != &DataType::Utf8 {
+        return None;
+    }
+    Some(fold(&nfc(fields[i].name())))
 }
 
 impl PreparedGroup {
@@ -2359,6 +2416,7 @@ fn write_prepared(
     }
     let mut bound: Vec<Option<(i64, DeclaredType)>> = Vec::with_capacity(p.groups.len());
     let mut definition: Option<(i64, bool)> = None;
+    let mut typed_here = false;
     for (g, group) in p.groups.iter().enumerate() {
         let Some(first) = first_of[g] else {
             bound.push(None);
@@ -2370,17 +2428,40 @@ fn write_prepared(
             entity: &p.names[first],
             entity_count: count_of[g],
         };
-        let r = names.parameter(
-            conn,
-            commit_id,
-            class_id,
-            &p.parameter,
-            &group.inferred,
-            group.value_kind,
-            &subject,
-            &mut report.warnings,
-            &mut folds,
-        )?;
+        let before = report.warnings.len();
+        let r = names
+            .parameter(
+                conn,
+                commit_id,
+                class_id,
+                &p.parameter,
+                &group.inferred,
+                group.value_kind,
+                &subject,
+                &mut report.warnings,
+                &mut folds,
+            )
+            .map_err(|e| match e {
+                DbError::UndeclaredValueType(mut d) if typed_here => {
+                    d.message.push_str(
+                        " (the parameter had no declared type: its type was set by an \
+                         earlier group of batches in this call, the first one)",
+                    );
+                    DbError::UndeclaredValueType(d)
+                }
+                e => e,
+            })?;
+        if definition.is_none() {
+            // The first group declared the type (an auto-created definition
+            // or type row): a later group is held to it.
+            typed_here = report.warnings[before..].iter().any(|w| {
+                w.kind == WarningKind::AutoCreated
+                    && matches!(
+                        w.object_type.as_str(),
+                        "parameter_type" | "parameter_definition"
+                    )
+            });
+        }
         match definition {
             None => definition = Some((r.pd_id, r.retain_content)),
             Some((pd, _)) if pd != r.pd_id => {

@@ -308,7 +308,9 @@ pub struct UndeclaredValueTypeDetails {
     pub alternative: String,
     /// The first entity of the refused group of batches, as written.
     pub entity: String,
-    /// How many entities the refused group carries (`entity` included).
+    /// How many entities the refused group carries (`entity` included):
+    /// the entities still to be written, i.e. after
+    /// `CoveredWrites::DeleteWins` dropped the writes its deletes cover.
     pub entity_count: usize,
     /// The measure kind of the group's value column (`"float"`, `"int"`,
     /// `"bool"`, `"string"`, `"date_time"`; `"duration"` is never inferred

@@ -46,7 +46,9 @@ use crate::canon::{canonicalize_indexed, index_domains, CanonicalValue, DomainIn
 use crate::conn::{
     head_on, with_read_named, with_read_plain, with_write_txn_retrying_ends, TxnEnd, TxnOptions,
 };
-use crate::error::{CoveredWriteDetails, DbError, WriteAndDeleteSameKeyDetails};
+use crate::error::{
+    CoveredWriteDetails, DbError, UndeclaredValueTypeDetails, WriteAndDeleteSameKeyDetails,
+};
 use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
@@ -70,9 +72,13 @@ use crate::types::{
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
 /// logical-long batches and label domains (`specs/arrow_ipc_bulk_format.md`
-/// §2.2/§4). The batches are treated as ONE logical table (concatenated);
-/// dense wire rows are expanded to logical-long *before* they reach here
-/// (spec §6.3 — the importer expands, the core canonicalizes).
+/// §2.2/§4). Batches whose columns have the same Arrow types are ONE
+/// logical table (concatenated); batches of different column types are
+/// separate groups of one target — values of several declared types for
+/// one parameter and alternative in one call — each group bound to the
+/// declared member it instantiates, and an entity may appear in one group
+/// only. Dense wire rows are expanded to logical-long *before* they reach
+/// here (spec §6.3 — the importer expands, the core canonicalizes).
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub class: String,
@@ -553,7 +559,22 @@ pub fn commit_changes(
                 // DuckDB error: the conflict-retry loop keys on its variant
                 // (`conn::is_conflict`), and an Api wrapper would break retry.
                 // An Internal error (a core invariant, e.g. from a scalar flush
-                // that ran mid-segment) keeps its variant too.
+                // that ran mid-segment) keeps its variant too, and a typed
+                // undeclared-type refusal keeps its variant, gaining the
+                // segment's index (and, for several segments, the prefix).
+                if let DbError::UndeclaredValueType(mut d) = e {
+                    d.segment_index = i;
+                    if multi {
+                        d.message = format!(
+                            "segment {} ({}:{}): {}",
+                            i + 1,
+                            p.class,
+                            p.parameter,
+                            d.message
+                        );
+                    }
+                    return DbError::UndeclaredValueType(d);
+                }
                 if multi && !matches!(e, DbError::Duckdb(_) | DbError::Internal(_)) {
                     DbError::Api(format!(
                         "segment {} ({}:{}): {e}",
@@ -1955,35 +1976,54 @@ struct PreparedSegment {
     class: String,
     parameter: String,
     alternative: String,
-    value_kind: ValueKind,
-    inferred: Vec<(String, IndexKind)>,
-    /// The label lookup of `domains`, built once per segment (plan T12).
-    domain_index: Arc<DomainIndex>,
+    /// The segment's value-type groups, in first-seen batch order: each the
+    /// batches whose columns have identical Arrow types, concatenated
+    /// (one group for a single-type segment). Shared by `without` copies.
+    groups: Arc<Vec<PreparedGroup>>,
     /// Warnings of the segment itself (timezone-normalized columns,
     /// normalized names and labels), added to the report on every attempt.
     prep_warnings: Vec<Warning>,
-    /// Distinct entity names, first-seen order, case-insensitively deduped.
+    /// Distinct entity names, first-seen order, case-insensitively deduped
+    /// across every group (one entity, one value).
     names: Vec<String>,
-    /// Per-entity row indices into the concatenated batch, ascending (i.e.
+    /// Per entity (an index into `names`): its group (an index into
+    /// `groups`).
+    group_of: Vec<usize>,
+    /// Per-entity row indices into its group's `sub_all`, ascending (i.e.
     /// original row order). O(nrows) total, vs O(entities × nrows) for the
     /// boolean masks these replace (critique F4).
     rows: Vec<Vec<u32>>,
+}
+
+/// One value-type group of a segment: the segment's batches whose columns
+/// all have the same Arrow data types, concatenated into one logical table.
+/// A group instantiates exactly one declared member (VMP Part 7 entry
+/// check, per batch); groups of one segment may bind to different members
+/// (a float constant for one entity, a string for another) or to the same
+/// one (an indexed member does not fix the measure kind).
+struct PreparedGroup {
+    value_kind: ValueKind,
+    inferred: Vec<(String, IndexKind)>,
+    /// The label lookup of the group's effective domains, built once per
+    /// group (plan T12).
+    domain_index: Arc<DomainIndex>,
     /// The dims+value sub-batch (entity column dropped).
     sub_all: RecordBatch,
 }
 
 impl PreparedSegment {
-    /// Canonicalize the value of entity `j` (an index into `names`). An
-    /// error that needs the value's location to be found in the source data
-    /// (a duplicate index tuple) names the entity, class, parameter and
-    /// alternative.
+    /// Canonicalize the value of entity `j` (an index into `names`) against
+    /// `declared`, the member its group binds to. An error that needs the
+    /// value's location to be found in the source data (a duplicate index
+    /// tuple) names the entity, class, parameter and alternative.
     fn canonicalize_entity(
         &self,
         j: usize,
         declared: &DeclaredType,
     ) -> Result<CanonicalValue, DbError> {
-        let sub = take_record_batch(&self.sub_all, &UInt32Array::from(self.rows[j].clone()))?;
-        canonicalize_indexed(&sub, declared, self.value_kind, &self.domain_index).map_err(|e| {
+        let g = &self.groups[self.group_of[j]];
+        let sub = take_record_batch(&g.sub_all, &UInt32Array::from(self.rows[j].clone()))?;
+        canonicalize_indexed(&sub, declared, g.value_kind, &g.domain_index).map_err(|e| {
             DbError::Canon(e.at_value(
                 &self.names[j],
                 &self.class,
@@ -1995,28 +2035,34 @@ impl PreparedSegment {
 
     /// This segment without the names `dropped` lists (indices into
     /// `names`; `CoveredWrites::DeleteWins`). The row indices of the kept
-    /// names still point into the shared `sub_all`.
+    /// names still point into the shared groups.
     fn without(&self, dropped: &[usize]) -> PreparedSegment {
         let drop: HashSet<usize> = dropped.iter().copied().collect();
-        let (names, rows) = self
+        let mut names = Vec::with_capacity(self.names.len());
+        let mut group_of = Vec::with_capacity(self.names.len());
+        let mut rows = Vec::with_capacity(self.names.len());
+        for (i, ((n, g), r)) in self
             .names
             .iter()
+            .zip(&self.group_of)
             .zip(&self.rows)
             .enumerate()
-            .filter(|(i, _)| !drop.contains(i))
-            .map(|(_, (n, r))| (n.clone(), r.clone()))
-            .unzip();
+        {
+            if !drop.contains(&i) {
+                names.push(n.clone());
+                group_of.push(*g);
+                rows.push(r.clone());
+            }
+        }
         PreparedSegment {
             class: self.class.clone(),
             parameter: self.parameter.clone(),
             alternative: self.alternative.clone(),
-            value_kind: self.value_kind,
-            inferred: self.inferred.clone(),
-            domain_index: Arc::clone(&self.domain_index),
+            groups: Arc::clone(&self.groups),
             prep_warnings: self.prep_warnings.clone(),
             names,
+            group_of,
             rows,
-            sub_all: self.sub_all.clone(),
         }
     }
 }
@@ -2025,6 +2071,11 @@ impl PreparedSegment {
 /// segment's class, parameter and alternative names changed; the entity
 /// names are normalized here, and the segment's `TextNormalized` warnings
 /// (names, labels) join its prepared warnings.
+///
+/// The batches are grouped by their columns' Arrow data types (the whole
+/// vector: entity, dimensions, value), in first-seen order; each group is
+/// concatenated into one logical table, as a single-type segment's batches
+/// always were. An entity may appear in one group only.
 fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedSegment, DbError> {
     // Referent names must be non-empty (critique F5): a caller-contract
     // problem is caught here, never as a raw CHECK error mid-transaction.
@@ -2037,17 +2088,145 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
             return Err(DbError::Api(format!("{what} name must be non-empty")));
         }
     }
-    // A segment's batches are one logical table (spec §2.3); an empty segment
-    // writes nothing — reject before it can auto-create referents or burn a
-    // commit (critique F8).
+    // A segment's batches are one logical table per value type (spec §2.3);
+    // an empty segment writes nothing — reject before it can auto-create
+    // referents or burn a commit (critique F8).
     if seg.batches.is_empty() {
         return Err(DbError::Api("empty batch: no rows to write".into()));
     }
-    let batch = if seg.batches.len() == 1 {
-        seg.batches[0].clone()
-    } else {
-        concat_batches(&seg.batches[0].schema(), &seg.batches)?
-    };
+    // Group the batches by column types, first-seen order. Batches of one
+    // group concatenate exactly as before (same column count and types).
+    let mut keys: Vec<Vec<&DataType>> = Vec::new();
+    let mut members: Vec<Vec<&RecordBatch>> = Vec::new();
+    for b in &seg.batches {
+        let key: Vec<&DataType> = b
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|f| f.data_type())
+            .collect();
+        match keys.iter().position(|k| *k == key) {
+            Some(g) => members[g].push(b),
+            None => {
+                keys.push(key);
+                members.push(vec![b]);
+            }
+        }
+    }
+    // A zero-row batch adds nothing to its group; a group of zero-row
+    // batches is dropped unless every batch is empty (then the segment
+    // writes nothing and is refused below, as before).
+    if members.iter().any(|m| m.iter().any(|b| b.num_rows() > 0)) {
+        members.retain(|m| m.iter().any(|b| b.num_rows() > 0));
+    }
+    let mut group_batches: Vec<RecordBatch> = Vec::with_capacity(members.len());
+    for m in &members {
+        group_batches.push(if m.len() == 1 {
+            m[0].clone()
+        } else {
+            concat_batches(&m[0].schema(), m.iter().copied())?
+        });
+    }
+
+    let mut prep_warnings: Vec<Warning> = Vec::new();
+    let mut labels = Normalized::default();
+    let mut groups: Vec<PreparedGroup> = Vec::with_capacity(group_batches.len());
+    let mut slot: HashMap<String, usize> = HashMap::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut group_of: Vec<usize> = Vec::new();
+    let mut rows: Vec<Vec<u32>> = Vec::new();
+    for (g, batch) in group_batches.iter().enumerate() {
+        groups.push(prepare_group(
+            batch,
+            g,
+            &seg.domains,
+            &mut seg_names,
+            &mut labels,
+            &mut prep_warnings,
+        )?);
+        // The per-entity row-index lists of this group.
+        let entity_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| DbError::Api("entity column must be Utf8 (entity names)".into()))?;
+        for row in 0..batch.num_rows() {
+            if entity_arr.is_null(row) {
+                return Err(DbError::Api(format!("null entity name in row {row}")));
+            }
+            // Entity names are names: NFC before the dedup below (the text rule).
+            let name = seg_names.nfc(entity_arr.value(row)).into_owned();
+            if name.trim().is_empty() {
+                return Err(DbError::Api(format!("empty entity name in row {row}")));
+            }
+            // Dedup by the name fold (`types::fold`, the Rust copy of DuckDB's
+            // `lower()`) so case-aliases cannot double-write one entity, across
+            // every group of the segment. Aliased spellings are ambiguous, not
+            // mergeable (critique F3). `resolve_entities`, which groups by the
+            // fold DuckDB returns, repeats the check as the second line.
+            let idx = *slot.entry(fold(&name)).or_insert_with(|| {
+                names.push(name.clone());
+                group_of.push(g);
+                rows.push(Vec::new());
+                names.len() - 1
+            });
+            if names[idx] != name {
+                return Err(DbError::Api(format!(
+                    "entity names {:?} and {name:?} resolve to the same entity \
+                     (name resolution is case-insensitive); use one spelling per batch",
+                    names[idx]
+                )));
+            }
+            if group_of[idx] != g {
+                // One entity, one value: rows of two value types cannot be
+                // one value, whatever they hold.
+                return Err(DbError::Api(format!(
+                    "entity {name:?} appears in batches of two value types in one \
+                     segment ({}; {}); one entity has one value: send its rows in \
+                     batches of one type",
+                    groups[group_of[idx]].desc(),
+                    groups[g].desc()
+                )));
+            }
+            rows[idx].push(row as u32);
+        }
+    }
+
+    let target = format!("{}:{}/{}", seg.class, seg.parameter, seg.alternative);
+    prep_warnings.extend(seg_names.warning("name", "segment", &target));
+    prep_warnings.extend(labels.warning("label", "segment", &target));
+
+    Ok(PreparedSegment {
+        class: seg.class.clone(),
+        parameter: seg.parameter.clone(),
+        alternative: seg.alternative.clone(),
+        groups: Arc::new(groups),
+        prep_warnings,
+        names,
+        group_of,
+        rows,
+    })
+}
+
+impl PreparedGroup {
+    /// The group's shape in words (the error messages' batch description).
+    fn desc(&self) -> String {
+        batch_desc(&self.inferred, self.value_kind)
+    }
+}
+
+/// Prepare group `g` of a segment from its concatenated batch: column-count
+/// and rank checks, the measure and index kinds, the effective label domains
+/// and their lookup, the tz warnings, and the label spellings for the
+/// segment's `TextNormalized` warning.
+fn prepare_group(
+    batch: &RecordBatch,
+    g: usize,
+    provided: &[LabelDomain],
+    seg_names: &mut Normalized,
+    labels: &mut Normalized,
+    prep_warnings: &mut Vec<Warning>,
+) -> Result<PreparedGroup, DbError> {
     let ncols = batch.num_columns();
     if ncols < 2 {
         return Err(DbError::Api(format!(
@@ -2081,10 +2260,10 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
 
     // Effective label domains: the in-process arg, plus any Arrow field-metadata
     // domain for a label dimension the arg did not cover (decision D).
-    let domains = effective_domains(&batch, &inferred, &seg.domains)?;
+    let domains = effective_domains(batch, &inferred, provided)?;
     // A domain that repeats a label has no well-defined order: refuse it once
-    // per segment, before any value is canonicalized, while building the
-    // segment's label lookup.
+    // per group, before any value is canonicalized, while building the
+    // group's label lookup.
     let domain_index = Arc::new(index_domains(&domains, |position| {
         inferred
             .get(usize::from(position).wrapping_sub(1))
@@ -2093,12 +2272,12 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
 
     // Tz-bearing timestamp columns are accepted — a Timestamp(µs, tz) is a
     // well-defined instant, stored as the UTC-µs instant unchanged — but never
-    // silently: each gets a TimezoneNormalized warning (critique F6).
-    let mut prep_warnings: Vec<Warning> = Vec::new();
+    // silently: each gets a TimezoneNormalized warning (critique F6), once
+    // per column and zone across the segment's groups.
     for i in 1..ncols {
         let field = batch.schema().field(i).clone();
         if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) = field.data_type() {
-            prep_warnings.push(Warning {
+            let w = Warning {
                 kind: WarningKind::TimezoneNormalized {
                     column: field.name().clone(),
                     tz: tz.to_string(),
@@ -2106,56 +2285,17 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
                 object_type: "column".into(),
                 name: field.name().clone(),
                 id: 0,
-            });
+            };
+            if g == 0 || !prep_warnings.contains(&w) {
+                prep_warnings.push(w);
+            }
         }
     }
-
-    // The per-entity row-index lists and the dims+value sub-batch (entity col
-    // dropped).
-    let entity_arr = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| DbError::Api("entity column must be Utf8 (entity names)".into()))?;
-    let nrows = batch.num_rows();
-    let mut slot: HashMap<String, usize> = HashMap::new();
-    let mut names: Vec<String> = Vec::new();
-    let mut rows: Vec<Vec<u32>> = Vec::new();
-    for row in 0..nrows {
-        if entity_arr.is_null(row) {
-            return Err(DbError::Api(format!("null entity name in row {row}")));
-        }
-        // Entity names are names: NFC before the dedup below (the text rule).
-        let name = seg_names.nfc(entity_arr.value(row)).into_owned();
-        if name.trim().is_empty() {
-            return Err(DbError::Api(format!("empty entity name in row {row}")));
-        }
-        // Dedup by the name fold (`types::fold`, the Rust copy of DuckDB's
-        // `lower()`) so case-aliases cannot double-write one entity. Aliased
-        // spellings are ambiguous, not mergeable (critique F3).
-        // `resolve_entities`, which groups by the fold DuckDB returns, repeats
-        // the check as the second line.
-        let idx = *slot.entry(fold(&name)).or_insert_with(|| {
-            names.push(name.clone());
-            rows.push(Vec::new());
-            names.len() - 1
-        });
-        if names[idx] != name {
-            return Err(DbError::Api(format!(
-                "entity names {:?} and {name:?} resolve to the same entity \
-                 (name resolution is case-insensitive); use one spelling per batch",
-                names[idx]
-            )));
-        }
-        rows[idx].push(row as u32);
-    }
-    let project: Vec<usize> = (1..ncols).collect();
-    let sub_all = batch.project(&project)?;
 
     // Labels (the text rule): canon compares and stores them in NFC; count
-    // here, once per segment, the distinct spellings that it changes, in
-    // the label columns and the domains alike, for the segment's warning.
-    let mut labels = Normalized::default();
+    // here the distinct spellings that it changes, in the label columns and
+    // the domains alike, for the segment's warning (a set: a spelling met in
+    // two groups counts once).
     for d in &domains {
         for l in &d.labels {
             labels.note(l);
@@ -2171,20 +2311,13 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
             }
         }
     }
-    let target = format!("{}:{}/{}", seg.class, seg.parameter, seg.alternative);
-    prep_warnings.extend(seg_names.warning("name", "segment", &target));
-    prep_warnings.extend(labels.warning("label", "segment", &target));
 
-    Ok(PreparedSegment {
-        class: seg.class.clone(),
-        parameter: seg.parameter.clone(),
-        alternative: seg.alternative.clone(),
+    let project: Vec<usize> = (1..ncols).collect();
+    let sub_all = batch.project(&project)?;
+    Ok(PreparedGroup {
         value_kind,
         inferred,
         domain_index,
-        prep_warnings,
-        names,
-        rows,
         sub_all,
     })
 }
@@ -2212,21 +2345,68 @@ fn write_prepared(
     let mut folds = NameFolds::default();
     let class_id =
         names.entity_class(conn, commit_id, &p.class, &mut report.warnings, &mut folds)?;
-    let ResolvedParameter {
-        pd_id,
-        pt_id,
-        shape: declared,
-        retain_content,
-    } = names.parameter(
-        conn,
-        commit_id,
-        class_id,
-        &p.parameter,
-        &p.inferred,
-        p.value_kind,
-        &mut report.warnings,
-        &mut folds,
-    )?;
+    // Each value-type group binds to its declared member (D2(a): a batch
+    // instantiates exactly one; the binding is persisted, D11), in group
+    // order. A group with no entity left (`DeleteWins` dropped them all)
+    // resolves nothing. Only the first group can auto-materialize the type
+    // of a typeless definition; a later group of another type is then held
+    // to that member, as a second commit would be.
+    let mut first_of: Vec<Option<usize>> = vec![None; p.groups.len()];
+    let mut count_of: Vec<usize> = vec![0; p.groups.len()];
+    for (j, &g) in p.group_of.iter().enumerate() {
+        first_of[g].get_or_insert(j);
+        count_of[g] += 1;
+    }
+    let mut bound: Vec<Option<(i64, DeclaredType)>> = Vec::with_capacity(p.groups.len());
+    let mut definition: Option<(i64, bool)> = None;
+    for (g, group) in p.groups.iter().enumerate() {
+        let Some(first) = first_of[g] else {
+            bound.push(None);
+            continue;
+        };
+        let subject = MatchSubject {
+            class: &p.class,
+            alternative: &p.alternative,
+            entity: &p.names[first],
+            entity_count: count_of[g],
+        };
+        let r = names.parameter(
+            conn,
+            commit_id,
+            class_id,
+            &p.parameter,
+            &group.inferred,
+            group.value_kind,
+            &subject,
+            &mut report.warnings,
+            &mut folds,
+        )?;
+        match definition {
+            None => definition = Some((r.pd_id, r.retain_content)),
+            Some((pd, _)) if pd != r.pd_id => {
+                return Err(DbError::Internal(format!(
+                    "segment {}:{}: value-type groups resolved to parameter definitions \
+                     {pd} and {}",
+                    p.class, p.parameter, r.pd_id
+                )))
+            }
+            Some(_) => {}
+        }
+        bound.push(Some((r.pt_id, r.shape)));
+    }
+    let Some((pd_id, retain_content)) = definition else {
+        return Err(DbError::Internal(format!(
+            "segment {}:{}: no entity to write",
+            p.class, p.parameter
+        )));
+    };
+    // The member entity `j`'s group binds to.
+    let member = |j: usize| -> (i64, &DeclaredType) {
+        let (pt_id, shape) = bound[p.group_of[j]]
+            .as_ref()
+            .expect("every group with an entity is bound");
+        (*pt_id, shape)
+    };
     let alt_id = names.alternative(
         conn,
         commit_id,
@@ -2279,7 +2459,7 @@ fn write_prepared(
         Resolved::Ids { ids, minted } => (ids, minted),
         Resolved::NdRefused { first_missing, err } => {
             for j in 0..first_missing {
-                p.canonicalize_entity(j, &declared)?;
+                p.canonicalize_entity(j, member(j).1)?;
             }
             return Err(err);
         }
@@ -2299,7 +2479,8 @@ fn write_prepared(
 
     let retained = keeps_content(&resolved_opts);
     for (j, (&entity_id, &minted)) in entity_ids.iter().zip(&entity_minted).enumerate() {
-        let value = p.canonicalize_entity(j, &declared)?;
+        let (pt_id, declared) = member(j);
+        let value = p.canonicalize_entity(j, declared)?;
         let key = ValueKey {
             entity_id,
             parameter_definition_id: pd_id,
@@ -2487,13 +2668,15 @@ impl ResolveCache {
         name: &str,
         inferred: &[(String, IndexKind)],
         value_kind: ValueKind,
+        subject: &MatchSubject<'_>,
         warnings: &mut Vec<Warning>,
         folds: &mut NameFolds,
     ) -> Result<ResolvedParameter, DbError> {
         let key = (class_id, name.to_string());
         if let Some(c) = self.parameters.get(&key) {
             // The match the uncached path runs, on the same set.
-            let matched = validate_declared(name, c.pd_id, &c.declared, inferred, value_kind)?;
+            let matched =
+                validate_declared(name, c.pd_id, &c.declared, inferred, value_kind, subject)?;
             folds.note("parameter_definition", name, &c.stored, c.pd_id);
             return Ok(ResolvedParameter {
                 pd_id: c.pd_id,
@@ -2503,7 +2686,7 @@ impl ResolveCache {
             });
         }
         let (pd_id, pt_id, shape, set, stored) = resolve_parameter(
-            conn, commit_id, class_id, name, inferred, value_kind, warnings,
+            conn, commit_id, class_id, name, inferred, value_kind, subject, warnings,
         )?;
         folds.note("parameter_definition", name, &stored, pd_id);
         let retain_content = read_retain_content(conn, pd_id)?;
@@ -3318,6 +3501,7 @@ type ParameterResolution = (i64, i64, DeclaredType, Option<Vec<DbDeclared>>, Str
 /// auto-materialized declarations bind their freshly created row. The fourth
 /// element is the declared set as read from the DB, `None` when this call
 /// created it (what [`ResolveCache`] may keep).
+#[allow(clippy::too_many_arguments)]
 fn resolve_parameter(
     conn: &Connection,
     commit_id: i64,
@@ -3325,6 +3509,7 @@ fn resolve_parameter(
     name: &str,
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
+    subject: &MatchSubject<'_>,
     warnings: &mut Vec<Warning>,
 ) -> Result<ParameterResolution, DbError> {
     if let Some(Found {
@@ -3351,7 +3536,7 @@ fn resolve_parameter(
             });
             Ok((pd_id, pt_id, inferred_declared(inferred), None, stored))
         } else {
-            let matched = validate_declared(name, pd_id, &set, inferred, value_kind)?;
+            let matched = validate_declared(name, pd_id, &set, inferred, value_kind, subject)?;
             Ok((pd_id, matched.pt_id, matched.shape, Some(set), stored))
         }
     } else {
@@ -3484,12 +3669,15 @@ fn batch_key(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> MatchKe
 /// EAGERLY, before any matching (deliberate: a damaged declaration is never
 /// half-usable). Returns the matched member — the member the batch binds to
 /// (its dimension kinds drive canon, its names/positions key label domains).
+/// The no-match refusal is [`DbError::UndeclaredValueType`], naming
+/// `subject` (the batch's target and its first entity).
 fn validate_declared(
     parameter: &str,
     pd_id: i64,
     set: &[DbDeclared],
     inferred: &[(String, IndexKind)],
     value_kind: ValueKind,
+    subject: &MatchSubject<'_>,
 ) -> Result<DbDeclared, DbError> {
     let keys: Vec<MatchKey> = set.iter().map(member_key).collect();
     for i in 0..keys.len() {
@@ -3537,14 +3725,49 @@ fn validate_declared(
         ""
     };
     let members: Vec<String> = set.iter().map(member_desc).collect();
-    Err(DbError::Api(format!(
-        "parameter {parameter:?}: batch ({}) instantiates none of the {} declared member \
-         type(s): [{}]; a write never widens the declared type set — declare the new \
-         shape first (template/reconcile operation){hint}",
+    let more = match subject.entity_count {
+        0 | 1 => String::new(),
+        n => format!(" and {} more of this type", n - 1),
+    };
+    let message = format!(
+        "parameter {parameter:?} (class {:?}, alternative {:?}), entity {:?}{more}: batch \
+         ({}) instantiates none of the {} declared member type(s): [{}]; a write never \
+         widens the declared type set — declare the new shape first (template/reconcile \
+         operation){hint}",
+        subject.class,
+        subject.alternative,
+        subject.entity,
         batch_desc(inferred, value_kind),
         members.len(),
         members.join("; ")
+    );
+    Err(DbError::UndeclaredValueType(Box::new(
+        UndeclaredValueTypeDetails {
+            segment_index: 0,
+            class: subject.class.to_string(),
+            parameter: parameter.to_string(),
+            alternative: subject.alternative.to_string(),
+            entity: subject.entity.to_string(),
+            entity_count: subject.entity_count,
+            value_kind: value_kind.tag().to_string(),
+            dimensions: inferred
+                .iter()
+                .map(|(n, k)| (n.clone(), index_kind_tag(*k).to_string()))
+                .collect(),
+            declared: members,
+            message,
+        },
     )))
+}
+
+/// What a declared-type match is for, for its refusal: the batch's class
+/// and alternative (the parameter is passed on its own), the first entity of
+/// the batch and how many entities it carries.
+struct MatchSubject<'a> {
+    class: &'a str,
+    alternative: &'a str,
+    entity: &'a str,
+    entity_count: usize,
 }
 
 /// Read a definition's full current declared-type set from `parameter_type` /

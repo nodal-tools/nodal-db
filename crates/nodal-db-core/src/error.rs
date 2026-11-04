@@ -220,6 +220,22 @@ pub enum DbError {
     #[error("{}", .0.message)]
     TemplateStampedRename(Box<TemplateStampedRenameDetails>),
 
+    /// A value write whose batch instantiates none of its parameter's
+    /// declared member types (VMP Part 7 entry check, set-membership): for
+    /// example a string batch for a parameter declared float only, or an
+    /// indexed batch whose dimension names or kinds no member declares.
+    /// The write path never widens a declared type set, so nothing was
+    /// written (the transaction rolls back). One segment may carry batches
+    /// of several value types — each group of batches with the same column
+    /// types binds to its own member — and the check runs per group:
+    /// `entity` is the first entity of the refused group (in the caller's
+    /// row order) and `entity_count` the entities that group carries.
+    /// Its own variant (editor request, mixed value types in one commit) so
+    /// a caller can match the refusal structurally. Boxed like
+    /// [`DbError::CoveredWrite`].
+    #[error("{}", .0.message)]
+    UndeclaredValueType(Box<UndeclaredValueTypeDetails>),
+
     /// A writer-internal invariant failed before any data reached DuckDB —
     /// e.g. the columnar-insert length check (a bound list shorter or longer
     /// than its chunk would be NULL-padded silently by the zip-unnest). Never
@@ -279,6 +295,32 @@ pub struct WriteAndDeleteSameKeyDetails {
     /// The resolved ids, when the resolved-id check found them; `None`
     /// from the up-front name check.
     pub resolved: Option<(i64, i64, i64)>,
+    pub message: String,
+}
+
+/// [`DbError::UndeclaredValueType`]'s payload.
+#[derive(Debug)]
+pub struct UndeclaredValueTypeDetails {
+    /// The refused segment's 0-based index in the call's segment list.
+    pub segment_index: usize,
+    pub class: String,
+    pub parameter: String,
+    pub alternative: String,
+    /// The first entity of the refused group of batches, as written.
+    pub entity: String,
+    /// How many entities the refused group carries (`entity` included).
+    pub entity_count: usize,
+    /// The measure kind of the group's value column (`"float"`, `"int"`,
+    /// `"bool"`, `"string"`, `"date_time"`; `"duration"` is never inferred
+    /// from Arrow).
+    pub value_kind: String,
+    /// The group's index dimensions in column order: `(name, kind)`, kind
+    /// one of `"datetime"`, `"integer"`, `"label"`. Empty for a rank-0
+    /// batch.
+    pub dimensions: Vec<(String, String)>,
+    /// The parameter's declared member types, one description each (e.g.
+    /// `"float rank 0"`, `"indexed rank 1 (t: integer)"`).
+    pub declared: Vec<String>,
     pub message: String,
 }
 

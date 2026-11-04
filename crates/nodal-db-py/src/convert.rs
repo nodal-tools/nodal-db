@@ -9,7 +9,7 @@ use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::record_batch::RecordBatch;
 use arrow_pyarrow::FromPyArrow;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use nodal_db_core::api::{DeleteKey, Segment};
 use nodal_db_core::canon::LabelDomain;
@@ -29,7 +29,7 @@ use nodal_db_core::types::{
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, CoveredWrite, DatabaseError, InternalError,
     ReadSurfaceStale, SchemaError, SchemaMismatch, ShadowedBuiltin, Stale, TemplateStampedRename,
-    UnreplayableWal, VersionTooOld, WriteAndDeleteSameKey,
+    UndeclaredValueType, UnreplayableWal, VersionTooOld, WriteAndDeleteSameKey,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -63,6 +63,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::UnreplayableWal { wal, cause } => unreplayable_wal_err(msg, wal, cause),
         DbError::TemplateStampedRename(d) => template_stamped_rename_err(msg, *d),
+        DbError::UndeclaredValueType(d) => undeclared_value_type_err(msg, *d),
         DbError::ShadowedBuiltin { name, schema, kind } => {
             shadowed_builtin_err(msg, name, schema, kind)
         }
@@ -134,6 +135,29 @@ fn write_and_delete_same_key_err(
         let _ = v.setattr("alternative", alternative);
         let _ = v.setattr("entity", entity);
         let _ = v.setattr("resolved", resolved);
+    });
+    err
+}
+
+/// An `UndeclaredValueType` exception carrying the refused group's target,
+/// first entity, entity count and type, and the declared member types.
+fn undeclared_value_type_err(
+    msg: String,
+    d: nodal_db_core::error::UndeclaredValueTypeDetails,
+) -> PyErr {
+    let err = UndeclaredValueType::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        // Best-effort: the message carries the same information in any case.
+        let _ = v.setattr("segment_index", d.segment_index);
+        let _ = v.setattr("class_name", d.class);
+        let _ = v.setattr("parameter", d.parameter);
+        let _ = v.setattr("alternative", d.alternative);
+        let _ = v.setattr("entity", d.entity);
+        let _ = v.setattr("entity_count", d.entity_count);
+        let _ = v.setattr("value_kind", d.value_kind);
+        let _ = v.setattr("dimensions", d.dimensions);
+        let _ = v.setattr("declared", d.declared);
     });
     err
 }
@@ -255,7 +279,25 @@ pub(crate) fn surface_report_to_py<'py>(
 /// `pyarrow.RecordBatch`). The imported batches ARE the `duckdb::arrow`
 /// `RecordBatch` type the core API takes (one arrow in the tree — the R2
 /// pin), so they cross into the core with no conversion.
+///
+/// A `list` or `tuple` of such objects yields all their batches in order:
+/// the way to hand one segment batches of different schemas (one parameter,
+/// values of several declared types in one call — the core groups the
+/// batches by column types and binds each group to its declared member).
 pub(crate) fn batches_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    if obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>() {
+        let mut out = Vec::new();
+        for item in obj.try_iter()? {
+            let item = item?;
+            if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
+                return Err(ApiError::new_err(
+                    "a list of batches must hold Arrow objects, not nested lists",
+                ));
+            }
+            out.extend(batches_from_py(&item)?);
+        }
+        return Ok(out);
+    }
     if obj.hasattr("__arrow_c_stream__")? {
         let reader = ArrowArrayStreamReader::from_pyarrow_bound(obj)?;
         let mut out = Vec::new();

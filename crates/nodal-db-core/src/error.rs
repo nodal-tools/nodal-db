@@ -5,7 +5,7 @@
 //! write path returns a single `DbError`.
 
 use crate::encoding::EncodeError;
-use crate::types::ObjectKind;
+use crate::types::{ObjectKind, StructuralKind};
 use crate::MINIMUM_DUCKDB;
 
 /// Errors raised by connection handling, schema application, and axis dedup.
@@ -203,6 +203,23 @@ pub enum DbError {
     #[error("{}", .0.message)]
     WriteAndDeleteSameKey(Box<WriteAndDeleteSameKeyDetails>),
 
+    /// A `commit_changes` call renamed classes or parameters of a
+    /// template-stamped database (metadata `template_name` present)
+    /// without `allow_on_template` on the item (class_param_rename_PLAN
+    /// OD7). The core cannot tell which classes and parameters the template
+    /// declares, so every rename that changes a class or parameter's folded
+    /// name (case-only renames and description-only revisions are exempt),
+    /// of an object that existed before the call, is refused by default: a
+    /// renamed declared object blocks the next apply of a changed template
+    /// until it is renamed back or the template ships a rename hint.
+    /// `renames` lists every such item of the call, so a client can ask its
+    /// user once and resend the allowed items with `allow_on_template:
+    /// true`. Checked after the call's structural changes ran, before any
+    /// value write; the transaction rolls back, so nothing was written.
+    /// Boxed like [`DbError::CoveredWrite`].
+    #[error("{}", .0.message)]
+    TemplateStampedRename(Box<TemplateStampedRenameDetails>),
+
     /// A writer-internal invariant failed before any data reached DuckDB —
     /// e.g. the columnar-insert length check (a bound list shorter or longer
     /// than its chunk would be NULL-padded silently by the zip-unnest). Never
@@ -263,6 +280,32 @@ pub struct WriteAndDeleteSameKeyDetails {
     /// from the up-front name check.
     pub resolved: Option<(i64, i64, i64)>,
     pub message: String,
+}
+
+/// [`DbError::TemplateStampedRename`]'s payload.
+#[derive(Debug)]
+pub struct TemplateStampedRenameDetails {
+    /// The database's stamped `template_name`.
+    pub template_name: String,
+    /// The database's stamped `template_version`, if any.
+    pub template_version: Option<String>,
+    /// Every refused rename of the call, in call order.
+    pub renames: Vec<TemplateStampedRenameItem>,
+    pub message: String,
+}
+
+/// One rename [`DbError::TemplateStampedRename`] refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateStampedRenameItem {
+    /// The item's position in the call's `structural` vec.
+    pub change_index: usize,
+    /// `EntityClass` or `Parameter`.
+    pub kind: StructuralKind,
+    /// The parameter's class as written (`None` for a class rename).
+    pub class: Option<String>,
+    /// The item's `current`, as written (after NFC).
+    pub current: String,
+    pub new_name: String,
 }
 
 /// The statement that drops a [`DbError::ShadowedBuiltin`] macro, valid for

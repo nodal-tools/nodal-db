@@ -177,6 +177,23 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    TemplateStampedRename,
+    ApiError,
+    "A commit renamed classes or parameters of a template-stamped database \
+     (metadata template_name present) without allow_on_template on the item \
+     (DbError::TemplateStampedRename). The core cannot tell which classes and \
+     parameters the template declares, and a renamed declared one blocks the \
+     next apply of a changed template, so such renames are refused by default; \
+     nothing was written. Attributes: `template_name`, `template_version` \
+     (None when not stamped) and `renames`, a list of dicts (`change_index`, \
+     `kind` - \"entity_class\" or \"parameter\" - `class_name` (None for a \
+     class), `current`, `new_name`), one per refused item. Ask the user, then \
+     resend the allowed items with \"allow_on_template\": True. Case-only \
+     renames and description-only revisions need no flag. A subclass of \
+     ApiError, so `except ApiError` still catches it."
+);
+create_exception!(
+    nodal_db,
     ShadowedBuiltin,
     NodalDbError,
     "The database file defines a macro named like a DuckDB built-in function \
@@ -1286,6 +1303,10 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;
     m.add("UnreplayableWal", py.get_type::<UnreplayableWal>())?;
     m.add("ShadowedBuiltin", py.get_type::<ShadowedBuiltin>())?;
+    m.add(
+        "TemplateStampedRename",
+        py.get_type::<TemplateStampedRename>(),
+    )?;
     m.add("CanonError", py.get_type::<CanonError>())?;
     m.add("ArrowError", py.get_type::<ArrowError>())?;
     m.add("InternalError", py.get_type::<InternalError>())?;

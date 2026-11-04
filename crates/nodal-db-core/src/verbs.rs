@@ -194,8 +194,15 @@ pub fn set_scenario_alternatives(
     // 2, critique F2): the verb and the composable channel produce identical
     // history for the same logical op.
     core_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_set_scenario_alternatives(conn, c, scenario, alternatives, &mut no_report())
-            .map(|(sid, _)| sid)
+        apply_set_scenario_alternatives(
+            conn,
+            c,
+            scenario,
+            alternatives,
+            &mut no_report(),
+            &crate::structural::CallRenames::default(),
+        )
+        .map(|(sid, _)| sid)
     })
 }
 

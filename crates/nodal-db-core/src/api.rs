@@ -55,7 +55,9 @@ use crate::object_delete::{
     apply_object_delete, cascade_scope, prepare_object_deletes, preview_one, reaches_created,
     written_value_covered, PreparedObjectDelete, WrittenIds,
 };
-use crate::structural::{apply_structural, prepare_structural};
+use crate::structural::{
+    apply_structural, prepare_structural, refuse_template_stamped_renames, CallRenames,
+};
 use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
 use crate::types::{
@@ -408,20 +410,36 @@ pub fn commit_changes(
         // item just created, and items apply sequentially against the one open
         // txn, so create → use resolves. Caller-given vec order is honored.
         let mut structural_folds = NameFolds::default();
+        // What this attempt's renames did (renamed-away names, original
+        // names, template-stamp candidates): a closure local, so a conflict
+        // retry rebuilds it.
+        let mut calls = CallRenames::default();
         for (i, ch) in structural.iter().enumerate() {
-            apply_structural(conn, commit_id, i, ch, &mut report, &mut structural_folds)?;
+            apply_structural(
+                conn,
+                commit_id,
+                i,
+                ch,
+                &mut report,
+                &mut structural_folds,
+                &mut calls,
+            )?;
         }
         report
             .warnings
             .extend(structural_folds.warnings("structural", ""));
+        // Renames on a template-stamped database need `allow_on_template`
+        // (OD7); every refused item is listed in one typed error.
+        refuse_template_stamped_renames(conn, &calls, &report)?;
         // An object delete may not reach an object a structural change of
-        // this call created (under either policy): the same-commit guard
-        // would leave it live. The resolved-id repeat of the name-level
-        // guard in `prepare_structural`; it also sees cascade children.
-        let created: HashSet<(ObjectKind, i64)> = report
+        // this call created or revised (under either policy): the
+        // same-commit guard would leave the row this call wrote live. The
+        // resolved-id repeat of the name-level guard in `prepare_structural`,
+        // and the real guarantee: it also sees cascade children and names
+        // the prepare check cannot match (class_param_rename_PLAN §4.5 d).
+        let revised: HashSet<(ObjectKind, i64)> = report
             .structural
             .iter()
-            .filter(|o| o.effect == StructuralEffect::Created)
             .filter_map(|o| {
                 let kind = match o.kind {
                     StructuralKind::Alternative => ObjectKind::Alternative,
@@ -431,21 +449,42 @@ pub fn commit_changes(
                     StructuralKind::Parameter => ObjectKind::Parameter,
                     _ => return None,
                 };
-                Some((kind, o.object_id))
+                let wrote_row = match o.effect {
+                    StructuralEffect::Created => true,
+                    // A rename or description revision writes a successor
+                    // row (valid_from = this commit); an entity has none.
+                    StructuralEffect::Renamed | StructuralEffect::Updated => {
+                        kind != ObjectKind::Entity
+                    }
+                    _ => false,
+                };
+                wrote_row.then_some((kind, o.object_id))
             })
             .collect();
         for p in &prepared_object_deletes {
-            if let Some((kind, id)) = reaches_created(conn, &p.key, &created)? {
+            if let Some((kind, id)) = reaches_created(conn, &p.key, &revised)? {
                 return Err(DbError::Api(format!(
                     "object-delete key {} ({} {}) reaches the {} id {id} that a \
-                     structural change of this call creates: create and delete an \
-                     object in separate calls",
+                     structural change of this call creates or revises: create, \
+                     rename or revise an object and delete it in separate calls",
                     p.key_index,
                     p.key.kind.tag(),
                     object_target_label(&p.key),
                     kind.tag()
                 )));
             }
+        }
+        // References to a name a rename of this call freed (OD5): a segment
+        // would auto-create a new, empty object under the old name and a
+        // delete would find nothing. Refused before any write.
+        if !calls.frees_no_name() {
+            refuse_renamed_away_references(
+                conn,
+                &calls,
+                &prepared,
+                &prepared_deletes,
+                &prepared_object_deletes,
+            )?;
         }
         // `DeleteWins`: what the deletes cover, resolved after the
         // structural changes (a delete may name a referent one of them
@@ -646,6 +685,22 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             n.nfc_in_place(name);
             dims.iter_mut().for_each(|d| n.nfc_in_place(d));
         }
+        StructuralChange::RenameEntityClass {
+            current, new_name, ..
+        } => {
+            n.nfc_in_place(current);
+            n.nfc_in_place(new_name);
+        }
+        StructuralChange::RenameParameter {
+            class,
+            current,
+            new_name,
+            ..
+        } => {
+            n.nfc_in_place(class);
+            n.nfc_in_place(current);
+            n.nfc_in_place(new_name);
+        }
         StructuralChange::CreateParameter {
             class,
             name,
@@ -675,6 +730,79 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             }
         }
     }
+}
+
+/// Refuse every segment, value-delete key and object-delete key of the call
+/// that addresses a class, parameter, alternative or scenario by a name a
+/// rename earlier in the call freed and that does not resolve now
+/// (class_param_rename_PLAN §4.5 f, OD5). A same-call create of the old name
+/// makes it resolve again (to the new object), and a case-only rename frees
+/// no name, so neither is refused. Runs after the structural changes and
+/// before the first value write.
+fn refuse_renamed_away_references(
+    conn: &Connection,
+    calls: &CallRenames,
+    segments: &[PreparedSegment],
+    deletes: &[(usize, DeleteKey)],
+    object_deletes: &[PreparedObjectDelete],
+) -> Result<(), DbError> {
+    let refuse = |what: String, kind: &str, old: &str, to: &str| {
+        DbError::Api(format!(
+            "{what}: {kind} {old:?} was renamed to {to:?} earlier in this call; address it \
+             by its new name (the old name would create a new, empty {kind} or find nothing)"
+        ))
+    };
+    // (class, parameter, alternative) of a segment or a value-delete key.
+    let check_value_key = |what: String, class: &str, parameter: &str, alternative: &str| {
+        if let Some(to) = calls.renamed_class(conn, class)? {
+            return Err(refuse(what, "class", class, &to));
+        }
+        if let Some(to) = calls.renamed_parameter(conn, class, parameter)? {
+            return Err(refuse(what, "parameter", parameter, &to));
+        }
+        if let Some(to) = calls.renamed_alternative(conn, alternative)? {
+            return Err(refuse(what, "alternative", alternative, &to));
+        }
+        Ok::<(), DbError>(())
+    };
+    for (i, s) in segments.iter().enumerate() {
+        check_value_key(
+            format!("segment {} ({}:{})", i + 1, s.class, s.parameter),
+            &s.class,
+            &s.parameter,
+            &s.alternative,
+        )?;
+    }
+    for (i, k) in deletes {
+        check_value_key(
+            format!("delete key {i}"),
+            &k.class,
+            &k.parameter,
+            &k.alternative,
+        )?;
+    }
+    for p in object_deletes {
+        let what = format!("object-delete key {}", p.key_index);
+        if let Some(class) = &p.key.class {
+            if let Some(to) = calls.renamed_class(conn, class)? {
+                return Err(refuse(what, "class", class, &to));
+            }
+        }
+        let ObjectRef::Name(name) = &p.key.target else {
+            continue;
+        };
+        let renamed = match (p.key.kind, &p.key.class) {
+            (ObjectKind::Class, _) => calls.renamed_class(conn, name)?,
+            (ObjectKind::Parameter, Some(class)) => calls.renamed_parameter(conn, class, name)?,
+            (ObjectKind::Alternative, _) => calls.renamed_alternative(conn, name)?,
+            (ObjectKind::Scenario, _) => calls.renamed_scenario(conn, name)?,
+            _ => None,
+        };
+        if let Some(to) = renamed {
+            return Err(refuse(what, p.key.kind.tag(), name, &to));
+        }
+    }
+    Ok(())
 }
 
 /// The names of one object-delete key in NFC (the text rule, `text.rs`).

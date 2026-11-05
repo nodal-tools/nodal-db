@@ -271,6 +271,18 @@ compared over the columns both arms have, by position, so a column
 appended to a read macro (a read-surface revision) is not a wrong result;
 a changed value in an existing column still is.
 
+**Write metrics measure the steady-state save.** Because each sample is a
+new process, every `wr_*` sample first does one untimed write of one
+scalar to a scratch file (harness `warm_process`). The core's
+once-per-process costs, such as the engine fold check of engine_rules
+§8 (~35–45 ms in a release build), are therefore paid outside the timed
+region. Per-file costs, such as the built-in guard's listing of the
+metric's own file, stay timed. One metric, `wr_cold_first_write`, skips
+the warm-up and times a fresh process's first write. It is where a
+change to the cost that every short-lived writer pays (a CLI write, a
+Python script) shows up. A new write mode gets the warm-up automatically,
+as long as its name starts with `wr_`.
+
 **Verdicts and exit status** (the table and `target-ab/runs/*/results.json`):
 
 | exit | verdict | meaning |

@@ -227,6 +227,22 @@ fn api_scalars(db: &Path, parameter: &str, names: &[String], vals: &[f64]) -> f6
     t.elapsed().as_secs_f64() * 1e3
 }
 
+/// Pay the core's once-per-process write costs before a write metric's
+/// timed region: one untimed `write_parameter` of one scalar on a scratch
+/// file of the sample directory. Each sample is a fresh harness process, so
+/// without this the first timed write would carry them (the engine fold
+/// check, ~35-45 ms since 908befd: engine_rules §8), and a write metric
+/// would measure process start-up, not the save. A write metric measures
+/// steady state; `wr_cold_first_write` alone keeps the first-write cost
+/// (`gate::COLD_WRITE_MODE`). The scratch file is not the metric's file,
+/// so per-file costs (the built-in guard's listing of a new path) stay in
+/// the timed write, and no metric's commit count or read-back changes.
+fn warm_process(dir: &Path) {
+    let warm = dir.join("warm-up.duckdb");
+    init_schema_with_default(&warm, Some("Base")).unwrap();
+    api_scalars(&warm, "warm_up", &["w0".to_string()], &[0.5]);
+}
+
 /// The 20 editor-shaped parameters of the 10^5 base file.
 fn q_param(i: usize) -> String {
     format!("q{i:02}")
@@ -503,6 +519,9 @@ fn main() {
     check::set_mode(mode);
     let dir = tempfile::tempdir().unwrap();
     check::set_sample_dir(dir.path());
+    if mode.starts_with("wr_") && mode != gate::COLD_WRITE_MODE {
+        warm_process(dir.path());
+    }
     if let Some(sample) = gate::run(mode, dir.path()) {
         sample.emit();
         return;

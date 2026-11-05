@@ -191,9 +191,26 @@ fn deletes(dir: &Path, mode: &str) -> Sample {
     readback(Sample::new(ms), &db, &all_sql, remain)
 }
 
+/// The one write metric that skips the warm-up (`warm_process` in
+/// main.rs): a fresh process's first write, once-per-process costs
+/// included.
+pub const COLD_WRITE_MODE: &str = "wr_cold_first_write";
+
 /// Dispatch a gate mode of this module; `None` if `mode` is not one.
 pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
     Some(match mode {
+        // A fresh process's first write: one scalar on a fresh file (the
+        // schema init and head read untimed), the commit timed. Carries
+        // what every short-lived writer (a CLI write, a Python script)
+        // pays once: the engine fold check and the first write open.
+        COLD_WRITE_MODE => {
+            let db = fresh(dir);
+            let before = head(&db);
+            let written = vec![sname(1)];
+            let ms = api_scalars(&db, "p", &written, &[1.25]);
+            check_commits(&db, before, 1);
+            readback(Sample::new(ms), &db, &scalar_readback("p", &written), 1)
+        }
         "wr_scalar_100_new_100k" | "wr_scalar_1_replace_100k" => scalar_writes(dir, mode),
         "wr_20x1_scalars_100k" => {
             let db = copy_base(dir);

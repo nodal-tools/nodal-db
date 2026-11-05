@@ -328,7 +328,10 @@ scans the long and array tiers' key columns once (the set is evaluated
 once per query) and hash-builds the stored positions of every axis in
 use. On a one-axis file that is a few tens of milliseconds per call, and
 it grows with the current long tier (about one key-column scan of it per
-call). On a file whose values own many stored axes (irregular series,
+call). Measured on the perf gate's quick synthetic file (one axis, a
+`value_rows` point read of one 8 760-cell long value): +12 to +13 % per
+call, about 6 ms on 50 ms (`rd_vr_point_long`, 2026-11-05, release
+build). On a file whose values own many stored axes (irregular series,
 each with its own axis) a `value_rows` point read pays for all of their
 positions: slower than the expansion it replaced in that one shape.
 Engine reads go through `read_parameter` and the point-read macros, not

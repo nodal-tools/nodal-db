@@ -306,6 +306,16 @@ check = "every execution returns 8 760 rows; digest of the rendered rows"
 note = "read_value of one stored-axis value: a point read must stay key-scoped (plan D12)"
 
 # ---------------------------------------------------------------- writes
+#
+# Warm-up (every `wr_*` metric except wr_cold_first_write): each sample is
+# a fresh harness process, which first does one untimed write_parameter of
+# one scalar on a scratch file in its sample directory (harness
+# `warm_process`). So a write metric measures the steady-state save, not
+# the core's once-per-process costs (the engine fold check of engine_rules
+# §8, ~35-45 ms in a release build since 908befd). Per-file costs (the
+# built-in guard's listing of the metric's own new file) stay timed. The
+# scratch file is separate, so no metric's commits or read-back change.
+# wr_cold_first_write is the one place the first-write cost is gated.
 
 [metric.wr_scalar_100_new_100k]
 layout_floor = 0.035
@@ -418,6 +428,11 @@ layout_floor = 0.030
 class = "io"
 needs = ["skip_unchanged"]
 check = "no commit and no new history row; the 10 000 values read back + digest"
+
+[metric.wr_cold_first_write]
+class = "io"
+check = "1 commit; the written scalar reads back (1 row + digest)"
+note = "a fresh process's FIRST write (no warm-up): one scalar on a fresh file, ms of the commit; once-per-process costs (the engine fold check) included"
 
 [metric.wr_longbig_1cell]
 layout_floor = 0.005

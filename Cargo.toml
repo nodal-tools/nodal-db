@@ -8,6 +8,13 @@ resolver = "2"
 # the conformance/spike tests; stripping keeps target/ sustainable.
 [profile.dev]
 strip = true
+# strip already drops debuginfo from the final binaries, so don't generate it in
+# the first place: keeps deps/ and incremental/ small too. Line tables only for
+# our crates (cheap; useful if strip is ever turned off), none for dependencies.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 # Compile the bundled DuckDB optimized even in dev/test builds. libduckdb-sys
 # builds DuckDB with DEBUG (D_ASSERT + debug-only verification paths, -O0)

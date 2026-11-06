@@ -200,7 +200,13 @@ payloads as §6 requires.) The query fails with
 changed identity …`, and the error invalidates the whole database
 instance, so every other connection on it fails too. No data is
 damaged. DuckDB 1.5.5 is not affected; 2.0.0 and the 2.0.1 pre-releases
-up to 2026-10-21 are. DuckDB issue: pending upstream report.
+up to 2026-10-21 are, and so are the 2.0.1 and 2.1.0 pre-releases of
+2026-10-29/30. Upstream: the same throw site as DuckDB issue
+[#27940](https://github.com/duckdb/duckdb/issues/27940) (our UNNEST
+trigger is reported there); its fix, PR
+[#27979](https://github.com/duckdb/duckdb/pull/27979) (open on
+2026-11-06), also fixes our case (verified on a build of the PR). Once a
+DuckDB release ships it, the tripwire test below fires.
 
 Turning the caching operators off avoids the bug, at no measurable
 cost: the A/B perf gate passed every metric against the code without

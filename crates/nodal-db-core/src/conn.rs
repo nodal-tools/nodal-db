@@ -98,7 +98,8 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
 /// identity …") for a join over dense ids, then `unnest` of a list longer
 /// than 2048 elements, then a selective filter: e.g. `read_parameter` on
 /// 8760-long arrays with a time-window filter. The error invalidates the
-/// whole database instance. DuckDB issue: pending upstream report; see
+/// whole database instance. Upstream fix: duckdb/duckdb PR #27979
+/// (<https://github.com/duckdb/duckdb/pull/27979>, open); see
 /// docs/dev/engine_rules.md §5 (bug, guard test, how to remove this).
 /// The setting is debug-tagged: if a DuckDB release renames or drops it,
 /// every open fails loudly here, which the upgrade checklist catches.

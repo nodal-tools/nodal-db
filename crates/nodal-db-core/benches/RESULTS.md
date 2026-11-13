@@ -86,49 +86,134 @@ changed identity after being seeded for dictionary caching") that
 invalidates the instance, in the Python client too. The check now reads
 the cell and compares outside SQL; the engine error itself is open.
 
+### 2026-11-14: `25ef921` (BASELINE) -> `d3628be`, release scales, exit 0 (BASELINE advanced)
+
+Host: AMD Ryzen 9 5900XT 16-Core Processor, 32 threads, governor `powersave`, kernel 6.14.0-37-generic; foreign load 0.5-1.6 busy cores while measuring. Looks (6, 11, 21); builds + fixtures cached, pairs 1680 s. Capabilities shared: lookup_const, skip_unchanged (the base lacks read_value_macro and asof_point_macro: those metrics are SKIPPED). Write metrics run with the per-process warm-up (`e0cc27c`); `wr_cold_first_write` is new. Results: `target-ab/runs/20261113T234628Z-25ef921346d4-d3628be535a3/results.json`.
+
+| metric | T | ratio [95 % CI] | n | verdict |
+|---|---|---|---|---|
+| `rd_point_scalar` | 1.05 | 0.982 [0.964, 0.992] | 6 | PASS |
+| `rd_point_long` | 1.05 | 0.992 [0.965, 1.012] | 6 | PASS |
+| `rd_point_array_dense` | 1.05 | 0.957 [0.948, 0.998] | 6 | PASS |
+| `rd_point_array_by_id` | 1.05 | 0.968 [0.901, 1.008] | 6 | PASS |
+| `rd_scalars_loader` | 1.05 | 0.981 [0.944, 1.007] | 21 | PASS |
+| `rd_dense` | 1.05 | 1.010 [0.992, 1.038] | 6 | PASS |
+| `rd_model_load_long` | 1.05 | 0.573 [0.545, 0.616] | 6 | PASS |
+| `rd_long_scan_17pct` | 1.05 | 1.010 [0.976, 1.017] | 21 | PASS |
+| `rd_point_value_array` | 1.05 | - | - | SKIPPED |
+| `rd_point_value_scalar` | 1.05 | - | - | SKIPPED |
+| `rd_point_value_window` | 1.05 | - | - | SKIPPED |
+| `rd_asof_point_head` | 1.05 | - | - | SKIPPED |
+| `rd_values_20` | 1.05 | - | - | SKIPPED |
+| `rd_vr_point_long` | 1.05 | 1.163 [1.107, 1.222] | 6 | ALLOWED |
+| `rd_axes_rp_scalar` | 1.05 | 0.190 [0.182, 0.201] | 6 | PASS |
+| `rd_axes_rp_long` | 1.05 | 0.313 [0.301, 0.319] | 6 | PASS |
+| `rd_axes_rp_array` | 1.05 | 0.785 [0.743, 0.802] | 6 | PASS |
+| `rd_axes_rp_irr` | 1.05 | 0.714 [0.705, 0.771] | 6 | PASS |
+| `rd_axes_vr_point_long` | 1.05 | 0.464 [0.447, 0.473] | 6 | PASS |
+| `rd_axes_vr_point_stored` | 1.05 | 0.454 [0.449, 0.478] | 6 | PASS |
+| `rd_axes_point_irr` | 1.05 | - | - | SKIPPED |
+| `wr_scalar_100_new_100k` | 1.10 | 1.095 [1.073, 1.120] | 21 | ALLOWED |
+| `wr_scalar_1_replace_100k` | 1.10 | 1.092 [1.067, 1.114] | 21 | ALLOWED |
+| `wr_20x1_scalars_100k` | 1.10 | 1.039 [1.020, 1.100] | 11 | PASS |
+| `wr_long_1000x24_new` | 1.10 | 1.015 [0.958, 1.048] | 6 | PASS |
+| `wr_label_10x8760_new` | 1.10 | 0.151 [0.146, 0.155] | 6 | PASS |
+| `wr_label_1000x3_of_8760_new` | 1.10 | 0.755 [0.731, 0.786] | 6 | PASS |
+| `wr_long_10x8760_replace` | 1.10 | 0.998 [0.987, 1.006] | 6 | PASS |
+| `wr_array_1000x24_new` | 1.10 | 1.067 [1.008, 1.149] | 21 | ALLOWED |
+| `wr_array_1000x24_replace_big` | 1.10 | 1.058 [1.009, 1.089] | 6 | PASS |
+| `wr_delete_1000_scalar_big` | 1.10 | 1.093 [1.061, 1.114] | 21 | ALLOWED |
+| `wr_delete_1000_long_big` | 1.10 | 1.038 [1.001, 1.072] | 6 | PASS |
+| `wr_delete_500_array_big` | 1.10 | 1.126 [1.086, 1.144] | 21 | ALLOWED |
+| `wr_1_delete_big` | 1.10 | 1.109 [1.077, 1.130] | 21 | ALLOWED |
+| `wr_editor_save` | 1.10 | 1.067 [1.045, 1.102] | 21 | ALLOWED |
+| `wr_replace_scalar_cycle_ckpt` | 1.10 | 1.019 [0.792, 1.048] | 6 | PASS |
+| `wr_replace_array_cycle_ckpt` | 1.10 | 1.008 [0.978, 1.066] | 6 | PASS |
+| `wr_replace_long_cycle_ckpt` | 1.10 | 1.007 [0.995, 1.024] | 6 | PASS |
+| `wr_unchanged_scalar_10k` | 1.10 | 1.048 [1.013, 1.090] | 21 | PASS |
+| `wr_cold_first_write` | 1.10 | 1.884 [1.758, 2.088] | 6 | ALLOWED |
+| `wr_longbig_1cell` | 1.10 | 0.994 [0.968, 1.001] | 6 | PASS |
+| `rd_editor_reload` | 1.10 | 0.995 [0.972, 1.012] | 6 | PASS |
+| `lk_core_sql_100k` | 1.05 | 1.042 [1.012, 1.061] | 21 | ALLOWED |
+| `lk_ensure_entity_100k` | 1.10 | 1.018 [0.995, 1.064] | 6 | PASS |
+| `imp_ipc_dense` | 1.10 | 0.998 [0.984, 1.034] | 6 | PASS |
+| `mt_compact_history_heavy` | 1.10 | 0.982 [0.974, 0.993] | 6 | PASS |
+| `mt_extract_head` | 1.10 | 1.067 [1.041, 1.090] | 6 | PASS |
+| `sz_compacted_bytes` | 1.02 | 1.002 [1.002, 1.002] | 7 | PASS |
+| `sz_extract_bytes` | 1.02 | 1.015 [1.015, 1.015] | 7 | PASS |
+
+Accepted regressions (`--allow`, owner rulings; attribution in the
+private perf-attribution findings of 2026-11):
+
+- `rd_vr_point_long`: R1 axis rendering (axis_position_cost_PLAN R1): value_rows in-use axis set scans the key columns per call, +12.5% on a one-axis file; owner-accepted 2026-11-03
+- `wr_scalar_100_new_100k`: shadowed-builtin guard own-write CHECKPOINT on an ordinary save (D4): measured +0.068 ms/value x 100 values = ~+6.8 ms per commit on the 10^5 file (2026-11-13 run 0.787 -> 0.855 ms/value); owner-accepted D4 2026-11-13
+- `wr_scalar_1_replace_100k`: shadowed-builtin guard own-write CHECKPOINT, ~+8 ms per save on the 10^5 file; next open ~22 ms faster; owner-accepted D4 2026-11-13
+- `wr_array_1000x24_new`: shadowed-builtin guard own-write CHECKPOINT on an ordinary save (D4): +4.0 ms on a one-commit save (93.5 -> 97.5 ms, 2026-11-13); owner-accepted D4 2026-11-13
+- `wr_delete_1000_scalar_big`: shadowed-builtin guard own-write CHECKPOINT, +6-8 ms per save on the 100 MB file, owner-accepted 2026-11-05 (D3)
+- `wr_delete_500_array_big`: shadowed-builtin guard own-write CHECKPOINT, +6-8 ms per save on the 100 MB file, owner-accepted 2026-11-05 (D3)
+- `wr_1_delete_big`: shadowed-builtin guard own-write CHECKPOINT, +6-8 ms per save on the 100 MB file, owner-accepted 2026-11-05 (D3)
+- `wr_editor_save`: shadowed-builtin guard own-write CHECKPOINT, +6-8 ms per save on the 100 MB file, owner-accepted 2026-11-05 (D3)
+- `wr_cold_first_write`: once-per-process engine fold check (engine_rules 8, full lower() probe since 908befd, ~35-45 ms) plus the first write open; owner-accepted 2026-11-05 (D1); reduction tracked in nodal-tools/nodal-db#1
+- `lk_core_sql_100k`: NameFolded: the entity lookup returns the stored name for the warning, +4-5% (~20 us/lookup); owner-accepted 2026-11-05 (D2)
+
+The D3/D4 allows not used in this run (the metric passed):
+`wr_delete_1000_long_big`, `wr_array_1000x24_replace_big`; the noise
+allow on `rd_scalars_loader` was not used either. BASELINE advanced to
+`d3628be`.
+
 ## Latest absolute medians (informational, host recorded)
 
 The candidate's median per metric from the latest release-gate run, with
 its host and load. Information only: no target column, no verdict.
 
-From the 2026-10-25 release-gate run (candidate `9b62603`, the host above).
+From the 2026-11-14 release-gate run (candidate `d3628be`, the host above).
 Milliseconds per operation as each metric defines it (`scripts/bench/ab/metrics.toml`), sizes in MiB.
 
 | metric | candidate median | baseline median |
 |---|---|---|
-| `rd_point_scalar` | 0.851 ms | 0.849 ms |
-| `rd_point_long` | 1.196 ms | 1.200 ms |
-| `rd_point_array_dense` | 2.556 ms | 2.554 ms |
-| `rd_point_array_by_id` | 0.595 ms | 0.599 ms |
-| `rd_scalars_loader` | 22.479 ms | 23.314 ms |
-| `rd_dense` | 231.216 ms | 232.342 ms |
-| `rd_model_load_long` | 1041.626 ms | 1142.937 ms |
-| `rd_long_scan_17pct` | 17.004 ms | 17.014 ms |
-| `wr_scalar_100_new_100k` | 0.922 ms | 0.922 ms |
-| `wr_scalar_1_replace_100k` | 85.208 ms | 86.709 ms |
-| `wr_20x1_scalars_100k` | 145.751 ms | 146.415 ms |
-| `wr_long_1000x24_new` | 199.052 ms | 195.629 ms |
-| `wr_long_10x8760_replace` | 941.329 ms | 943.165 ms |
-| `wr_array_1000x24_new` | 101.244 ms | 102.333 ms |
-| `wr_array_1000x24_replace_big` | 166.924 ms | 167.594 ms |
-| `wr_delete_1000_scalar_big` | 124.349 ms | 127.374 ms |
-| `wr_delete_1000_long_big` | 333.717 ms | 334.730 ms |
-| `wr_delete_500_array_big` | 123.286 ms | 122.295 ms |
-| `wr_1_delete_big` | 107.666 ms | 107.101 ms |
-| `wr_editor_save` | 124.528 ms | 122.673 ms |
-| `wr_replace_scalar_cycle_ckpt` | 475.416 ms | 479.236 ms |
-| `wr_replace_array_cycle_ckpt` | 906.869 ms | 983.256 ms |
-| `wr_replace_long_cycle_ckpt` | 640.984 ms | 646.541 ms |
-| `wr_unchanged_scalar_10k` | 95.794 ms | 95.624 ms |
-| `wr_longbig_1cell` | 3307.274 ms | 3360.707 ms |
-| `rd_editor_reload` | 275.225 ms | 273.850 ms |
-| `lk_core_sql_100k` | 0.508 ms | 0.507 ms |
-| `lk_ensure_entity_100k` | 51.362 ms | 52.467 ms |
-| `imp_ipc_dense` | 6769.355 ms | 6800.370 ms |
-| `mt_compact_history_heavy` | 13616.429 ms | 13384.663 ms |
-| `mt_extract_head` | 1502.403 ms | 1478.953 ms |
-| `sz_compacted_bytes` | 100.26 MiB | 100.26 MiB |
-| `sz_extract_bytes` | 16.76 MiB | 16.76 MiB |
+| `rd_point_scalar` | 0.748 ms | 0.759 ms |
+| `rd_point_long` | 1.273 ms | 1.273 ms |
+| `rd_point_array_dense` | 2.346 ms | 2.447 ms |
+| `rd_point_array_by_id` | 0.618 ms | 0.640 ms |
+| `rd_scalars_loader` | 22.413 ms | 23.058 ms |
+| `rd_dense` | 236.624 ms | 235.681 ms |
+| `rd_model_load_long` | 613.756 ms | 1064.957 ms |
+| `rd_long_scan_17pct` | 16.111 ms | 16.134 ms |
+| `rd_vr_point_long` | 54.738 ms | 46.767 ms |
+| `rd_axes_rp_scalar` | 84.382 ms | 438.013 ms |
+| `rd_axes_rp_long` | 146.246 ms | 471.587 ms |
+| `rd_axes_rp_array` | 526.344 ms | 665.261 ms |
+| `rd_axes_rp_irr` | 403.530 ms | 562.438 ms |
+| `rd_axes_vr_point_long` | 111.866 ms | 240.719 ms |
+| `rd_axes_vr_point_stored` | 113.269 ms | 243.960 ms |
+| `wr_scalar_100_new_100k` | 0.860 ms | 0.782 ms |
+| `wr_scalar_1_replace_100k` | 80.841 ms | 73.760 ms |
+| `wr_20x1_scalars_100k` | 138.369 ms | 134.429 ms |
+| `wr_long_1000x24_new` | 187.816 ms | 183.969 ms |
+| `wr_label_10x8760_new` | 176.438 ms | 1175.624 ms |
+| `wr_label_1000x3_of_8760_new` | 98.045 ms | 130.065 ms |
+| `wr_long_10x8760_replace` | 909.361 ms | 912.414 ms |
+| `wr_array_1000x24_new` | 102.241 ms | 96.064 ms |
+| `wr_array_1000x24_replace_big` | 161.961 ms | 153.223 ms |
+| `wr_delete_1000_scalar_big` | 124.495 ms | 113.959 ms |
+| `wr_delete_1000_long_big` | 331.770 ms | 318.073 ms |
+| `wr_delete_500_array_big` | 122.551 ms | 108.805 ms |
+| `wr_1_delete_big` | 103.814 ms | 94.380 ms |
+| `wr_editor_save` | 115.375 ms | 108.519 ms |
+| `wr_replace_scalar_cycle_ckpt` | 455.219 ms | 446.848 ms |
+| `wr_replace_array_cycle_ckpt` | 912.404 ms | 906.658 ms |
+| `wr_replace_long_cycle_ckpt` | 601.930 ms | 600.004 ms |
+| `wr_unchanged_scalar_10k` | 85.001 ms | 81.200 ms |
+| `wr_cold_first_write` | 108.035 ms | 57.033 ms |
+| `wr_longbig_1cell` | 3057.538 ms | 3088.287 ms |
+| `rd_editor_reload` | 238.381 ms | 238.322 ms |
+| `lk_core_sql_100k` | 0.478 ms | 0.460 ms |
+| `lk_ensure_entity_100k` | 42.442 ms | 41.791 ms |
+| `imp_ipc_dense` | 5180.637 ms | 5178.867 ms |
+| `mt_compact_history_heavy` | 12435.729 ms | 12653.186 ms |
+| `mt_extract_head` | 1421.217 ms | 1332.759 ms |
+| `sz_compacted_bytes` | 100.51 MiB | 100.26 MiB |
+| `sz_extract_bytes` | 17.01 MiB | 16.76 MiB |
 
 ## Recorded history
 

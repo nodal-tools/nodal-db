@@ -1,0 +1,14 @@
+{
+  "description": "a non-canonical NaN pattern (negative, signaling, payload 1) hashes its own bits, so it differs from a04",
+  "element_type": "double",
+  "values": [
+    0.0
+  ],
+  "bits_at": [
+    [
+      0,
+      "0xfff0000000000001"
+    ]
+  ],
+  "expected_hash_u64": 17701889319522400847
+}

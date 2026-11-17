@@ -3,7 +3,8 @@
 Builds the workload in this directory (src/main.rs) against the core of
 each revision, runs the same seeded random API workload with both, and
 diffs the outputs: every commit's report or error, every row of every
-base table (without the commit timestamps and the db_identity row), the
+base table (without the commit timestamps and the db_identity row; the
+schema_version row only when both arms have the same one), the
 sequence counters and the counts of the audit views with findings. Use
 it to show that a write-path change that is meant to be invisible (a
 refactor, a performance change) writes the same data as before.
@@ -190,6 +191,20 @@ def compare_logical(old, new):
     return problems
 
 
+def drop_differing_schema_version(old, new):
+    """The dump's `schema_version` metadata row, removed from both outputs
+    only when the arms' rows differ (a schema-version bump between the
+    revisions); otherwise kept and compared like any row. Returns the two
+    outputs and a note (None when nothing was dropped)."""
+    def rows(text):
+        return [line for line in text.splitlines() if '|"schema_version"|' in line]
+    ro, rn = rows(old), rows(new)
+    if ro == rn:
+        return old, new, None
+    strip = lambda text, rs: "\n".join(l for l in text.splitlines() if l not in rs) + "\n"
+    return strip(old, ro), strip(new, rn), f"schema_version rows differ, not compared: {ro} vs {rn}"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("old")
@@ -234,6 +249,9 @@ def main():
                 for p in problems[:20]:
                     print("  " + p[:400])
             continue
+        outs["old"], outs["new"], note = drop_differing_schema_version(outs["old"], outs["new"])
+        if note:
+            print(f"seed {seed}: {note}")
         if outs["old"] == outs["new"]:
             print(
                 f"seed {seed}: identical ({len(outs['new'].splitlines())} lines, "

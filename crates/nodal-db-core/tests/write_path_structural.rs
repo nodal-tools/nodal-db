@@ -11,6 +11,8 @@
 // workspace clippy.toml ban on them is for name compares in the crates.
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -334,6 +336,7 @@ fn array_of_525600_elements_round_trips_bit_exactly() {
     }
     conn.close().unwrap();
     assert_audits_clean(&db);
+    assert_eq!(common::assert_array_hashes(&db), 2);
 }
 
 // --- §7.3 rollback and read-after-write ------------------------------------
@@ -1406,6 +1409,9 @@ fn array_batch_across_the_element_threshold_writes_and_replaces() {
         0
     );
     assert_audits_clean(&db);
+    // Both rounds' rows (the set form across the element threshold) carry
+    // their payload's hash.
+    assert_eq!(common::assert_array_hashes(&db), 2 * N);
 }
 
 /// A call that writes a key and deletes the same key is rejected up front

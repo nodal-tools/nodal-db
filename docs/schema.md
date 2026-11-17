@@ -75,6 +75,18 @@ The DDL files form layers, each building on the ones before:
   data of the whole table instead. For one value rendered as rows (axis
   positions and values), use `read_value` / `read_values` (by name) or
   `value_rows_for` (by id), which fetch the payload by `array_id` too.
+- **`content_hash`, the array payload hash.** `value_array` and
+  `value_array_hist` carry a `UBIGINT` `content_hash`: XXH3-64 (seed 0)
+  of the payload's elements, each as its 64 bits in 8 bytes
+  little-endian, in stored order, and nothing else (no key, no axes, no
+  length or type tag). It is an accelerator for skipping unchanged
+  writes, never an identity and never a proof of equality: a stored
+  hash that differs from a new payload's shows the payload changed, while
+  equal hashes prove nothing (the writer then compares the numbers).
+  NULL means unknown (a row written by plain SQL, or a history stub,
+  which keeps no payload). The table-shaped views `value_array_current`
+  and `value_array_asof` show it; `value_array_asof_for` and the logical
+  read surface do not.
 - **One current row, case-insensitive names.** Hidden generated `cur_*`
   columns back unique indexes that allow exactly one current row per id
   and case-insensitive name uniqueness; they are omitted from the diagrams.

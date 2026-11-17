@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use duckdb::{AccessMode, Config, Connection};
+use duckdb::{AccessMode, Config, Connection, OptionalExt};
 
 use crate::error::DbError;
 use crate::MINIMUM_DUCKDB;
@@ -566,6 +566,16 @@ where
     // the rollback) whether the file is a nodal-db database at all.
     let mut commit_insert_failed = false;
     let result = (|| {
+        // The schema-version gate: a file of another `SCHEMA_VERSION` is
+        // refused before anything is written, whatever the write (tier,
+        // retention mode, structural or a caller's own SQL), so no core write
+        // ever touches it. A failing probe (no `metadata` table) marks the
+        // commit-table check: the file may not be a nodal-db database.
+        if let Some(found) =
+            foreign_schema_version(&conn).inspect_err(|_| commit_insert_failed = true)?
+        {
+            return Err(schema_mismatch(found));
+        }
         // The staleness precondition (TxnOptions docs): after BEGIN, before
         // the commit row, so a refusal leaves no orphan commit and uses no
         // sequence value. A failing probe marks the commit-table check too:
@@ -619,21 +629,6 @@ where
                      create it with init first",
                     db_path.display().to_string()
                 ))
-            } else if let (DbError::Duckdb(_), Some(found)) = (&e, foreign_schema_version(&conn)) {
-                // An engine error (typically a Binder error on a column this
-                // build's statements expect) on a file of another schema
-                // version: say so instead of surfacing the raw binder text.
-                let expected = crate::compaction::SCHEMA_VERSION;
-                DbError::SchemaMismatch {
-                    message: format!(
-                        "database schema version {found:?} is not this nodal-db's \
-                         ({expected:?}); re-create the database (init + import) with this \
-                         nodal-db, or use a nodal-db build matching its schema version \
-                         (original error: {e})"
-                    ),
-                    found,
-                    expected: expected.to_string(),
-                }
             } else {
                 e
             };
@@ -673,19 +668,34 @@ fn has_commit_table(conn: &Connection) -> bool {
 }
 
 /// The file's current `schema_version` metadata value when it differs from
-/// this build's [`crate::compaction::SCHEMA_VERSION`]; `None` when it matches
-/// or the probe fails (the caller then keeps the original error). Only run on
-/// a write failure, after the rollback.
-fn foreign_schema_version(conn: &Connection) -> Option<String> {
-    let found: String = conn
+/// this build's [`crate::compaction::SCHEMA_VERSION`] (an empty string when
+/// the row is missing); `None` when it matches. Run by every write cycle
+/// inside its transaction, before the `commit` row (one single-row read).
+fn foreign_schema_version(conn: &Connection) -> Result<Option<String>, DbError> {
+    let found: Option<String> = conn
         .query_row(
             "SELECT value FROM metadata \
              WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
             [],
             |r| r.get(0),
         )
-        .ok()?;
-    (found != crate::compaction::SCHEMA_VERSION).then_some(found)
+        .optional()?;
+    let found = found.unwrap_or_default();
+    Ok((found != crate::compaction::SCHEMA_VERSION).then_some(found))
+}
+
+/// The write cycle's refusal of a file of another schema version.
+fn schema_mismatch(found: String) -> DbError {
+    let expected = crate::compaction::SCHEMA_VERSION;
+    DbError::SchemaMismatch {
+        message: format!(
+            "write refused: database schema version {found:?} is not this nodal-db's \
+             ({expected:?}); re-create the database (init + import) with this nodal-db, \
+             or use a nodal-db build matching its schema version"
+        ),
+        found,
+        expected: expected.to_string(),
+    }
 }
 
 /// Is this a DuckDB write-write conflict (VMP Part 5 retry trigger)? Matched on

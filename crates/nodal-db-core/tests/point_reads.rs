@@ -861,11 +861,29 @@ fn value_array_asof_for_equals_value_array_asof() {
             "SELECT count(*) FROM value_array_hist WHERE NOT content_retained"
         ) >= 1
     );
+    // `value_array_asof_for` has the mirror's columns minus `content_hash`
+    // (the stable surface leaves the storage accelerator out): project the
+    // mirror to them by name.
+    let for_cols: Vec<String> = {
+        let mut st = conn
+            .prepare("DESCRIBE SELECT * FROM value_array_asof_for(0, -1, -1, -1)")
+            .unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert!(
+        !for_cols.iter().any(|c| c == "content_hash"),
+        "{for_cols:?}"
+    );
+    assert_eq!(for_cols.len(), 17, "{for_cols:?}");
+    let for_cols = for_cols.join(", ");
     let asof = |c: i64, (pd, e, a): (i64, i64, i64)| {
         (
             format!("SELECT * FROM value_array_asof_for({c}, {pd}, {e}, {a})"),
             format!(
-                "SELECT * FROM value_array_asof({c}) WHERE parameter_definition_id = {pd} \
+                "SELECT {for_cols} FROM value_array_asof({c}) WHERE parameter_definition_id = {pd} \
                  AND entity_id = {e} AND alternative_id = {a}"
             ),
         )

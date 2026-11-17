@@ -7,8 +7,9 @@
 //! identical hashes. The machine-checkable oracle is
 //! `conformance/encoding_vectors/*.json`, driven by `tests/encoding_vectors.rs`.
 //!
-//! Scope: axis encoding (spec §4–§7) + content hash (§2). The *value* encoding
-//! (spec §9) is deferred — see the `// deferred: OPEN-7` note at the bottom.
+//! Scope: axis encoding (spec §4–§7) + content hash (§2), the dormant value
+//! encoding (spec §9), and the stored array payload hash (spec §13,
+//! `array_payload_hash`; vectors in `conformance/array_hash_vectors/`).
 
 use serde::{Deserialize, Serialize};
 
@@ -638,6 +639,90 @@ pub fn encode_value(key: &ValueKey, content: &ValueContent) -> Result<Vec<u8>, E
 /// Convenience: encode then hash a value (spec §2 over §9 bytes).
 pub fn hash_value(key: &ValueKey, content: &ValueContent) -> Result<u64, EncodeError> {
     Ok(content_hash(&encode_value(key, content)?))
+}
+
+/// Elements per stack chunk of the streaming payload hash (2 KiB of input).
+const PAYLOAD_HASH_CHUNK: usize = 256;
+
+/// Stream 64-bit words into XXH3-64 / seed 0 as 8-byte little-endian
+/// groups, through a stack buffer (no full-size copy of the payload).
+fn hash_le_words(words: impl ExactSizeIterator<Item = [u8; 8]>) -> u64 {
+    let mut h = xxhash_rust::xxh3::Xxh3Default::new();
+    let mut buf = [0u8; PAYLOAD_HASH_CHUNK * 8];
+    let mut n = 0;
+    for w in words {
+        buf[n * 8..n * 8 + 8].copy_from_slice(&w);
+        n += 1;
+        if n == PAYLOAD_HASH_CHUNK {
+            h.update(&buf);
+            n = 0;
+        }
+    }
+    h.update(&buf[..n * 8]);
+    h.digest()
+}
+
+/// The stored array payload hash (spec §13): XXH3-64, seed 0, over each
+/// element's raw IEEE-754 bits as 8 bytes little-endian, in stored
+/// (row-major) order, and nothing else (no length prefix, no kind tag, no
+/// key, no axes; no canonicalization: `-0.0` and every NaN pattern hash as
+/// their own bits). Stored in `value_array.content_hash`, where it is an
+/// accelerator of the unchanged-write check only: a mismatch proves two
+/// payloads differ, a match proves nothing (the bytes decide).
+pub fn array_payload_hash(values: &[f64]) -> u64 {
+    hash_le_words(values.iter().map(|v| v.to_bits().to_le_bytes()))
+}
+
+/// The integer twin of [`array_payload_hash`] (spec §13): each element's
+/// two's-complement value as 8 bytes little-endian. Untagged, so an integer
+/// payload hashes equal to a float payload with the same bits.
+pub fn array_payload_hash_i64(values: &[i64]) -> u64 {
+    hash_le_words(values.iter().map(|v| v.to_le_bytes()))
+}
+
+#[cfg(test)]
+mod array_hash_tests {
+    use super::*;
+
+    fn one_shot(values: &[f64]) -> u64 {
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        content_hash(&bytes)
+    }
+
+    #[test]
+    fn streaming_equals_one_shot() {
+        // Lengths around the chunk boundary and the XXH3 size classes.
+        let lens = (0..=64).chain([
+            PAYLOAD_HASH_CHUNK - 1,
+            PAYLOAD_HASH_CHUNK,
+            PAYLOAD_HASH_CHUNK + 1,
+            3 * PAYLOAD_HASH_CHUNK + 7,
+            8_760,
+        ]);
+        for n in lens {
+            let v: Vec<f64> = (0..n).map(|i| i as f64 * 0.37 - 5.0).collect();
+            assert_eq!(array_payload_hash(&v), one_shot(&v), "length {n}");
+            let ints: Vec<i64> = v.iter().map(|x| x.to_bits() as i64).collect();
+            assert_eq!(
+                array_payload_hash_i64(&ints),
+                one_shot(&v),
+                "int length {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_payload_hashes_the_empty_input() {
+        assert_eq!(array_payload_hash(&[]), content_hash(&[]));
+    }
+
+    #[test]
+    fn raw_bits_are_hashed_without_canonicalization() {
+        assert_ne!(array_payload_hash(&[0.0]), array_payload_hash(&[-0.0]));
+        let quiet = f64::from_bits(0x7ff8_0000_0000_0000);
+        let other = f64::from_bits(0x7ff8_0000_0000_0001);
+        assert_ne!(array_payload_hash(&[quiet]), array_payload_hash(&[other]));
+    }
 }
 
 #[cfg(test)]

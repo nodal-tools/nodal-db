@@ -332,12 +332,10 @@ fn ingest_into_uninitialized_db_is_api_error() {
     );
 }
 
-/// A write that fails on a file of another schema version (e.g. a 0.3 file
-/// without `value_array.array_id`, which fails with a raw `Binder Error:
-/// Referenced column "array_id" not found`) reports the version mismatch
-/// instead, as `DbError::SchemaMismatch` (not retried, the engine error kept
-/// in the message); on a current-version file the same engine error passes
-/// through.
+/// A write cycle on a file of another schema version is refused before the
+/// caller's closure runs, as `DbError::SchemaMismatch` (not retried,
+/// nothing written); on a current-version file an engine error from the
+/// closure passes through unchanged.
 #[test]
 fn write_error_on_other_schema_version_names_the_version() {
     use nodal_db_core::conn::with_write_txn;
@@ -381,14 +379,28 @@ fn write_error_on_other_schema_version_names_the_version() {
     assert_eq!(m, &err.to_string());
     assert!(m.contains("\"0.3-test\""), "{m}");
     assert!(m.contains(nodal_db_core::compaction::SCHEMA_VERSION), "{m}");
-    assert!(m.contains("no_such_column"), "original error kept: {m}");
+    assert!(
+        !m.contains("no_such_column"),
+        "refused before the closure ran: {m}"
+    );
     assert_eq!(
         count(&db, "SELECT count(*) FROM commit"),
         commits,
         "rolled back"
     );
 
-    // A non-engine error from the closure is never remapped.
+    // A non-engine error from the closure is never remapped (on a current
+    // file: on the old one the closure never runs).
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE metadata SET value = ? \
+             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+            [nodal_db_core::compaction::SCHEMA_VERSION],
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
     let err = with_write_txn(&db, "t", "m", |_c, _id| -> Result<(), DbError> {
         Err(DbError::Api("mine".into()))
     })

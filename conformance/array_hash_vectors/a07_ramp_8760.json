@@ -1,0 +1,11 @@
+{
+  "description": "an hourly year: element i = start + i * step (every value exact), 8 760 elements, crosses the streaming chunk size many times",
+  "element_type": "double",
+  "values": [],
+  "ramp": {
+    "len": 8760,
+    "start": -100.0,
+    "step": 0.25
+  },
+  "expected_hash_u64": 5878914964114562885
+}

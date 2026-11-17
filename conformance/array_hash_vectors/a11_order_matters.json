@@ -1,0 +1,10 @@
+{
+  "description": "a08's elements in another order: stored order is hash input",
+  "element_type": "double",
+  "values": [
+    3.5,
+    2.5,
+    1.5
+  ],
+  "expected_hash_u64": 16642498191122709322
+}

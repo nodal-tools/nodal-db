@@ -18,6 +18,8 @@
 //! model's, and `value_timeline`'s long leg must hold one span per change
 //! of the value; after every commit the audits must be clean.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -724,6 +726,9 @@ fn run_seed(seed: u64, commits: usize) -> SetMix {
         );
     }
     conn.close().unwrap();
+    // The array rows of the tier transitions carry their payload's hash
+    // (stubs none; skip-unchanged P3).
+    common::assert_array_hashes(&db);
     mix
 }
 

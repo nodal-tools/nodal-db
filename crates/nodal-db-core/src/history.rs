@@ -115,7 +115,11 @@
 //! encoder output, compared on the RAW stored columns (`value_kind` and the
 //! payload bits; arrays: `values` element bits and length, `values_int`
 //! NULL) with `content_retained = TRUE`. The stored side is never
-//! re-canonicalized and never compared by `content_hash`. Every doubt errs
+//! re-canonicalized. For arrays, a stored `content_hash` (the payload hash,
+//! `encoding::array_payload_hash`) that differs from the new payload's
+//! proves "changed" without fetching the payload; only the bytes prove
+//! "unchanged" (a matching or NULL hash falls through to the byte compare),
+//! so a wrong stored hash costs one version, never a write. Every doubt errs
 //! toward "changed" (an extra version costs history; a false "unchanged"
 //! would lose a write). The probes read the comparison columns in the same
 //! statements as today (the scalar probe; the long tier's grouped
@@ -159,7 +163,7 @@ use duckdb::{params, Connection, OptionalExt};
 
 use crate::axis::{dedup_or_insert_created, AxisCache};
 use crate::canon::CanonicalValue;
-use crate::encoding::{datetime_coord, AxisBody, CanonicalAxis};
+use crate::encoding::{array_payload_hash, datetime_coord, AxisBody, CanonicalAxis};
 use crate::error::DbError;
 use crate::types::{
     ScalarValue, ShapedData, Tier, ValueKey, ValueKind, WriteOptions, WriteOutcome,
@@ -999,10 +1003,10 @@ const ARRAY_PREIMAGE_STUB_SET_SQL: &str = "INSERT INTO value_array_hist \
        (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
         valid_from_commit, version, \
         axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
-        valid_to_commit, content_retained) \
+        content_hash, valid_to_commit, content_retained) \
      SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
         valid_from_commit, version, \
-        axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, ?, FALSE \
+        axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
      FROM value_array WHERE array_id IN (SELECT unnest(?::BIGINT[]))";
 
 /// The set form of the array arm of `close_out_tier`'s DELETE.
@@ -1022,13 +1026,13 @@ const ARRAY_LIVE_SQL: &str = "SELECT v.entity_id, v.parameter_definition_id, v.a
 const ARRAY_LIVE_META_SQL: &str =
     "SELECT v.entity_id, v.parameter_definition_id, v.alternative_id, \
             v.array_id, v.version::INTEGER, v.parameter_type_id, \
-            v.axis1_id, v.axis2_id, v.axis3_id, v.axis4_id, v.v_min, v.v_max \
+            v.axis1_id, v.axis2_id, v.axis3_id, v.axis4_id, v.v_min, v.v_max, v.content_hash \
      FROM value_array v JOIN k ON v.entity_id = k.e \
           AND v.parameter_definition_id = k.p AND v.alternative_id = k.a";
 
 /// The single-key form of [`ARRAY_LIVE_META_SQL`].
 const ARRAY_LIVE_META_ONE_SQL: &str = "SELECT array_id, version::INTEGER, parameter_type_id, \
-            axis1_id, axis2_id, axis3_id, axis4_id, v_min, v_max \
+            axis1_id, axis2_id, axis3_id, axis4_id, v_min, v_max, content_hash \
      FROM value_array WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ?";
 
 /// The stored payloads of the bound `array_id`s, for the unchanged check:
@@ -1042,7 +1046,8 @@ pub const ARRAY_PAYLOAD_SQL: &str = "SELECT array_id, values, values_int IS NULL
         WHERE array_id IN (SELECT unnest(?::BIGINT[])) OFFSET 0)";
 
 /// The narrow columns of a live array row the unchanged prefilter compares:
-/// its handle, version, binding, axes and pruning bounds.
+/// its handle, version, binding, axes, pruning bounds and stored payload
+/// hash.
 #[derive(Clone, Copy, Debug)]
 struct ArrayMeta {
     array_id: i64,
@@ -1051,11 +1056,14 @@ struct ArrayMeta {
     axis: [Option<i64>; 4],
     vmin: Option<f64>,
     vmax: Option<f64>,
+    /// `content_hash`: `NULL` (unknown) when the row was not written by the
+    /// core (direct SQL, a test fixture).
+    hash: Option<u64>,
 }
 
 impl ArrayMeta {
     /// Read `array_id, version, parameter_type_id, axis1..4_id, v_min,
-    /// v_max` starting at column `o`.
+    /// v_max, content_hash` starting at column `o`.
     fn read(r: &duckdb::Row, o: usize) -> duckdb::Result<ArrayMeta> {
         Ok(ArrayMeta {
             array_id: r.get(o)?,
@@ -1064,19 +1072,25 @@ impl ArrayMeta {
             axis: [r.get(o + 3)?, r.get(o + 4)?, r.get(o + 5)?, r.get(o + 6)?],
             vmin: r.get(o + 7)?,
             vmax: r.get(o + 8)?,
+            hash: r.get(o + 9)?,
         })
     }
 
-    /// The prefilter: can the row hold the new value? A mismatch of the
-    /// binding, any axis id or a pruning bound proves a change; a match
-    /// proves nothing (the payload bytes decide).
-    fn may_equal(&self, a: &ArrayWrite) -> bool {
+    /// The prefilter: can the row hold the new value (whose payload hash is
+    /// `h`, [`array_payload_hash`])? A mismatch of the binding, any axis
+    /// id, a pruning bound or a stored (non-NULL) payload hash proves a
+    /// change; a match, or a NULL hash, proves nothing: the payload bytes
+    /// decide ([`array_payloads_equal`]). The hash narrows, the bytes
+    /// decide: a wrong stored hash can only cost one extra version (a false
+    /// "changed"), never a lost write.
+    fn may_equal(&self, a: &ArrayWrite, h: u64) -> bool {
         let (lo, hi) = min_max(a.vals());
         let axis: [Option<i64>; 4] = std::array::from_fn(|d| a.axis_ids.get(d).copied());
         self.pt == a.parameter_type_id
             && self.axis == axis
             && self.vmin.is_some_and(|x| same_bound(x, lo))
             && self.vmax.is_some_and(|x| same_bound(x, hi))
+            && self.hash.is_none_or(|s| s == h)
     }
 }
 
@@ -1599,10 +1613,16 @@ fn write_array(
     c: i64,
     axis_ids: &[i64],
     vals: &[f64],
+    hash: u64,
     live_array_id: Option<i64>,
     retained: bool,
     pt_id: Option<i64>,
 ) -> Result<(u16, usize, usize), DbError> {
+    debug_assert_eq!(
+        hash,
+        array_payload_hash(vals),
+        "the hash of the bound payload"
+    );
     let (vmin, vmax) = min_max(vals);
     // The payload binds as ONE `?::DOUBLE[]` parameter (columnar bind, plan
     // D2): the canonical floats verbatim, so the statement text is the same
@@ -1623,11 +1643,12 @@ fn write_array(
         p.push(payload);
         p.push(Value::Double(vmin));
         p.push(Value::Double(vmax));
+        p.push(Value::UBigInt(hash));
         p.push(Value::BigInt(array_id));
         conn.prepare_cached(
             "UPDATE value_array SET valid_from_commit=?, version=?, parameter_type_id=?, \
                axis1_id=?, axis2_id=?, axis3_id=?, axis4_id=?, \
-               values=?::DOUBLE[], values_int=NULL, v_min=?, v_max=? \
+               values=?::DOUBLE[], values_int=NULL, v_min=?, v_max=?, content_hash=? \
              WHERE array_id=?",
         )?
         .execute(duckdb::params_from_iter(p))?;
@@ -1648,12 +1669,14 @@ fn write_array(
         p.push(payload);
         p.push(Value::Double(vmin));
         p.push(Value::Double(vmax));
+        p.push(Value::UBigInt(hash));
         conn.prepare_cached(
             "INSERT INTO value_array \
                (entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
                 valid_from_commit, version, \
-                axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::DOUBLE[], NULL, ?, ?)",
+                axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
+                content_hash) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::DOUBLE[], NULL, ?, ?, ?)",
         )?
         .execute(duckdb::params_from_iter(p))?;
         Ok((version, 1, 0))
@@ -1662,9 +1685,10 @@ fn write_array(
 
 /// SQL-side pre-image copy of the live array row into `value_array_hist`
 /// (VMP Part 5), keyed by its `array_id` (an index scan; the id is copied
-/// verbatim). Retained → `SELECT *, c, TRUE` (column parity: `array_id` is the
-/// first column of both tables); stub → payload columns nulled with
-/// `content_retained = FALSE`. The pre-image never leaves SQL.
+/// verbatim). Retained → `SELECT *, c, TRUE` (column parity: the hist twin
+/// is the live columns in the same order, `content_hash` included, then the
+/// two history columns); stub → payload columns and `content_hash` nulled
+/// with `content_retained = FALSE` (no payload, so no fingerprint of it). The pre-image never leaves SQL.
 fn copy_array_preimage(
     conn: &Connection,
     array_id: i64,
@@ -1678,10 +1702,10 @@ fn copy_array_preimage(
            (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
             valid_from_commit, version, \
             axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
-            valid_to_commit, content_retained) \
+            content_hash, valid_to_commit, content_retained) \
          SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
             valid_from_commit, version, \
-            axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, ?, FALSE \
+            axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
          FROM value_array WHERE array_id=?"
     };
     Ok(conn.prepare_cached(sql)?.execute(params![c, array_id])?)
@@ -1760,12 +1784,13 @@ const ARRAY_VERSION_SQL: &str = "SELECT v.entity_id, v.parameter_definition_id, 
 const ARRAY_UPDATE_SQL: &str =
     "UPDATE value_array SET valid_from_commit = ?, version = u.version, \
        parameter_type_id = u.pt, axis1_id = u.a1, axis2_id = u.a2, axis3_id = u.a3, \
-       axis4_id = u.a4, values = u.vals, values_int = NULL, v_min = u.mn, v_max = u.mx \
+       axis4_id = u.a4, values = u.vals, values_int = NULL, v_min = u.mn, v_max = u.mx, \
+       content_hash = u.h \
      FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::SMALLINT[]) AS version, \
              unnest(?::BIGINT[]) AS pt, unnest(?::BIGINT[]) AS a1, unnest(?::BIGINT[]) AS a2, \
              unnest(?::BIGINT[]) AS a3, unnest(?::BIGINT[]) AS a4, \
              unnest(?::DOUBLE[][]) AS vals, unnest(?::DOUBLE[]) AS mn, \
-             unnest(?::DOUBLE[]) AS mx) u \
+             unnest(?::DOUBLE[]) AS mx, unnest(?::UBIGINT[]) AS h) u \
      WHERE value_array.array_id = u.id";
 
 /// The insert of a round's new array rows with their pre-minted `array_id`s
@@ -1773,15 +1798,15 @@ const ARRAY_UPDATE_SQL: &str =
 const ARRAY_INSERT_SQL: &str = "INSERT INTO value_array \
        (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
         valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id, \
-        values, values_int, v_min, v_max) \
+        values, values_int, v_min, v_max, content_hash) \
      SELECT u.id, u.e, u.p, u.a, u.pt, ?, u.version, u.a1, u.a2, u.a3, u.a4, \
-       u.vals, NULL, u.mn, u.mx \
+       u.vals, NULL, u.mn, u.mx, u.h \
      FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::BIGINT[]) AS e, \
              unnest(?::BIGINT[]) AS p, unnest(?::BIGINT[]) AS a, unnest(?::BIGINT[]) AS pt, \
              unnest(?::SMALLINT[]) AS version, unnest(?::BIGINT[]) AS a1, \
              unnest(?::BIGINT[]) AS a2, unnest(?::BIGINT[]) AS a3, unnest(?::BIGINT[]) AS a4, \
              unnest(?::DOUBLE[][]) AS vals, unnest(?::DOUBLE[]) AS mn, \
-             unnest(?::DOUBLE[]) AS mx) u";
+             unnest(?::DOUBLE[]) AS mx, unnest(?::UBIGINT[]) AS h) u";
 
 /// `n` fresh `array_id`s from the column's own sequence (its only minter),
 /// sorted: assigned to the new keys in input order they are exactly the ids
@@ -1882,14 +1907,19 @@ fn write_array_round(
         (live, versions)
     };
 
-    // --- Unchanged keys: live in array, the narrow prefilter passes, and
+    // The payload hash of each key, once: the same value feeds the
+    // prefilter and the bind (the hash of the bound slice by construction).
+    let h: Vec<u64> = w.iter().map(|a| array_payload_hash(a.vals())).collect();
+
+    // --- Unchanged keys: live in array, the narrow prefilter passes (a
+    // stored hash that differs proves a change without the fetch), and
     // the stored payload (fetched by array_id) equals the new one bit for
     // bit. They write nothing: no pre-image copy, no replace
     // (skip_unchanged_writes_PLAN §3.2). ---
     let mut cands: Vec<(i64, &[f64])> = Vec::new();
-    for a in w {
+    for (a, &ha) in w.iter().zip(&h) {
         if let Some(&(Live::Array(id), _)) = live.get(&triple(&a.key)) {
-            if meta.get(&id).is_some_and(|m| m.may_equal(a)) {
+            if meta.get(&id).is_some_and(|m| m.may_equal(a, ha)) {
                 cands.push((id, a.vals()));
             }
         }
@@ -1954,7 +1984,7 @@ fn write_array_round(
         }
         let ids: Vec<i64> = replaced.iter().filter_map(|&i| live_id(i)).collect();
         let mut p = vec![Value::BigInt(c), list(&ids, |&v| Value::BigInt(v))];
-        p.extend(array_cols(w, &replaced, &versions, false));
+        p.extend(array_cols(w, &h, &replaced, &versions, false));
         check_list_lengths(&p, replaced.len())?;
         let updated = conn
             .prepare_cached(ARRAY_UPDATE_SQL)?
@@ -1969,7 +1999,7 @@ fn write_array_round(
     if !fresh.is_empty() {
         let ids = mint_array_ids(conn, fresh.len())?;
         let mut p = vec![Value::BigInt(c), list(&ids, |&v| Value::BigInt(v))];
-        p.extend(array_cols(w, &fresh, &versions, true));
+        p.extend(array_cols(w, &h, &fresh, &versions, true));
         check_list_lengths(&p, fresh.len())?;
         let inserted = conn
             .prepare_cached(ARRAY_INSERT_SQL)?
@@ -2000,13 +2030,20 @@ fn write_array_round(
 /// column order of [`ARRAY_UPDATE_SQL`] after `id` (or, with `key`, of
 /// [`ARRAY_INSERT_SQL`] after `id`: the key triple first). The payload is
 /// the canonical floats verbatim as one nested list; `v_min` / `v_max` come
-/// from [`min_max`].
-fn array_cols(w: &[ArrayWrite], idx: &[usize], versions: &[i16], key: bool) -> Vec<Value> {
+/// from [`min_max`], `content_hash` from `h` (the round's per-key
+/// [`array_payload_hash`], parallel to `w`).
+fn array_cols(
+    w: &[ArrayWrite],
+    h: &[u64],
+    idx: &[usize],
+    versions: &[i16],
+    key: bool,
+) -> Vec<Value> {
     let col = |f: &dyn Fn(&ArrayWrite) -> Option<i64>| -> Value {
         let v: Vec<Option<i64>> = idx.iter().map(|&i| f(&w[i])).collect();
         opt_list(&v, |&x| Value::BigInt(x))
     };
-    let mut p: Vec<Value> = Vec::with_capacity(12);
+    let mut p: Vec<Value> = Vec::with_capacity(13);
     if key {
         p.push(col(&|a| Some(a.key.entity_id)));
         p.push(col(&|a| Some(a.key.parameter_definition_id)));
@@ -2026,6 +2063,7 @@ fn array_cols(w: &[ArrayWrite], idx: &[usize], versions: &[i16], key: bool) -> V
     let mm: Vec<(f64, f64)> = idx.iter().map(|&i| min_max(w[i].vals())).collect();
     p.push(list(&mm, |&(lo, _)| Value::Double(lo)));
     p.push(list(&mm, |&(_, hi)| Value::Double(hi)));
+    p.push(list(idx, |&i| Value::UBigInt(h[i])));
     p
 }
 
@@ -2037,9 +2075,10 @@ fn write_array_one(conn: &Connection, c: i64, a: &ArrayWrite) -> Result<WriteOut
         live_tier_array_meta(conn, &a.key)?
     };
     // The unchanged check (as in the set form): the prefilter on the
-    // narrow columns, then the payload by array_id.
+    // narrow columns and the stored hash, then the payload by array_id.
+    let h = array_payload_hash(a.vals());
     if let Some((Live::Array(id), Some(m))) = current {
-        if m.may_equal(a) && array_payloads_equal(conn, &[(id, a.vals())])?.contains(&id) {
+        if m.may_equal(a, h) && array_payloads_equal(conn, &[(id, a.vals())])?.contains(&id) {
             return Ok(unchanged_outcome(
                 Tier::Array,
                 m.version,
@@ -2059,6 +2098,7 @@ fn write_array_one(conn: &Connection, c: i64, a: &ArrayWrite) -> Result<WriteOut
         c,
         &a.axis_ids,
         a.vals(),
+        h,
         current.and_then(Live::array_id),
         a.retained,
         a.parameter_type_id,
@@ -3587,9 +3627,12 @@ impl VCols {
 /// The payload of one stored value row or long cell, decoded from its RAW
 /// stored columns: floats as bits, strings as their exact bytes, timestamps
 /// as µs. The stored side is never re-canonicalized (critique C3.1), and
-/// equality is never decided by `encoding::content_hash` / `encode_value`
-/// (C3.2; the value encoding now encodes `v_str` as its raw bytes, spec
-/// §9.5, but a hash is still not an equality test). A new value is decoded by the same function from its
+/// equality is never decided by a hash (`encoding::content_hash` /
+/// `encode_value`, C3.2; the value encoding now encodes `v_str` as its raw
+/// bytes, spec §9.5, but a hash is still not an equality test). The one
+/// stored hash, the array tier's `content_hash`, may only prove a payload
+/// *changed* (a mismatch, in [`ArrayMeta::may_equal`]); "unchanged" is
+/// always the bytes. A new value is decoded by the same function from its
 /// [`VCols::of`] encoding, so equal cells mean equal encoder outputs: the
 /// same `value_kind` and the same bits in every value column.
 #[derive(Clone, Debug, PartialEq)]
@@ -3894,6 +3937,7 @@ mod tests {
 
     use super::*;
     use crate::conn::with_write_txn;
+    use crate::encoding::array_payload_hash as ph;
     use crate::encoding::AxisProperties;
     use crate::schema_init::init_schema;
     use crate::types::{LongRow, ValueKind};
@@ -4825,7 +4869,18 @@ mod tests {
     fn bad_axis_on_array_violates_foreign_key() {
         let (_d, db) = fresh();
         assert_rejected(&db, "foreign key", |conn, c| {
-            write_array(conn, &KEY, c, &[999_999], &[1.0, 2.0], None, true, None).map(|_| ())
+            write_array(
+                conn,
+                &KEY,
+                c,
+                &[999_999],
+                &[1.0, 2.0],
+                ph(&[1.0, 2.0]),
+                None,
+                true,
+                None,
+            )
+            .map(|_| ())
         });
     }
 
@@ -4834,8 +4889,29 @@ mod tests {
         let (_d, db) = fresh();
         assert_rejected(&db, "UNIQUE constraint violation", |conn, c| {
             let ax = axis_id(conn, 2);
-            write_array(conn, &KEY, c, &[ax], &[1.0, 2.0], None, true, None)?;
-            write_array(conn, &KEY, c, &[ax], &[3.0, 4.0], None, true, None).map(|_| ())
+            write_array(
+                conn,
+                &KEY,
+                c,
+                &[ax],
+                &[1.0, 2.0],
+                ph(&[1.0, 2.0]),
+                None,
+                true,
+                None,
+            )?;
+            write_array(
+                conn,
+                &KEY,
+                c,
+                &[ax],
+                &[3.0, 4.0],
+                ph(&[3.0, 4.0]),
+                None,
+                true,
+                None,
+            )
+            .map(|_| ())
         });
     }
 
@@ -4861,7 +4937,7 @@ mod tests {
         let (_d, db) = fresh();
         with_write_txn(&db, "t", "empty", |conn, c| {
             let ax = axis_id(conn, 1);
-            write_array(conn, &KEY, c, &[ax], &[], None, true, None)
+            write_array(conn, &KEY, c, &[ax], &[], ph(&[]), None, true, None)
         })
         .unwrap();
         let conn = Connection::open(&db).unwrap();

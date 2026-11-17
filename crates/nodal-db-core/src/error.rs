@@ -79,9 +79,11 @@ pub enum DbError {
 
     /// The database file's `schema_version` is `found`, not this build's
     /// `expected` ([`crate::compaction::SCHEMA_VERSION`]): the file was made
-    /// by another nodal-db schema version. Raised by a write that fails on
-    /// such a file (the engine error is kept in `message`) and by the
-    /// compaction, extract and erase pre-checks. Its own variant so callers
+    /// by another nodal-db schema version. Raised by every write cycle
+    /// (`conn::with_write_txn` and everything built on it: saves, imports,
+    /// structural commits, deletes, verbs), which refuses such a file before
+    /// it writes anything, and by the compaction, extract, erase and
+    /// read-surface refresh pre-checks. Its own variant so callers
     /// can match it structurally instead of the text; never retried. The
     /// remedy is to re-create the database with this build (init + import)
     /// or to use a build matching the file. `message` is the full text,

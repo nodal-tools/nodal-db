@@ -1,0 +1,8 @@
+{
+  "description": "one +0.0 element: eight zero bytes",
+  "element_type": "double",
+  "values": [
+    0.0
+  ],
+  "expected_hash_u64": 14374147212387527897
+}

@@ -969,11 +969,20 @@ def main():
               " (SELECT array_id FROM value_array_hist WHERE entity_id = ?)", coal, coal)
     check("array_id: stable across an in-place replace (hist pre-image carries the live id)",
           ids[0] is not None and ids[0] == ids[1], str(ids))
-    hist_cols = [r[0] for r in allrows("DESCRIBE value_array_hist")]
-    live_cols = [r[0] for r in allrows("DESCRIBE value_array")]
-    check("array_id: first column of value_array and value_array_hist (SELECT * parity)",
+    hist_desc = [(r[0], r[1]) for r in allrows("DESCRIBE value_array_hist")]
+    live_desc = [(r[0], r[1]) for r in allrows("DESCRIBE value_array")]
+    hist_cols = [n for n, _ in hist_desc]
+    live_cols = [n for n, _ in live_desc]
+    # The live columns, then the two history columns: `content_hash`
+    # (UBIGINT, the payload hash) is the last live column, so the pre-image
+    # copy `SELECT *, c, TRUE` lines it up with the hist twin's.
+    check("array_id: first column of value_array and value_array_hist (SELECT * parity;"
+          " content_hash UBIGINT last live column)",
           hist_cols[0] == live_cols[0] == "array_id"
-          and hist_cols[:len(live_cols)] == live_cols, f"{live_cols} / {hist_cols}")
+          and hist_desc[:len(live_desc)] == live_desc
+          and live_desc[-1] == ("content_hash", "UBIGINT")
+          and hist_cols[len(live_cols):] == ["valid_to_commit", "content_retained"],
+          f"{live_desc} / {hist_desc}")
 
     # ---- audits -----------------------------------------------------------
     for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
@@ -2001,7 +2010,8 @@ def main():
     # Column parity: every *_asof macro projects every real (non-generated)
     # column of its base table, in table order. value_array_asof mirrors the
     # `_hist` layout (live columns plus the two history columns), so its base
-    # is value_array_hist.
+    # is value_array_hist. The one exception: the stable point form
+    # value_array_asof_for leaves out the storage accelerator content_hash.
     def real_cols(table):
         return [r[0] for r in allrows(
             "SELECT column_name FROM information_schema.columns"
@@ -2013,7 +2023,10 @@ def main():
         base_table = ("value_array_hist" if m in ("value_array_asof", "value_array_asof_for")
                       else m[:-len("_asof")])
         cols = [r[0] for r in allrows(f"DESCRIBE SELECT * FROM {asof_calls[m](1)}")]
-        if cols != real_cols(base_table):
+        want_cols = real_cols(base_table)
+        if m == "value_array_asof_for":
+            want_cols = [c for c in want_cols if c != "content_hash"]
+        if cols != want_cols:
             drift[m] = cols
     check("as-of macros: each projects every real column of its base table, in order",
           not drift, str(drift))
@@ -2027,11 +2040,15 @@ def main():
                    " (SELECT parameter_definition_id, entity_id, alternative_id FROM value_array"
                    "  UNION ALL SELECT parameter_definition_id, entity_id, alternative_id"
                    "  FROM value_array_hist)")
+    # asof_for's columns: the mirror's minus content_hash (by name, in order).
+    for_cols = ", ".join(r[0] for r in allrows(
+        "DESCRIBE SELECT * FROM value_array_asof_for(0, -1, -1, -1)"))
     bad_asof, hits = {}, 0
     for pd_k, e_k, a_k in keys:
         for c in range(0, c_latest + 2):
             got = (f"SELECT * FROM value_array_asof_for({c}, {pd_k}, {e_k}, {a_k})")
-            want = (f"SELECT * FROM value_array_asof({c}) WHERE parameter_definition_id = {pd_k}"
+            want = (f"SELECT {for_cols} FROM value_array_asof({c})"
+                    f" WHERE parameter_definition_id = {pd_k}"
                     f" AND entity_id = {e_k} AND alternative_id = {a_k}")
             d = multiset_diff(got, want)
             hits += d[2] > 0

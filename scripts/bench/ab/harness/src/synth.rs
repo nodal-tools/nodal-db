@@ -33,6 +33,13 @@ use crate::check::{
 pub const CELLS: usize = 8760;
 const ALT: &str = "Base";
 const USER: &str = "bench";
+
+/// The columns of the stable `value_array_asof_for`, in order (the mirror
+/// `value_array_asof` has these plus `content_hash` from schema
+/// 0.5-array-hash on).
+const ASOF_FOR_COLS: &str = "array_id, entity_id, parameter_definition_id, alternative_id, \
+     parameter_type_id, valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id, \
+     values, values_int, v_min, v_max, valid_to_commit, content_retained";
 pub(crate) const T0_US: i64 = 1_735_689_600 * 1_000_000;
 pub(crate) const HOUR_US: i64 = 3_600 * 1_000_000;
 
@@ -542,8 +549,13 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
                 mode,
                 &format!("SELECT * FROM value_array_asof_for({c}, {pd}, {e}, {al})"),
                 1,
+                // The reference names value_array_asof_for's 17 columns:
+                // the mirror value_array_asof also carries content_hash
+                // (schema 0.5-array-hash), and naming them binds on both
+                // arms' schemas.
                 Some(&format!(
-                    "SELECT * FROM value_array_asof({c}) WHERE parameter_definition_id = {pd} \
+                    "SELECT {ASOF_FOR_COLS} FROM value_array_asof({c}) \
+                     WHERE parameter_definition_id = {pd} \
                      AND entity_id = {e} AND alternative_id = {al}"
                 )),
                 k(60, 40),

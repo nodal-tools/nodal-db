@@ -1,0 +1,11 @@
+{
+  "description": "a BIGINT payload whose elements are a08's bit patterns: untagged, so it hashes equal to a08 (the byte compare, which sees values_int, still tells them apart)",
+  "element_type": "bigint",
+  "values": [
+    4609434218613702656,
+    4612811918334230528,
+    4615063718147915776
+  ],
+  "same_hash_as": "a08_small",
+  "expected_hash_u64": 6734720023283317961
+}

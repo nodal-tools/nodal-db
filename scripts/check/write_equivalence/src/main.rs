@@ -1318,9 +1318,10 @@ fn dump(db: &Path, out: &mut String) {
         }
     };
     // The array payload hash (`content_hash`, schema 0.5-array-hash) is
-    // excluded where the column exists, and so is the `schema_version`
-    // metadata row: both differ between a 0.4 and a 0.5 arm by definition,
-    // and everything else must stay byte-identical (skip-unchanged P3, B2).
+    // excluded where the column exists: a 0.4 arm has none, and everything
+    // else must stay byte-identical (skip-unchanged P3, B2). The
+    // `schema_version` metadata row is printed; check.py drops it only when
+    // the two arms' versions differ.
     let hashed = names(
         "SELECT table_name FROM duckdb_columns() \
          WHERE database_name = current_database() AND schema_name = 'main' \
@@ -1330,8 +1331,7 @@ fn dump(db: &Path, out: &mut String) {
     for t in &tables {
         let sql = match t.as_str() {
             "commit" => "SELECT * EXCLUDE (timestamp) FROM \"commit\" ORDER BY id".to_string(),
-            "metadata" => "SELECT * FROM metadata \
-                           WHERE lower(name) NOT IN ('db_identity', 'schema_version') \
+            "metadata" => "SELECT * FROM metadata WHERE lower(name) <> 'db_identity' \
                            ORDER BY ALL"
                 .to_string(),
             _ if hashed.contains(t) => {

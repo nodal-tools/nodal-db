@@ -1056,6 +1056,38 @@ def test_class_and_parameter_rename_ops(db):
         )
 
 
+def test_create_entity_description_round_trip(db):
+    rep = db.commit_structural(
+        [
+            {"op": "create_entity_class", "name": "unit", "dims": []},
+            {"op": "create_entity", "class": "unit", "name": "u1",
+             "description": "Gas turbine."},
+            {"op": "create_entity", "class": "unit", "name": "u2"},
+        ],
+        user="t",
+    )
+    assert [o["effect"] for o in rep["structural"]] == ["created"] * 3
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'u1'")
+        == "Gas turbine."
+    )
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'u2'")
+        is None
+    )
+    # Create only: a re-create with another description is a no-op.
+    n = commit_count(db)
+    rep = db.commit_structural(
+        [{"op": "create_entity", "class": "unit", "name": "u1", "description": "x"}],
+        user="t",
+    )
+    assert rep["commit_id"] == 0 and commit_count(db) == n
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'u1'")
+        == "Gas turbine."
+    )
+
+
 def test_template_stamped_rename_is_typed_and_resendable(db):
     db.write_parameter("node", "demand", "Base", scalar_batch(["n1"], [1.0]), user="t")
     db.stamp_template_identity("flextool", "40", user="t")

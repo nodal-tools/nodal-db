@@ -202,6 +202,7 @@ fn entity(class: &str, name: &str) -> SC {
         class: class.into(),
         name: Some(name.into()),
         elements: vec![],
+        description: None,
     }
 }
 
@@ -777,6 +778,7 @@ fn nd_dimensions_and_class_sets_follow_a_class_rename() {
                 class: "unit__node".into(),
                 name: None,
                 elements: vec!["u1".into(), "b1".into()],
+                description: None,
             },
         ],
     );
@@ -882,6 +884,7 @@ fn class_set_members_follow_a_class_rename() {
                 class: "flow".into(),
                 name: None,
                 elements: vec!["b1".into()],
+                description: None,
             },
         ],
     );

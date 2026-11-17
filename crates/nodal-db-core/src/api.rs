@@ -699,6 +699,7 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             class,
             name,
             elements,
+            ..
         } => {
             n.nfc_in_place(class);
             if let Some(name) = name {

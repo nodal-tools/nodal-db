@@ -548,7 +548,8 @@ pub fn ensure_entity(
     let msg = format!("ensure_entity {class}:{effective_name}");
     // The shared applier is the one entity+element create body (invariant 2).
     core_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_entity(conn, c, class, name, elements, &mut no_report()).map(|(id, _)| id)
+        apply_create_entity(conn, c, class, name, elements, None, &mut no_report())
+            .map(|(id, _)| id)
     })
 }
 

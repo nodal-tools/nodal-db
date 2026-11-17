@@ -882,10 +882,15 @@ pub enum StructuralChange {
         active: Option<bool>,
     },
     /// Idempotent 0-D/N-D entity create (existing ⇒ its id, verifies tuple).
+    /// `description` applies on create only: an existing entity is a NoOp
+    /// that verifies the element tuple and ignores it (the first of two
+    /// creates of one entity in a call wins); `Some("")` stores no
+    /// description. Free text: never NFC-normalized.
     CreateEntity {
         class: String,
         name: Option<String>,
         elements: Vec<String>,
+        description: Option<String>,
     },
     /// Idempotent entity-class create (0-D or N-D). `description` applies on
     /// create only (an existing class is a NoOp that checks the dims and

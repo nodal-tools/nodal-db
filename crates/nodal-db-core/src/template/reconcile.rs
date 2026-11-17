@@ -2973,7 +2973,7 @@ pub(crate) fn insert_entity_row(
     Ok(conn.query_row(
         "INSERT INTO entity (entity_class_id, name, description, valid_from_commit) \
          VALUES (?, ?, ?, ?) RETURNING id",
-        params![class_id, name, description, c],
+        params![class_id, name, stored_description(description), c],
         |r| r.get(0),
     )?)
 }

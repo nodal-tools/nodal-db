@@ -148,8 +148,17 @@ pub(crate) fn apply_structural(
             class,
             name,
             elements,
+            description,
         } => {
-            let (id, e) = apply_create_entity(conn, c, class, name.as_deref(), elements, folds)?;
+            let (id, e) = apply_create_entity(
+                conn,
+                c,
+                class,
+                name.as_deref(),
+                elements,
+                description.as_deref(),
+                folds,
+            )?;
             (StructuralKind::Entity, id, e)
         }
         StructuralChange::CreateEntityClass {
@@ -1554,6 +1563,7 @@ pub(crate) fn apply_create_entity(
     class: &str,
     name: Option<&str>,
     elements: &[String],
+    description: Option<&str>,
     folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let effective_name = effective_entity_name(name, elements)?;
@@ -1589,7 +1599,7 @@ pub(crate) fn apply_create_entity(
             .noted(folds, "entity", el);
         el_ids.push((*pos, id));
     }
-    let eid = insert_entity_row(conn, c, s.cid, &effective_name, None)?;
+    let eid = insert_entity_row(conn, c, s.cid, &effective_name, description)?;
     for (pos, el_id) in &el_ids {
         insert_entity_element_row(conn, c, eid, *pos, *el_id)?;
     }
@@ -2059,6 +2069,7 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             class,
             name,
             elements,
+            description: _,
         } => {
             require_nonempty("class", class)?;
             let effective = effective_entity_name(name.as_deref(), elements)?;

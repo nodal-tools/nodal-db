@@ -585,6 +585,7 @@ fn entity(class: &str, name: &str) -> SC {
         class: class.into(),
         name: Some(name.into()),
         elements: vec![],
+        description: None,
     }
 }
 
@@ -1111,4 +1112,146 @@ fn composed_editor_save_one_commit() {
     assert_eq!(r.object_deletes.len(), 1);
     assert_eq!(r.rows_written, 1);
     assert_eq!(ranking(&db, "sc"), vec!["wet"]);
+}
+
+// ---------------------------------------------------------------------------
+// Entity descriptions on create (entity_descriptions_purge §1)
+// ---------------------------------------------------------------------------
+
+fn described(class: &str, name: Option<&str>, elements: &[&str], d: Option<&str>) -> SC {
+    SC::CreateEntity {
+        class: class.into(),
+        name: name.map(Into::into),
+        elements: elements.iter().map(|e| e.to_string()).collect(),
+        description: d.map(Into::into),
+    }
+}
+
+fn qs(db: &Path, sql: &str) -> Option<String> {
+    let conn = Connection::open(db).unwrap();
+    conn.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+fn link_class() -> SC {
+    SC::CreateEntityClass {
+        name: "link".into(),
+        dims: vec!["node".into(), "unit".into()],
+        description: None,
+    }
+}
+
+#[test]
+fn entity_description_stored_on_create_0d_and_nd() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let nfd = "Cafe\u{301} de\u{301}cor";
+    let r = cs(
+        &db,
+        vec![
+            class("node"),
+            class("unit"),
+            link_class(),
+            described("node", Some("n1"), &[], Some("a node")),
+            described("unit", Some("u1"), &[], Some(nfd)),
+            described("node", Some("n2"), &[], Some("")),
+            described("node", Some("n3"), &[], None),
+            described("link", None, &["n1", "u1"], Some("a link")),
+        ],
+    );
+    assert!(r.structural.iter().all(|o| o.effect == SE::Created));
+    let desc = |name: &str| {
+        qs(
+            &db,
+            &format!("SELECT description FROM entity_current WHERE name = '{name}'"),
+        )
+    };
+    assert_eq!(desc("n1").as_deref(), Some("a node"));
+    // Free text: stored as written, never NFC-normalized.
+    assert_eq!(desc("u1").as_deref(), Some(nfd));
+    // Some("") and None store no description.
+    assert_eq!(desc("n2"), None);
+    assert_eq!(desc("n3"), None);
+    assert_eq!(desc("n1__u1").as_deref(), Some("a link"));
+    // Visible as-of the commit too.
+    assert_eq!(
+        qs(
+            &db,
+            &format!(
+                "SELECT description FROM entity_asof({}) WHERE name = 'n1__u1'",
+                r.commit_id
+            )
+        )
+        .as_deref(),
+        Some("a link")
+    );
+}
+
+#[test]
+fn entity_description_create_only_first_wins_tuple_verified() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    cs(
+        &db,
+        vec![
+            class("node"),
+            class("unit"),
+            link_class(),
+            described("node", Some("n1"), &[], Some("first")),
+            // A second create of the same entity in one call: NoOp, the
+            // first description wins.
+            described("node", Some("N1"), &[], Some("second")),
+            described("unit", Some("u1"), &[], None),
+            described("link", None, &["n1", "u1"], Some("link")),
+        ],
+    );
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT description FROM entity_current WHERE name = 'n1'"
+        )
+        .as_deref(),
+        Some("first")
+    );
+    // A re-create with another description is a NoOp: no commit, the
+    // stored description is kept.
+    let before = commits(&db);
+    let r = cs(&db, vec![described("node", Some("n1"), &[], Some("other"))]);
+    assert_eq!(r.structural[0].effect, SE::NoOp);
+    assert_eq!(r.commit_id, 0);
+    assert_eq!(commits(&db), before);
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT description FROM entity_current WHERE name = 'n1'"
+        )
+        .as_deref(),
+        Some("first")
+    );
+    // The element tuple is still verified on the NoOp path.
+    let err = commit_structural(
+        &db,
+        vec![described("link", Some("n1__u1"), &["n1", "n1"], Some("x"))],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("already exists with elements"),
+        "{err}"
+    );
+}
+
+#[test]
+fn create_entity_json_without_description_deserializes() {
+    let v: SC = serde_json::from_str(
+        r#"{"CreateEntity": {"class": "node", "name": "n1", "elements": []}}"#,
+    )
+    .unwrap();
+    assert_eq!(v, described("node", Some("n1"), &[], None));
+    let v: SC = serde_json::from_str(
+        r#"{"CreateEntity": {"class": "node", "name": "n1", "elements": [], "description": "d"}}"#,
+    )
+    .unwrap();
+    assert_eq!(v, described("node", Some("n1"), &[], Some("d")));
 }

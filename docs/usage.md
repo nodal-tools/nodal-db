@@ -589,8 +589,12 @@ database; parameter names are unique within their class.
   database (creates and templates follow the same rule). The same name
   with no description change, or `""` on an object with no description,
   is `NoOp`; a call of only no-ops makes no commit (`commit_id` 0).
-  `CreateEntityClass` also takes a `description`, applied only when the
-  class is created.
+  `CreateEntityClass` and `CreateEntity` (Python `create_entity_class`,
+  `create_entity`) also take a `description`, applied only when the
+  class or entity is created: a create of an existing one is a `NoOp`
+  that keeps the stored description (when one call creates the same
+  entity twice, the first description wins). An entity's description
+  cannot be revised yet.
 - **Several changes in one call** apply in order. Address an object by
   the name it has at that point of the call: after `node -> bus`, a
   later item, segment or delete uses `bus`. A reference by the old name
@@ -991,7 +995,9 @@ residue items: 0
 
 `version` is the source schema version to record; a profile can instead
 read it from the source by overriding `version_of`. The report lists
-everything that could not be imported.
+everything that could not be imported. The descriptions of classes,
+parameters, alternatives, scenarios and entities are imported with
+them.
 
 **The import creates a new file, all or nothing.** The importer builds
 the database in a temporary directory next to the target and moves it

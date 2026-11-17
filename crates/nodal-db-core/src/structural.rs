@@ -27,8 +27,8 @@ use duckdb::{params, Connection};
 
 use crate::api::{
     find_alternative, find_entity, find_entity_class, find_parameter, find_scenario,
-    find_value_list, insert_alternative_row, lookup_alternative, lookup_entity_class,
-    lookup_parameter, lookup_scenario,
+    find_value_list, insert_alternative_row, lookup_alternative, lookup_entity,
+    lookup_entity_class, lookup_parameter, lookup_scenario,
 };
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
@@ -58,7 +58,9 @@ use crate::types::{
 ///
 /// Every reference to an existing object (an idempotent create's own name
 /// included, a rename's new name excluded) is noted in `folds` for the
-/// call's `NameFolded` warnings; every rename is recorded in `calls`.
+/// call's `NameFolded` warnings; every rename is recorded in `calls`, and
+/// what the item names, by id, in `touches` (the purge survivors).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_structural(
     conn: &Connection,
     c: i64,
@@ -67,6 +69,7 @@ pub(crate) fn apply_structural(
     report: &mut WriteReport,
     folds: &mut NameFolds,
     calls: &mut CallRenames,
+    touches: &mut CallTouches,
 ) -> Result<(), DbError> {
     let (kind, object_id, effect) = match change {
         StructuralChange::CreateAlternative { name, description } => {
@@ -223,6 +226,7 @@ pub(crate) fn apply_structural(
             (StructuralKind::Parameter, id, e)
         }
     };
+    touches.note(conn, change, object_id)?;
     report.structural.push(StructuralOutcome {
         change_index,
         kind,
@@ -230,6 +234,113 @@ pub(crate) fn apply_structural(
         effect,
     });
     Ok(())
+}
+
+/// What the structural items of one `commit_change_set` attempt name or
+/// create, by resolved id, at each purge grain (purge plan §3.5.3, critique
+/// S9): the purge spares exactly these (and, upward, what their identity
+/// references). Filled by [`apply_structural`] like [`CallRenames`], from
+/// resolved ids, never from outcomes (an activation outcome carries only
+/// the entity id). Every item counts, `NoOp` included. A closure local of
+/// the write transaction, so a conflict retry rebuilds it. Disabled (and
+/// empty) unless the call purges: then no extra lookup runs.
+#[derive(Default)]
+pub(crate) struct CallTouches {
+    pub(crate) enabled: bool,
+    pub(crate) entities: HashSet<i64>,
+    pub(crate) classes: HashSet<i64>,
+    pub(crate) parameters: HashSet<i64>,
+    pub(crate) alternatives: HashSet<i64>,
+    pub(crate) scenarios: HashSet<i64>,
+    /// `(entity, alternative)` of every `SetEntityActivation`.
+    pub(crate) activations: HashSet<(i64, i64)>,
+    /// `(group, member, alternative or 0)` of every `SetMembership`.
+    pub(crate) memberships: HashSet<(i64, i64, i64)>,
+    /// The scenarios a `SetScenarioAlternatives` ranks.
+    pub(crate) rankings: HashSet<i64>,
+}
+
+impl CallTouches {
+    pub(crate) fn new(enabled: bool) -> Self {
+        CallTouches {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// Record what `change` (applied, with outcome id `object_id`) names.
+    /// Names resolve by lookup in the open transaction, right after the
+    /// item applied, so they find the rows the item resolved (nothing
+    /// renames between the two).
+    fn note(
+        &mut self,
+        conn: &Connection,
+        change: &StructuralChange,
+        object_id: i64,
+    ) -> Result<(), DbError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let alt = |n: &str| lookup_alternative(conn, n);
+        let entity = |a: &EntityAddr| -> Result<Option<i64>, DbError> {
+            match lookup_entity_class(conn, &a.class)? {
+                Some(cid) => lookup_entity(conn, cid, &a.name),
+                None => Ok(None),
+            }
+        };
+        match change {
+            StructuralChange::CreateAlternative { .. }
+            | StructuralChange::RenameAlternative { .. } => {
+                self.alternatives.insert(object_id);
+            }
+            StructuralChange::CreateScenario { .. } | StructuralChange::RenameScenario { .. } => {
+                self.scenarios.insert(object_id);
+            }
+            StructuralChange::SetScenarioAlternatives { alternatives, .. } => {
+                self.scenarios.insert(object_id);
+                self.rankings.insert(object_id);
+                for a in alternatives {
+                    self.alternatives.extend(alt(a)?);
+                }
+            }
+            StructuralChange::SetEntityActivation { alternative, .. } => {
+                self.entities.insert(object_id);
+                if let Some(a) = alt(alternative)? {
+                    self.alternatives.insert(a);
+                    self.activations.insert((object_id, a));
+                }
+            }
+            StructuralChange::SetMembership {
+                group,
+                member,
+                alternative,
+                ..
+            } => {
+                let a = match alternative {
+                    Some(n) => alt(n)?,
+                    None => Some(0),
+                };
+                if let (Some(g), Some(m), Some(a)) = (entity(group)?, entity(member)?, a) {
+                    self.entities.extend([g, m]);
+                    if a != 0 {
+                        self.alternatives.insert(a);
+                    }
+                    self.memberships.insert((g, m, a));
+                }
+            }
+            StructuralChange::CreateEntity { .. } => {
+                self.entities.insert(object_id);
+            }
+            StructuralChange::CreateEntityClass { .. }
+            | StructuralChange::RenameEntityClass { .. } => {
+                self.classes.insert(object_id);
+            }
+            StructuralChange::CreateParameter { .. } | StructuralChange::RenameParameter { .. } => {
+                self.parameters.insert(object_id);
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

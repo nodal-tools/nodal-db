@@ -37,13 +37,1049 @@
 //! the temp-table form over bound `BIGINT[]` lists: the sets are computed in
 //! SQL from the scope, so no id list ever passes through Rust.
 
-#![allow(dead_code)] // P1: the set machinery; the purge phase wires it (P2).
+use std::collections::HashSet;
 
-use duckdb::Connection;
+use duckdb::{params, Connection};
 
+use crate::api::{find_alternative, find_entity_class, find_parameter, find_value_list};
 use crate::error::DbError;
-use crate::object_delete::{cascade_edges, IdSet};
-use crate::types::ObjectKind;
+use crate::object_delete::{
+    cascade_edges, close_current_rows_set, close_leg_set, count_leg_set, object_legs, DepLeg,
+    Grain, IdSet, SAMPLE_LIMIT,
+};
+use crate::structural::{CallRenames, CallTouches};
+use crate::text::{NameFolds, Normalized};
+use crate::types::{
+    Blocker, CascadeCounts, ObjectKind, PurgeOutcome, PurgeRequest, PurgeScope, TableCount,
+    WriteReport,
+};
+
+// ---------------------------------------------------------------------------
+// Requests: names (pure checks, NFC) and resolution
+// ---------------------------------------------------------------------------
+
+/// The names of one request in NFC (the text rule, engine rule 10); a
+/// purge only looks names up, so they are normalized silently.
+pub(crate) fn nfc_request(r: &mut PurgeRequest, n: &mut Normalized) {
+    let opt = |o: &mut Option<String>, n: &mut Normalized| {
+        if let Some(s) = o {
+            n.nfc_in_place(s);
+        }
+    };
+    match &mut r.scope {
+        PurgeScope::Values {
+            class,
+            parameter,
+            alternative,
+        } => {
+            opt(class, n);
+            opt(parameter, n);
+            opt(alternative, n);
+        }
+        PurgeScope::Entities { class } | PurgeScope::Parameters { class } => opt(class, n),
+        PurgeScope::Activations { class, alternative } => {
+            opt(class, n);
+            opt(alternative, n);
+        }
+        PurgeScope::Memberships { group_class } => opt(group_class, n),
+        PurgeScope::Alternatives { except }
+        | PurgeScope::Classes { except }
+        | PurgeScope::ValueLists { except } => except.iter_mut().for_each(|s| n.nfc_in_place(s)),
+        PurgeScope::Scenarios => {}
+    }
+}
+
+/// Pure checks of the requests (no DB): no blank name, and
+/// `Values.parameter` only with its `class` (§3.5.2).
+pub(crate) fn validate_requests(reqs: &[PurgeRequest]) -> Result<(), DbError> {
+    for (i, r) in reqs.iter().enumerate() {
+        let blank = |what: &str, s: &str| {
+            if s.trim().is_empty() {
+                Err(DbError::Api(format!(
+                    "purge request {i}: {what} name must be non-empty"
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        let opt = |what: &str, o: &Option<String>| match o {
+            Some(s) => blank(what, s),
+            None => Ok(()),
+        };
+        match &r.scope {
+            PurgeScope::Values {
+                class,
+                parameter,
+                alternative,
+            } => {
+                opt("class", class)?;
+                opt("parameter", parameter)?;
+                opt("alternative", alternative)?;
+                if parameter.is_some() && class.is_none() {
+                    return Err(DbError::Api(format!(
+                        "purge request {i}: a values scope names a parameter only with its class"
+                    )));
+                }
+            }
+            PurgeScope::Entities { class } | PurgeScope::Parameters { class } => {
+                opt("class", class)?
+            }
+            PurgeScope::Activations { class, alternative } => {
+                opt("class", class)?;
+                opt("alternative", alternative)?;
+            }
+            PurgeScope::Memberships { group_class } => opt("group class", group_class)?,
+            PurgeScope::Alternatives { except } => {
+                for s in except {
+                    blank("alternative", s)?;
+                }
+            }
+            PurgeScope::Classes { except } => {
+                for s in except {
+                    blank("class", s)?;
+                }
+            }
+            PurgeScope::ValueLists { except } => {
+                for s in except {
+                    blank("value list", s)?;
+                }
+            }
+            PurgeScope::Scenarios => {}
+        }
+    }
+    Ok(())
+}
+
+/// One request's scope with its names resolved to ids.
+#[derive(Clone, Debug)]
+pub(crate) enum Scope {
+    Values {
+        class: Option<i64>,
+        parameter: Option<i64>,
+        alternative: Option<i64>,
+    },
+    Entities {
+        class: Option<i64>,
+    },
+    Activations {
+        class: Option<i64>,
+        alternative: Option<i64>,
+    },
+    Memberships {
+        group_class: Option<i64>,
+    },
+    Alternatives {
+        except: Vec<i64>,
+    },
+    Scenarios,
+    Classes {
+        except: Vec<i64>,
+    },
+    Parameters {
+        class: Option<i64>,
+    },
+    ValueLists {
+        except: Vec<i64>,
+    },
+}
+
+/// Resolve every request's names, lookup-only and by the name fold, after
+/// the call's structural changes (§3.5.2): an unknown name is refused, and
+/// so is a name a rename of this call freed (OD5 extended to purge names:
+/// a replace would silently become an append). Every resolved spelling is
+/// noted in `folds` (`NameFolded`).
+pub(crate) fn resolve_requests(
+    conn: &Connection,
+    reqs: &[PurgeRequest],
+    calls: &CallRenames,
+    folds: &mut NameFolds,
+) -> Result<Vec<Scope>, DbError> {
+    reqs.iter()
+        .enumerate()
+        .map(|(i, r)| resolve_one(conn, i, &r.scope, calls, folds))
+        .collect()
+}
+
+fn missing(i: usize, kind: &str, name: &str, renamed: Option<String>) -> DbError {
+    match renamed {
+        Some(to) => DbError::Api(format!(
+            "purge request {i}: {kind} {name:?} was renamed to {to:?} earlier in this call; \
+             address it by its new name"
+        )),
+        None => DbError::Api(format!("purge request {i}: unknown {kind} {name:?}")),
+    }
+}
+
+fn resolve_one(
+    conn: &Connection,
+    i: usize,
+    scope: &PurgeScope,
+    calls: &CallRenames,
+    folds: &mut NameFolds,
+) -> Result<Scope, DbError> {
+    let mut class = |name: &str, folds: &mut NameFolds| -> Result<i64, DbError> {
+        match find_entity_class(conn, name)? {
+            Some(f) => Ok(f.noted(folds, "entity_class", name)),
+            None => Err(missing(i, "class", name, calls.renamed_class(conn, name)?)),
+        }
+    };
+    let alternative = |name: &str, folds: &mut NameFolds| -> Result<i64, DbError> {
+        match find_alternative(conn, name)? {
+            Some(f) => Ok(f.noted(folds, "alternative", name)),
+            None => Err(missing(
+                i,
+                "alternative",
+                name,
+                calls.renamed_alternative(conn, name)?,
+            )),
+        }
+    };
+    let opt_class = |o: &Option<String>,
+                     folds: &mut NameFolds,
+                     class: &mut dyn FnMut(&str, &mut NameFolds) -> Result<i64, DbError>|
+     -> Result<Option<i64>, DbError> {
+        o.as_deref().map(|n| class(n, folds)).transpose()
+    };
+    Ok(match scope {
+        PurgeScope::Values {
+            class: c,
+            parameter,
+            alternative: a,
+        } => {
+            let cid = opt_class(c, folds, &mut class)?;
+            let pid = match (parameter, cid, c) {
+                (Some(p), Some(cid), Some(cn)) => Some(match find_parameter(conn, cid, p)? {
+                    Some(f) => f.noted(folds, "parameter_definition", p),
+                    None => {
+                        return Err(missing(
+                            i,
+                            "parameter",
+                            &format!("{cn}.{p}"),
+                            calls.renamed_parameter(conn, cn, p)?,
+                        ))
+                    }
+                }),
+                _ => None,
+            };
+            let aid = a.as_deref().map(|n| alternative(n, folds)).transpose()?;
+            Scope::Values {
+                class: cid,
+                parameter: pid,
+                alternative: aid,
+            }
+        }
+        PurgeScope::Entities { class: c } => Scope::Entities {
+            class: opt_class(c, folds, &mut class)?,
+        },
+        PurgeScope::Activations {
+            class: c,
+            alternative: a,
+        } => Scope::Activations {
+            class: opt_class(c, folds, &mut class)?,
+            alternative: a.as_deref().map(|n| alternative(n, folds)).transpose()?,
+        },
+        PurgeScope::Memberships { group_class } => Scope::Memberships {
+            group_class: opt_class(group_class, folds, &mut class)?,
+        },
+        PurgeScope::Alternatives { except } => Scope::Alternatives {
+            except: except
+                .iter()
+                .map(|n| alternative(n, folds))
+                .collect::<Result<_, _>>()?,
+        },
+        PurgeScope::Scenarios => Scope::Scenarios,
+        PurgeScope::Classes { except } => Scope::Classes {
+            except: except
+                .iter()
+                .map(|n| class(n, folds))
+                .collect::<Result<_, _>>()?,
+        },
+        PurgeScope::Parameters { class: c } => Scope::Parameters {
+            class: opt_class(c, folds, &mut class)?,
+        },
+        PurgeScope::ValueLists { except } => Scope::ValueLists {
+            except: except
+                .iter()
+                .map(|n| match find_value_list(conn, n)? {
+                    Some(f) => Ok(f.noted(folds, "parameter_value_list", n)),
+                    None => Err(missing(i, "value list", n, None)),
+                })
+                .collect::<Result<_, DbError>>()?,
+        },
+    })
+}
+
+/// `id NOT IN (…)` for an except list (empty: `TRUE`). Ids are integers
+/// the core resolved, so they are rendered inline.
+fn not_in(column: &str, ids: &[i64]) -> String {
+    if ids.is_empty() {
+        "TRUE".into()
+    } else {
+        let list: Vec<String> = ids.iter().map(i64::to_string).collect();
+        format!("{column} NOT IN ({})", list.join(", "))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The purge phase
+// ---------------------------------------------------------------------------
+
+/// What the purge phase reads of the rest of the call.
+pub(crate) struct PurgeCall<'a> {
+    pub(crate) requests: &'a [PurgeRequest],
+    pub(crate) scopes: &'a [Scope],
+    pub(crate) touches: &'a CallTouches,
+    /// The value keys the call buffered (written or unchanged).
+    pub(crate) written: &'a HashSet<(i64, i64, i64)>,
+    pub(crate) retain_override: Option<bool>,
+}
+
+/// Run the call's purges, last in the call, under its commit `c` (§3.5.1),
+/// appending one [`PurgeOutcome`] per request to `report.purges`. One
+/// refusal rolls the whole call back (§3.5.7); the order of refusals is
+/// name errors (already raised by [`resolve_requests`]), then the
+/// template stamp, then reach outside a scope.
+pub(crate) fn run(
+    conn: &Connection,
+    c: i64,
+    call: &PurgeCall<'_>,
+    report: &mut WriteReport,
+) -> Result<(), DbError> {
+    if call.requests.is_empty() {
+        return Ok(());
+    }
+    fill_survivors(conn, call)?;
+    fill_retention(conn, call.retain_override)?;
+    for (r, scope) in call.scopes.iter().enumerate() {
+        build_request_sets(conn, r, scope)?;
+    }
+    refuse_outside_scope(conn, call)?;
+    for (r, scope) in call.scopes.iter().enumerate() {
+        let outcome = execute(conn, c, r, scope)?;
+        report.purges.push(outcome);
+        if test_hooks::take_conflict() {
+            // A DuckDB error carrying the `Conflict` substring the retry
+            // loop keys on, after the first request closed its rows.
+            conn.execute_batch("SELECT error('Conflict (test-injected, mid-purge)')")?;
+        }
+    }
+    drop_tables(conn)
+}
+
+/// The survivor sets: what the call names or creates
+/// ([`CallTouches`]), the value keys it buffered, spared upward.
+fn fill_survivors(conn: &Connection, call: &PurgeCall<'_>) -> Result<(), DbError> {
+    create_survivor_tables(conn)?;
+    if test_hooks::survivors_disabled() {
+        return Ok(());
+    }
+    let t = call.touches;
+    let ids = |s: &HashSet<i64>| -> Vec<i64> { s.iter().copied().collect() };
+    insert_ids(conn, &surv_table(SetKind::Entity), &ids(&t.entities))?;
+    insert_ids(conn, &surv_table(SetKind::Class), &ids(&t.classes))?;
+    insert_ids(conn, &surv_table(SetKind::Parameter), &ids(&t.parameters))?;
+    insert_ids(
+        conn,
+        &surv_table(SetKind::Alternative),
+        &ids(&t.alternatives),
+    )?;
+    insert_ids(conn, &surv_table(SetKind::Scenario), &ids(&t.scenarios))?;
+    insert_ids(conn, SURV_RANKING, &ids(&t.rankings))?;
+    let list = |v: Vec<i64>| duckdb::types::Value::List(v.into_iter().map(Into::into).collect());
+    if !call.written.is_empty() {
+        let (mut e, mut p, mut a) = (Vec::new(), Vec::new(), Vec::new());
+        for &(x, y, z) in call.written {
+            e.push(x);
+            p.push(y);
+            a.push(z);
+        }
+        exec(
+            conn,
+            &format!(
+                "INSERT INTO {SURV_VALUE} SELECT unnest(?::BIGINT[]), unnest(?::BIGINT[]), \
+                 unnest(?::BIGINT[])"
+            ),
+            [list(e), list(p), list(a)],
+        )?;
+    }
+    if !t.activations.is_empty() {
+        let (e, a): (Vec<i64>, Vec<i64>) = t.activations.iter().copied().unzip();
+        exec(
+            conn,
+            &format!(
+                "INSERT INTO {SURV_ACTIVATION} SELECT unnest(?::BIGINT[]), unnest(?::BIGINT[])"
+            ),
+            [list(e), list(a)],
+        )?;
+    }
+    if !t.memberships.is_empty() {
+        let (mut g, mut m, mut a) = (Vec::new(), Vec::new(), Vec::new());
+        for &(x, y, z) in &t.memberships {
+            g.push(x);
+            m.push(y);
+            a.push(z);
+        }
+        exec(
+            conn,
+            &format!(
+                "INSERT INTO {SURV_MEMBERSHIP} SELECT unnest(?::BIGINT[]), unnest(?::BIGINT[]), \
+                 unnest(?::BIGINT[])"
+            ),
+            [list(g), list(m), list(a)],
+        )?;
+    }
+    spare_upward(conn)
+}
+
+/// The retention partition `pg_retention(pd_id, retained)` (§3.5.5, V-S3):
+/// every definition's `retain_override.unwrap_or(retain_content)`, read
+/// before any close (from each definition's latest row, so a definition
+/// the same purge closes keeps its retention).
+fn fill_retention(conn: &Connection, retain_override: Option<bool>) -> Result<(), DbError> {
+    let over = match retain_override {
+        Some(true) => "TRUE",
+        Some(false) => "FALSE",
+        None => "NULL",
+    };
+    exec_batch(
+        conn,
+        &format!(
+            "CREATE OR REPLACE TEMP TABLE pg_retention AS \
+             SELECT id AS pd_id, coalesce({over}, arg_max(retain_content, version)) AS retained \
+             FROM parameter_definition GROUP BY id"
+        ),
+    )?;
+    Ok(())
+}
+
+/// Request `r`'s scope table of kind `k`: what it has in scope before its
+/// cascade grows it (reach outside it is refused, §3.5.4).
+fn scope_table(r: usize, k: SetKind) -> String {
+    format!("pg{r}_scope_{}", k.tag())
+}
+
+/// The live rows of `table` (`id` column) matching `filter`.
+fn live(table: &str, filter: &str) -> String {
+    format!("SELECT id FROM {table} WHERE valid_to_commit IS NULL AND {filter}")
+}
+
+/// Build request `r`'s scope, dependent and close sets, and run the
+/// frontier hard check. Data scopes that close rows, never objects
+/// (`Values`, `Activations`, `Memberships`), get filter sets only.
+fn build_request_sets(conn: &Connection, r: usize, scope: &Scope) -> Result<(), DbError> {
+    let (base, expand): (Vec<(SetKind, String)>, bool) = match scope {
+        Scope::Values {
+            class,
+            parameter,
+            alternative,
+        } => {
+            let mut b = Vec::new();
+            match (parameter, class) {
+                (Some(p), _) => b.push((SetKind::Parameter, format!("SELECT {p}"))),
+                (None, Some(c)) => b.push((
+                    SetKind::Parameter,
+                    live("parameter_definition", &format!("entity_class_id = {c}")),
+                )),
+                (None, None) => {}
+            }
+            if let Some(a) = alternative {
+                b.push((SetKind::Alternative, format!("SELECT {a}")));
+            }
+            (b, false)
+        }
+        Scope::Activations { class, alternative } => {
+            let mut b = Vec::new();
+            if let Some(c) = class {
+                b.push((
+                    SetKind::Entity,
+                    live("entity", &format!("entity_class_id = {c}")),
+                ));
+            }
+            if let Some(a) = alternative {
+                b.push((SetKind::Alternative, format!("SELECT {a}")));
+            }
+            (b, false)
+        }
+        Scope::Memberships { group_class } => (
+            group_class
+                .iter()
+                .map(|c| {
+                    (
+                        SetKind::Entity,
+                        live("entity", &format!("entity_class_id = {c}")),
+                    )
+                })
+                .collect(),
+            false,
+        ),
+        Scope::Entities { class } => (
+            vec![(
+                SetKind::Entity,
+                live(
+                    "entity",
+                    &class
+                        .map(|c| format!("entity_class_id = {c}"))
+                        .unwrap_or_else(|| "TRUE".into()),
+                ),
+            )],
+            true,
+        ),
+        Scope::Alternatives { except } => (
+            vec![(
+                SetKind::Alternative,
+                live("alternative", &not_in("id", except)),
+            )],
+            false,
+        ),
+        Scope::Scenarios => (vec![(SetKind::Scenario, live("scenario", "TRUE"))], false),
+        Scope::Classes { except } => (
+            vec![(SetKind::Class, live("entity_class", &not_in("id", except)))],
+            true,
+        ),
+        Scope::Parameters { class } => (
+            vec![(
+                SetKind::Parameter,
+                live(
+                    "parameter_definition",
+                    &class
+                        .map(|c| format!("entity_class_id = {c}"))
+                        .unwrap_or_else(|| "TRUE".into()),
+                ),
+            )],
+            false,
+        ),
+        Scope::ValueLists { except } => (
+            vec![(
+                SetKind::ValueList,
+                live("parameter_value_list", &not_in("id", except)),
+            )],
+            false,
+        ),
+    };
+    // The scope sets: the base, plus a class's own entities and parameters
+    // (the class cascade is the scope, §3.7).
+    for k in SetKind::ALL {
+        create_id_table(conn, &scope_table(r, k))?;
+    }
+    for (k, select) in &base {
+        exec(
+            conn,
+            &format!("INSERT INTO {} {select}", scope_table(r, *k)),
+            [],
+        )?;
+    }
+    if matches!(scope, Scope::Classes { .. }) {
+        let classes = scope_table(r, SetKind::Class);
+        exec_batch(
+            conn,
+            &format!(
+                "INSERT INTO {} {}; INSERT INTO {} {}",
+                scope_table(r, SetKind::Entity),
+                live(
+                    "entity",
+                    &format!("entity_class_id IN (SELECT id FROM {classes})")
+                ),
+                scope_table(r, SetKind::Parameter),
+                live(
+                    "parameter_definition",
+                    &format!("entity_class_id IN (SELECT id FROM {classes})")
+                ),
+            ),
+        )?;
+    }
+    build_dep_sets(conn, r, &base, expand)?;
+    build_close_sets(conn, r)?;
+    check_frontier(conn, r)
+}
+
+/// Refuse the call when a request's close set holds an object no request
+/// of the call has in scope (§3.5.4, P-OD3), unless that request sets
+/// `allow_outside_scope`: every reaching request is listed, per kind and
+/// class, with a bounded sample.
+fn refuse_outside_scope(conn: &Connection, call: &PurgeCall<'_>) -> Result<(), DbError> {
+    let mut lines: Vec<String> = Vec::new();
+    for (r, req) in call.requests.iter().enumerate() {
+        if req.allow_outside_scope {
+            continue;
+        }
+        let reach = outside_scope(conn, r, call.requests.len())?;
+        if !reach.is_empty() {
+            let items: Vec<String> = reach
+                .iter()
+                .map(|b| {
+                    format!(
+                        "{} {} of {} ({}{})",
+                        b.count,
+                        b.table,
+                        b.column,
+                        b.sample.join(", "),
+                        if b.count > b.sample.len() {
+                            ", …"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect();
+            lines.push(format!("request {r}: {}", items.join("; ")));
+        }
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::Api(format!(
+        "purge reaches outside its scope (nothing was written): {}. Its cascade would close \
+         these objects, which no request of the call has in scope; purge them too, or set \
+         allow_outside_scope on the request",
+        lines.join(" | ")
+    )))
+}
+
+/// Request `r`'s reach outside every request's scope (of `n` requests):
+/// one [`Blocker`] per reached kind and class (`table` the object table,
+/// `column` its class, or `"dimension"` for classes), with a count and a
+/// bounded sample of names.
+pub(crate) fn outside_scope(
+    conn: &Connection,
+    r: usize,
+    n: usize,
+) -> Result<Vec<Blocker>, DbError> {
+    let union = |k: SetKind| -> String {
+        (0..n)
+            .map(|q| format!("SELECT id FROM {}", scope_table(q, k)))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ")
+    };
+    let mut out = Vec::new();
+    for (k, group) in [
+        (SetKind::Entity, Some("entity_class_id")),
+        (SetKind::Parameter, Some("entity_class_id")),
+        (SetKind::Class, None),
+    ] {
+        let table = k.object_table();
+        let outside = format!(
+            "SELECT id FROM {} WHERE id NOT IN ({})",
+            close_table(r, k),
+            union(k)
+        );
+        let sql = match group {
+            Some(col) => format!(
+                "SELECT ec.name, count(*), array_to_string(list(o.name ORDER BY o.name)[1:{SAMPLE_LIMIT}], chr(31)) \
+                 FROM {table} o JOIN entity_class ec ON ec.id = o.{col} \
+                   AND ec.valid_to_commit IS NULL \
+                 WHERE o.valid_to_commit IS NULL AND o.id IN ({outside}) \
+                 GROUP BY ec.name ORDER BY ec.name"
+            ),
+            None => format!(
+                "SELECT 'dimension', count(*), array_to_string(list(o.name ORDER BY o.name)[1:{SAMPLE_LIMIT}], chr(31)) \
+                 FROM {table} o WHERE o.valid_to_commit IS NULL AND o.id IN ({outside}) \
+                 HAVING count(*) > 0"
+            ),
+        };
+        test_hooks::count();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Blocker {
+                table: table.to_string(),
+                column: row.get(0)?,
+                count: row.get::<_, i64>(1)? as usize,
+                sample: row
+                    .get::<_, String>(2)?
+                    .split('\u{1f}')
+                    .map(str::to_string)
+                    .collect(),
+            })
+        })?;
+        for b in rows {
+            out.push(b?);
+        }
+    }
+    Ok(out)
+}
+
+/// The survivor anti-join of a leg's table at its grain (`None`: none).
+fn survivor_antijoin(leg: &DepLeg) -> Option<String> {
+    let t = leg.table;
+    match leg.grain {
+        Grain::Value | Grain::ValueMeta => Some(value_antijoin(t)),
+        Grain::Activation => Some(format!(
+            "NOT EXISTS (SELECT 1 FROM {SURV_ACTIVATION} s WHERE s.e = {t}.entity_id \
+             AND s.a = {t}.alternative_id)"
+        )),
+        Grain::Membership => Some(format!(
+            "NOT EXISTS (SELECT 1 FROM {SURV_MEMBERSHIP} s WHERE s.g = {t}.group_entity_id \
+             AND s.m = {t}.member_entity_id AND s.a = coalesce({t}.alternative_id, 0))"
+        )),
+        Grain::Ranking => Some(format!(
+            "{t}.scenario_id NOT IN (SELECT id FROM {SURV_RANKING})"
+        )),
+        Grain::Descriptor | Grain::Plain => None,
+    }
+}
+
+/// The value-key survivor anti-join of a value-keyed table.
+fn value_antijoin(t: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM {SURV_VALUE} s WHERE s.e = {t}.entity_id \
+         AND s.p = {t}.parameter_definition_id AND s.a = {t}.alternative_id)"
+    )
+}
+
+/// The registry's dependent leg of `kind` on `table` (keyed by `column`).
+fn leg(kind: ObjectKind, table: &str, column: &str) -> DepLeg {
+    let legs = object_legs(kind).expect("purge kinds have leg sets");
+    *legs
+        .dependents
+        .iter()
+        .find(|l| l.table == table && l.key_column() == column)
+        .unwrap_or_else(|| panic!("registry leg {table}.{column} of {kind:?}"))
+}
+
+/// Counts of one request, merged per table.
+#[derive(Default)]
+struct Accum {
+    object_rows: usize,
+    objects: usize,
+    per_table: Vec<TableCount>,
+    spared_objects: usize,
+    spared: Vec<TableCount>,
+}
+
+fn add(v: &mut Vec<TableCount>, table: &str, rows: usize) {
+    if rows == 0 {
+        return;
+    }
+    match v.iter_mut().find(|t| t.table == table) {
+        Some(t) => t.rows += rows,
+        None => v.push(TableCount {
+            table: table.to_string(),
+            rows,
+        }),
+    }
+}
+
+fn counts(object_rows: usize, per_table: Vec<TableCount>) -> CascadeCounts {
+    let dep: usize = per_table.iter().map(|t| t.rows).sum();
+    CascadeCounts {
+        object_rows,
+        total_rows: object_rows + dep,
+        per_table,
+    }
+}
+
+/// Execute request `r` (§3.6): values, then dependents, then identity legs,
+/// then object rows (V-S3), each a set-form statement with the same-commit
+/// guard.
+fn execute(conn: &Connection, c: i64, r: usize, scope: &Scope) -> Result<PurgeOutcome, DbError> {
+    let mut acc = Accum::default();
+    match scope {
+        Scope::Values { .. } | Scope::Activations { .. } | Scope::Memberships { .. } => {
+            execute_rows(conn, c, r, scope, &mut acc)?
+        }
+        _ => execute_objects(conn, c, r, &mut acc)?,
+    }
+    Ok(PurgeOutcome {
+        request_index: r,
+        closed_out: counts(acc.object_rows, acc.per_table),
+        objects: acc.objects,
+        spared: counts(acc.spared_objects, acc.spared),
+        unbound: 0,
+    })
+}
+
+/// Is request `r`'s set of kind `k` non-empty?
+fn has(conn: &Connection, table: &str) -> Result<bool, DbError> {
+    Ok(query_count(
+        conn,
+        &format!("SELECT count(*) FROM (SELECT 1 FROM {table} LIMIT 1)"),
+    )? > 0)
+}
+
+/// The data scopes that close rows, never objects (§3.5.4): `Values`
+/// (all tiers and their value metadata), `Activations`, `Memberships`, each
+/// filtered by the registry legs over its filter sets and spared at its
+/// grain.
+fn execute_rows(
+    conn: &Connection,
+    c: i64,
+    r: usize,
+    scope: &Scope,
+    acc: &mut Accum,
+) -> Result<(), DbError> {
+    let ent = dep_table(r, SetKind::Entity);
+    let par = dep_table(r, SetKind::Parameter);
+    let alt = dep_table(r, SetKind::Alternative);
+    // (filter conjuncts per table) for the legs the scope closes.
+    let filter = |legs: &[(Option<DepLeg>, &str)]| -> String {
+        let parts: Vec<String> = legs
+            .iter()
+            .filter_map(|(l, set)| l.map(|l| l.key.render(IdSet::Table(set))))
+            .collect();
+        if parts.is_empty() {
+            "TRUE".into()
+        } else {
+            parts.join(" AND ")
+        }
+    };
+    match scope {
+        Scope::Values {
+            class,
+            parameter,
+            alternative,
+        } => {
+            let by_pd = class.is_some() || parameter.is_some();
+            let by_alt = alternative.is_some();
+            for table in [
+                "value_scalar",
+                "value_long",
+                "value_array",
+                "parameter_value_metadata",
+            ] {
+                let pred = filter(&[
+                    (
+                        by_pd.then(|| leg(ObjectKind::Parameter, table, "parameter_definition_id")),
+                        &par,
+                    ),
+                    (
+                        by_alt.then(|| leg(ObjectKind::Alternative, table, "alternative_id")),
+                        &alt,
+                    ),
+                ]);
+                if table == "parameter_value_metadata" {
+                    close_rows(conn, c, table, &pred, Some(&value_antijoin(table)), acc)?;
+                } else {
+                    close_values(conn, c, table, &pred, acc)?;
+                }
+            }
+        }
+        Scope::Activations { class, alternative } => {
+            let t = "entity_alternative";
+            let pred = filter(&[
+                (class.map(|_| leg(ObjectKind::Entity, t, "entity_id")), &ent),
+                (
+                    alternative.map(|_| leg(ObjectKind::Alternative, t, "alternative_id")),
+                    &alt,
+                ),
+            ]);
+            let l = leg(ObjectKind::Entity, t, "entity_id");
+            close_rows(conn, c, t, &pred, survivor_antijoin(&l).as_deref(), acc)?;
+        }
+        Scope::Memberships { group_class } => {
+            let t = "membership";
+            let l = leg(ObjectKind::Entity, t, "group_entity_id");
+            let pred = filter(&[(group_class.map(|_| l), &ent)]);
+            close_rows(conn, c, t, &pred, survivor_antijoin(&l).as_deref(), acc)?;
+        }
+        _ => unreachable!("object scopes run execute_objects"),
+    }
+    Ok(())
+}
+
+/// Close the live, pre-call rows of `table` matching `pred` and not spared
+/// by `anti`, counting closed and spared rows.
+fn close_rows(
+    conn: &Connection,
+    c: i64,
+    table: &str,
+    pred: &str,
+    anti: Option<&str>,
+    acc: &mut Accum,
+) -> Result<(), DbError> {
+    if let Some(anti) = anti {
+        let spared = query_count(
+            conn,
+            &format!(
+                "SELECT count(*) FROM {table} WHERE {pred} AND valid_from_commit < {c} \
+                 AND valid_to_commit IS NULL AND NOT ({anti})"
+            ),
+        )?;
+        add(&mut acc.spared, table, spared as usize);
+    }
+    let anti = anti.map(|a| format!(" AND {a}")).unwrap_or_default();
+    let n = exec(
+        conn,
+        &format!(
+            "UPDATE {table} SET valid_to_commit = ? WHERE {pred} \
+             AND valid_from_commit < ? AND valid_to_commit IS NULL{anti}"
+        ),
+        params![c, c],
+    )?;
+    add(&mut acc.per_table, table, n);
+    Ok(())
+}
+
+/// The SET list of a stub close-out (content not retained).
+const STUB_SET: &str = "content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, \
+     v_str = NULL, v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL";
+
+/// The value close-out of one tier over `pred` (§3.6, P-OD5): per
+/// retention mode one statement, the definition's effective retention from
+/// `pg_retention`; survivors spared by the value-key anti-join. Arrays
+/// resolve their `array_id`s on narrow columns first, then copy the
+/// pre-image to `value_array_hist` and delete, keyed by `array_id`
+/// (engine rule 2).
+fn close_values(
+    conn: &Connection,
+    c: i64,
+    table: &str,
+    pred: &str,
+    acc: &mut Accum,
+) -> Result<(), DbError> {
+    let anti = value_antijoin(table);
+    if table == "value_array" {
+        let spared = query_count(
+            conn,
+            &format!(
+                "SELECT count(*) FROM value_array WHERE {pred} AND valid_from_commit < {c} \
+                 AND NOT ({anti})"
+            ),
+        )?;
+        add(&mut acc.spared, table, spared as usize);
+        exec_batch(
+            conn,
+            &format!(
+                "CREATE OR REPLACE TEMP TABLE pg_arrays AS \
+                 SELECT v.array_id, r.retained FROM \
+                   (SELECT array_id, parameter_definition_id FROM value_array \
+                    WHERE {pred} AND valid_from_commit < {c} AND {anti}) v \
+                 JOIN pg_retention r ON r.pd_id = v.parameter_definition_id"
+            ),
+        )?;
+        let copied_kept = exec(
+            conn,
+            "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array \
+             WHERE array_id IN (SELECT array_id FROM pg_arrays WHERE retained)",
+            params![c],
+        )?;
+        let copied_stub = exec(
+            conn,
+            "INSERT INTO value_array_hist \
+               (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+                valid_from_commit, version, \
+                axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
+                content_hash, valid_to_commit, content_retained) \
+             SELECT array_id, entity_id, parameter_definition_id, alternative_id, \
+                parameter_type_id, valid_from_commit, version, \
+                axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
+             FROM value_array WHERE array_id IN (SELECT array_id FROM pg_arrays WHERE NOT retained)",
+            params![c],
+        )?;
+        let deleted = exec(
+            conn,
+            "DELETE FROM value_array WHERE array_id IN (SELECT array_id FROM pg_arrays)",
+            [],
+        )?;
+        if deleted != copied_kept + copied_stub {
+            return Err(DbError::Internal(format!(
+                "purge array close-out: copied {} pre-images, deleted {deleted}",
+                copied_kept + copied_stub
+            )));
+        }
+        add(&mut acc.per_table, table, deleted);
+        return Ok(());
+    }
+    let spared = query_count(
+        conn,
+        &format!(
+            "SELECT count(*) FROM {table} WHERE {pred} AND valid_from_commit < {c} \
+             AND valid_to_commit IS NULL AND NOT ({anti})"
+        ),
+    )?;
+    add(&mut acc.spared, table, spared as usize);
+    for retained in [true, false] {
+        let set = if retained {
+            "valid_to_commit = ?".to_string()
+        } else {
+            format!("valid_to_commit = ?, {STUB_SET}")
+        };
+        let n = exec(
+            conn,
+            &format!(
+                "UPDATE {table} SET {set} WHERE {pred} \
+                 AND parameter_definition_id IN \
+                   (SELECT pd_id FROM pg_retention WHERE retained = {retained}) \
+                 AND valid_from_commit < ? AND valid_to_commit IS NULL AND {anti}"
+            ),
+            params![c, c],
+        )?;
+        add(&mut acc.per_table, table, n);
+    }
+    Ok(())
+}
+
+/// The object scopes (§3.6): for every kind the request reaches, its
+/// value legs through [`close_values`] over the dependent set, then its
+/// other dependent legs (at their grain: survivor anti-join over the
+/// dependent set, descriptors over the close set, the rest over the
+/// dependent set), then identity legs and object rows over the close set.
+fn execute_objects(conn: &Connection, c: i64, r: usize, acc: &mut Accum) -> Result<(), DbError> {
+    let mut kinds: Vec<(SetKind, ObjectKind)> = Vec::new();
+    for k in SetKind::ALL {
+        let Some(kind) = k.object_kind() else {
+            continue;
+        };
+        if has(conn, &dep_table(r, k))? {
+            kinds.push((k, kind));
+        }
+    }
+    // Values.
+    for &(k, kind) in &kinds {
+        let legs = object_legs(kind).expect("purge kinds have leg sets");
+        let dep = dep_table(r, k);
+        for l in legs.dependents.iter().filter(|l| l.grain == Grain::Value) {
+            close_values(conn, c, l.table, &l.key.render(IdSet::Table(&dep)), acc)?;
+        }
+    }
+    // Dependents.
+    for &(k, kind) in &kinds {
+        let legs = object_legs(kind).expect("purge kinds have leg sets");
+        let (dep, close) = (dep_table(r, k), close_table(r, k));
+        for l in legs.dependents.iter().filter(|l| l.grain != Grain::Value) {
+            let set = if l.grain == Grain::Descriptor {
+                &close
+            } else {
+                &dep
+            };
+            let anti = survivor_antijoin(l);
+            if let Some(a) = &anti {
+                let spared = count_leg_set(
+                    conn,
+                    l,
+                    set,
+                    Some(&format!("valid_from_commit < {c} AND NOT ({a})")),
+                )?;
+                add(&mut acc.spared, l.table, spared);
+            }
+            let n = close_leg_set(conn, l, c, set, anti.as_deref())?;
+            add(&mut acc.per_table, l.table, n);
+        }
+    }
+    // Identity legs and object rows.
+    for &(k, kind) in &kinds {
+        let legs = object_legs(kind).expect("purge kinds have leg sets");
+        let close = close_table(r, k);
+        for l in &legs.identity {
+            acc.object_rows += close_leg_set(conn, l, c, &close, None)?;
+        }
+    }
+    for &(k, _) in &kinds {
+        let n = close_current_rows_set(conn, k.object_table(), c, &close_table(r, k))?;
+        acc.objects += n;
+        acc.object_rows += n;
+        acc.spared_objects += query_count(
+            conn,
+            &format!(
+                "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL \
+                 AND valid_from_commit < {c} AND id IN (SELECT id FROM {}) \
+                 AND id IN (SELECT id FROM {})",
+                k.object_table(),
+                dep_table(r, k),
+                surv_table(k)
+            ),
+        )? as usize;
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Statement helpers (counted, for the statement-count scale guard)
@@ -187,12 +1223,6 @@ pub(crate) fn insert_ids(conn: &Connection, name: &str, ids: &[i64]) -> Result<(
         [list],
     )?;
     Ok(())
-}
-
-/// The live (ANY version current) rows of an `id` table's ids in `table`,
-/// counted (an object set's size, closed or not by this call).
-pub(crate) fn count_ids(conn: &Connection, set: &str) -> Result<usize, DbError> {
-    Ok(query_count(conn, &format!("SELECT count(DISTINCT id) FROM {set}"))? as usize)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +1443,32 @@ pub mod test_hooks {
         static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static NO_UPWARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static NO_SURVIVORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static CONFLICTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Make the next `n` purge phases on this thread fail with a synthetic
+    /// write-write conflict after their first request closed its rows, so
+    /// the retry loop re-runs the whole call.
+    #[cfg(debug_assertions)]
+    pub fn inject_conflicts_mid_purge(n: u32) {
+        CONFLICTS.with(|c| c.set(n));
+    }
+
+    pub(crate) fn take_conflict() -> bool {
+        #[cfg(debug_assertions)]
+        {
+            CONFLICTS.with(|c| {
+                let n = c.get();
+                if n > 0 {
+                    c.set(n - 1);
+                }
+                n > 0
+            })
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
     }
 
     pub(crate) fn count() {

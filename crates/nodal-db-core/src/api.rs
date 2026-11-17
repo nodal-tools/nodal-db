@@ -59,15 +59,15 @@ use crate::object_delete::{
 };
 use crate::structural::{
     apply_structural, prepare_structural, refuse_template_stamped_renames, rewrite_name_documents,
-    CallRenames,
+    CallRenames, CallTouches,
 };
 use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
-    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, ShapedData, StructuralChange,
-    StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind, Warning, WarningKind,
-    WriteOptions, WriteReport,
+    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, PurgeRequest, ShapedData,
+    StructuralChange, StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind, Warning,
+    WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -252,14 +252,74 @@ pub struct DeleteKey {
 #[allow(clippy::too_many_arguments)]
 pub fn commit_changes(
     db: &Path,
-    mut segments: Vec<Segment>,
-    mut structural: Vec<StructuralChange>,
-    mut deletes: Vec<DeleteKey>,
-    mut object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
+    segments: Vec<Segment>,
+    structural: Vec<StructuralChange>,
+    deletes: Vec<DeleteKey>,
+    object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
     user: &str,
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
+    commit_change_set(
+        db,
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            object_deletes,
+            purges: Vec::new(),
+        },
+        user,
+        message,
+        opts,
+    )
+}
+
+/// Everything one atomic commit can carry, by channel (purge plan §3.4):
+/// the argument of [`commit_change_set`], the one write entry point.
+/// `Default` is the empty set, so a caller names only the channels it uses
+/// and a channel added later does not break its literal.
+#[derive(Clone, Debug, Default)]
+pub struct ChangeSet {
+    pub segments: Vec<Segment>,
+    pub structural: Vec<StructuralChange>,
+    pub deletes: Vec<DeleteKey>,
+    pub object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
+    pub purges: Vec<PurgeRequest>,
+}
+
+/// Commit a [`ChangeSet`] in ONE atomic, conflict-retried transaction under
+/// one `commit` row: the body of [`commit_changes`] (whose documentation
+/// describes every channel but purges), of every wrapper and of the Python
+/// skin (CLAUDE.md invariant 2: one pipeline).
+///
+/// **Purges** (purge plan §3.5) run LAST, after the object deletes, under
+/// the same commit id. Their names resolve lookup-only after the
+/// structural changes (an unknown or blank name, `Values.parameter`
+/// without its class, or a name a rename of this call freed is refused).
+/// Each request closes everything in its scope except exactly what the
+/// call itself writes, at each scope's own level (true replace; see
+/// [`crate::types::PurgeScope`]); every close carries the same-commit
+/// guard, so a row this call wrote is never closed, and closed values
+/// follow their definition's retention (`retain_override` included). A
+/// request whose cascade reaches objects outside every request's scope
+/// refuses the whole call unless it sets `allow_outside_scope`.
+/// Per-request outcomes land in `report.purges`; a call whose purges close
+/// nothing and that writes nothing makes no commit.
+pub fn commit_change_set(
+    db: &Path,
+    set: ChangeSet,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
+    let ChangeSet {
+        mut segments,
+        mut structural,
+        mut deletes,
+        mut object_deletes,
+        mut purges,
+    } = set;
     // Every commit must carry a real author; message is the caller's choice
     // (may be empty) — jkiviluo 2026-08-18.
     if user.trim().is_empty() {
@@ -269,9 +329,11 @@ pub fn commit_changes(
         && structural.is_empty()
         && deletes.is_empty()
         && object_deletes.is_empty()
+        && purges.is_empty()
     {
         return Err(DbError::Api(
-            "nothing to do: no segments, no structural changes, no deletes, no object deletes"
+            "nothing to do: no segments, no structural changes, no deletes, no object deletes, \
+             no purges"
                 .into(),
         ));
     }
@@ -306,6 +368,9 @@ pub fn commit_changes(
     }
     for (k, _) in &mut object_deletes {
         nfc_object_delete_key(k, &mut lookups);
+    }
+    for r in &mut purges {
+        crate::purge::nfc_request(r, &mut lookups);
     }
     // Two same-commit writes to one (class, parameter, alternative) key have no
     // defined history semantics (spec §4.2, E7 class); compare by the same
@@ -364,6 +429,8 @@ pub fn commit_changes(
     // charset/type validation, one-set-per-scenario (M3), contradictory renames,
     // and the cross-channel object-delete orphan guard (M2). No DB touched.
     prepare_structural(&structural, &object_deletes)?;
+    // Purges: blank names and a parameter without its class (pure).
+    crate::purge::validate_requests(&purges)?;
     // A value written and deleted in one call: rejected whatever the
     // content (D9); likewise a value written while an object delete in
     // the same call covers it (D10).
@@ -421,6 +488,9 @@ pub fn commit_changes(
         // names, template-stamp candidates): a closure local, so a conflict
         // retry rebuilds it.
         let mut calls = CallRenames::default();
+        // What the structural items name, by id, for the purges' survivors
+        // (a closure local, like `calls`; idle unless the call purges).
+        let mut touches = CallTouches::new(!purges.is_empty());
         for (i, ch) in structural.iter().enumerate() {
             apply_structural(
                 conn,
@@ -430,6 +500,7 @@ pub fn commit_changes(
                 &mut report,
                 &mut structural_folds,
                 &mut calls,
+                &mut touches,
             )?;
         }
         report
@@ -493,6 +564,12 @@ pub fn commit_changes(
                 &prepared_object_deletes,
             )?;
         }
+        // Purge names resolve here, after the structural changes and before
+        // any write: an unknown or renamed-away name refuses the call
+        // before the writes run (purge plan §3.5.2).
+        let mut purge_folds = NameFolds::default();
+        let purge_scopes = crate::purge::resolve_requests(conn, &purges, &calls, &mut purge_folds)?;
+        report.warnings.extend(purge_folds.warnings("purge", ""));
         // `DeleteWins`: what the deletes cover, resolved after the
         // structural changes (a delete may name a referent one of them
         // created or renamed) and before any write.
@@ -636,6 +713,19 @@ pub fn commit_changes(
                 }
             }
         }
+        // Purges run last, under the same commit (purge plan §3.5.1).
+        crate::purge::run(
+            conn,
+            commit_id,
+            &crate::purge::PurgeCall {
+                requests: &purges,
+                scopes: &purge_scopes,
+                touches: &touches,
+                written: &buffers.keys,
+                retain_override: opts.retain_override,
+            },
+            &mut report,
+        )?;
         // The name-keyed metadata documents follow the renames, once per
         // document per call (OD8, B1), at the end of the call: every
         // channel has run, so one pass sees all it must follow.
@@ -648,6 +738,7 @@ pub fn commit_changes(
             deleted,
             structural: structural.len(),
             object_deletes: prepared_object_deletes.len(),
+            purges: purges.len(),
         };
         if wrote_nothing(&report, &evidence) {
             // Nothing changed: no commit (D1). The report says so with
@@ -854,6 +945,8 @@ struct NoopEvidence {
     structural: usize,
     /// Object deletes submitted (each must report `NotFound`).
     object_deletes: usize,
+    /// Purge requests submitted (each must have closed nothing).
+    purges: usize,
 }
 
 /// Did this call provably change nothing (skip_unchanged_writes_PLAN D1,
@@ -879,6 +972,7 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         warnings,
         object_deletes,
         structural,
+        purges,
         // Not a write: the read-surface refresh runs in its own transaction.
         read_surface_warning: _,
     } = report;
@@ -910,6 +1004,10 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         && object_deletes
             .iter()
             .all(|o| matches!(o.result, ObjectDeleteResult::NotFound))
+        && purges.len() == ev.purges
+        && purges
+            .iter()
+            .all(|p| p.closed_out.total_rows == 0 && p.unbound == 0)
 }
 
 /// D9 (critique C1): a call that writes a value and also deletes it is
@@ -1507,6 +1605,30 @@ pub fn delete_objects(
         Vec::new(),
         Vec::new(),
         object_deletes,
+        user,
+        message,
+        opts,
+    )
+}
+
+/// Purge (purge plan §3): close out every item of each request's scope in
+/// ONE atomic, conflict-retried commit — the purges-only wrapper over
+/// [`commit_change_set`]. A purge keeps history (as-of reads see
+/// everything) and never shrinks the file. Outcomes land in
+/// `report.purges`.
+pub fn purge(
+    db: &Path,
+    requests: Vec<PurgeRequest>,
+    user: &str,
+    message: &str,
+    opts: WriteOptions,
+) -> Result<WriteReport, DbError> {
+    commit_change_set(
+        db,
+        ChangeSet {
+            purges: requests,
+            ..ChangeSet::default()
+        },
         user,
         message,
         opts,
@@ -4055,6 +4177,7 @@ mod tests {
                 kind: ObjectKind::Alternative,
                 result: ObjectDeleteResult::NotFound,
             }],
+            purges: vec![crate::types::PurgeOutcome::default()],
             ..WriteReport::default()
         };
         let ev = NoopEvidence {
@@ -4062,6 +4185,7 @@ mod tests {
             deleted: 0,
             structural: 1,
             object_deletes: 1,
+            purges: 1,
         };
         (report, ev)
     }
@@ -4106,6 +4230,15 @@ mod tests {
                 "an object delete outcome missing",
                 Box::new(|_, e| e.object_deletes = 2),
             ),
+            (
+                "a purge closed rows",
+                Box::new(|r, _| r.purges[0].closed_out.total_rows = 1),
+            ),
+            (
+                "a purge unbound a list",
+                Box::new(|r, _| r.purges[0].unbound = 1),
+            ),
+            ("a purge outcome missing", Box::new(|_, e| e.purges = 2)),
         ];
         for (what, bend) in bends {
             let (mut r, mut ev) = noop();

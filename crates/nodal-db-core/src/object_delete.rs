@@ -201,7 +201,6 @@ pub(crate) struct DepLeg {
     /// refuses to erase them in v1).
     erase: bool,
     /// The purge's survivor grain for this leg ([`Grain`]).
-    #[allow(dead_code)] // read by the purge phase (purge plan P2)
     pub(crate) grain: Grain,
 }
 
@@ -219,6 +218,12 @@ impl DepLeg {
     /// The per-id match predicate (one `?`).
     fn predicate(&self) -> String {
         self.key.render(IdSet::One)
+    }
+
+    /// The column the key matches against the target id (the indirect
+    /// leg's own column).
+    pub(crate) fn key_column(&self) -> &'static str {
+        self.key.column
     }
 }
 
@@ -1497,7 +1502,6 @@ const LIVE_GUARD: &str = "valid_from_commit < ? AND valid_to_commit IS NULL";
 
 /// [`close_leg`] over every id of `set` (a txn-local `id` table), with an
 /// optional extra conjunct (a purge survivor anti-join). Non-array legs only.
-#[allow(dead_code)] // wired by the purge phase (purge plan P2)
 pub(crate) fn close_leg_set(
     conn: &Connection,
     leg: &DepLeg,
@@ -1530,7 +1534,6 @@ pub(crate) fn close_leg_set_sql(leg: &DepLeg, set: &str, extra: Option<&str>) ->
 
 /// [`count_leg`] over every id of `set` (live rows, the purge preview and
 /// the purge's spared counts), with an optional extra conjunct.
-#[allow(dead_code)] // wired by the purge phase (purge plan P2)
 pub(crate) fn count_leg_set(
     conn: &Connection,
     leg: &DepLeg,
@@ -1551,7 +1554,6 @@ pub(crate) fn count_leg_set(
 }
 
 /// [`close_current_row`] over every id of `set`.
-#[allow(dead_code)] // wired by the purge phase (purge plan P2)
 pub(crate) fn close_current_rows_set(
     conn: &Connection,
     table: &str,

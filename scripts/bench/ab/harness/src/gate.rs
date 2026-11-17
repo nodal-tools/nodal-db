@@ -25,7 +25,8 @@ use crate::check::{
     check, check_commits, check_rows, elapsed_ms, head, in_list, read_hash, scalar_i64, Sample,
 };
 use crate::{
-    api_commit, api_scalars, copy_base, copy_big, del_keys, names, q_segment, series_seg, sname,
+    api_commit, api_scalars, copy_base, copy_big, del_keys, names, pinned_seg, q_segment,
+    series_seg, sname,
 };
 
 fn scalar_readback(param: &str, entities: &[String]) -> String {
@@ -296,6 +297,40 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
                 &db,
                 &param_readback("node", "arr24", Some(&ns)),
                 24_000,
+            )
+        }
+        "wr_array_100x8760_changed_pinned" | "wr_array_100x8760_unchanged" => {
+            // skip_unchanged P3 (content hash): a fresh file, an untimed seed
+            // of 100 arrays of 8 760 values, then the timed rewrite.
+            // `_changed_pinned` moves every interior element and keeps each
+            // array's min and max, so the v_min / v_max prefilter passes and
+            // only the payload (or its stored hash) proves the change;
+            // `_unchanged` rewrites the seed (capability skip_unchanged: no
+            // commit, no history row), the guard of the unchanged path.
+            let db = fresh(dir);
+            let ns = names(0..100);
+            api_commit(&db, vec![series_seg("a8760", &ns, 8760, false, 0)], vec![]);
+            let pinned = mode == "wr_array_100x8760_changed_pinned";
+            let seg = if pinned {
+                pinned_seg("a8760", &ns, 8760)
+            } else {
+                series_seg("a8760", &ns, 8760, false, 0)
+            };
+            let before = head(&db);
+            let hist = scalar_i64(&db, "SELECT count(*) FROM value_array_hist");
+            let ms = api_commit(&db, vec![seg], vec![]);
+            let n = usize::from(pinned);
+            check_commits(&db, before, n as i64);
+            check_rows(
+                "history rows after the rewrite",
+                scalar_i64(&db, "SELECT count(*) FROM value_array_hist") as usize,
+                hist as usize + 100 * n,
+            );
+            readback(
+                Sample::new(ms),
+                &db,
+                &param_readback("node", "a8760", None),
+                876_000,
             )
         }
         "wr_delete_1000_scalar_big"

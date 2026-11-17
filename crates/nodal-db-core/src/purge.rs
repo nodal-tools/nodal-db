@@ -1741,6 +1741,14 @@ fn fixpoint(conn: &Connection, insert: &str) -> Result<usize, DbError> {
 /// (a class adds its entities, parameters and B2 dependant classes; an
 /// entity its B1 containers). Every kind's table exists afterwards (empty
 /// when unreached).
+///
+/// A class's own entities and parameters are reached from the whole
+/// dependent set (a spared class's unstated children still close), but the
+/// cross-object edges (B1: an entity's N-D containers; B2: the classes
+/// that use a class as a dimension) only from the dependent set minus the
+/// call's survivors, recomputed every round: a spared object closes
+/// nothing, so it pushes nothing outside the scope. The survivor tables
+/// must exist (empty for a preview).
 pub(crate) fn build_dep_sets(
     conn: &Connection,
     r: usize,
@@ -1767,12 +1775,21 @@ pub(crate) fn build_dep_sets(
             for edge in cascade_edges(kind) {
                 let dst = dep_table(r, SetKind::of(edge.neighbor_kind));
                 let from = dep_table(r, src);
+                let closing = format!(
+                    "SELECT id FROM {from} WHERE id NOT IN (SELECT id FROM {})",
+                    surv_table(src)
+                );
+                let ids = if SetKind::of(edge.neighbor_kind) == src {
+                    IdSet::Query(&closing)
+                } else {
+                    IdSet::Table(&from)
+                };
                 added += exec(
                     conn,
                     &format!(
                         "INSERT INTO {dst} SELECT DISTINCT x.id FROM ({}) x(id) \
                          WHERE x.id NOT IN (SELECT id FROM {dst})",
-                        edge.select_ids(IdSet::Table(&from))
+                        edge.select_ids(ids)
                     ),
                     [],
                 )?;

@@ -83,15 +83,20 @@ pub(crate) enum IdSet<'a> {
     /// A bound `BIGINT[]` list (one bind).
     #[allow(dead_code)] // the render guard test's second set form
     List,
+    /// The ids a one-column `SELECT` returns (no bind), e.g. a set minus
+    /// another.
+    Query(&'a str),
 }
 
 impl IdSet<'_> {
-    /// `= ?`, `IN (SELECT id FROM t)` or `IN (SELECT unnest(?::BIGINT[]))`.
+    /// `= ?`, `IN (SELECT id FROM t)`, `IN (SELECT unnest(?::BIGINT[]))` or
+    /// `IN (<query>)`.
     pub(crate) fn render(&self) -> String {
         match self {
             IdSet::One => "= ?".to_string(),
             IdSet::Table(t) => format!("IN (SELECT id FROM {t})"),
             IdSet::List => "IN (SELECT unnest(?::BIGINT[]))".to_string(),
+            IdSet::Query(q) => format!("IN ({q})"),
         }
     }
 }
@@ -761,12 +766,16 @@ pub(crate) struct CascadeEdge {
     pub(crate) table: &'static str,
     /// Blocker column label for [`Blocker::column`].
     pub(crate) column: &'static str,
-    /// SQL template selecting the neighbor ids, returning a single id column,
-    /// live-guarded; `{ids}` is the source-id form ([`IdSet`]: `= ?` with
-    /// EXACTLY ONE `?` bound to the source id, or a set form). Drives the
-    /// closure walk, the purge's set frontier AND (wrapped) the blocker
-    /// COUNT + sample, so they can never drift.
-    select_tpl: &'static str,
+    /// The neighbor-id query, as a predicate template like [`LegKey`]:
+    /// `SELECT … FROM …` (`select`) returning a single id column, the
+    /// source-id column (`key`) matched against an [`IdSet`] (`= ?` with
+    /// EXACTLY ONE `?` bound to the source id, or a set form), and the
+    /// live guards (`live`). Drives the closure walk, the purge's set
+    /// frontier AND (wrapped) the blocker COUNT + sample, so they can never
+    /// drift.
+    select: &'static str,
+    key: &'static str,
+    live: &'static str,
     /// The table carrying `(id, name)` for the neighbor kind, for the bounded
     /// blocker `sample`.
     pub(crate) name_table: &'static str,
@@ -782,10 +791,10 @@ pub(crate) fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
             neighbor_kind: ObjectKind::Entity,
             table: "entity",
             column: "element_entity_id",
-            select_tpl: "SELECT DISTINCT ee.entity_id \
-                         FROM entity_element ee \
-                         JOIN entity e ON e.id = ee.entity_id AND e.valid_to_commit IS NULL \
-                         WHERE ee.element_entity_id {ids} AND ee.valid_to_commit IS NULL",
+            select: "SELECT DISTINCT ee.entity_id FROM entity_element ee \
+                     JOIN entity e ON e.id = ee.entity_id AND e.valid_to_commit IS NULL",
+            key: "ee.element_entity_id",
+            live: "ee.valid_to_commit IS NULL",
             name_table: "entity",
         }],
         ObjectKind::Class => vec![
@@ -794,8 +803,9 @@ pub(crate) fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
                 neighbor_kind: ObjectKind::Entity,
                 table: "entity",
                 column: "entity_class_id",
-                select_tpl: "SELECT id FROM entity \
-                             WHERE entity_class_id {ids} AND valid_to_commit IS NULL",
+                select: "SELECT id FROM entity",
+                key: "entity_class_id",
+                live: "valid_to_commit IS NULL",
                 name_table: "entity",
             },
             // Child parameter definitions — each runs its own §4d cascade.
@@ -803,8 +813,9 @@ pub(crate) fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
                 neighbor_kind: ObjectKind::Parameter,
                 table: "parameter_definition",
                 column: "entity_class_id",
-                select_tpl: "SELECT id FROM parameter_definition \
-                             WHERE entity_class_id {ids} AND valid_to_commit IS NULL",
+                select: "SELECT id FROM parameter_definition",
+                key: "entity_class_id",
+                live: "valid_to_commit IS NULL",
                 name_table: "parameter_definition",
             },
             // B2 — classes that declare THIS class as a dimension type; each such
@@ -813,11 +824,11 @@ pub(crate) fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
                 neighbor_kind: ObjectKind::Class,
                 table: "entity_class",
                 column: "dimension_class_id",
-                select_tpl: "SELECT DISTINCT ecd.entity_class_id \
-                             FROM entity_class_dimension ecd \
-                             JOIN entity_class ec ON ec.id = ecd.entity_class_id \
-                                                 AND ec.valid_to_commit IS NULL \
-                             WHERE ecd.dimension_class_id {ids} AND ecd.valid_to_commit IS NULL",
+                select: "SELECT DISTINCT ecd.entity_class_id FROM entity_class_dimension ecd \
+                         JOIN entity_class ec ON ec.id = ecd.entity_class_id \
+                           AND ec.valid_to_commit IS NULL",
+                key: "ecd.dimension_class_id",
+                live: "ecd.valid_to_commit IS NULL",
                 name_table: "entity_class",
             },
         ],
@@ -828,7 +839,13 @@ pub(crate) fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
 impl CascadeEdge {
     /// The neighbor-id SELECT against `ids`.
     pub(crate) fn select_ids(&self, ids: IdSet<'_>) -> String {
-        self.select_tpl.replace("{ids}", &ids.render())
+        format!(
+            "{} WHERE {} {} AND {}",
+            self.select,
+            self.key,
+            ids.render(),
+            self.live
+        )
     }
 }
 

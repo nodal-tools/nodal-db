@@ -1662,6 +1662,88 @@ fn classes_except_must_be_closed_under_class_set_dimensions() {
     );
 }
 
+/// Engine review B1: a survivor closes nothing, so its N-D containers are
+/// not reached (not refused as outside the scope, not closed with the
+/// flag).
+#[test]
+fn spared_entities_do_not_push_the_cascade_into_their_containers() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![entity("node", "n1"), entity("node", "n2")],
+            purges: vec![req(PS::Entities {
+                class: Some("node".into()),
+            })],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.purges[0].objects, 0);
+    assert_eq!(live_entities(&db).len(), 6, "the links stay");
+    // With the flag: still nothing outside the scope closes.
+    call(
+        &db,
+        ChangeSet {
+            structural: vec![entity("node", "n1"), entity("node", "n2")],
+            purges: vec![PurgeRequest {
+                allow_outside_scope: true,
+                ..req(PS::Entities {
+                    class: Some("node".into()),
+                })
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(live_entities(&db).len(), 6);
+}
+
+/// Engine review B1: a spared class does not push B2 into the classes
+/// that use it as a dimension (an excepted class stays).
+#[test]
+fn a_spared_class_does_not_close_the_classes_using_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![
+                class("node", &[]),
+                entity("node", "n1"),
+                entity("node", "n2"),
+            ],
+            purges: vec![PurgeRequest {
+                allow_outside_scope: true,
+                ..req(PS::Classes {
+                    except: vec!["link".into(), "unit".into()],
+                })
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Only node's unstated parameters (demand, profile) close.
+    assert_eq!(r.purges[0].objects, 2, "{:?}", r.purges[0]);
+    assert_eq!(live(&db, "entity_class"), 3);
+    assert_eq!(live_entities(&db).len(), 6);
+    // Without the re-stated entities, n1 and n2 close and their links are
+    // reached outside the scope: refused.
+    let err = call(
+        &db,
+        ChangeSet {
+            structural: vec![class("node", &[])],
+            purges: vec![req(PS::Classes {
+                except: vec!["link".into(), "unit".into()],
+            })],
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("2 entity of link"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // Preview (tests 10, 22)
 // ---------------------------------------------------------------------------

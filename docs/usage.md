@@ -659,6 +659,16 @@ scope and anything it no longer states must go.
                       purges=[{"scope": "entities"}], user="alice")
     ```
 
+=== "CLI"
+
+    ```bash
+    nodal-db purge demo.duckdb --scope values --class node --preview
+    nodal-db purge demo.duckdb --scope classes --except node --user alice
+    ```
+
+    `--allow-outside-scope` and `--allow-on-template` are the two opt-ins;
+    `template apply --recreate-removed` re-creates removed vocabulary.
+
 === "Rust"
 
     `api::purge` and `api::preview_purge`, or the `purges` channel of

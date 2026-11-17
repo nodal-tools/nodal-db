@@ -61,8 +61,9 @@ answer will be a served API, not a protocol document.
   to open while a commit is in progress and should retry.
 - A file made by another nodal-db schema version is a defined error
   too: `SchemaMismatch` (`DbError::SchemaMismatch { found, expected, .. }`,
-  `nodal_db.SchemaMismatch`, an `ApiError` subclass) from a write that
-  fails on it and from compaction, extract and erase. Match the variant,
+  `nodal_db.SchemaMismatch`, an `ApiError` subclass) from every write,
+  which refuses such a file before writing anything, and from
+  compaction, extract, erase and the read-surface refresh. Match the variant,
   not the message text. See
   [connection discipline](../usage.md#connection-discipline).
 - Compaction can refuse a file whose leftover `<db>.wal` cannot be

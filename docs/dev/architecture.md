@@ -443,12 +443,42 @@ discipline. The client-side rules are in
 
 ## 7. Deletion, erasure and the change model
 
-Value deletes, structural changes and object deletes ride the same
-atomic commit as value writes (`api::commit_changes`). Object deletion
+Value deletes, structural changes, object deletes and purges ride the
+same atomic commit as value writes (`api::commit_change_set`, which
+`api::commit_changes` and every wrapper call). Object deletion
 (alternative / parameter / entity / class) closes out the object row and
 its dependents via one **leg registry**, so the preview counts, the
 RESTRICT report and the cascade updates are generated from the same
 table and cannot drift. Deletes are close-outs: history survives.
+
+**Purge** (`purge.rs`) runs the same leg registry in **set form**.
+Every leg holds a predicate template (key column, optional indirect
+table, optional filter), rendered per id (`= ?`, what the object delete,
+its preview and erasure run) or against a transaction-local `TEMP` id
+table; the set form shares the per-id form's SET list and same-commit
+guard, so a scope of any size closes in O(legs + depth) statements. Per
+request the purge fills two sets per object kind: the **dependent set**
+(the scope, grown by the cascade edges in an iterative frontier) and the
+**close set** (the dependent set minus the call's survivors: what it
+names, creates or writes, spared upward to what their identity
+references). The close set drives object rows and identity legs; the
+dependent set drives dependent legs, each with the survivor anti-join of
+its grain (value keys, activation pairs, membership triples, rankings);
+descriptors of vocabulary run over the close set. The frontier of the
+close set reaching a survivor is an internal error. Values close through
+a predicate-scoped statement per tier and retention mode, on the same
+SET lists `history.rs` closes every value with (one close-out
+definition), with retention per definition read before any close and
+arrays copied and deleted by `array_id`. The preview counts the same
+steps' rows instead of running them.
+
+Template reconcile classifies removals by the commit that closed them:
+every template-apply and migration-step commit writes the reserved
+metadata key `template_applied_commit` (a `run:` program's progress
+commit records its commit range), and a declared class, parameter or
+value list closed by any other commit is *removed locally*, which blocks
+a changed apply until `recreate_removed`. A local close of vocabulary
+also withdraws `template_content_hash`, so the same template replans.
 
 What cascades is decided by one question: does the delete punch a hole
 in a live N-dimensional container? The cascade follows those edges and

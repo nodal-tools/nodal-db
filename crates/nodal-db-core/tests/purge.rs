@@ -1661,3 +1661,85 @@ fn classes_except_must_be_closed_under_class_set_dimensions() {
         ["k", "q"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Preview (tests 10, 22)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn preview_matches_the_commit_without_survivors() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    // Group and member both in scope: the membership row counts once.
+    let reqs = vec![
+        PurgeRequest {
+            allow_outside_scope: true,
+            ..req(PS::Entities { class: None })
+        },
+        req(PS::Scenarios),
+        req(PS::Values {
+            class: None,
+            parameter: None,
+            alternative: Some("high".into()),
+        }),
+    ];
+    let before = head(&db);
+    let pv = nodal_db_core::api::preview_purge(&db, reqs.clone()).unwrap();
+    assert_eq!(head(&db), before, "a preview writes nothing");
+    let r = purge(&db, reqs, "t", "m", o()).unwrap();
+    for (p, o) in pv.iter().zip(&r.purges) {
+        assert_eq!(p.request_index, o.request_index);
+        assert_eq!(p.objects, o.objects);
+        if o.request_index != 2 {
+            // Request 2's values were already closed by request 0 in the
+            // commit; the preview counts each request on its own.
+            assert_eq!(p.cascade, o.closed_out, "request {}", o.request_index);
+        }
+        assert!(p.outside_scope.is_empty());
+        assert!(!p.template_stamped);
+    }
+    assert!(pv[0]
+        .cascade
+        .per_table
+        .iter()
+        .any(|t| t.table == "membership" && t.rows == 2));
+    // The preview's connection is closed: a write goes through.
+    purge1(&db, PS::Alternatives { except: vec![] });
+}
+
+#[test]
+fn preview_reports_reach_and_the_template_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let pv = nodal_db_core::api::preview_purge(
+        &db,
+        vec![req(PS::Entities {
+            class: Some("unit".into()),
+        })],
+    )
+    .unwrap();
+    assert_eq!(pv[0].outside_scope.len(), 1);
+    assert_eq!(pv[0].outside_scope[0].count, 2);
+    assert_eq!(pv[0].outside_scope[0].column, "link");
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let db2 = stamped(&dir2);
+    let pv = nodal_db_core::api::preview_purge(
+        &db2,
+        vec![
+            req(PS::Classes { except: vec![] }),
+            req(PS::Entities { class: None }),
+        ],
+    )
+    .unwrap();
+    assert!(pv[0].template_stamped);
+    assert!(!pv[1].template_stamped);
+    // Unknown names refuse in the preview as in the commit.
+    assert!(nodal_db_core::api::preview_purge(
+        &db2,
+        vec![req(PS::Entities {
+            class: Some("nope".into())
+        })]
+    )
+    .is_err());
+}

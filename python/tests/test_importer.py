@@ -524,6 +524,29 @@ def test_import_stream_with_descriptions_is_idempotent(tmp_path, monkeypatch):
     assert _rows(_nodal(out), "SELECT count(*) AS n FROM commit")[0]["n"] == n
 
 
+def test_purge_classes_then_reimport_converges(tmp_path, monkeypatch):
+    """Purge every class of an imported database, then replay the import on
+    it: the bootstrap apply re-creates the purged vocabulary
+    (recreate_removed) and the data lands again (purge plan V-B2)."""
+    import nodal_db
+
+    spine = make_basic_spine(tmp_path)
+    _rep, out = run_import(tmp_path, spine)
+    db = _nodal(out)
+    n_values = _rows(db, "SELECT count(*) AS n FROM value_scalar WHERE valid_to_commit IS NULL")
+    db.purge([{"scope": "classes", "allow_on_template": True,
+               "allow_outside_scope": True}], user="t")
+    assert _rows(db, "SELECT count(*) AS n FROM entity_class WHERE valid_to_commit IS NULL") \
+        == [{"n": 0}]
+    monkeypatch.setattr(nodal_db, "init", nodal_db.open)
+    imp = SpineImporter(str(spine), str(out), SyntheticProfile(), user="t", version="7")
+    imp._import_into(str(out))
+    assert _rows(db, "SELECT count(*) AS n FROM entity_class WHERE valid_to_commit IS NULL") \
+        == [{"n": 3}]
+    assert _rows(db, "SELECT count(*) AS n FROM value_scalar WHERE valid_to_commit IS NULL") \
+        == n_values
+
+
 def test_case_colliding_names_refuse(tmp_path):
     from spinedb_api import DatabaseMapping
 

@@ -53,8 +53,8 @@ use crate::template::dbvocab::read_metadata_key;
 use crate::template::reconcile::{close_value_lists_set, read_pd_row, revise_pd_row};
 use crate::text::{NameFolds, Normalized};
 use crate::types::{
-    Blocker, CascadeCounts, ObjectKind, PurgeOutcome, PurgeRequest, PurgeScope, TableCount,
-    WriteReport,
+    Blocker, CascadeCounts, ObjectKind, PurgeOutcome, PurgePreview, PurgeRequest, PurgeScope,
+    TableCount, WriteReport,
 };
 
 // ---------------------------------------------------------------------------
@@ -946,57 +946,49 @@ fn counts(object_rows: usize, per_table: Vec<TableCount>) -> CascadeCounts {
     }
 }
 
-/// Execute request `r` (§3.6): values, then dependents, then identity legs,
-/// then object rows (V-S3), each a set-form statement with the same-commit
-/// guard.
-fn execute(
-    conn: &Connection,
-    c: i64,
-    r: usize,
-    scope: &Scope,
-) -> Result<(PurgeOutcome, bool), DbError> {
-    let mut acc = Accum::default();
-    match scope {
-        Scope::Values { .. } | Scope::Activations { .. } | Scope::Memberships { .. } => {
-            execute_rows(conn, c, r, scope, &mut acc)?
-        }
-        _ => execute_objects(conn, c, r, &mut acc)?,
-    }
-    Ok((
-        PurgeOutcome {
-            request_index: r,
-            closed_out: counts(acc.object_rows, acc.per_table),
-            objects: acc.objects,
-            spared: counts(acc.spared_objects, acc.spared),
-            unbound: acc.unbound,
-        },
-        acc.vocabulary,
-    ))
+/// One close-out statement (group) of a request, in execution order. The
+/// commit runs them ([`run_step`]); the preview counts the rows they match
+/// ([`preview_one`]): one list of predicates, so the two cannot drift.
+enum Step {
+    /// A value tier (or `parameter_value_metadata`, `meta`) over `pred`,
+    /// spared by the value-key anti-join, retention per definition.
+    Values {
+        table: &'static str,
+        pred: String,
+        meta: bool,
+    },
+    /// The rows of a data scope (`Activations`, `Memberships`) over `pred`,
+    /// spared by `anti`.
+    Rows {
+        table: &'static str,
+        pred: String,
+        anti: Option<String>,
+    },
+    /// A registry leg over a set; `identity` counts in the object rows.
+    Leg {
+        leg: DepLeg,
+        set: String,
+        anti: Option<String>,
+        identity: bool,
+    },
+    /// Remove the bindings of the request's lists by definitions no
+    /// request closes (V-OD2).
+    Unbind,
+    /// The request's value lists, members and annotations (the
+    /// `close_value_list` door).
+    Lists { set: String },
+    /// The object rows of a close set.
+    Objects { kind: SetKind, set: String },
 }
 
-/// Is request `r`'s set of kind `k` non-empty?
-fn has(conn: &Connection, table: &str) -> Result<bool, DbError> {
-    Ok(query_count(
-        conn,
-        &format!("SELECT count(*) FROM (SELECT 1 FROM {table} LIMIT 1)"),
-    )? > 0)
-}
-
-/// The data scopes that close rows, never objects (§3.5.4): `Values`
-/// (all tiers and their value metadata), `Activations`, `Memberships`, each
-/// filtered by the registry legs over its filter sets and spared at its
-/// grain.
-fn execute_rows(
-    conn: &Connection,
-    c: i64,
-    r: usize,
-    scope: &Scope,
-    acc: &mut Accum,
-) -> Result<(), DbError> {
+/// Request `r`'s steps (§3.6): values, then dependents, then identity legs,
+/// then object rows (V-S3).
+fn steps(conn: &Connection, r: usize, scope: &Scope) -> Result<Vec<Step>, DbError> {
+    let mut out = Vec::new();
     let ent = dep_table(r, SetKind::Entity);
     let par = dep_table(r, SetKind::Parameter);
     let alt = dep_table(r, SetKind::Alternative);
-    // (filter conjuncts per table) for the legs the scope closes.
+    // The AND of registry legs over filter sets (`TRUE` for none).
     let filter = |legs: &[(Option<DepLeg>, &str)]| -> String {
         let parts: Vec<String> = legs
             .iter()
@@ -1015,7 +1007,6 @@ fn execute_rows(
             alternative,
         } => {
             let by_pd = class.is_some() || parameter.is_some();
-            let by_alt = alternative.is_some();
             for table in [
                 "value_scalar",
                 "value_long",
@@ -1028,38 +1019,344 @@ fn execute_rows(
                         &par,
                     ),
                     (
-                        by_alt.then(|| leg(ObjectKind::Alternative, table, "alternative_id")),
+                        alternative.map(|_| leg(ObjectKind::Alternative, table, "alternative_id")),
                         &alt,
                     ),
                 ]);
-                if table == "parameter_value_metadata" {
-                    close_rows(conn, c, table, &pred, Some(&value_antijoin(table)), acc)?;
-                } else {
-                    close_values(conn, c, table, &pred, acc)?;
-                }
+                out.push(Step::Values {
+                    table,
+                    pred,
+                    meta: table == "parameter_value_metadata",
+                });
             }
+            return Ok(out);
         }
         Scope::Activations { class, alternative } => {
             let t = "entity_alternative";
-            let pred = filter(&[
-                (class.map(|_| leg(ObjectKind::Entity, t, "entity_id")), &ent),
-                (
-                    alternative.map(|_| leg(ObjectKind::Alternative, t, "alternative_id")),
-                    &alt,
-                ),
-            ]);
             let l = leg(ObjectKind::Entity, t, "entity_id");
-            close_rows(conn, c, t, &pred, survivor_antijoin(&l).as_deref(), acc)?;
+            out.push(Step::Rows {
+                table: t,
+                pred: filter(&[
+                    (class.map(|_| l), &ent),
+                    (
+                        alternative.map(|_| leg(ObjectKind::Alternative, t, "alternative_id")),
+                        &alt,
+                    ),
+                ]),
+                anti: survivor_antijoin(&l),
+            });
+            return Ok(out);
         }
         Scope::Memberships { group_class } => {
             let t = "membership";
             let l = leg(ObjectKind::Entity, t, "group_entity_id");
-            let pred = filter(&[(group_class.map(|_| l), &ent)]);
-            close_rows(conn, c, t, &pred, survivor_antijoin(&l).as_deref(), acc)?;
+            out.push(Step::Rows {
+                table: t,
+                pred: filter(&[(group_class.map(|_| l), &ent)]),
+                anti: survivor_antijoin(&l),
+            });
+            return Ok(out);
         }
-        _ => unreachable!("object scopes run execute_objects"),
+        _ => {}
     }
-    Ok(())
+    // Object scopes: every kind the request reaches.
+    let mut kinds: Vec<(SetKind, ObjectKind)> = Vec::new();
+    for k in SetKind::ALL {
+        let Some(kind) = k.object_kind() else {
+            continue;
+        };
+        if has(conn, &dep_table(r, k))? {
+            kinds.push((k, kind));
+        }
+    }
+    let has_lists = has(conn, &dep_table(r, SetKind::ValueList))?;
+    // Values, over the dependent sets.
+    for &(k, kind) in &kinds {
+        let legs = object_legs(kind).expect("purge kinds have leg sets");
+        let dep = dep_table(r, k);
+        for l in legs.dependents.iter().filter(|l| l.grain == Grain::Value) {
+            out.push(Step::Values {
+                table: l.table,
+                pred: l.key.render(IdSet::Table(&dep)),
+                meta: false,
+            });
+        }
+    }
+    // Dependents, at their grain: descriptors over the close set, the rest
+    // over the dependent set with their survivor anti-join.
+    for &(k, kind) in &kinds {
+        let legs = object_legs(kind).expect("purge kinds have leg sets");
+        for l in legs.dependents.iter().filter(|l| l.grain != Grain::Value) {
+            let set = if l.grain == Grain::Descriptor {
+                close_table(r, k)
+            } else {
+                dep_table(r, k)
+            };
+            out.push(Step::Leg {
+                leg: *l,
+                set,
+                anti: survivor_antijoin(l),
+                identity: false,
+            });
+        }
+    }
+    if has_lists {
+        out.push(Step::Unbind);
+    }
+    // Identity legs, then object rows, over the close sets.
+    for &(k, kind) in &kinds {
+        let legs = object_legs(kind).expect("purge kinds have leg sets");
+        for l in &legs.identity {
+            out.push(Step::Leg {
+                leg: *l,
+                set: close_table(r, k),
+                anti: None,
+                identity: true,
+            });
+        }
+    }
+    if has_lists {
+        out.push(Step::Lists {
+            set: close_table(r, SetKind::ValueList),
+        });
+    }
+    for &(k, _) in &kinds {
+        out.push(Step::Objects {
+            kind: k,
+            set: close_table(r, k),
+        });
+    }
+    Ok(out)
+}
+
+/// Execute request `r` (§3.6): its [`steps`], each a set-form statement
+/// with the same-commit guard. Returns its outcome and whether it closed
+/// a class, parameter definition or value list.
+fn execute(
+    conn: &Connection,
+    c: i64,
+    r: usize,
+    scope: &Scope,
+) -> Result<(PurgeOutcome, bool), DbError> {
+    let mut acc = Accum::default();
+    for step in steps(conn, r, scope)? {
+        run_step(conn, c, r, &step, &mut acc)?;
+    }
+    Ok((
+        PurgeOutcome {
+            request_index: r,
+            closed_out: counts(acc.object_rows, acc.per_table),
+            objects: acc.objects,
+            spared: counts(acc.spared_objects, acc.spared),
+            unbound: acc.unbound,
+        },
+        acc.vocabulary,
+    ))
+}
+
+fn run_step(
+    conn: &Connection,
+    c: i64,
+    r: usize,
+    step: &Step,
+    acc: &mut Accum,
+) -> Result<(), DbError> {
+    match step {
+        Step::Values { table, pred, meta } => {
+            if *meta {
+                close_rows(conn, c, table, pred, Some(&value_antijoin(table)), acc)
+            } else {
+                close_values(conn, c, table, pred, acc)
+            }
+        }
+        Step::Rows { table, pred, anti } => close_rows(conn, c, table, pred, anti.as_deref(), acc),
+        Step::Leg {
+            leg,
+            set,
+            anti,
+            identity,
+        } => {
+            if let Some(a) = anti {
+                let spared = count_leg_set(
+                    conn,
+                    leg,
+                    set,
+                    Some(&format!("valid_from_commit < {c} AND NOT ({a})")),
+                )?;
+                add(&mut acc.spared, leg.table, spared);
+            }
+            let n = close_leg_set(conn, leg, c, set, anti.as_deref())?;
+            if *identity {
+                acc.object_rows += n;
+            } else {
+                add(&mut acc.per_table, leg.table, n);
+            }
+            Ok(())
+        }
+        Step::Unbind => {
+            test_hooks::count();
+            let mut stmt = conn.prepare(&bindings_sql(r))?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            for pd in ids {
+                let mut row = read_pd_row(conn, pd)?;
+                row.parameter_value_list_id = None;
+                revise_pd_row(conn, c, &row)?;
+                acc.unbound += 1;
+            }
+            Ok(())
+        }
+        Step::Lists { set } => {
+            let closed = close_value_lists_set(conn, c, set)?;
+            add(
+                &mut acc.per_table,
+                "semantic_annotation",
+                closed.annotations,
+            );
+            acc.object_rows += closed.members + closed.lists;
+            acc.objects += closed.lists;
+            acc.vocabulary |= closed.lists > 0;
+            acc.spared_objects += spared_objects(conn, c, r, SetKind::ValueList)?;
+            Ok(())
+        }
+        Step::Objects { kind, set } => {
+            let n = close_current_rows_set(conn, kind.object_table(), c, set)?;
+            acc.objects += n;
+            acc.object_rows += n;
+            acc.vocabulary |= n > 0 && matches!(kind, SetKind::Class | SetKind::Parameter);
+            acc.spared_objects += spared_objects(conn, c, r, *kind)?;
+            Ok(())
+        }
+    }
+}
+
+/// Is the id table non-empty?
+fn has(conn: &Connection, table: &str) -> Result<bool, DbError> {
+    Ok(query_count(
+        conn,
+        &format!("SELECT count(*) FROM (SELECT 1 FROM {table} LIMIT 1)"),
+    )? > 0)
+}
+
+/// Read-only preview of `reqs` (§3.6) on `conn` (one per-operation RO
+/// connection): the same sets and the same [`steps`], counted instead of
+/// run, with no survivors, so the counts, `outside_scope` and
+/// `template_stamped` are upper bounds of what a call that also writes
+/// would close. Rows are counted once per table across a request's steps
+/// (the `preview_dependent_counts` OR grouping).
+pub(crate) fn preview(
+    conn: &Connection,
+    reqs: &[PurgeRequest],
+) -> Result<Vec<PurgePreview>, DbError> {
+    let scopes = resolve_requests(
+        conn,
+        reqs,
+        &CallRenames::default(),
+        &mut NameFolds::default(),
+    )?;
+    create_survivor_tables(conn)?;
+    for (r, scope) in scopes.iter().enumerate() {
+        build_request_sets(conn, r, scope)?;
+    }
+    build_all_close_parameters(conn, reqs.len())?;
+    let stamped = read_metadata_key(conn, "template_name")?.is_some();
+    let mut out = Vec::with_capacity(reqs.len());
+    for (r, scope) in scopes.iter().enumerate() {
+        // (table, counts as object rows, live filter, predicates)
+        type Group = (&'static str, bool, &'static str, Vec<String>);
+        let mut groups: Vec<Group> = Vec::new();
+        let mut push = |table: &'static str, object: bool, pred: String| {
+            let live = if table == "value_array" {
+                ""
+            } else {
+                " AND valid_to_commit IS NULL"
+            };
+            match groups.iter_mut().find(|g| g.0 == table && g.1 == object) {
+                Some(g) => g.3.push(pred),
+                None => groups.push((table, object, live, vec![pred])),
+            }
+        };
+        let mut objects = 0usize;
+        for step in steps(conn, r, scope)? {
+            match step {
+                Step::Values { table, pred, .. } | Step::Rows { table, pred, .. } => {
+                    push(table, false, pred)
+                }
+                Step::Leg {
+                    leg, set, identity, ..
+                } => push(leg.table, identity, leg.key.render(IdSet::Table(&set))),
+                Step::Unbind => {}
+                Step::Lists { set } => {
+                    let ids = format!("IN (SELECT id FROM {set})");
+                    push(
+                        "semantic_annotation",
+                        false,
+                        format!("object_type = 'parameter_value_list' AND object_id {ids}"),
+                    );
+                    push(
+                        "semantic_annotation",
+                        false,
+                        format!(
+                            "object_type = 'list_value' AND object_id IN \
+                             (SELECT id FROM list_value WHERE parameter_value_list_id {ids})"
+                        ),
+                    );
+                    push("list_value", true, format!("parameter_value_list_id {ids}"));
+                    push("parameter_value_list", true, format!("id {ids}"));
+                    objects += query_count(
+                        conn,
+                        &format!(
+                            "SELECT count(*) FROM parameter_value_list \
+                             WHERE valid_to_commit IS NULL AND id {ids}"
+                        ),
+                    )? as usize;
+                }
+                Step::Objects { kind, set } => {
+                    let pred = format!("id IN (SELECT id FROM {set})");
+                    objects += query_count(
+                        conn,
+                        &format!(
+                            "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL AND {pred}",
+                            kind.object_table()
+                        ),
+                    )? as usize;
+                    push(kind.object_table(), true, pred);
+                }
+            }
+        }
+        let mut object_rows = 0usize;
+        let mut per_table: Vec<TableCount> = Vec::new();
+        for (table, object, live, preds) in groups {
+            let clause = preds
+                .iter()
+                .map(|p| format!("({p})"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let n = query_count(
+                conn,
+                &format!("SELECT count(*) FROM {table} WHERE ({clause}){live}"),
+            )? as usize;
+            if object {
+                object_rows += n;
+            } else {
+                add(&mut per_table, table, n);
+            }
+        }
+        let template_stamped = stamped && scope.is_vocabulary() && {
+            let i = stamped_item(conn, r)?;
+            i.classes + i.parameters + i.value_lists > 0
+        };
+        out.push(PurgePreview {
+            request_index: r,
+            objects,
+            cascade: counts(object_rows, per_table),
+            outside_scope: outside_scope(conn, r, reqs.len())?,
+            template_stamped,
+        });
+    }
+    drop_tables(conn)?;
+    Ok(out)
 }
 
 /// Close the live, pre-call rows of `table` matching `pred` and not spared
@@ -1178,102 +1475,6 @@ fn close_values(
             params![c, c],
         )?;
         add(&mut acc.per_table, table, n);
-    }
-    Ok(())
-}
-
-/// The object scopes (§3.6): for every kind the request reaches, its
-/// value legs through [`close_values`] over the dependent set, then its
-/// other dependent legs (at their grain: survivor anti-join over the
-/// dependent set, descriptors over the close set, the rest over the
-/// dependent set), then identity legs and object rows over the close set.
-fn execute_objects(conn: &Connection, c: i64, r: usize, acc: &mut Accum) -> Result<(), DbError> {
-    let mut kinds: Vec<(SetKind, ObjectKind)> = Vec::new();
-    for k in SetKind::ALL {
-        let Some(kind) = k.object_kind() else {
-            continue;
-        };
-        if has(conn, &dep_table(r, k))? {
-            kinds.push((k, kind));
-        }
-    }
-    // Values.
-    for &(k, kind) in &kinds {
-        let legs = object_legs(kind).expect("purge kinds have leg sets");
-        let dep = dep_table(r, k);
-        for l in legs.dependents.iter().filter(|l| l.grain == Grain::Value) {
-            close_values(conn, c, l.table, &l.key.render(IdSet::Table(&dep)), acc)?;
-        }
-    }
-    // Dependents.
-    for &(k, kind) in &kinds {
-        let legs = object_legs(kind).expect("purge kinds have leg sets");
-        let (dep, close) = (dep_table(r, k), close_table(r, k));
-        for l in legs.dependents.iter().filter(|l| l.grain != Grain::Value) {
-            let set = if l.grain == Grain::Descriptor {
-                &close
-            } else {
-                &dep
-            };
-            let anti = survivor_antijoin(l);
-            if let Some(a) = &anti {
-                let spared = count_leg_set(
-                    conn,
-                    l,
-                    set,
-                    Some(&format!("valid_from_commit < {c} AND NOT ({a})")),
-                )?;
-                add(&mut acc.spared, l.table, spared);
-            }
-            let n = close_leg_set(conn, l, c, set, anti.as_deref())?;
-            add(&mut acc.per_table, l.table, n);
-        }
-    }
-    // Value lists (no leg registry: the `close_value_list` door). Bindings
-    // by definitions no request closes are removed first (V-OD2; the
-    // refusal ran unless allowed); then the lists' annotations, members and
-    // rows.
-    let lists = close_table(r, SetKind::ValueList);
-    let has_lists = has(conn, &dep_table(r, SetKind::ValueList))?;
-    if has_lists {
-        test_hooks::count();
-        let mut stmt = conn.prepare(&bindings_sql(r))?;
-        let ids: Vec<i64> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
-        for pd in ids {
-            let mut row = read_pd_row(conn, pd)?;
-            row.parameter_value_list_id = None;
-            revise_pd_row(conn, c, &row)?;
-            acc.unbound += 1;
-        }
-    }
-    // Identity legs and object rows.
-    for &(k, kind) in &kinds {
-        let legs = object_legs(kind).expect("purge kinds have leg sets");
-        let close = close_table(r, k);
-        for l in &legs.identity {
-            acc.object_rows += close_leg_set(conn, l, c, &close, None)?;
-        }
-    }
-    if has_lists {
-        let closed = close_value_lists_set(conn, c, &lists)?;
-        add(
-            &mut acc.per_table,
-            "semantic_annotation",
-            closed.annotations,
-        );
-        acc.object_rows += closed.members + closed.lists;
-        acc.objects += closed.lists;
-        acc.vocabulary |= closed.lists > 0;
-        acc.spared_objects += spared_objects(conn, c, r, SetKind::ValueList)?;
-    }
-    for &(k, _) in &kinds {
-        let n = close_current_rows_set(conn, k.object_table(), c, &close_table(r, k))?;
-        acc.objects += n;
-        acc.object_rows += n;
-        acc.vocabulary |= n > 0 && matches!(k, SetKind::Class | SetKind::Parameter);
-        acc.spared_objects += spared_objects(conn, c, r, k)?;
     }
     Ok(())
 }

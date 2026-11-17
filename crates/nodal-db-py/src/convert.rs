@@ -22,8 +22,9 @@ use nodal_db_core::template::{ApplyOutcome, ReconcilePlan};
 use nodal_db_core::types::{
     Blocker, CascadeCounts, CoveredWrites, CoveringDelete, EntityAddr, ObjectDeleteKey,
     ObjectDeleteOpts, ObjectDeleteOutcome, ObjectDeletePreview, ObjectDeleteResult, ObjectKind,
-    ObjectRef, StructuralChange, StructuralEffect, StructuralKind, StructuralOutcome, TableCount,
-    Tier, Warning, WarningKind, WriteReport,
+    ObjectRef, PurgeOutcome, PurgePreview, PurgeRequest, PurgeScope, StructuralChange,
+    StructuralEffect, StructuralKind, StructuralOutcome, TableCount, Tier, Warning, WarningKind,
+    WriteReport,
 };
 
 use crate::{
@@ -533,6 +534,90 @@ fn str_list(obj: &Bound<'_, PyAny>, key: &str) -> PyResult<Vec<String>> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Purge requests in (purge plan §3.10): `{"scope": <name>, <filters>,
+// "allow_outside_scope"?, "allow_on_template"?}`.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn purge_request_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PurgeRequest> {
+    let scope_name = req_str(obj, "purge", "scope")?;
+    let except = || str_list(obj, "except");
+    let scope = match scope_name.as_str() {
+        "values" => PurgeScope::Values {
+            class: opt_str(obj, "class")?,
+            parameter: opt_str(obj, "parameter")?,
+            alternative: opt_str(obj, "alternative")?,
+        },
+        "entities" => PurgeScope::Entities {
+            class: opt_str(obj, "class")?,
+        },
+        "activations" => PurgeScope::Activations {
+            class: opt_str(obj, "class")?,
+            alternative: opt_str(obj, "alternative")?,
+        },
+        "memberships" => PurgeScope::Memberships {
+            group_class: opt_str(obj, "group_class")?,
+        },
+        "alternatives" => PurgeScope::Alternatives { except: except()? },
+        "scenarios" => PurgeScope::Scenarios,
+        "classes" => PurgeScope::Classes { except: except()? },
+        "parameters" => PurgeScope::Parameters {
+            class: opt_str(obj, "class")?,
+        },
+        "value_lists" => PurgeScope::ValueLists { except: except()? },
+        other => {
+            return Err(ApiError::new_err(format!(
+                "unknown purge scope {other:?} (expected values, entities, activations, \
+                 memberships, alternatives, scenarios, classes, parameters or value_lists)"
+            )))
+        }
+    };
+    Ok(PurgeRequest {
+        scope,
+        allow_outside_scope: opt_bool(obj, "allow_outside_scope")?.unwrap_or(false),
+        allow_on_template: opt_bool(obj, "allow_on_template")?.unwrap_or(false),
+    })
+}
+
+pub(crate) fn purge_requests_from_py(
+    reqs: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PurgeRequest>> {
+    let mut out = Vec::new();
+    if let Some(r) = reqs {
+        for item in r.try_iter()? {
+            out.push(purge_request_from_py(&item?)?);
+        }
+    }
+    Ok(out)
+}
+
+fn purge_outcome_to_py<'py>(py: Python<'py>, o: &PurgeOutcome) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("request_index", o.request_index)?;
+    d.set_item("closed_out", cascade_to_py(py, &o.closed_out)?)?;
+    d.set_item("objects", o.objects)?;
+    d.set_item("spared", cascade_to_py(py, &o.spared)?)?;
+    d.set_item("unbound", o.unbound)?;
+    Ok(d)
+}
+
+pub(crate) fn purge_previews_to_py<'py>(
+    py: Python<'py>,
+    ps: &[PurgePreview],
+) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for p in ps {
+        let d = PyDict::new(py);
+        d.set_item("request_index", p.request_index)?;
+        d.set_item("objects", p.objects)?;
+        d.set_item("cascade", cascade_to_py(py, &p.cascade)?)?;
+        d.set_item("outside_scope", blockers_to_py(py, &p.outside_scope)?)?;
+        d.set_item("template_stamped", p.template_stamped)?;
+        out.append(d)?;
+    }
+    Ok(out)
+}
+
 /// An entity address: a dict `{"class": str, "name": str}` or a `(class, name)`
 /// 2-tuple.
 fn entity_addr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<EntityAddr> {
@@ -866,6 +951,11 @@ pub(crate) fn report_to_py<'py>(py: Python<'py>, r: &WriteReport) -> PyResult<Bo
         structs.append(structural_outcome_to_py(py, o)?)?;
     }
     d.set_item("structural", structs)?;
+    let purges = PyList::empty(py);
+    for o in &r.purges {
+        purges.append(purge_outcome_to_py(py, o)?)?;
+    }
+    d.set_item("purges", purges)?;
     d.set_item("read_surface_warning", r.read_surface_warning.as_deref())?;
     Ok(d)
 }

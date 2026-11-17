@@ -65,9 +65,9 @@ use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
-    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, PurgeRequest, ShapedData,
-    StructuralChange, StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind, Warning,
-    WarningKind, WriteOptions, WriteReport,
+    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, PurgePreview, PurgeRequest,
+    ShapedData, StructuralChange, StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind,
+    Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
@@ -1655,6 +1655,26 @@ pub fn purge(
         message,
         opts,
     )
+}
+
+/// Read-only preview of each purge request (purge plan §3.6): what it would
+/// close (`objects`, `cascade`: rows counted once per table), its reach
+/// outside its scope and whether it closes vocabulary of a template-stamped
+/// database, through the same sets and statements the commit runs, on one
+/// fresh RO connection opened and closed per call (CLAUDE.md invariant 1).
+/// Nothing is written, so no survivor spares anything: the counts are upper
+/// bounds of a call that also writes. Names are refused as the commit
+/// refuses them.
+pub fn preview_purge(
+    db: &Path,
+    mut requests: Vec<PurgeRequest>,
+) -> Result<Vec<PurgePreview>, DbError> {
+    let mut lookups = Normalized::default();
+    for r in &mut requests {
+        crate::purge::nfc_request(r, &mut lookups);
+    }
+    crate::purge::validate_requests(&requests)?;
+    with_read_plain(db, |conn| crate::purge::preview(conn, &requests))
 }
 
 /// Read-only preview of each object delete (object_delete plan §3, decision D6):

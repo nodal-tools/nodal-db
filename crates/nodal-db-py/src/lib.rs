@@ -510,6 +510,18 @@ impl Database {
     ///   class or parameter rename that changes the folded name needs
     ///   `"allow_on_template": True`, else `TemplateStampedRename` lists the
     ///   refused items.
+    /// * `purges`: list of dicts `{"scope": "values"|"entities"|"activations"|
+    ///   "memberships"|"alternatives"|"scenarios"|"classes"|"parameters"|
+    ///   "value_lists", <filters>, "allow_outside_scope"?,
+    ///   "allow_on_template"?}`; filters: `class`, `parameter`, `alternative`
+    ///   (values), `class` (entities, parameters), `class`, `alternative`
+    ///   (activations), `group_class` (memberships), `except` (alternatives,
+    ///   classes, value_lists). Run last, under the same commit: each closes
+    ///   everything in its scope except exactly what the same call writes
+    ///   (true replace). Outcomes land in the report's `"purges"` list.
+    ///   A reach outside the scopes raises `ApiError` unless allowed; a
+    ///   vocabulary purge on a template-stamped database raises
+    ///   `TemplateStampedPurge` unless `"allow_on_template": True`.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
     /// * `covered_writes`: `"refuse"` (the default) or `"delete_wins"`; see
@@ -532,7 +544,7 @@ impl Database {
     /// `ApiError` and commits nothing. A dropped write is not a write: if
     /// nothing else changes, nothing is committed.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
-                        object_deletes = None, user, message = String::new(),
+                        object_deletes = None, purges = None, user, message = String::new(),
                         force_replace = false, retain_override = None, expect_commit = None,
                         covered_writes = "refuse"))]
     #[allow(clippy::too_many_arguments)]
@@ -543,6 +555,7 @@ impl Database {
         structural: Option<&Bound<'py, PyAny>>,
         deletes: Option<&Bound<'py, PyAny>>,
         object_deletes: Option<&Bound<'py, PyAny>>,
+        purges: Option<&Bound<'py, PyAny>>,
         user: String,
         message: String,
         force_replace: bool,
@@ -570,6 +583,7 @@ impl Database {
                 odels.push(object_delete_from_py(&item?)?);
             }
         }
+        let purges = purge_requests_from_py(purges)?;
         let path = self.path.clone();
         let opts = WriteOptions {
             force_replace,
@@ -577,10 +591,17 @@ impl Database {
             expect_commit,
             covered_writes,
         };
+        // The one write entry point (invariant 2): every channel in one
+        // change set.
+        let set = api::ChangeSet {
+            segments: segs,
+            structural: structs,
+            deletes: dels,
+            object_deletes: odels,
+            purges,
+        };
         let report = py
-            .detach(move || {
-                api::commit_changes(&path, segs, structs, dels, odels, &user, &message, opts)
-            })
+            .detach(move || api::commit_change_set(&path, set, &user, &message, opts))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
@@ -639,6 +660,54 @@ impl Database {
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
+    }
+
+    /// Purge: close out every item of each request's scope in one atomic
+    /// commit (the purges-only convenience over `commit_changes`; see its
+    /// `purges` for the request dicts). A purge keeps history and never
+    /// shrinks the file. Returns the report; its `"purges"` list has one
+    /// outcome per request (`closed_out`, `objects`, `spared`, `unbound`).
+    #[pyo3(signature = (requests, *, user, message = String::new(), retain_override = None,
+                        expect_commit = None))]
+    fn purge<'py>(
+        &self,
+        py: Python<'py>,
+        requests: &Bound<'py, PyAny>,
+        user: String,
+        message: String,
+        retain_override: Option<bool>,
+        expect_commit: Option<i64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let reqs = purge_requests_from_py(Some(requests))?;
+        let path = self.path.clone();
+        let opts = WriteOptions {
+            retain_override,
+            expect_commit,
+            ..Default::default()
+        };
+        let report = py
+            .detach(move || api::purge(&path, reqs, &user, &message, opts))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
+        report_to_py(py, &report)
+    }
+
+    /// Read-only preview of purge requests: per request `objects`,
+    /// `cascade` (rows it would close, per table), `outside_scope` (its reach
+    /// outside every request's scope) and `template_stamped`. Nothing is
+    /// written, so nothing is spared: the counts are upper bounds.
+    fn preview_purge<'py>(
+        &self,
+        py: Python<'py>,
+        requests: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let reqs = purge_requests_from_py(Some(requests))?;
+        let path = self.path.clone();
+        let previews = py
+            .detach(move || api::preview_purge(&path, reqs))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
+        purge_previews_to_py(py, &previews)
     }
 
     /// Read-only preview of object deletes: what `cascade=True` would close

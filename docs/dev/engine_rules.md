@@ -106,6 +106,11 @@ Above 50 keys (`dynamic_or_filter_threshold`, a user setting) the read is
 a sequential scan: correct, but as slow as a whole-parameter read. The
 user docs state the limit in value hits, not names.
 
+A bulk close-out (a purge) resolves the `array_id`s of its scope on the
+narrow columns into a transaction-local table first, then copies the
+pre-images and deletes by `array_id`: a scan of the payload, as any
+whole-scope read is, but never keyed by the key triple.
+
 **Guards.**
 [`crates/nodal-db-core/tests/array_id_index_scan.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/array_id_index_scan.rs)
 (checks the plans of the production statements with `EXPLAIN ANALYZE`)

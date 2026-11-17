@@ -430,11 +430,13 @@ needs = ["skip_unchanged"]
 check = "no commit and no new history row; the 10 000 values read back + digest"
 
 [metric.wr_array_100x8760_changed_pinned]
+layout_floor = 0.030
 class = "io"
 check = "1 commit (the timed rewrite); 100 new history rows; the 876 000 current cells read back + digest"
 note = "100 arrays of 8 760 values, each a ramp whose first (minimum) and last (maximum) elements stay put while every interior element moves by 0.25: the v_min / v_max prefilter passes, so the payload compare (or the stored content hash) proves the change; an untimed seed write first"
 
 [metric.wr_array_100x8760_unchanged]
+layout_floor = 0.010
 class = "io"
 needs = ["skip_unchanged"]
 check = "no commit and no new history row; the 876 000 current cells read back + digest"

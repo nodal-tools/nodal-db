@@ -192,6 +192,89 @@ pub struct DbVocab {
     /// The same for live parameter definitions, keyed by (the class id the
     /// closed row had, folded old name).
     pub renamed_parameters: BTreeMap<(i64, String), Vec<RenamedAway>>,
+    /// Classes removed locally (purge plan §3.8, V-OD1): the folded name
+    /// of every class whose id has no live row any more, closed by a
+    /// commit that is not template-owned ([`template_owned`]). The
+    /// reconcile's removed-locally blocker reads it.
+    pub removed_classes: BTreeMap<String, RemovedLocally>,
+    /// The same for parameter definitions, keyed by (the class id the
+    /// closed row had, folded name).
+    pub removed_parameters: BTreeMap<(i64, String), RemovedLocally>,
+    /// The same for value lists, keyed by folded name.
+    pub removed_value_lists: BTreeMap<String, RemovedLocally>,
+}
+
+/// A vocabulary object whose last row a local (not template-owned) commit
+/// closed: its name as stored and the closing commit.
+#[derive(Clone, Debug)]
+pub struct RemovedLocally {
+    pub name: String,
+    pub at_commit: i64,
+}
+
+/// The template-owned commits (purge plan §3.8, V-S1): every commit that
+/// wrote a version of the reserved metadata key `template_applied_commit`
+/// (each template-apply and migration-step commit writes one), plus the
+/// ranges a `run:` program's progress commit records (`"a..=c"`: the
+/// program's own commits through its progress commit). Inclusive ranges.
+pub fn template_owned(conn: &Connection) -> Result<Vec<(i64, i64)>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT valid_from_commit, value FROM metadata \
+         WHERE lower(name) = 'template_applied_commit'",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (from, value) = row?;
+        out.push((from, from));
+        if let Some((a, b)) = value.split_once("..=") {
+            if let (Ok(a), Ok(b)) = (a.trim().parse::<i64>(), b.trim().parse::<i64>()) {
+                out.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A removed object's key: (the scoping id or 0, folded name).
+type RemovedKey = (i64, String);
+
+/// The vocabulary objects of `table` whose id has no live row, by folded
+/// name (every name the id ever had), with the commit that closed the id's
+/// last row; only those that commit is not template-owned. `key` adds the
+/// row's column that scopes the name (`t.entity_class_id` for a
+/// parameter) or `NULL::BIGINT`.
+fn removed_locally(
+    conn: &Connection,
+    table: &str,
+    key: &str,
+    owned: &[(i64, i64)],
+) -> Result<Vec<(RemovedKey, RemovedLocally)>, DbError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {key}, t.name, x.closed FROM {table} t \
+         JOIN (SELECT id, max(valid_to_commit) AS closed FROM {table} GROUP BY id \
+               HAVING count(*) FILTER (WHERE valid_to_commit IS NULL) = 0) x ON x.id = t.id \
+         ORDER BY x.closed, t.id"
+    ))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Option<i64>>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (scope, name, at_commit) = row?;
+        if owned.iter().any(|&(a, b)| a <= at_commit && at_commit <= b) {
+            continue;
+        }
+        out.push((
+            (scope.unwrap_or(0), fold(&name)),
+            RemovedLocally { name, at_commit },
+        ));
+    }
+    Ok(out)
 }
 
 /// One earlier spelling of a live object (a class or a parameter
@@ -740,6 +823,22 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
                     },
                 );
             }
+        }
+    }
+
+    // --- removed-locally objects (the reconcile's removed-locally blocker,
+    // V-OD1): read whole like the renamed-away spellings; the latest
+    // removal of a fold wins (ordered by closing commit). ---
+    {
+        let owned = template_owned(conn)?;
+        for ((_, f), r) in removed_locally(conn, "entity_class", "NULL::BIGINT", &owned)? {
+            v.removed_classes.insert(f, r);
+        }
+        for (k, r) in removed_locally(conn, "parameter_definition", "t.entity_class_id", &owned)? {
+            v.removed_parameters.insert(k, r);
+        }
+        for ((_, f), r) in removed_locally(conn, "parameter_value_list", "NULL::BIGINT", &owned)? {
+            v.removed_value_lists.insert(f, r);
         }
     }
 

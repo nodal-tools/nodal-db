@@ -685,8 +685,14 @@ impl Database {
     /// a crash between a program's own commit and the progress substamp
     /// re-runs it (the core's Layer-3 contract). A program that raises
     /// aborts the apply; the original exception propagates.
+    ///
+    /// `recreate_removed=True` re-creates the declared classes, parameters
+    /// and value lists that were removed locally (an object delete, a purge,
+    /// `drop_value_list`); without it a changed template refuses on them,
+    /// naming the commit that removed each.
     #[pyo3(signature = (template_path, *, user, message = String::new(), programs = None,
-                        expect_commit = None, allow_retarget = false, allow_downgrade = false))]
+                        expect_commit = None, allow_retarget = false, allow_downgrade = false,
+                        recreate_removed = false))]
     #[allow(clippy::too_many_arguments)]
     fn template_apply<'py>(
         &self,
@@ -698,6 +704,7 @@ impl Database {
         expect_commit: Option<i64>,
         allow_retarget: bool,
         allow_downgrade: bool,
+        recreate_removed: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         // Build the registry for the duration of this call. Each entry wraps
         // the Python callable: re-acquire the GIL only for the call
@@ -748,6 +755,7 @@ impl Database {
             allow_retarget,
             allow_downgrade,
             expect_commit,
+            recreate_removed,
         };
         let result = py.detach(move || {
             let t = tpl::parse_file(&template_path)?;

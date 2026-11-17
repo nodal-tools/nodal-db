@@ -853,8 +853,11 @@ class SpineImporter:
             ) as f:
                 json.dump(tpl, f)  # JSON is valid YAML 1.2
                 tpl_path = f.name
+            # The import re-states the source's vocabulary: declared items a
+            # purge or delete removed are re-created, not refused.
             outcome = db.template_apply(tpl_path, user=self.user,
-                                        message="spine import: vocabulary (as found)")
+                                        message="spine import: vocabulary (as found)",
+                                        recreate_removed=True)
             rep.commits.append(("vocabulary", outcome.get("commit_id")))
             rep.counts["classes"] = len(classes)
             rep.counts["parameter_definitions"] = len(defs)

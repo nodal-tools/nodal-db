@@ -368,6 +368,9 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
             )));
         }
         close_value_list(conn, c, lid)?;
+        // A closed list leaves a template-stamped database unconverged
+        // (purge plan §3.8, V-B2): the next apply replans.
+        clear_metadata(conn, c, "template_content_hash")?;
         Ok(())
     })
 }

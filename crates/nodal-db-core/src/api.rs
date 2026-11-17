@@ -702,6 +702,16 @@ pub fn commit_change_set(
         report
             .warnings
             .extend(object_folds.warnings("object_delete", ""));
+        // An object delete that closed a class or parameter definition
+        // leaves a template-stamped database unconverged: its certified
+        // content hash goes, so the next apply replans and meets the
+        // removed-locally blocker (purge plan §3.8, V-B2).
+        if report.object_deletes.iter().any(|o| {
+            matches!(o.kind, ObjectKind::Class | ObjectKind::Parameter)
+                && matches!(o.result, ObjectDeleteResult::Deleted { .. })
+        }) {
+            crate::template::reconcile::clear_metadata(conn, commit_id, "template_content_hash")?;
+        }
         // `DeleteWins`: a write is dropped only for a delete that took
         // effect; otherwise the whole call is refused (rolled back). Each
         // warning's `by` then names a covering delete that took effect.

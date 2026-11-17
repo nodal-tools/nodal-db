@@ -493,9 +493,6 @@ pub fn commit_changes(
                 &prepared_object_deletes,
             )?;
         }
-        // The name-keyed metadata documents follow the renames, once per
-        // document per call (OD8, B1).
-        rewrite_name_documents(conn, commit_id, &calls)?;
         // `DeleteWins`: what the deletes cover, resolved after the
         // structural changes (a delete may name a referent one of them
         // created or renamed) and before any write.
@@ -639,6 +636,10 @@ pub fn commit_changes(
                 }
             }
         }
+        // The name-keyed metadata documents follow the renames, once per
+        // document per call (OD8, B1), at the end of the call: every
+        // channel has run, so one pass sees all it must follow.
+        rewrite_name_documents(conn, commit_id, &calls)?;
         // `tiers` lists the tiers written; the canonicalization noted every
         // value's tier, unchanged ones included.
         report.tiers.retain(|t| buffers.written_tiers.contains(t));

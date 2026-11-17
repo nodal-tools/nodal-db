@@ -502,10 +502,10 @@ def test_hostile_source_reports_loud_residue(tmp_path):
 
 
 def test_import_stream_with_descriptions_is_idempotent(tmp_path, monkeypatch):
-    """The importer's write stream, replayed on the database it built, makes
-    no commit (skip-unchanged, D1): descriptions are create-only, so the
-    re-stated entities and scenarios are no-ops. The importer itself only
-    writes new files; the replay runs its body against the existing file."""
+    """A write-stream test: the importer only ever writes NEW files, so this
+    replays its write stream (``_import_into``) on the database it built. It
+    makes no commit (skip-unchanged, D1): descriptions are create-only, so
+    the re-stated entities and scenarios are no-ops."""
     import nodal_db
     from spinedb_api import DatabaseMapping
 
@@ -525,9 +525,10 @@ def test_import_stream_with_descriptions_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_purge_classes_then_reimport_converges(tmp_path, monkeypatch):
-    """Purge every class of an imported database, then replay the import on
-    it: the bootstrap apply re-creates the purged vocabulary
-    (recreate_removed) and the data lands again (purge plan V-B2)."""
+    """A write-stream test: the importer only ever writes NEW files, so this
+    replays its write stream (``_import_into``) on a database whose classes
+    a purge closed. The bootstrap apply re-creates the purged vocabulary
+    (``recreate_removed``) and the data lands again (purge plan V-B2)."""
     import nodal_db
 
     spine = make_basic_spine(tmp_path)

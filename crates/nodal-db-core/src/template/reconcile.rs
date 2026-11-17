@@ -668,6 +668,13 @@ fn max_commit(conn: &Connection) -> Result<i64, DbError> {
 /// (CLAUDE.md invariant 1). Best-effort snapshot — [`apply`] recomputes
 /// everything; quote `db_commit` to `expect_commit` to pin it.
 pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
+    plan_with(db, t, &ApplyOptions::default())
+}
+
+/// [`plan`] with the apply's options that change the diff
+/// (`recreate_removed`: the dry run shows the re-creates instead of the
+/// removed-locally blockers).
+pub fn plan_with(db: &Path, t: &Template, opts: &ApplyOptions) -> Result<ReconcilePlan, DbError> {
     // Names in NFC (the text rule, `crate::text`).
     let t = &ir::nfc_names(t);
     let chk = ir::validate(t)?;
@@ -712,7 +719,7 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
             });
             simulate_span(&mut vocab, t, m, &mut warnings, &mut chain_blocked);
         }
-        let mut p = diff(&vocab, &chk, false)?;
+        let mut p = diff(&vocab, &chk, opts.recreate_removed)?;
         p.db_commit = db_commit;
         p.pending_migrations = planned_spans;
         if let Err(e) = guard {
@@ -992,8 +999,17 @@ pub fn apply(
                         "template {} migration {} -> {}: progress after run {p}",
                         t.template.name, span.from, span.to
                     );
-                    let first = cursor + 1;
                     let c = core_write_txn_retrying(db, user, &msg, |conn, c| {
+                        // The range starts after the last template-owned
+                        // commit, not at this apply's cursor: after a crash
+                        // between the program's commits and this one, the
+                        // re-run's range still covers the earlier run's.
+                        let first = super::dbvocab::template_owned(conn)?
+                            .iter()
+                            .map(|&(_, b)| b + 1)
+                            .max()
+                            .unwrap_or(cursor + 1)
+                            .min(cursor + 1);
                         set_metadata(conn, c, "template_migration_step", &substamp)?;
                         // The program's commits through this one are
                         // template-owned (V-S1): the range.
@@ -1168,8 +1184,7 @@ pub fn apply(
 
 fn blocked_error(p: &ReconcilePlan) -> DbError {
     DbError::Api(format!(
-        "template apply refused: {} blocking conflict(s) (in-place reshape of existing \
-         declarations is not supported yet):\n  - {}",
+        "template apply refused: {} blocking conflict(s):\n  - {}",
         p.blocked.len(),
         p.blocked.join("\n  - ")
     ))
@@ -1312,6 +1327,15 @@ fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
             break;
         }
     }
+    // The drop is template-owned: the live names it closes are no longer
+    // "removed locally" after it (the latest closure decides).
+    let closed: HashSet<String> = vocab
+        .classes
+        .keys()
+        .filter(|k| doomed.contains(*k))
+        .cloned()
+        .collect();
+    vocab.removed_classes.retain(|k, _| !closed.contains(k));
     vocab.classes.retain(|k, _| !doomed.contains(k));
     for s in vocab.class_sets.values_mut() {
         s.members.retain(|m| !doomed.contains(&fold(m)));
@@ -1512,7 +1536,10 @@ fn simulate_span(
             }
             MigrationStep::DropParameter { class, parameter } => {
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
-                    c.params.remove(&fold(parameter));
+                    if c.params.remove(&fold(parameter)).is_some() {
+                        let id = c.id;
+                        vocab.removed_parameters.remove(&(id, fold(parameter)));
+                    }
                 }
             }
             MigrationStep::DropClass { class } => simulate_drop_class(vocab, class),
@@ -1528,7 +1555,9 @@ fn simulate_span(
                     })
                     .collect();
                 if bound.is_empty() {
-                    vocab.value_lists.remove(&fold(list));
+                    if vocab.value_lists.remove(&fold(list)).is_some() {
+                        vocab.removed_value_lists.remove(&fold(list));
+                    }
                 } else {
                     blocked.push(format!(
                         "apply will refuse: drop_value_list {list:?} — {} definition(s) \

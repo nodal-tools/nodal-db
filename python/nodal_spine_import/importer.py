@@ -854,7 +854,10 @@ class SpineImporter:
                 json.dump(tpl, f)  # JSON is valid YAML 1.2
                 tpl_path = f.name
             # The import re-states the source's vocabulary: declared items a
-            # purge or delete removed are re-created, not refused.
+            # purge or delete removed are re-created, not refused. (The
+            # importer writes new files, where nothing was removed; this
+            # matters only when its write stream runs against an existing
+            # database.)
             outcome = db.template_apply(tpl_path, user=self.user,
                                         message="spine import: vocabulary (as found)",
                                         recreate_removed=True)

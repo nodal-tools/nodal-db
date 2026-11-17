@@ -100,6 +100,21 @@ answer will be a served API, not a protocol document.
   refused item; resend the ones the user allows with
   `allow_on_template: true`. See
   [Renaming objects](../usage.md#renaming-objects-and-editing-descriptions).
+- A purge of classes, parameters or value lists on a template-stamped
+  database is refused the same way with `TemplateStampedPurge`
+  (`DbError::TemplateStampedPurge`, `nodal_db.TemplateStampedPurge`, an
+  `ApiError` subclass) listing every refused request; resend with
+  `allow_on_template: true`. An object delete of a declared class or
+  parameter, and `drop_value_list`, need no flag. See
+  [Purge](../usage.md#purge).
+- Clients that apply templates: after a purge, an object delete or a
+  `drop_value_list` removed a declared class, parameter or value list, an
+  apply of the same or a changed template refuses with "… was removed
+  locally in commit N …" until it runs with `recreate_removed`
+  (`ApplyOptions::recreate_removed`, Python `recreate_removed=True`, CLI
+  `--recreate-removed`), which re-creates the items with new ids. Ask the
+  user before passing it; `plan_with` / `template_plan(...,
+  recreate_removed=True)` previews the result.
 - **Never call a table macro through an attached database.** Views of
   an attached file (`ATTACH … AS other`, then `other.<view>`) read that
   file, but a table macro called as `other.<macro>(…)` resolves its

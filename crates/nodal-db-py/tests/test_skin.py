@@ -1406,6 +1406,11 @@ def test_purge_in_commit_changes_spares_what_the_call_writes(db):
         db.purge([{"scope": "everything"}], user="t")
     with pytest.raises(nodal_db.ApiError, match="unknown class"):
         db.purge([{"scope": "entities", "class": "nope"}], user="t")
+    # A key the scope does not take refuses (it would widen the purge).
+    with pytest.raises(nodal_db.ApiError, match="does not take"):
+        db.purge([{"scope": "memberships", "class": "unit"}], user="t")
+    with pytest.raises(nodal_db.ApiError, match="does not take"):
+        db.preview_purge([{"scope": "values", "clas": "unit"}])
 
 
 def test_purge_on_a_template_is_typed_and_recreate_removed_converges(db, tmp_path):
@@ -1427,6 +1432,8 @@ def test_purge_on_a_template_is_typed_and_recreate_removed_converges(db, tmp_pat
     assert rep["purges"][0]["objects"] == 2
     with pytest.raises(nodal_db.ApiError, match="removed locally"):
         db.template_apply(str(tpl), user="t")
+    assert db.template_plan(str(tpl))["blocked"]
+    assert db.template_plan(str(tpl), recreate_removed=True)["blocked"] == []
     out = db.template_apply(str(tpl), user="t", recreate_removed=True)
     assert out["converged"]
     assert one_value(db, "SELECT count(*) FROM entity_class WHERE cur_name = 'unit'") == 1

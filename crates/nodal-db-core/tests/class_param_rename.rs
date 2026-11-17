@@ -1772,6 +1772,39 @@ fn object_deletes_drop_their_names_from_the_documents() {
     nodal_db_core::template::validate(&t).unwrap();
 }
 
+#[test]
+fn export_drops_stale_audit_rule_names_with_a_warning() {
+    // A stale document (written by direct SQL, or left by a history-free
+    // extract) still exports: the unknown class's rule and the unknown
+    // requirement are dropped with a warning, and the template validates.
+    let dir = tempfile::tempdir().unwrap();
+    let db = docs_db(&dir);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE metadata SET value = ? WHERE cur_name = 'audit_rules'",
+        [r#"{"conditional_requirements": [
+              {"class": "unit", "selector": "method",
+               "when": {"a": {"require": ["eff", "rate_gone"]}}},
+              {"class": "ghost", "selector": "x", "when": {"a": {"require": ["y"]}}}]}"#],
+    )
+    .unwrap();
+    drop(conn);
+    let (t, warnings) = nodal_db_core::template::export(&db).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("requires \"rate_gone\"")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("rule for class \"ghost\" omitted")),
+        "{warnings:?}"
+    );
+    nodal_db_core::template::validate(&t).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Template reconcile after a rename (tests 25-27, S2 + RenameClass hint)
 // ---------------------------------------------------------------------------

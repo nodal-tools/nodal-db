@@ -87,6 +87,15 @@ fn purge_previews_refuses_and_closes() {
     assert!(out.contains("value_scalar"), "{out}");
     assert_eq!(live(&db, "value_scalar"), 3, "a preview writes nothing");
 
+    let (ok, _, err) =
+        run(bin()
+            .arg("purge")
+            .arg(&db)
+            .args(["--scope", "memberships", "--class", "node"]));
+    assert!(!ok);
+    assert!(err.contains("does not take --class"), "{err}");
+    assert_eq!(live(&db, "value_scalar"), 3);
+
     let (ok, _, err) = run(bin().arg("purge").arg(&db).args(["--scope", "everything"]));
     assert!(!ok);
     assert!(err.contains("unknown scope"), "{err}");

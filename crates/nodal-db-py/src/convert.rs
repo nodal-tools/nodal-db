@@ -541,6 +541,29 @@ fn str_list(obj: &Bound<'_, PyAny>, key: &str) -> PyResult<Vec<String>> {
 
 pub(crate) fn purge_request_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PurgeRequest> {
     let scope_name = req_str(obj, "purge", "scope")?;
+    // A key the scope does not take is refused: ignoring it would silently
+    // widen the purge (e.g. memberships with "class" purges every group).
+    let filters: &[&str] = match scope_name.as_str() {
+        "values" => &["class", "parameter", "alternative"],
+        "entities" | "parameters" => &["class"],
+        "activations" => &["class", "alternative"],
+        "memberships" => &["group_class"],
+        "alternatives" | "classes" | "value_lists" => &["except"],
+        _ => &[],
+    };
+    let dict = obj
+        .cast::<PyDict>()
+        .map_err(|_| ApiError::new_err("a purge request is a dict"))?;
+    for k in dict.keys() {
+        let k: String = k.extract()?;
+        let common = ["scope", "allow_outside_scope", "allow_on_template"];
+        if !common.contains(&k.as_str()) && !filters.contains(&k.as_str()) {
+            return Err(ApiError::new_err(format!(
+                "purge scope {scope_name:?} does not take {k:?} (it takes {filters:?}, \
+                 allow_outside_scope, allow_on_template)"
+            )));
+        }
+    }
     let except = || str_list(obj, "except");
     let scope = match scope_name.as_str() {
         "values" => PurgeScope::Values {

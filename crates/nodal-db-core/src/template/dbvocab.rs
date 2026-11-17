@@ -241,15 +241,18 @@ type RemovedKey = (i64, String);
 
 /// The vocabulary objects of `table` whose id has no live row, by folded
 /// name (every name the id ever had), with the commit that closed the id's
-/// last row; only those that commit is not template-owned. `key` adds the
-/// row's column that scopes the name (`t.entity_class_id` for a
-/// parameter) or `NULL::BIGINT`.
+/// last row. Per name the LATEST such closure decides, and the name is
+/// removed locally only when that commit is not template-owned: an older
+/// local removal must not hide a newer template-owned one (a list a user
+/// dropped, re-created, then dropped and re-declared by a migration step).
+/// `key` adds the row's column that scopes the name (`t.entity_class_id`
+/// for a parameter) or `NULL::BIGINT`.
 fn removed_locally(
     conn: &Connection,
     table: &str,
     key: &str,
     owned: &[(i64, i64)],
-) -> Result<Vec<(RemovedKey, RemovedLocally)>, DbError> {
+) -> Result<BTreeMap<RemovedKey, RemovedLocally>, DbError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {key}, t.name, x.closed FROM {table} t \
          JOIN (SELECT id, max(valid_to_commit) AS closed FROM {table} GROUP BY id \
@@ -263,18 +266,22 @@ fn removed_locally(
             r.get::<_, i64>(2)?,
         ))
     })?;
-    let mut out = Vec::new();
+    // Latest closure per name first (rows come ordered by closing commit),
+    // with its owner; then the template-owned ones drop out.
+    let mut latest: BTreeMap<RemovedKey, (RemovedLocally, bool)> = BTreeMap::new();
     for row in rows {
         let (scope, name, at_commit) = row?;
-        if owned.iter().any(|&(a, b)| a <= at_commit && at_commit <= b) {
-            continue;
-        }
-        out.push((
+        let is_owned = owned.iter().any(|&(a, b)| a <= at_commit && at_commit <= b);
+        latest.insert(
             (scope.unwrap_or(0), fold(&name)),
-            RemovedLocally { name, at_commit },
-        ));
+            (RemovedLocally { name, at_commit }, is_owned),
+        );
     }
-    Ok(out)
+    Ok(latest
+        .into_iter()
+        .filter(|(_, (_, is_owned))| !is_owned)
+        .map(|(k, (r, _))| (k, r))
+        .collect())
 }
 
 /// One earlier spelling of a live object (a class or a parameter
@@ -828,7 +835,7 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
 
     // --- removed-locally objects (the reconcile's removed-locally blocker,
     // V-OD1): read whole like the renamed-away spellings; the latest
-    // removal of a fold wins (ordered by closing commit). ---
+    // closure of a fold decides (removed_locally). ---
     {
         let owned = template_owned(conn)?;
         for ((_, f), r) in removed_locally(conn, "entity_class", "NULL::BIGINT", &owned)? {

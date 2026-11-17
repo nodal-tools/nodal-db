@@ -690,9 +690,12 @@ scope and anything it no longer states must go.
 | `value_lists` (`except`) | every list but those listed, with its members and annotations |
 
 Filter and `except` names are looked up as written (case-insensitively,
-in NFC) after the call's structural changes; an unknown or empty name is
-refused, and so is a name that a rename earlier in the same call
-replaced. Purges run last in the call, under its commit; the report's
+in NFC) after the call's structural changes and value writes (so a class
+a segment of the same call creates is known, with nothing to close yet);
+an unknown or empty name is refused, and so is a name that a rename
+earlier in the same call replaced. A filter or flag the scope does not
+take is refused too (Python and the CLI), since ignoring it would widen
+the purge. Purges run last in the call, under its commit; the report's
 `purges` list has one outcome per request (`closed_out`, `objects`,
 `spared`, `unbound`). A purge that closes nothing and a call that also
 writes nothing make no commit.
@@ -719,12 +722,15 @@ values, activations, memberships and locations. Two limits:
 
 Rows the call itself writes are never closed, and closed values follow
 their definition's retention (`retain_content`, or the call's
-`retain_override`). Structural rows and parameter defaults are always
+`retain_override`; `force_replace` keeps no content, as for a value
+delete). Structural rows and parameter defaults are always
 kept in history.
 
 **Reach outside the scope.** A request whose cascade would close objects
 that no request of the call has in scope is refused, with nothing
-written, and the error lists them per kind and class: N-D entities of
+written, and the error lists them per kind and class. The refusal comes
+only after the call's writes have run (and been rolled back), so preview
+first. The objects it lists are N-D entities of
 other classes that use a purged entity as an element, classes that keep
 a purged class as a dimension (also through a class set), and, for
 `value_lists`, the parameters outside every scope that still bind a
@@ -743,18 +749,23 @@ vocabulary that existed before the call is refused with
 `nodal_db.TemplateStampedPurge`, an `ApiError` subclass), listing every
 such request; resend it with `"allow_on_template": True`. Data scopes
 need no flag, also for entities the template seeded, and re-creating
-seeds is the template's (or the import's) job. A purge that closes
-vocabulary withdraws the template's certified content hash, so the next
-apply of the same template does not skip as a no-op: it stops with
+seeds is the template's (or the import's) job. An object delete of a
+declared class or parameter, and `drop_value_list`, need no
+`allow_on_template` (they name what they remove); a purge does, since
+its scope covers vocabulary it does not name.
+
+A purge, object delete or `drop_value_list` that closes vocabulary
+withdraws the template's certified content hash, so the next apply of
+**the same template** no longer skips as a no-op, and neither the same
+nor a changed template re-creates what was removed: the apply stops with
 "class `X` was removed locally in commit N: re-create it with
 `recreate_removed`, or drop it from the template". Apply with
-`recreate_removed=True` (Python) or `ApplyOptions::recreate_removed`
-(Rust) to re-create the removed items with new ids; the plan notes each.
-The Spine importer does this itself, since an import re-states its
-vocabulary. **The same now holds for object deletes**: deleting a
-declared class or parameter, or `drop_value_list` on a declared list,
-blocks the next apply of a changed template until `recreate_removed`
-(it used to re-create them silently). Removals made by the template's
+`recreate_removed=True` (Python), `ApplyOptions::recreate_removed` (Rust)
+or `template apply --recreate-removed` (CLI) to re-create the removed
+items with new ids; the plan notes each, and `template_plan` /
+`template plan` take the same option to preview it. **This is a
+behaviour change for object deletes and `drop_value_list`** of declared
+items: an apply used to re-create them silently. Removals made by the template's
 own migration steps and `run:` programs never block. After a
 history-free extract the removal history is gone, and a changed template
 re-creates such items silently again.
@@ -769,18 +780,23 @@ audit rules document is removed.
 **History and size.** A purge closes rows; it never removes them. As-of
 reads before the purge see everything, no erasure marker is written, and
 the file does not shrink: it grows by the closed rows' new versions until
-[compaction](features.md#compaction). Purging a large tier is one long transaction
-(about ten minutes for a hundred million long-tier cells), and purging
-and re-importing on every run without unchanged-value skipping grows the
-history by the whole scope each time. To discard data for good, use
+[compaction](features.md#compaction). A purge is one transaction that
+holds the database's write lock throughout: purging about 105 million
+long-tier cells took about ten minutes and peaked at 3.4 GB of memory,
+within the 6.4 GB DuckDB limit of an 8 GB budget (scalars and arrays are
+far cheaper). Preview a large purge first. Purging and re-importing on
+every run without unchanged-value skipping grows the history by the
+whole scope each time. To discard data for good, use
 [Erase an alternative](#erase-an-alternative); to start over without the
 history, [extract a database without its history](#extract-a-database-without-its-history)
 or import into a new file.
 
 **Preview.** `preview_purge` reports, per request, the objects and rows
 (per table) it would close, its reach outside the scope and whether it
-closes template vocabulary. It writes nothing, so nothing is spared: its
-counts are upper bounds of a call that also writes.
+closes template vocabulary. A row an earlier request of the call covers
+counts in that earlier request only, as in the commit. It writes
+nothing, so nothing is spared: its counts are upper bounds of a call
+that also writes.
 
 ### Read with SQL
 

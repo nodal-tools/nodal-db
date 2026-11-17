@@ -522,6 +522,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             import::require_db(&db)?;
             use nodal_db_core::types::{PurgeRequest, PurgeScope};
+            // A flag the scope does not take is refused: ignoring it would
+            // silently widen the purge.
+            let takes: &[&str] = match scope.as_str() {
+                "values" => &["class", "parameter", "alternative"],
+                "entities" | "parameters" => &["class"],
+                "activations" => &["class", "alternative"],
+                "memberships" => &["group-class"],
+                "alternatives" | "classes" | "value-lists" | "value_lists" => &["except"],
+                _ => &[],
+            };
+            for (flag, given) in [
+                ("class", class.is_some()),
+                ("parameter", parameter.is_some()),
+                ("alternative", alternative.is_some()),
+                ("group-class", group_class.is_some()),
+                ("except", !except.is_empty()),
+            ] {
+                if given && !takes.contains(&flag) {
+                    bail!("--scope {scope} does not take --{flag}");
+                }
+            }
             let s = match scope.as_str() {
                 "values" => PurgeScope::Values {
                     class,

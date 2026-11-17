@@ -246,3 +246,55 @@ fn a_class_a_run_program_closes_never_blocks() {
         1
     );
 }
+
+/// The latest closure of a name decides: a local removal, a re-create, then
+/// a migration step that drops and re-declares the list does not block on
+/// the older local removal (templates review item 2).
+#[test]
+fn an_older_local_removal_does_not_hide_a_newer_template_owned_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = loaded(&dir);
+    drop_value_list(&db, "L", "t").unwrap();
+    apply_str(&db, &tpl("1", ""), recreate()).unwrap();
+    let v3 = tpl(
+        "3",
+        "migrations:\n  - from: \"1\"\n    to: \"2\"\n    steps:\n      - drop_value_list: {list: L}\n  - from: \"2\"\n    to: \"3\"\n    steps: []\n",
+    );
+    let out = apply_str(&db, &v3, ApplyOptions::default()).unwrap();
+    assert!(out.converged);
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM parameter_value_list WHERE cur_name = 'l'"
+        ),
+        1
+    );
+}
+
+/// `template plan` takes recreate_removed too: the dry run shows the
+/// re-create instead of the blocker.
+#[test]
+fn plan_previews_recreate_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = loaded(&dir);
+    delete(&db, ObjectKind::Class, None, "unit");
+    let t = parse_str(&tpl("1", "")).unwrap();
+    let p = nodal_db_core::template::plan(&db, &t).unwrap();
+    assert!(
+        p.blocked.iter().any(|b| b.contains("removed locally")),
+        "{:?}",
+        p.blocked
+    );
+    let p = nodal_db_core::template::plan_with(&db, &t, &recreate()).unwrap();
+    assert!(p.blocked.is_empty(), "{:?}", p.blocked);
+    assert!(
+        p.notes.iter().any(|n| n.contains("re-created")),
+        "{:?}",
+        p.notes
+    );
+    // The apply's refusal names the blocker without the reshape wording.
+    let err = apply_str(&db, &tpl("1", ""), ApplyOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("reshape"), "{err}");
+}

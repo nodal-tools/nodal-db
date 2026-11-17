@@ -737,16 +737,23 @@ impl Database {
     /// template file, diff it against the database, and return the plan as a
     /// dict (`"text"` is the core's human rendering; quote `"db_commit"` to
     /// `template_apply(expect_commit=...)` to pin plan -> apply).
+    /// `recreate_removed=True` plans as that apply option would.
+    #[pyo3(signature = (template_path, *, recreate_removed = false))]
     fn template_plan<'py>(
         &self,
         py: Python<'py>,
         template_path: PathBuf,
+        recreate_removed: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let path = self.path.clone();
+        let opts = tpl::ApplyOptions {
+            recreate_removed,
+            ..Default::default()
+        };
         let plan = py
             .detach(move || {
                 let t = tpl::parse_file(&template_path)?;
-                tpl::plan(&path, &t)
+                tpl::plan_with(&path, &t, &opts)
             })
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;

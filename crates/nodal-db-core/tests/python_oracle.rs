@@ -87,6 +87,7 @@ fn independent_python_oracle_reproduces_every_vector() {
         "conformance/oracle/nfc16.py",
         "conformance/oracle/encode_axis.py",
         "conformance/oracle/encode_value.py",
+        "conformance/oracle/array_hash.py",
     ] {
         let oracle = root.join(rel);
         let output = Command::new(&python)

@@ -1,0 +1,21 @@
+{
+  "description": "the smallest subnormal, the largest subnormal, +inf and -inf",
+  "element_type": "double",
+  "values": [
+    5e-324,
+    2.225073858507201e-308,
+    0.0,
+    0.0
+  ],
+  "bits_at": [
+    [
+      2,
+      "0x7ff0000000000000"
+    ],
+    [
+      3,
+      "0xfff0000000000000"
+    ]
+  ],
+  "expected_hash_u64": 16331846760754715164
+}

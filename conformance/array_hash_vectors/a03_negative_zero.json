@@ -1,0 +1,8 @@
+{
+  "description": "-0.0 hashes its own bits (0x8000000000000000), so it differs from a02: no canonicalization inside the hash",
+  "element_type": "double",
+  "values": [
+    -0.0
+  ],
+  "expected_hash_u64": 9407778237848358495
+}

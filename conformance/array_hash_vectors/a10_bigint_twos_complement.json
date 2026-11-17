@@ -1,0 +1,12 @@
+{
+  "description": "BIGINT elements as two's-complement little-endian words, extremes included",
+  "element_type": "bigint",
+  "values": [
+    -1,
+    0,
+    1,
+    -9223372036854775808,
+    9223372036854775807
+  ],
+  "expected_hash_u64": 11006086568776536171
+}

@@ -1,0 +1,10 @@
+{
+  "description": "a small float payload in stored (row-major) order",
+  "element_type": "double",
+  "values": [
+    1.5,
+    2.5,
+    3.5
+  ],
+  "expected_hash_u64": 6734720023283317961
+}

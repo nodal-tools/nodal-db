@@ -1,0 +1,6 @@
+{
+  "description": "the empty payload hashes the empty input (no length prefix)",
+  "element_type": "double",
+  "values": [],
+  "expected_hash_u64": 3244421341483603138
+}

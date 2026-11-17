@@ -272,10 +272,12 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// Precedents: the DB-identity metadata row (20fe969) added bootstrap
 /// data — no bump; the `erasure_marker` base table (0.3) changed the table set
 /// — bump; the `array_id` surrogate key on `value_array` / `value_array_hist`
-/// (this version) changed two tables' insertable columns — bump. Consequence of a bump (erasure_compaction_plan §9 step
+/// (0.4) changed two tables' insertable columns — bump; the `content_hash`
+/// column on the same two tables (this version, skip-unchanged P3) — bump.
+/// Consequence of a bump (erasure_compaction_plan §9 step
 /// 1): existing dev DBs refuse compaction until re-inited/re-imported —
 /// pre-freeze, re-init IS the migration story.
-pub const SCHEMA_VERSION: &str = "0.4-array-id";
+pub const SCHEMA_VERSION: &str = "0.5-array-hash";
 
 /// Default byte-growth watermark for [`compact_if_needed`]: repack once the DB
 /// file has grown to at least this multiple of its size right after the last

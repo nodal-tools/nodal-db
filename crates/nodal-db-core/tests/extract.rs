@@ -12,6 +12,8 @@
 //! whose default catalog is the file in question: a macro reached through an
 //! attached catalog binds to the caller's catalog (pinned by T11 below).
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -971,9 +973,11 @@ fn extract_keeps_array_ids_and_sequence_stride() {
     let fx = churned_source(dir.path());
     let dest = dir.path().join("extract.duckdb");
     extract(&fx.db, &dest, &opts("tester")).expect("extract");
-    let live = "SELECT array_id, entity_id, parameter_definition_id, alternative_id, version \
-                FROM value_array";
+    let live = "SELECT array_id, entity_id, parameter_definition_id, alternative_id, version, \
+                content_hash FROM value_array";
     assert_eq!(fingerprint(&fx.db, live), fingerprint(&dest, live));
+    assert!(common::assert_array_hashes(&fx.db) > 0);
+    assert!(common::assert_array_hashes(&dest) > 0);
     assert_eq!(
         scalar(
             &dest,
@@ -1339,7 +1343,10 @@ fn t2_asof_extract_equals_source_asof_macros() {
         )
         .unwrap_or_else(|e| panic!("as-of {n}: {e}"));
         assert_eq!(r.horizon_commit, n);
+        // Promoted rows carry their hist source's content_hash (compared in
+        // assert_asof_equal: value_array_asof includes it), the true one.
         assert_asof_equal(src, &dest, n);
+        common::assert_array_hashes(&dest);
 
         // The log is cut at N (verbatim), then E.
         let log = format!("SELECT * FROM \"commit\" WHERE id <= {n}");

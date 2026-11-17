@@ -8,6 +8,8 @@
 //! the row count and an order-independent content hash of every base table
 //! are equal before and after.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -246,6 +248,8 @@ fn identical_rewrite_is_unchanged_in_every_tier_and_commits_nothing() {
         assert_eq!(r.axes_created, 0);
         assert_audits_clean(&db);
     }
+    // Every array row carries its payload's hash (skip-unchanged P3).
+    assert_eq!(common::assert_array_hashes(&db), 4);
 }
 
 /// Through `history::write_value` inside a caller's own transaction: the

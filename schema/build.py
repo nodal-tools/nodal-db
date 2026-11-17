@@ -32,7 +32,7 @@ SCHEMA_DIR = pathlib.Path(__file__).resolve().parent
 MINIMUM_DUCKDB = (2, 0)
 
 # Must match the bootstrap row in 900_bootstrap.sql.
-SCHEMA_VERSION = "0.4-array-id"
+SCHEMA_VERSION = "0.5-array-hash"
 
 
 def check_duckdb_version() -> None:

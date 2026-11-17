@@ -1317,12 +1317,26 @@ fn dump(db: &Path, out: &mut String) {
             writeln!(out, "{}", cells.join("|")).unwrap();
         }
     };
+    // The array payload hash (`content_hash`, schema 0.5-array-hash) is
+    // excluded where the column exists, and so is the `schema_version`
+    // metadata row: both differ between a 0.4 and a 0.5 arm by definition,
+    // and everything else must stay byte-identical (skip-unchanged P3, B2).
+    let hashed = names(
+        "SELECT table_name FROM duckdb_columns() \
+         WHERE database_name = current_database() AND schema_name = 'main' \
+           AND column_name = 'content_hash' AND table_name LIKE 'value_array%' \
+         ORDER BY table_name",
+    );
     for t in &tables {
         let sql = match t.as_str() {
             "commit" => "SELECT * EXCLUDE (timestamp) FROM \"commit\" ORDER BY id".to_string(),
-            "metadata" => "SELECT * FROM metadata WHERE lower(name) <> 'db_identity' \
+            "metadata" => "SELECT * FROM metadata \
+                           WHERE lower(name) NOT IN ('db_identity', 'schema_version') \
                            ORDER BY ALL"
                 .to_string(),
+            _ if hashed.contains(t) => {
+                format!("SELECT * EXCLUDE (content_hash) FROM \"{t}\" ORDER BY ALL")
+            }
             _ => format!("SELECT * FROM \"{t}\" ORDER BY ALL"),
         };
         q(t, &sql);

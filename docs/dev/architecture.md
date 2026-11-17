@@ -265,9 +265,14 @@ columns*, not on a second canonicalization or a hash: the new side is
 exactly what the encoder would insert, the stored side is read raw, and
 equal means the same tier, binding (`parameter_type_id`), axis ids, and
 per row or cell the same `value_kind` and payload bits, with the row's
-content retained. Every doubt errs toward "changed": a false "changed"
-costs one extra version, a false "unchanged" would silently drop a
-write. A long value is diffed cell by cell: when every current cell
+content retained. For arrays the live probe also reads the stored payload
+hash (`content_hash`, XXH3-64 of the payload's element bits): a stored
+hash that differs from the new payload's proves "changed" without
+fetching the payload, but only the bytes prove "unchanged" (a matching
+or NULL hash falls through to the byte compare), so a wrong stored hash
+costs one version, never a write. Every doubt errs toward "changed": a
+false "changed" costs one extra version, a false "unchanged" would
+silently drop a write. A long value is diffed cell by cell: when every current cell
 shares one set of axis ids, one value kind and one binding, equal to
 the new value's, only the changed and removed cells are closed out (one
 UPDATE joined on the bound positions, in chunks of 16 384) and only the

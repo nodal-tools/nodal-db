@@ -124,6 +124,11 @@ These hold for every stable object with value columns (`value_cells`,
 - Ids (`entity_id`, `parameter_definition_id`, …) are stable within one
   file but neither dense, ordered nor portable between files.
   `value_array_current.array_id` is a storage handle, never an identity.
+- `content_hash` (`value_array_current`, `value_array_asof`; not in
+  `value_array_asof_for`) is the array payload's XXH3-64 hash over its
+  element bits, a write-path accelerator: never an identity, never a
+  proof of equality, NULL when unknown (rows written by plain SQL,
+  history stubs).
 - Types: the generated reference lists each column's DuckDB type. The
   stable objects use `BIGINT`, `INTEGER`, `SMALLINT`, `DOUBLE`,
   `BOOLEAN`, `VARCHAR`, `TIMESTAMP` and the lists `DOUBLE[]`, `BIGINT[]`.

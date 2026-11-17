@@ -8,6 +8,8 @@
 //! The generated-column drift guard (R3) and the self-check discrepancy guard
 //! (B3) need private access and live as in-module unit tests in `compaction.rs`.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -904,7 +906,8 @@ fn write_array(db: &Path, entity: &str, vals: &[f64]) {
 
 /// Compaction copies every `array_id` verbatim (live and `_hist`), and the
 /// sequence restore keeps `seq_value_array`'s INCREMENT BY 2 (F10: a bare
-/// `START WITH n` used to reset it to 1) and the ids' parity.
+/// `START WITH n` used to reset it to 1) and the ids' parity. Every
+/// `content_hash` survives too (skip-unchanged P3).
 #[test]
 fn compact_preserves_array_ids_and_sequence_stride() {
     let dir = tempfile::tempdir().unwrap();
@@ -915,8 +918,12 @@ fn compact_preserves_array_ids_and_sequence_stride() {
             write_array(&db, e, &[i as f64, 1.0, 2.0]);
         }
     }
-    let ids_query = "SELECT 'live', array_id, entity_id, version FROM value_array \
-                     UNION ALL SELECT 'hist', array_id, entity_id, version FROM value_array_hist";
+    let ids_query = "SELECT 'live', array_id, entity_id, version, content_hash \
+                     FROM value_array \
+                     UNION ALL SELECT 'hist', array_id, entity_id, version, content_hash \
+                     FROM value_array_hist";
+    let rows = common::assert_array_hashes(&db);
+    assert_eq!(rows, 12);
     let before = fingerprint(&db, ids_query);
     let last_before = scalar(
         &db,
@@ -928,8 +935,9 @@ fn compact_preserves_array_ids_and_sequence_stride() {
     assert_eq!(
         fingerprint(&db, ids_query),
         before,
-        "array_ids copied verbatim"
+        "array_ids and content hashes copied verbatim"
     );
+    assert_eq!(common::assert_array_hashes(&db), rows);
     assert_eq!(
         scalar(
             &db,

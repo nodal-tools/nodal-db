@@ -9,6 +9,8 @@
 //! commit id (the DB bootstraps commit id 1, so step N's write is commit N+1);
 //! `null` means the row is current (`valid_to_commit IS NULL`).
 
+mod common;
+
 use std::path::PathBuf;
 
 use duckdb::Connection;
@@ -214,6 +216,9 @@ fn run_case(path: &std::path::Path) {
 
         assert_step(&db, &key, &step.expect, &commit_ids, path, i + 1);
     }
+    // Every array row the core wrote carries its payload's hash (stubs
+    // none; skip-unchanged P3).
+    common::assert_array_hashes(&db);
 }
 
 fn resolve(step: Option<usize>, commit_ids: &[i64]) -> Option<i64> {

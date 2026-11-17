@@ -138,6 +138,8 @@ CREATE TABLE value_array (
   CHECK ((values IS NULL) != (values_int IS NULL)),  -- exactly one populated (current table only)
   v_min DOUBLE, v_max DOUBLE,        -- per-row pruning metadata (Timescale lesson, VMP Part 3);
                                       -- DOUBLE for both kinds (int min/max cast when exact, else NULL)
+  content_hash UBIGINT,               -- XXH3-64 of the payload's elements (canonical_encoding.md §13);
+                                      -- unchanged-write accelerator, never trusted; NULL = unknown
   UNIQUE (entity_id, parameter_definition_id, alternative_id)   -- uniqueness of the triple, engine-enforced (VMP Part 2)
 );
 
@@ -164,6 +166,7 @@ CREATE TABLE value_array_hist (
   values     DOUBLE[],                -- NULL when content_retained = FALSE (stub)
   values_int BIGINT[],                -- sibling; NULL for float rows or stubs (NO XOR: stubs null both)
   v_min DOUBLE, v_max DOUBLE,
+  content_hash UBIGINT,               -- copied from the live row; NULL on a stub
   valid_to_commit          BIGINT NOT NULL,
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
   CHECK (valid_to_commit > valid_from_commit)   -- span coherence (critique F2)

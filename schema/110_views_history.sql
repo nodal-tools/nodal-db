@@ -262,7 +262,7 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 CREATE MACRO value_array_asof(c) AS TABLE
 SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
        valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
-       values, values_int, v_min, v_max,
+       values, values_int, v_min, v_max, content_hash,
        NULL::BIGINT AS valid_to_commit, TRUE AS content_retained
 FROM value_array
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
@@ -271,7 +271,7 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
 UNION ALL
 SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id,
        valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id,
-       values, values_int, v_min, v_max,
+       values, values_int, v_min, v_max, content_hash,
        valid_to_commit, content_retained
 FROM value_array_hist
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
@@ -279,7 +279,9 @@ WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
   AND valid_from_commit <= c AND valid_to_commit > c;
 
 -- One array value as of commit c: value_array_asof(c) WHERE <the key
--- triple>, the same columns and the same erasure guard in both legs, but the
+-- triple>, the same columns except the mirror's content_hash (a storage
+-- accelerator, not part of the stable surface) and the same erasure guard in
+-- both legs, but the
 -- current leg is fetched by array_id (index; fast_point_reads_PLAN §5.3).
 -- Each leg resolves its key on narrow columns first, as a scalar folded
 -- with coalesce(…, -1): a miss probes -1, which lies below every zone map,

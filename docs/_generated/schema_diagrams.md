@@ -552,6 +552,7 @@ erDiagram
         BIGINT_list values_int
         DOUBLE v_min
         DOUBLE v_max
+        UBIGINT content_hash
     }
     value_array }o..|| alternative : "alternative_id"
     value_array }o--|| axis : "axis1_id, axis2_id, axis3_id, axis4_id"
@@ -566,7 +567,6 @@ erDiagram
 erDiagram
     direction LR
     value_array_hist {
-        BIGINT array_id
         BIGINT entity_id FK
         BIGINT parameter_definition_id FK
         BIGINT alternative_id FK
@@ -575,11 +575,7 @@ erDiagram
         BIGINT axis2_id FK
         BIGINT axis3_id FK
         BIGINT axis4_id FK
-        DOUBLE_list values
-        BIGINT_list values_int
-        DOUBLE v_min
-        DOUBLE v_max
-        BOOLEAN content_retained
+        more columns "+7 non-key, see column list"
     }
     value_array_hist }o..|| alternative : "alternative_id"
     value_array_hist }o..|| axis : "axis1_id, axis2_id, axis3_id, axis4_id"
@@ -656,6 +652,7 @@ erDiagram
     | `value_array` | `values_int` | `BIGINT[]` | yes |  |
     | `value_array` | `v_min` | `DOUBLE` | yes |  |
     | `value_array` | `v_max` | `DOUBLE` | yes |  |
+    | `value_array` | `content_hash` | `UBIGINT` | yes |  |
     | `value_array_hist` | `array_id` | `BIGINT` |  |  |
     | `value_array_hist` | `entity_id` | `BIGINT` |  | FK |
     | `value_array_hist` | `parameter_definition_id` | `BIGINT` |  | FK |
@@ -671,6 +668,7 @@ erDiagram
     | `value_array_hist` | `values_int` | `BIGINT[]` | yes |  |
     | `value_array_hist` | `v_min` | `DOUBLE` | yes |  |
     | `value_array_hist` | `v_max` | `DOUBLE` | yes |  |
+    | `value_array_hist` | `content_hash` | `UBIGINT` | yes |  |
     | `value_array_hist` | `valid_to_commit` | `BIGINT` |  |  |
     | `value_array_hist` | `content_retained` | `BOOLEAN` |  |  |
     | `value_long` | `entity_id` | `BIGINT` |  | FK |

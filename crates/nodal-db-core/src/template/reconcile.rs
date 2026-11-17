@@ -2470,8 +2470,6 @@ impl IdCache {
 //     (review item 20: replaces the hand-written copies; RenameParameter /
 //     MoveParameter / UpdateParameter share one parameter_definition INSERT) --
 
-/// Close the current row(s) of `table` carrying `id` (versioned tables share
-/// the id across versions; exactly one row is current). Returns rows closed.
 /// Count the CURRENT parameter definitions still bound to a value list — the
 /// orphan-only guard shared by the `drop_value_list` migration step and the
 /// [`crate::verbs::drop_value_list`] verb (a bound list has a live binding a
@@ -2552,6 +2550,8 @@ fn close_value_lists_where(conn: &Connection, c: i64, ids: &str) -> Result<Close
     })
 }
 
+/// Close the current row of `table` carrying `id` (versioned tables share
+/// the id across versions; exactly one row is current). Returns rows closed.
 fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
     let n = conn.execute(
         &format!("UPDATE {table} SET valid_to_commit = ? WHERE id = ? AND valid_to_commit IS NULL"),

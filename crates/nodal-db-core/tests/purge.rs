@@ -1546,17 +1546,29 @@ fn classes_purge_with_restated_classes_keeps_their_descriptors() {
 fn a_rename_and_a_purge_rewrite_the_documents_once() {
     let dir = tempfile::tempdir().unwrap();
     let db = stamped(&dir);
-    // Rename unit -> gen and purge gen.rate in the same call: the key
-    // "unit.rate" goes (pre-call name), "unit.eff" moves to "gen.eff".
+    // Rename unit -> gen and purge gen's parameters except the re-stated
+    // method, in one call: "unit.method" moves to "gen.method" and
+    // "unit.eff" (pre-call name) goes; the rule follows the class and
+    // loses its closed requirements (rate, eff: every branch empty, so it
+    // goes, and the document is cleared).
     let r = call(
         &db,
         ChangeSet {
-            structural: vec![SC::RenameEntityClass {
-                current: "unit".into(),
-                new_name: "gen".into(),
-                description: None,
-                allow_on_template: true,
-            }],
+            structural: vec![
+                SC::RenameEntityClass {
+                    current: "unit".into(),
+                    new_name: "gen".into(),
+                    description: None,
+                    allow_on_template: true,
+                },
+                SC::CreateParameter {
+                    class: "gen".into(),
+                    name: "method".into(),
+                    types: vec![],
+                    value_list: None,
+                    description: None,
+                },
+            ],
             purges: vec![allowed(PS::Parameters {
                 class: Some("gen".into()),
             })],
@@ -1565,26 +1577,65 @@ fn a_rename_and_a_purge_rewrite_the_documents_once() {
     )
     .unwrap();
     let c = r.commit_id;
-    // method, eff and rate all closed (none re-stated): every rule goes.
     let p: serde_json::Value = serde_json::from_str(&meta(&db, "presentation").unwrap()).unwrap();
     let keys: Vec<&String> = p["parameter_group_membership"]
         .as_object()
         .unwrap()
         .keys()
         .collect();
-    assert_eq!(keys, ["node.demand"]);
-    assert_eq!(
-        q(
-            &db,
-            &format!(
-                "SELECT count(*) FROM metadata WHERE lower(name) = 'presentation' \
-                         AND valid_from_commit = {c}"
-            )
-        ),
-        1,
-        "written once"
-    );
+    assert_eq!(keys, ["gen.method", "node.demand"]);
+    for key in ["presentation", "audit_rules"] {
+        assert_eq!(
+            q(
+                &db,
+                &format!(
+                    "SELECT count(*) FROM metadata WHERE lower(name) = '{key}' \
+                     AND (valid_from_commit = {c} OR valid_to_commit = {c})"
+                )
+            ),
+            if key == "presentation" { 2 } else { 1 },
+            "{key}: written (or cleared) once"
+        );
+    }
     assert!(meta(&db, "audit_rules").is_none());
+
+    // A rename and an object delete of gen.eff in one call: the rule moves
+    // to gen and keeps branch b with rate only.
+    let dir3 = tempfile::tempdir().unwrap();
+    let db3 = stamped(&dir3);
+    call(
+        &db3,
+        ChangeSet {
+            structural: vec![SC::RenameEntityClass {
+                current: "unit".into(),
+                new_name: "gen".into(),
+                description: None,
+                allow_on_template: true,
+            }],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Parameter,
+                    class: Some("gen".into()),
+                    target: ObjectRef::Name("eff".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rules: serde_json::Value =
+        serde_json::from_str(&meta(&db3, "audit_rules").unwrap()).unwrap();
+    let rule = &rules["conditional_requirements"][0];
+    assert_eq!(rule["class"], "gen");
+    assert_eq!(rule["when"]["b"]["require"], serde_json::json!(["rate"]));
+    let p: serde_json::Value = serde_json::from_str(&meta(&db3, "presentation").unwrap()).unwrap();
+    let keys: Vec<&String> = p["parameter_group_membership"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(keys, ["gen.method", "node.demand"]);
 
     // An object delete of a parameter removes its keys too.
     let dir2 = tempfile::tempdir().unwrap();
@@ -1659,6 +1710,70 @@ fn classes_except_must_be_closed_under_class_set_dimensions() {
             "SELECT name FROM entity_class WHERE valid_to_commit IS NULL ORDER BY name"
         ),
         ["k", "q"]
+    );
+}
+
+/// `force_replace` stubs every value a purge closes, as for a value delete.
+#[test]
+fn force_replace_stubs_purged_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let r = purge(
+        &db,
+        vec![req(PS::Values {
+            class: Some("unit".into()),
+            parameter: None,
+            alternative: None,
+        })],
+        "t",
+        "m",
+        WriteOptions {
+            force_replace: true,
+            ..o()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM value_scalar WHERE valid_to_commit = {} \
+                         AND NOT content_retained AND v_float IS NULL",
+                r.commit_id
+            )
+        ),
+        2
+    );
+}
+
+/// Purge names resolve after the call's writes: a class and alternative a
+/// segment auto-creates are known, and their pre-call scope is empty.
+#[test]
+fn names_a_segment_auto_creates_are_known_to_the_purge() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let r = call(
+        &db,
+        ChangeSet {
+            segments: vec![seg("fresh", "p", "new_alt", scalars(&[("f1", 1.0)]))],
+            purges: vec![req(PS::Values {
+                class: Some("fresh".into()),
+                parameter: Some("p".into()),
+                alternative: Some("new_alt".into()),
+            })],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(r.commit_id > 0);
+    assert_eq!(r.purges[0].closed_out.total_rows, 0);
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE valid_to_commit IS NULL AND v_float = 1 \
+                AND entity_id = (SELECT id FROM entity WHERE name = 'f1')"
+        ),
+        1
     );
 }
 
@@ -1772,11 +1887,9 @@ fn preview_matches_the_commit_without_survivors() {
     for (p, o) in pv.iter().zip(&r.purges) {
         assert_eq!(p.request_index, o.request_index);
         assert_eq!(p.objects, o.objects);
-        if o.request_index != 2 {
-            // Request 2's values were already closed by request 0 in the
-            // commit; the preview counts each request on its own.
-            assert_eq!(p.cascade, o.closed_out, "request {}", o.request_index);
-        }
+        // Request 2's values are closed by request 0 first: the preview
+        // does not count them twice either.
+        assert_eq!(p.cascade, o.closed_out, "request {}", o.request_index);
         assert!(p.outside_scope.is_empty());
         assert!(!p.template_stamped);
     }

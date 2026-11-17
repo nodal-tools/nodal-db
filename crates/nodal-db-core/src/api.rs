@@ -564,12 +564,6 @@ pub fn commit_change_set(
                 &prepared_object_deletes,
             )?;
         }
-        // Purge names resolve here, after the structural changes and before
-        // any write: an unknown or renamed-away name refuses the call
-        // before the writes run (purge plan §3.5.2).
-        let mut purge_folds = NameFolds::default();
-        let purge_scopes = crate::purge::resolve_requests(conn, &purges, &calls, &mut purge_folds)?;
-        report.warnings.extend(purge_folds.warnings("purge", ""));
         // `DeleteWins`: what the deletes cover, resolved after the
         // structural changes (a delete may name a referent one of them
         // created or renamed) and before any write.
@@ -664,6 +658,13 @@ pub fn commit_change_set(
         // The remaining deferred writes, before any delete reads value rows
         // (deletes and object deletes run after every write, as before).
         buffers.flush(conn, commit_id, &mut report)?;
+        // Purge names resolve after the writes (purge plan §3.5.2; review):
+        // a class, parameter or alternative a segment of this call
+        // auto-created is known (its pre-call scope is empty). An unknown or
+        // renamed-away name refuses the whole call (it rolls back).
+        let mut purge_folds = NameFolds::default();
+        let purge_scopes = crate::purge::resolve_requests(conn, &purges, &calls, &mut purge_folds)?;
+        report.warnings.extend(purge_folds.warnings("purge", ""));
         if test_hooks::take_injected_conflict() {
             // A DuckDB error carrying the `Conflict` substring the retry
             // loop keys on (`conn::is_conflict`).
@@ -706,10 +707,10 @@ pub fn commit_change_set(
         // leaves a template-stamped database unconverged: its certified
         // content hash goes, so the next apply replans and meets the
         // removed-locally blocker (purge plan §3.8, V-B2).
-        let deleted_vocabulary = report.object_deletes.iter().any(|o| {
-            matches!(o.kind, ObjectKind::Class | ObjectKind::Parameter)
-                && matches!(o.result, ObjectDeleteResult::Deleted { .. })
-        });
+        // Read from the rows, not the outcomes: only a pre-call class or
+        // definition whose id has no live row left counts.
+        let deleted_vocabulary = !prepared_object_deletes.is_empty()
+            && crate::purge::closed_vocabulary(conn, commit_id)?;
         if deleted_vocabulary {
             crate::template::reconcile::clear_metadata(conn, commit_id, "template_content_hash")?;
         }
@@ -733,7 +734,13 @@ pub fn commit_change_set(
                 scopes: &purge_scopes,
                 touches: &touches,
                 written: &buffers.keys,
-                retain_override: opts.retain_override,
+                // A purge keeps content like a value delete: `force_replace`
+                // stubs every closed value (`history::keeps_content`).
+                retain_override: if opts.force_replace {
+                    Some(false)
+                } else {
+                    opts.retain_override
+                },
             },
             &mut report,
         )?;

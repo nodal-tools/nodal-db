@@ -385,6 +385,26 @@ pub(crate) fn run(
     Ok(vocabulary)
 }
 
+/// Did commit `c` close a class, parameter definition or value list that
+/// existed before it (its id has no live row left)? Rows the commit itself
+/// created are never closed (the same-commit guard), and a revision keeps
+/// its id live, so this is exactly "pre-call vocabulary removed".
+pub(crate) fn closed_vocabulary(conn: &Connection, c: i64) -> Result<bool, DbError> {
+    let n = query_count(
+        conn,
+        &format!(
+            "SELECT count(*) FROM ( \
+               SELECT id FROM entity_class WHERE valid_to_commit = {c} \
+                 AND id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL) \
+               UNION ALL SELECT id FROM parameter_definition WHERE valid_to_commit = {c} \
+                 AND id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL) \
+               UNION ALL SELECT id FROM parameter_value_list WHERE valid_to_commit = {c} \
+                 AND id NOT IN (SELECT id FROM parameter_value_list WHERE valid_to_commit IS NULL))"
+        ),
+    )?;
+    Ok(n > 0)
+}
+
 /// Every request's parameter close set, together: a value list's binding
 /// by a definition another request closes is not reach outside the call's
 /// scopes, and is not unbound (the definition closes).
@@ -1244,7 +1264,9 @@ fn has(conn: &Connection, table: &str) -> Result<bool, DbError> {
 /// run, with no survivors, so the counts, `outside_scope` and
 /// `template_stamped` are upper bounds of what a call that also writes
 /// would close. Rows are counted once per table across a request's steps
-/// (the `preview_dependent_counts` OR grouping).
+/// (the `preview_dependent_counts` OR grouping), and a row an earlier
+/// request of the call already counts is not counted again, as the commit
+/// closes it once, in the earlier request.
 pub(crate) fn preview(
     conn: &Connection,
     reqs: &[PurgeRequest],
@@ -1262,6 +1284,20 @@ pub(crate) fn preview(
     build_all_close_parameters(conn, reqs.len())?;
     let stamped = read_metadata_key(conn, "template_name")?.is_some();
     let mut out = Vec::with_capacity(reqs.len());
+    // (table, predicate) of every earlier request's steps.
+    let mut earlier: Vec<(&'static str, String)> = Vec::new();
+    let excl = |earlier: &[(&'static str, String)], table: &str| -> String {
+        let preds: Vec<String> = earlier
+            .iter()
+            .filter(|(t, _)| *t == table)
+            .map(|(_, p)| format!("({p})"))
+            .collect();
+        if preds.is_empty() {
+            String::new()
+        } else {
+            format!(" AND NOT ({})", preds.join(" OR "))
+        }
+    };
     for (r, scope) in scopes.iter().enumerate() {
         // (table, counts as object rows, live filter, predicates)
         type Group = (&'static str, bool, &'static str, Vec<String>);
@@ -1308,7 +1344,8 @@ pub(crate) fn preview(
                         conn,
                         &format!(
                             "SELECT count(*) FROM parameter_value_list \
-                             WHERE valid_to_commit IS NULL AND id {ids}"
+                             WHERE valid_to_commit IS NULL AND id {ids}{}",
+                            excl(&earlier, "parameter_value_list")
                         ),
                     )? as usize;
                 }
@@ -1317,8 +1354,9 @@ pub(crate) fn preview(
                     objects += query_count(
                         conn,
                         &format!(
-                            "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL AND {pred}",
-                            kind.object_table()
+                            "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL AND {pred}{}",
+                            kind.object_table(),
+                            excl(&earlier, kind.object_table())
                         ),
                     )? as usize;
                     push(kind.object_table(), true, pred);
@@ -1327,6 +1365,7 @@ pub(crate) fn preview(
         }
         let mut object_rows = 0usize;
         let mut per_table: Vec<TableCount> = Vec::new();
+        let mut mine: Vec<(&'static str, String)> = Vec::new();
         for (table, object, live, preds) in groups {
             let clause = preds
                 .iter()
@@ -1335,14 +1374,19 @@ pub(crate) fn preview(
                 .join(" OR ");
             let n = query_count(
                 conn,
-                &format!("SELECT count(*) FROM {table} WHERE ({clause}){live}"),
+                &format!(
+                    "SELECT count(*) FROM {table} WHERE ({clause}){live}{}",
+                    excl(&earlier, table)
+                ),
             )? as usize;
             if object {
                 object_rows += n;
             } else {
                 add(&mut per_table, table, n);
             }
+            mine.extend(preds.into_iter().map(|p| (table, p)));
         }
+        earlier.extend(mine);
         let template_stamped = stamped && scope.is_vocabulary() && {
             let i = stamped_item(conn, r)?;
             i.classes + i.parameters + i.value_lists > 0

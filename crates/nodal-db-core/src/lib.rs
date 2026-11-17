@@ -81,6 +81,11 @@ pub mod api;
 /// read-only preview.
 pub mod object_delete;
 
+/// Purge (entity_descriptions_purge plan §3): a bulk, versioned close-out of
+/// every item in a named scope, in one commit, through the object delete's
+/// leg registry in set form.
+pub mod purge;
+
 /// Physical repack (Sense A): rebuild the DB file into a fresh, densely-packed
 /// one that reclaims dead blocks while preserving ALL logical content, then
 /// atomically swap it in (`specs/compaction_DESIGN.md`). The rebuild copy is

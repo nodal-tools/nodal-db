@@ -43,6 +43,7 @@ use duckdb::{params, Connection};
 
 use crate::api::{find_alternative, find_entity_class, find_parameter, find_value_list};
 use crate::error::DbError;
+use crate::history::{ARRAY_PREIMAGE, ARRAY_PREIMAGE_STUB, CLOSE_SET, CLOSE_SET_STUB};
 use crate::object_delete::{
     cascade_edges, close_current_rows_set, close_leg_set, count_leg_set, object_legs, DepLeg,
     Grain, IdSet, SAMPLE_LIMIT,
@@ -908,11 +909,9 @@ fn close_rows(
     Ok(())
 }
 
-/// The SET list of a stub close-out (content not retained).
-const STUB_SET: &str = "content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, \
-     v_str = NULL, v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL";
-
-/// The value close-out of one tier over `pred` (§3.6, P-OD5): per
+/// The value close-out of one tier over `pred` (§3.6, P-OD5), on the SET
+/// lists and pre-image copies `history` closes every value with (one
+/// close-out definition, CR2-9): per
 /// retention mode one statement, the definition's effective retention from
 /// `pg_retention`; survivors spared by the value-key anti-join. Arrays
 /// resolve their `array_id`s on narrow columns first, then copy the
@@ -947,21 +946,15 @@ fn close_values(
         )?;
         let copied_kept = exec(
             conn,
-            "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array \
-             WHERE array_id IN (SELECT array_id FROM pg_arrays WHERE retained)",
+            &format!("{ARRAY_PREIMAGE}array_id IN (SELECT array_id FROM pg_arrays WHERE retained)"),
             params![c],
         )?;
         let copied_stub = exec(
             conn,
-            "INSERT INTO value_array_hist \
-               (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-                valid_from_commit, version, \
-                axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
-                content_hash, valid_to_commit, content_retained) \
-             SELECT array_id, entity_id, parameter_definition_id, alternative_id, \
-                parameter_type_id, valid_from_commit, version, \
-                axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
-             FROM value_array WHERE array_id IN (SELECT array_id FROM pg_arrays WHERE NOT retained)",
+            &format!(
+                "{ARRAY_PREIMAGE_STUB}array_id IN \
+                 (SELECT array_id FROM pg_arrays WHERE NOT retained)"
+            ),
             params![c],
         )?;
         let deleted = exec(
@@ -987,11 +980,7 @@ fn close_values(
     )?;
     add(&mut acc.spared, table, spared as usize);
     for retained in [true, false] {
-        let set = if retained {
-            "valid_to_commit = ?".to_string()
-        } else {
-            format!("valid_to_commit = ?, {STUB_SET}")
-        };
+        let set = if retained { CLOSE_SET } else { CLOSE_SET_STUB };
         let n = exec(
             conn,
             &format!(

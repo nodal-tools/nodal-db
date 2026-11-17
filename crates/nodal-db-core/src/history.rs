@@ -228,6 +228,71 @@ macro_rules! long_cur_nulls {
     };
 }
 
+// ---------------------------------------------------------------------------
+// The close-out SET lists: ONE definition each (purge plan §3.6, CR2-9),
+// shared by every close-out statement below (per key, key list, cell diff)
+// and by the purge's predicate-scoped close-out (`crate::purge`). Macros so
+// the statements stay `const` (`concat!`); the `pub(crate)` constants are
+// the same text for runtime-built statements.
+// ---------------------------------------------------------------------------
+
+/// The payload columns a stub nulls, with `content_retained = FALSE` (VMP
+/// Part 5 retention): every typed value column of a scalar or long row.
+macro_rules! stub_payload {
+    () => {
+        "content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, \
+         v_str = NULL, v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL"
+    };
+}
+
+/// The SET list of a retained close-out (one bind: the closing commit).
+macro_rules! close_set {
+    () => {
+        "valid_to_commit = ?"
+    };
+}
+
+/// The SET list of a stub close-out (one bind: the closing commit).
+macro_rules! close_set_stub {
+    () => {
+        concat!("valid_to_commit = ?, ", stub_payload!())
+    };
+}
+
+/// The retained array pre-image copy to `value_array_hist` (one bind: the
+/// closing commit), completed by a filter over `value_array`.
+macro_rules! array_preimage {
+    () => {
+        "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array WHERE "
+    };
+}
+
+/// The stub array pre-image copy (payload and `content_hash` nulled,
+/// `content_retained = FALSE`; one bind: the closing commit), completed by a
+/// filter over `value_array`.
+macro_rules! array_preimage_stub {
+    () => {
+        "INSERT INTO value_array_hist \
+           (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, \
+            axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
+            content_hash, valid_to_commit, content_retained) \
+         SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
+            valid_from_commit, version, \
+            axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
+         FROM value_array WHERE "
+    };
+}
+
+/// [`close_set!`] for runtime-built statements.
+pub(crate) const CLOSE_SET: &str = close_set!();
+/// [`close_set_stub!`] for runtime-built statements.
+pub(crate) const CLOSE_SET_STUB: &str = close_set_stub!();
+/// [`array_preimage!`] for runtime-built statements.
+pub(crate) const ARRAY_PREIMAGE: &str = array_preimage!();
+/// [`array_preimage_stub!`] for runtime-built statements.
+pub(crate) const ARRAY_PREIMAGE_STUB: &str = array_preimage_stub!();
+
 /// Should the superseded / pre-image row keep its content? `force_replace`
 /// forces a stub; an explicit `retain_override` otherwise decides; default true.
 pub(crate) fn keeps_content(opts: &WriteOptions) -> bool {
@@ -705,11 +770,12 @@ pub(crate) fn rewrite_scalar_string_values(
     )?;
     if !retained {
         conn.execute(
-            "UPDATE value_scalar SET content_retained = FALSE, \
-               v_float=NULL, v_int=NULL, v_bool=NULL, v_str=NULL, v_datetime=NULL, \
-               v_dur_months=NULL, v_dur_micros=NULL \
-             WHERE valid_to_commit = ?1 AND parameter_definition_id = ?2 \
-               AND value_kind = 'string' AND v_str = ?3",
+            concat!(
+                "UPDATE value_scalar SET ",
+                stub_payload!(),
+                " WHERE valid_to_commit = ?1 AND parameter_definition_id = ?2 \
+                 AND value_kind = 'string' AND v_str = ?3"
+            ),
             params![commit_id, pd_id, from],
         )?;
     }
@@ -752,11 +818,12 @@ pub(crate) fn drop_scalar_values_not_matching(
     )?;
     if !retained && closed > 0 {
         conn.execute(
-            "UPDATE value_scalar SET content_retained = FALSE, \
-               v_float=NULL, v_int=NULL, v_bool=NULL, v_str=NULL, v_datetime=NULL, \
-               v_dur_months=NULL, v_dur_micros=NULL \
-             WHERE valid_to_commit = ?1 AND parameter_definition_id = ?2 \
-               AND content_retained",
+            concat!(
+                "UPDATE value_scalar SET ",
+                stub_payload!(),
+                " WHERE valid_to_commit = ?1 AND parameter_definition_id = ?2 \
+                 AND content_retained"
+            ),
             params![commit_id, pd_id],
         )?;
     }
@@ -977,37 +1044,40 @@ const LONG_CURRENT_SQL: &str = "SELECT l.entity_id, l.parameter_definition_id, l
 
 /// The set form of the retained `close_out_long`: every current cell of the
 /// bound keys.
-const LONG_CLOSE_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
+const LONG_CLOSE_SQL: &str = concat!(
+    "UPDATE value_long SET ",
+    close_set!(),
+    " \
      FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
                   unnest(?::BIGINT[]) AS a) k \
      WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
-       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL";
+       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL"
+);
 
 /// The stub form of [`LONG_CLOSE_SQL`]: the SET list of the stub
 /// `close_out_long`.
-const LONG_CLOSE_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit = ?, \
-       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
-       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+const LONG_CLOSE_STUB_SQL: &str = concat!(
+    "UPDATE value_long SET ",
+    close_set_stub!(),
+    " \
      FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
                   unnest(?::BIGINT[]) AS a) k \
      WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
-       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL";
+       AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL"
+);
 
 /// The set form of the retained `copy_array_preimage`, keyed by the bound
 /// `array_id`s.
-const ARRAY_PREIMAGE_SET_SQL: &str = "INSERT INTO value_array_hist \
-     SELECT *, ?, TRUE FROM value_array WHERE array_id IN (SELECT unnest(?::BIGINT[]))";
+const ARRAY_PREIMAGE_SET_SQL: &str = concat!(
+    array_preimage!(),
+    "array_id IN (SELECT unnest(?::BIGINT[]))"
+);
 
 /// The set form of the stub `copy_array_preimage` (the same column list).
-const ARRAY_PREIMAGE_STUB_SET_SQL: &str = "INSERT INTO value_array_hist \
-       (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-        valid_from_commit, version, \
-        axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
-        content_hash, valid_to_commit, content_retained) \
-     SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-        valid_from_commit, version, \
-        axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
-     FROM value_array WHERE array_id IN (SELECT unnest(?::BIGINT[]))";
+const ARRAY_PREIMAGE_STUB_SET_SQL: &str = concat!(
+    array_preimage_stub!(),
+    "array_id IN (SELECT unnest(?::BIGINT[]))"
+);
 
 /// The set form of the array arm of `close_out_tier`'s DELETE.
 const ARRAY_DELETE_SET_SQL: &str =
@@ -1157,21 +1227,27 @@ fn array_payloads_equal(
 
 /// Same-tier close-out of the current rows of the bound keys, content
 /// retained.
-const SCALAR_CLOSE_SQL: &str = "UPDATE value_scalar SET valid_to_commit = ? \
+const SCALAR_CLOSE_SQL: &str = concat!(
+    "UPDATE value_scalar SET ",
+    close_set!(),
+    " \
      FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
                   unnest(?::BIGINT[]) AS a) k \
      WHERE value_scalar.entity_id = k.e AND value_scalar.parameter_definition_id = k.p \
-       AND value_scalar.alternative_id = k.a AND value_scalar.valid_to_commit IS NULL";
+       AND value_scalar.alternative_id = k.a AND value_scalar.valid_to_commit IS NULL"
+);
 
 /// The stub form of [`SCALAR_CLOSE_SQL`]: the same SET list as the per-key
 /// stub close-out (`content_retained = FALSE`, the 7 payload columns NULL).
-const SCALAR_CLOSE_STUB_SQL: &str = "UPDATE value_scalar SET valid_to_commit = ?, \
-       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
-       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+const SCALAR_CLOSE_STUB_SQL: &str = concat!(
+    "UPDATE value_scalar SET ",
+    close_set_stub!(),
+    " \
      FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
                   unnest(?::BIGINT[]) AS a) k \
      WHERE value_scalar.entity_id = k.e AND value_scalar.parameter_definition_id = k.p \
-       AND value_scalar.alternative_id = k.a AND value_scalar.valid_to_commit IS NULL";
+       AND value_scalar.alternative_id = k.a AND value_scalar.valid_to_commit IS NULL"
+);
 
 /// The columnar `value_scalar` INSERT: the commit is a scalar bind, every
 /// other column a zipped list; `content_retained` is the literal TRUE and
@@ -1584,15 +1660,19 @@ fn close_out_scalar(
     retained: bool,
 ) -> Result<usize, DbError> {
     let sql = if retained {
-        "UPDATE value_scalar SET valid_to_commit=? \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-           AND valid_to_commit IS NULL"
+        concat!(
+            "UPDATE value_scalar SET ",
+            close_set!(),
+            " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
+             AND valid_to_commit IS NULL"
+        )
     } else {
-        "UPDATE value_scalar SET valid_to_commit=?, content_retained=FALSE, \
-           v_float=NULL, v_int=NULL, v_bool=NULL, v_str=NULL, v_datetime=NULL, \
-           v_dur_months=NULL, v_dur_micros=NULL \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-           AND valid_to_commit IS NULL"
+        concat!(
+            "UPDATE value_scalar SET ",
+            close_set_stub!(),
+            " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
+             AND valid_to_commit IS NULL"
+        )
     };
     Ok(conn.prepare_cached(sql)?.execute(params![
         c,
@@ -1696,17 +1776,9 @@ fn copy_array_preimage(
     retained: bool,
 ) -> Result<usize, DbError> {
     let sql = if retained {
-        "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM value_array WHERE array_id=?"
+        concat!(array_preimage!(), "array_id=?")
     } else {
-        "INSERT INTO value_array_hist \
-           (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-            valid_from_commit, version, \
-            axis1_id, axis2_id, axis3_id, axis4_id, values, values_int, v_min, v_max, \
-            content_hash, valid_to_commit, content_retained) \
-         SELECT array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
-            valid_from_commit, version, \
-            axis1_id, axis2_id, axis3_id, axis4_id, NULL, NULL, v_min, v_max, NULL, ?, FALSE \
-         FROM value_array WHERE array_id=?"
+        concat!(array_preimage_stub!(), "array_id=?")
     };
     Ok(conn.prepare_cached(sql)?.execute(params![c, array_id])?)
 }
@@ -2853,7 +2925,10 @@ fn current_long_cells(conn: &Connection, key: &ValueKey) -> Result<LongCells, Db
 /// (key, position tuple) rows, joined on the seven columns (one bound list
 /// per column, ≤ [`LONG_INSERT_CHUNK`] rows per execution), content
 /// retained.
-const LONG_CLOSE_CELLS_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
+const LONG_CLOSE_CELLS_SQL: &str = concat!(
+    "UPDATE value_long SET ",
+    close_set!(),
+    " \
      FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
                   unnest(?::BIGINT[]) AS a, unnest(?::INTEGER[]) AS q1, \
                   unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
@@ -2861,13 +2936,15 @@ const LONG_CLOSE_CELLS_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
      WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
        AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL \
        AND value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
-       AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4";
+       AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4"
+);
 
 /// The stub form of [`LONG_CLOSE_CELLS_SQL`] (the SET list of the stub
 /// `close_out_long`).
-const LONG_CLOSE_CELLS_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit = ?, \
-       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
-       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+const LONG_CLOSE_CELLS_STUB_SQL: &str = concat!(
+    "UPDATE value_long SET ",
+    close_set_stub!(),
+    " \
      FROM (SELECT unnest(?::BIGINT[]) AS e, unnest(?::BIGINT[]) AS p, \
                   unnest(?::BIGINT[]) AS a, unnest(?::INTEGER[]) AS q1, \
                   unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
@@ -2875,7 +2952,8 @@ const LONG_CLOSE_CELLS_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit =
      WHERE value_long.entity_id = k.e AND value_long.parameter_definition_id = k.p \
        AND value_long.alternative_id = k.a AND value_long.valid_to_commit IS NULL \
        AND value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
-       AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4";
+       AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4"
+);
 
 /// The one-key close-out of a cell diff that closes most of the value's
 /// cells: every current cell of the key but the bound kept positions (an
@@ -2885,26 +2963,32 @@ const LONG_CLOSE_CELLS_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit =
 /// costs ~7 µs per closed cell against ~5 µs for the key-level one, so a
 /// re-import that changes all but a few cells of a large value would
 /// otherwise be slower than the whole rewrite it replaces).
-const LONG_CLOSE_EXCEPT_SQL: &str = "UPDATE value_long SET valid_to_commit = ? \
+const LONG_CLOSE_EXCEPT_SQL: &str = concat!(
+    "UPDATE value_long SET ",
+    close_set!(),
+    " \
      WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ? \
        AND valid_to_commit IS NULL \
        AND NOT EXISTS (SELECT 1 FROM (SELECT unnest(?::INTEGER[]) AS q1, \
              unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
              unnest(?::INTEGER[]) AS q4) k \
            WHERE value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
-             AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4)";
+             AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4)"
+);
 
 /// The stub form of [`LONG_CLOSE_EXCEPT_SQL`].
-const LONG_CLOSE_EXCEPT_STUB_SQL: &str = "UPDATE value_long SET valid_to_commit = ?, \
-       content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, v_str = NULL, \
-       v_datetime = NULL, v_dur_months = NULL, v_dur_micros = NULL \
+const LONG_CLOSE_EXCEPT_STUB_SQL: &str = concat!(
+    "UPDATE value_long SET ",
+    close_set_stub!(),
+    " \
      WHERE entity_id = ? AND parameter_definition_id = ? AND alternative_id = ? \
        AND valid_to_commit IS NULL \
        AND NOT EXISTS (SELECT 1 FROM (SELECT unnest(?::INTEGER[]) AS q1, \
              unnest(?::INTEGER[]) AS q2, unnest(?::INTEGER[]) AS q3, \
              unnest(?::INTEGER[]) AS q4) k \
            WHERE value_long.i1_pos = k.q1 AND value_long.i2_pos = k.q2 \
-             AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4)";
+             AND value_long.i3_pos = k.q3 AND value_long.i4_pos = k.q4)"
+);
 
 /// Close out every current cell of `key` but those at `keep` (one
 /// statement, ≤ [`LONG_INSERT_CHUNK`] kept positions), checked against
@@ -3514,15 +3598,19 @@ fn close_out_long(
     retained: bool,
 ) -> Result<usize, DbError> {
     let sql = if retained {
-        "UPDATE value_long SET valid_to_commit=? \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-           AND valid_to_commit IS NULL"
+        concat!(
+            "UPDATE value_long SET ",
+            close_set!(),
+            " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
+             AND valid_to_commit IS NULL"
+        )
     } else {
-        "UPDATE value_long SET valid_to_commit=?, content_retained=FALSE, \
-           v_float=NULL, v_int=NULL, v_bool=NULL, v_str=NULL, v_datetime=NULL, \
-           v_dur_months=NULL, v_dur_micros=NULL \
-         WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
-           AND valid_to_commit IS NULL"
+        concat!(
+            "UPDATE value_long SET ",
+            close_set_stub!(),
+            " WHERE entity_id=? AND parameter_definition_id=? AND alternative_id=? \
+             AND valid_to_commit IS NULL"
+        )
     };
     Ok(conn.prepare_cached(sql)?.execute(params![
         c,

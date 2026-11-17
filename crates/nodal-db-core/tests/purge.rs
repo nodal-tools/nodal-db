@@ -865,3 +865,277 @@ fn statement_count_does_not_depend_on_the_number_of_entities() {
     };
     assert_eq!(count(10), count(10_000));
 }
+
+// ---------------------------------------------------------------------------
+// Values (tests 5, 7, 12; V-S3 retention)
+// ---------------------------------------------------------------------------
+
+/// Live scalar values as `class.parameter/alternative/entity=value`.
+fn live_values(db: &Path) -> Vec<String> {
+    names(
+        db,
+        "SELECT ec.name || '.' || pd.name || '/' || a.name || '/' || e.name || '=' || \
+                CAST(s.v_float AS VARCHAR) \
+         FROM value_scalar s \
+         JOIN entity e ON e.id = s.entity_id AND e.valid_to_commit IS NULL \
+         JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL \
+         JOIN parameter_definition pd ON pd.id = s.parameter_definition_id \
+           AND pd.valid_to_commit IS NULL \
+         JOIN alternative a ON a.id = s.alternative_id AND a.valid_to_commit IS NULL \
+         WHERE s.valid_to_commit IS NULL ORDER BY 1",
+    )
+}
+
+#[test]
+fn values_filters_close_exactly_their_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let all = live_values(&db);
+    assert_eq!(all.len(), 7);
+    // class + parameter + alternative
+    purge1(
+        &db,
+        PS::Values {
+            class: Some("node".into()),
+            parameter: Some("demand".into()),
+            alternative: Some("high".into()),
+        },
+    );
+    assert_eq!(live_values(&db).len(), 6);
+    assert!(!live_values(&db).contains(&"node.demand/high/n1=10.0".to_string()));
+    // class + alternative: the node values in Base (scalars + the array).
+    let r = purge1(
+        &db,
+        PS::Values {
+            class: Some("node".into()),
+            parameter: None,
+            alternative: Some("Base".into()),
+        },
+    );
+    assert_eq!(r.purges[0].objects, 0);
+    assert_eq!(
+        live_values(&db),
+        [
+            "link.flow/Base/n1__u1=7.0",
+            "link.flow/Base/n2__u2=8.0",
+            "unit.cap/Base/u1=5.0",
+            "unit.cap/Base/u2=6.0"
+        ]
+    );
+    assert_eq!(q(&db, "SELECT count(*) FROM value_array"), 0);
+    // alternative only
+    purge1(
+        &db,
+        PS::Values {
+            class: None,
+            parameter: None,
+            alternative: Some("Base".into()),
+        },
+    );
+    assert!(live_values(&db).is_empty());
+    // Values never close objects; nothing left for Values{}.
+    assert_eq!(live_entities(&db).len(), 6);
+    let r = purge1(
+        &db,
+        PS::Values {
+            class: None,
+            parameter: None,
+            alternative: None,
+        },
+    );
+    assert_eq!(r.commit_id, 0);
+}
+
+#[test]
+fn values_purge_and_half_rewrite_keeps_only_written_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    // Values{class: node} with a write of n1's Base demand (unchanged):
+    // only that key stays, though n2 and the high value are on entities
+    // the call names.
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![entity("node", "n2")],
+            segments: vec![seg("node", "demand", "Base", scalars(&[("n1", 1.0)]))],
+            purges: vec![req(PS::Values {
+                class: Some("node".into()),
+                parameter: None,
+                alternative: None,
+            })],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.values_unchanged, 1);
+    let node: Vec<String> = live_values(&db)
+        .into_iter()
+        .filter(|v| v.starts_with("node."))
+        .collect();
+    assert_eq!(node, ["node.demand/Base/n1=1.0"]);
+    assert!(r.purges[0]
+        .spared
+        .per_table
+        .iter()
+        .any(|t| t.table == "value_scalar" && t.rows == 1));
+}
+
+#[test]
+fn values_retention_follows_the_definition_and_the_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    // unit.cap does not retain content; a default on node.demand.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "UPDATE parameter_definition SET retain_content = FALSE WHERE name = 'cap'; \
+         INSERT INTO definition_value_scalar (parameter_definition_id, slot, valid_from_commit, \
+           version, value_kind, v_float) \
+         SELECT id, 'default_value', (SELECT max(id) FROM commit), 1, 'float', 42 \
+         FROM parameter_definition WHERE name = 'demand';",
+    )
+    .unwrap();
+    drop(conn);
+    let r = purge1(
+        &db,
+        PS::Values {
+            class: None,
+            parameter: None,
+            alternative: Some("Base".into()),
+        },
+    );
+    let c = r.commit_id;
+    let stubs = |table: &str| {
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM {table} WHERE valid_to_commit = {c} AND NOT content_retained"
+            ),
+        )
+    };
+    let kept = |table: &str| {
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM {table} WHERE valid_to_commit = {c} AND content_retained \
+                 AND v_float IS NOT NULL"
+            ),
+        )
+    };
+    assert_eq!(stubs("value_scalar"), 2, "unit.cap: retain_content = FALSE");
+    assert_eq!(kept("value_scalar"), 4);
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM value_scalar WHERE NOT content_retained AND v_float IS NOT NULL"
+        ),
+        0
+    );
+    // The array's pre-image is retained (node.profile retains content) and
+    // readable as of the commit before.
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM value_array_hist WHERE valid_to_commit = {c} \
+                 AND content_retained AND len(values) = 3"
+            )
+        ),
+        1
+    );
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM value_array_asof({}) WHERE len(values) = 3",
+                c - 1
+            )
+        ),
+        1
+    );
+    // Defaults are never purged.
+    assert_eq!(live(&db, "definition_value_scalar"), 1);
+
+    // retain_override = Some(false) stubs everything; Some(true) keeps it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let db2 = fixture(&dir2);
+    let r = purge(
+        &db2,
+        vec![req(PS::Values {
+            class: None,
+            parameter: None,
+            alternative: None,
+        })],
+        "t",
+        "m",
+        WriteOptions {
+            retain_override: Some(false),
+            ..o()
+        },
+    )
+    .unwrap();
+    let c = r.commit_id;
+    assert_eq!(
+        q(&db2, &format!("SELECT count(*) FROM value_scalar WHERE valid_to_commit = {c} AND content_retained")),
+        0
+    );
+    assert_eq!(
+        q(&db2, &format!("SELECT count(*) FROM value_array_hist WHERE valid_to_commit = {c} AND NOT content_retained AND values IS NULL")),
+        1
+    );
+    let dir3 = tempfile::tempdir().unwrap();
+    let db3 = fixture(&dir3);
+    let conn = Connection::open(&db3).unwrap();
+    conn.execute_batch("UPDATE parameter_definition SET retain_content = FALSE")
+        .unwrap();
+    drop(conn);
+    let r = purge(
+        &db3,
+        vec![req(PS::Values {
+            class: None,
+            parameter: None,
+            alternative: None,
+        })],
+        "t",
+        "m",
+        WriteOptions {
+            retain_override: Some(true),
+            ..o()
+        },
+    )
+    .unwrap();
+    let c = r.commit_id;
+    assert_eq!(
+        q(&db3, &format!("SELECT count(*) FROM value_scalar WHERE valid_to_commit = {c} AND NOT content_retained")),
+        0
+    );
+}
+
+#[test]
+fn a_purged_alternative_can_still_be_erased() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    purge1(
+        &db,
+        PS::Values {
+            class: None,
+            parameter: None,
+            alternative: Some("Base".into()),
+        },
+    );
+    let rep = nodal_db_core::erasure::erase_alternative(
+        &db,
+        &ObjectDeleteKey {
+            kind: ObjectKind::Alternative,
+            class: None,
+            target: ObjectRef::Name("Base".into()),
+        },
+        &nodal_db_core::erasure::EraseOpts {
+            note: None,
+            expect_present: &[],
+        },
+        "t",
+    )
+    .unwrap();
+    assert!(rep.erased);
+    assert_eq!(q(&db, "SELECT count(*) FROM value_array_hist"), 0);
+}

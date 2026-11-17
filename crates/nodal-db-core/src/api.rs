@@ -706,10 +706,11 @@ pub fn commit_change_set(
         // leaves a template-stamped database unconverged: its certified
         // content hash goes, so the next apply replans and meets the
         // removed-locally blocker (purge plan §3.8, V-B2).
-        if report.object_deletes.iter().any(|o| {
+        let deleted_vocabulary = report.object_deletes.iter().any(|o| {
             matches!(o.kind, ObjectKind::Class | ObjectKind::Parameter)
                 && matches!(o.result, ObjectDeleteResult::Deleted { .. })
-        }) {
+        });
+        if deleted_vocabulary {
             crate::template::reconcile::clear_metadata(conn, commit_id, "template_content_hash")?;
         }
         // `DeleteWins`: a write is dropped only for a delete that took
@@ -724,7 +725,7 @@ pub fn commit_change_set(
             }
         }
         // Purges run last, under the same commit (purge plan §3.5.1).
-        crate::purge::run(
+        let purged_vocabulary = crate::purge::run(
             conn,
             commit_id,
             &crate::purge::PurgeCall {
@@ -736,10 +737,21 @@ pub fn commit_change_set(
             },
             &mut report,
         )?;
-        // The name-keyed metadata documents follow the renames, once per
-        // document per call (OD8, B1), at the end of the call: every
+        // A purge that closed (or unbound) vocabulary leaves a stamped
+        // database unconverged, as an object delete does (V-B2).
+        if purged_vocabulary {
+            crate::template::reconcile::clear_metadata(conn, commit_id, "template_content_hash")?;
+        }
+        // The name-keyed metadata documents follow the renames and drop
+        // what this call closed or unbound, once per document per call
+        // (OD8, B1; purge plan §3.7, V-S2), at the end of the call: every
         // channel has run, so one pass sees all it must follow.
-        rewrite_name_documents(conn, commit_id, &calls)?;
+        rewrite_name_documents(
+            conn,
+            commit_id,
+            &calls,
+            purged_vocabulary || deleted_vocabulary,
+        )?;
         // `tiers` lists the tiers written; the canonicalization noted every
         // value's tier, unchanged ones included.
         report.tiers.retain(|t| buffers.written_tiers.contains(t));

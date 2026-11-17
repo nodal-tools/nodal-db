@@ -2485,18 +2485,71 @@ pub(crate) fn value_list_binding_count(conn: &Connection, lid: i64) -> Result<i6
     )?)
 }
 
-/// Close out a value list and its member rows under `c` (the single close
-/// path shared by the `drop_value_list` migration step and verb — invariant
-/// #2: one door). Caller checks [`value_list_binding_count`] first. Returns
-/// the number of member rows closed.
+/// Close out a value list, its member rows and the list's and members'
+/// `semantic_annotation` rows under `c` (the single close path shared by the
+/// `drop_value_list` migration step and verb, and in set form by the purge
+/// — invariant #2: one door). Caller checks [`value_list_binding_count`]
+/// first. Returns the number of member rows closed; exactly one list row
+/// must close.
 pub(crate) fn close_value_list(conn: &Connection, c: i64, lid: i64) -> Result<usize, DbError> {
-    let members = conn.execute(
-        "UPDATE list_value SET valid_to_commit = ? \
-         WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
-        params![c, lid],
+    let closed = close_value_lists_where(conn, c, &format!("= {lid}"))?;
+    if closed.lists != 1 {
+        return Err(DbError::Api(format!(
+            "revision of parameter_value_list id {lid}: expected exactly one current row, \
+             closed {}",
+            closed.lists
+        )));
+    }
+    Ok(closed.members)
+}
+
+/// What [`close_value_lists_set`] closed.
+#[derive(Default)]
+pub(crate) struct ClosedLists {
+    pub(crate) lists: usize,
+    pub(crate) members: usize,
+    pub(crate) annotations: usize,
+}
+
+/// [`close_value_list`] over every list id of the txn-local id table `set`
+/// (the purge's set form; no one-row check).
+pub(crate) fn close_value_lists_set(
+    conn: &Connection,
+    c: i64,
+    set: &str,
+) -> Result<ClosedLists, DbError> {
+    close_value_lists_where(conn, c, &format!("IN (SELECT id FROM {set})"))
+}
+
+/// The one body of both forms: `ids` is the list-id predicate (`= <id>` or
+/// `IN (…)`). Every close carries the same-commit guard.
+fn close_value_lists_where(conn: &Connection, c: i64, ids: &str) -> Result<ClosedLists, DbError> {
+    let guard = "valid_from_commit < ? AND valid_to_commit IS NULL";
+    let annotations = conn.execute(
+        &format!(
+            "UPDATE semantic_annotation SET valid_to_commit = ? WHERE {guard} AND \
+             ((object_type = 'parameter_value_list' AND object_id {ids}) OR \
+              (object_type = 'list_value' AND object_id IN \
+                 (SELECT id FROM list_value WHERE parameter_value_list_id {ids})))"
+        ),
+        params![c, c],
     )?;
-    close_row(conn, c, "parameter_value_list", lid)?;
-    Ok(members)
+    let members = conn.execute(
+        &format!(
+            "UPDATE list_value SET valid_to_commit = ? \
+             WHERE parameter_value_list_id {ids} AND {guard}"
+        ),
+        params![c, c],
+    )?;
+    let lists = conn.execute(
+        &format!("UPDATE parameter_value_list SET valid_to_commit = ? WHERE id {ids} AND {guard}"),
+        params![c, c],
+    )?;
+    Ok(ClosedLists {
+        lists,
+        members,
+        annotations,
+    })
 }
 
 fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {

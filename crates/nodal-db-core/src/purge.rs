@@ -42,13 +42,15 @@ use std::collections::HashSet;
 use duckdb::{params, Connection};
 
 use crate::api::{find_alternative, find_entity_class, find_parameter, find_value_list};
-use crate::error::DbError;
+use crate::error::{DbError, TemplateStampedPurgeDetails, TemplateStampedPurgeItem};
 use crate::history::{ARRAY_PREIMAGE, ARRAY_PREIMAGE_STUB, CLOSE_SET, CLOSE_SET_STUB};
 use crate::object_delete::{
     cascade_edges, close_current_rows_set, close_leg_set, count_leg_set, object_legs, DepLeg,
     Grain, IdSet, SAMPLE_LIMIT,
 };
 use crate::structural::{CallRenames, CallTouches};
+use crate::template::dbvocab::read_metadata_key;
+use crate::template::reconcile::{close_value_lists_set, read_pd_row, revise_pd_row};
 use crate::text::{NameFolds, Normalized};
 use crate::types::{
     Blocker, CascadeCounts, ObjectKind, PurgeOutcome, PurgeRequest, PurgeScope, TableCount,
@@ -182,6 +184,17 @@ pub(crate) enum Scope {
     ValueLists {
         except: Vec<i64>,
     },
+}
+
+impl Scope {
+    /// Vocabulary scopes close classes, parameters or lists (template
+    /// protection, §3.7).
+    pub(crate) fn is_vocabulary(&self) -> bool {
+        matches!(
+            self,
+            Scope::Classes { .. } | Scope::Parameters { .. } | Scope::ValueLists { .. }
+        )
+    }
 }
 
 /// Resolve every request's names, lookup-only and by the name fold, after
@@ -345,18 +358,22 @@ pub(crate) fn run(
     c: i64,
     call: &PurgeCall<'_>,
     report: &mut WriteReport,
-) -> Result<(), DbError> {
+) -> Result<bool, DbError> {
     if call.requests.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     fill_survivors(conn, call)?;
     fill_retention(conn, call.retain_override)?;
     for (r, scope) in call.scopes.iter().enumerate() {
         build_request_sets(conn, r, scope)?;
     }
+    build_all_close_parameters(conn, call.requests.len())?;
+    refuse_template_stamped(conn, call)?;
     refuse_outside_scope(conn, call)?;
+    let mut vocabulary = false;
     for (r, scope) in call.scopes.iter().enumerate() {
-        let outcome = execute(conn, c, r, scope)?;
+        let (outcome, closed_vocabulary) = execute(conn, c, r, scope)?;
+        vocabulary |= closed_vocabulary || outcome.unbound > 0;
         report.purges.push(outcome);
         if test_hooks::take_conflict() {
             // A DuckDB error carrying the `Conflict` substring the retry
@@ -364,7 +381,139 @@ pub(crate) fn run(
             conn.execute_batch("SELECT error('Conflict (test-injected, mid-purge)')")?;
         }
     }
-    drop_tables(conn)
+    drop_tables(conn)?;
+    Ok(vocabulary)
+}
+
+/// Every request's parameter close set, together: a value list's binding
+/// by a definition another request closes is not reach outside the call's
+/// scopes, and is not unbound (the definition closes).
+const ALL_CLOSE_PARAMETER: &str = "pg_all_close_parameter";
+
+fn build_all_close_parameters(conn: &Connection, n: usize) -> Result<(), DbError> {
+    let union = (0..n)
+        .map(|r| format!("SELECT id FROM {}", close_table(r, SetKind::Parameter)))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    exec_batch(
+        conn,
+        &format!("CREATE OR REPLACE TEMP TABLE {ALL_CLOSE_PARAMETER} AS {union}"),
+    )?;
+    Ok(())
+}
+
+/// The live definitions outside every request's close set that bind a list
+/// of request `r`'s close set (V-OD2): reach outside the scope, removed with
+/// `allow_outside_scope`.
+fn bindings_sql(r: usize) -> String {
+    format!(
+        "SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL \
+           AND parameter_value_list_id IN (SELECT id FROM {}) \
+           AND id NOT IN (SELECT id FROM {ALL_CLOSE_PARAMETER})",
+        close_table(r, SetKind::ValueList)
+    )
+}
+
+/// The template-stamp check (§3.7, OD7): on a database stamped with a
+/// template, a vocabulary request that would close a class, parameter or
+/// value list that existed before the call needs `allow_on_template`; every
+/// refused request is listed in one typed error. Objects the call created
+/// are survivors, never in a close set, so a request that closes only those
+/// passes.
+fn refuse_template_stamped(conn: &Connection, call: &PurgeCall<'_>) -> Result<(), DbError> {
+    let mut items = Vec::new();
+    for (r, (req, scope)) in call.requests.iter().zip(call.scopes).enumerate() {
+        if req.allow_on_template || !scope.is_vocabulary() {
+            continue;
+        }
+        let item = stamped_item(conn, r)?;
+        if item.classes + item.parameters + item.value_lists > 0 {
+            items.push(item);
+        }
+    }
+    if items.is_empty() {
+        return Ok(());
+    }
+    let Some(template_name) = read_metadata_key(conn, "template_name")? else {
+        return Ok(());
+    };
+    let template_version = read_metadata_key(conn, "template_version")?;
+    let lines: Vec<String> = items
+        .iter()
+        .map(|i| {
+            format!(
+                "request {}: {} class(es), {} parameter(s), {} value list(s) ({})",
+                i.request_index,
+                i.classes,
+                i.parameters,
+                i.value_lists,
+                i.sample.join(", ")
+            )
+        })
+        .collect();
+    let message = format!(
+        "the database is stamped with template {template_name:?}{}: purging its classes, \
+         parameters or value lists needs allow_on_template on each request. The core cannot \
+         tell which ones the template declares, and a purged declared item blocks the next \
+         apply of a changed template until it is re-created with recreate_removed. Refused \
+         (nothing was written): {}",
+        template_version
+            .as_deref()
+            .map(|v| format!(" (version {v:?})"))
+            .unwrap_or_default(),
+        lines.join("; ")
+    );
+    Err(DbError::TemplateStampedPurge(Box::new(
+        TemplateStampedPurgeDetails {
+            template_name,
+            template_version,
+            requests: items,
+            message,
+        },
+    )))
+}
+
+/// What request `r` would close of the pre-call vocabulary (its close
+/// sets), with a bounded sample of names.
+pub(crate) fn stamped_item(
+    conn: &Connection,
+    r: usize,
+) -> Result<TemplateStampedPurgeItem, DbError> {
+    let count = |k: SetKind| -> Result<usize, DbError> {
+        Ok(query_count(
+            conn,
+            &format!(
+                "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL \
+                 AND id IN (SELECT id FROM {})",
+                k.object_table(),
+                close_table(r, k)
+            ),
+        )? as usize)
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT n FROM ( \
+           SELECT 0 AS o, name AS n FROM entity_class WHERE valid_to_commit IS NULL \
+             AND id IN (SELECT id FROM {cls}) \
+           UNION ALL SELECT 1, ec.name || '.' || p.name FROM parameter_definition p \
+             JOIN entity_class ec ON ec.id = p.entity_class_id AND ec.valid_to_commit IS NULL \
+             WHERE p.valid_to_commit IS NULL AND p.id IN (SELECT id FROM {par}) \
+           UNION ALL SELECT 2, name FROM parameter_value_list WHERE valid_to_commit IS NULL \
+             AND id IN (SELECT id FROM {lst})) \
+         ORDER BY o, n LIMIT {SAMPLE_LIMIT}",
+        cls = close_table(r, SetKind::Class),
+        par = close_table(r, SetKind::Parameter),
+        lst = close_table(r, SetKind::ValueList),
+    ))?;
+    let sample = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(TemplateStampedPurgeItem {
+        request_index: r,
+        classes: count(SetKind::Class)?,
+        parameters: count(SetKind::Parameter)?,
+        value_lists: count(SetKind::ValueList)?,
+        sample,
+    })
 }
 
 /// The survivor sets: what the call names or creates
@@ -695,6 +844,32 @@ pub(crate) fn outside_scope(
             out.push(b?);
         }
     }
+    // A purged list bound by a definition no request closes (V-OD2).
+    let sql = format!(
+        "SELECT count(*), array_to_string(list(ec.name || '.' || p.name \
+             ORDER BY ec.name, p.name)[1:{SAMPLE_LIMIT}], chr(31)) \
+         FROM parameter_definition p JOIN entity_class ec ON ec.id = p.entity_class_id \
+           AND ec.valid_to_commit IS NULL \
+         WHERE p.valid_to_commit IS NULL AND p.id IN ({}) HAVING count(*) > 0",
+        bindings_sql(r)
+    );
+    test_hooks::count();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Blocker {
+            table: "parameter_definition".into(),
+            column: "parameter_value_list_id".into(),
+            count: row.get::<_, i64>(0)? as usize,
+            sample: row
+                .get::<_, String>(1)?
+                .split('\u{1f}')
+                .map(str::to_string)
+                .collect(),
+        })
+    })?;
+    for b in rows {
+        out.push(b?);
+    }
     Ok(out)
 }
 
@@ -744,6 +919,9 @@ struct Accum {
     per_table: Vec<TableCount>,
     spared_objects: usize,
     spared: Vec<TableCount>,
+    unbound: usize,
+    /// A class, parameter definition or value list closed.
+    vocabulary: bool,
 }
 
 fn add(v: &mut Vec<TableCount>, table: &str, rows: usize) {
@@ -771,7 +949,12 @@ fn counts(object_rows: usize, per_table: Vec<TableCount>) -> CascadeCounts {
 /// Execute request `r` (§3.6): values, then dependents, then identity legs,
 /// then object rows (V-S3), each a set-form statement with the same-commit
 /// guard.
-fn execute(conn: &Connection, c: i64, r: usize, scope: &Scope) -> Result<PurgeOutcome, DbError> {
+fn execute(
+    conn: &Connection,
+    c: i64,
+    r: usize,
+    scope: &Scope,
+) -> Result<(PurgeOutcome, bool), DbError> {
     let mut acc = Accum::default();
     match scope {
         Scope::Values { .. } | Scope::Activations { .. } | Scope::Memberships { .. } => {
@@ -779,13 +962,16 @@ fn execute(conn: &Connection, c: i64, r: usize, scope: &Scope) -> Result<PurgeOu
         }
         _ => execute_objects(conn, c, r, &mut acc)?,
     }
-    Ok(PurgeOutcome {
-        request_index: r,
-        closed_out: counts(acc.object_rows, acc.per_table),
-        objects: acc.objects,
-        spared: counts(acc.spared_objects, acc.spared),
-        unbound: 0,
-    })
+    Ok((
+        PurgeOutcome {
+            request_index: r,
+            closed_out: counts(acc.object_rows, acc.per_table),
+            objects: acc.objects,
+            spared: counts(acc.spared_objects, acc.spared),
+            unbound: acc.unbound,
+        },
+        acc.vocabulary,
+    ))
 }
 
 /// Is request `r`'s set of kind `k` non-empty?
@@ -1043,6 +1229,25 @@ fn execute_objects(conn: &Connection, c: i64, r: usize, acc: &mut Accum) -> Resu
             add(&mut acc.per_table, l.table, n);
         }
     }
+    // Value lists (no leg registry: the `close_value_list` door). Bindings
+    // by definitions no request closes are removed first (V-OD2; the
+    // refusal ran unless allowed); then the lists' annotations, members and
+    // rows.
+    let lists = close_table(r, SetKind::ValueList);
+    let has_lists = has(conn, &dep_table(r, SetKind::ValueList))?;
+    if has_lists {
+        test_hooks::count();
+        let mut stmt = conn.prepare(&bindings_sql(r))?;
+        let ids: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for pd in ids {
+            let mut row = read_pd_row(conn, pd)?;
+            row.parameter_value_list_id = None;
+            revise_pd_row(conn, c, &row)?;
+            acc.unbound += 1;
+        }
+    }
     // Identity legs and object rows.
     for &(k, kind) in &kinds {
         let legs = object_legs(kind).expect("purge kinds have leg sets");
@@ -1051,23 +1256,42 @@ fn execute_objects(conn: &Connection, c: i64, r: usize, acc: &mut Accum) -> Resu
             acc.object_rows += close_leg_set(conn, l, c, &close, None)?;
         }
     }
+    if has_lists {
+        let closed = close_value_lists_set(conn, c, &lists)?;
+        add(
+            &mut acc.per_table,
+            "semantic_annotation",
+            closed.annotations,
+        );
+        acc.object_rows += closed.members + closed.lists;
+        acc.objects += closed.lists;
+        acc.vocabulary |= closed.lists > 0;
+        acc.spared_objects += spared_objects(conn, c, r, SetKind::ValueList)?;
+    }
     for &(k, _) in &kinds {
         let n = close_current_rows_set(conn, k.object_table(), c, &close_table(r, k))?;
         acc.objects += n;
         acc.object_rows += n;
-        acc.spared_objects += query_count(
-            conn,
-            &format!(
-                "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL \
-                 AND valid_from_commit < {c} AND id IN (SELECT id FROM {}) \
-                 AND id IN (SELECT id FROM {})",
-                k.object_table(),
-                dep_table(r, k),
-                surv_table(k)
-            ),
-        )? as usize;
+        acc.vocabulary |= n > 0 && matches!(k, SetKind::Class | SetKind::Parameter);
+        acc.spared_objects += spared_objects(conn, c, r, k)?;
     }
     Ok(())
+}
+
+/// The objects of request `r`'s dependent set of kind `k` that survived
+/// (pre-call rows only).
+fn spared_objects(conn: &Connection, c: i64, r: usize, k: SetKind) -> Result<usize, DbError> {
+    Ok(query_count(
+        conn,
+        &format!(
+            "SELECT count(*) FROM {} WHERE valid_to_commit IS NULL \
+             AND valid_from_commit < {c} AND id IN (SELECT id FROM {}) \
+             AND id IN (SELECT id FROM {})",
+            k.object_table(),
+            dep_table(r, k),
+            surv_table(k)
+        ),
+    )? as usize)
 }
 
 // ---------------------------------------------------------------------------

@@ -36,10 +36,10 @@ use crate::template::dbvocab::read_metadata_key;
 use crate::template::ir::{normalize_audit_rules, AuditRules};
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    insert_class_dim_row, insert_class_row, insert_definition_row, insert_entity_element_row,
-    insert_entity_row, insert_membership_row, insert_scenario_row, insert_type_member, read_ec_row,
-    read_pd_row, revise_alternative_row, revise_ec_row, revise_pd_row, revise_scenario_row,
-    set_metadata,
+    clear_metadata, insert_class_dim_row, insert_class_row, insert_definition_row,
+    insert_entity_element_row, insert_entity_row, insert_membership_row, insert_scenario_row,
+    insert_type_member, read_ec_row, read_pd_row, revise_alternative_row, revise_ec_row,
+    revise_pd_row, revise_scenario_row, set_metadata,
 };
 use crate::text::NameFolds;
 use crate::types::{
@@ -590,28 +590,98 @@ fn doc_classes(conn: &Connection, calls: &CallRenames) -> Result<Vec<DocClass>, 
     Ok(out)
 }
 
-/// Rewrite the two name-keyed metadata documents after the call's renames
-/// (class_param_rename_PLAN §5.2, OD8): the `presentation` document's
-/// `parameter_group_membership` keys (`"{class}.{parameter}"`) and the
-/// `audit_rules` document's `class`, `selector` and `require[]` names. Runs
-/// ONCE per call, after the last structural item (B1: `set_metadata`
-/// closes the current row, so a second write of one document in one commit
-/// would trip the span CHECK), and writes a document only when a name in it
-/// changed.
+/// What a call closed or unbound of the vocabulary the name-keyed
+/// documents name (purge plan §3.7, V-S2), by **pre-call** names (the
+/// documents hold those): classes and parameter definitions whose id has
+/// no live row after a close at `c` (a purge or an object delete), and
+/// definitions a purge unbound from their value list (a revision at `c`
+/// that dropped the binding). A parameter's class is named as it was
+/// before the call (its latest row older than `c`), so a closed parameter
+/// of a class this call renamed is keyed under the original class name.
+#[derive(Default)]
+struct RemovedNames {
+    /// Folded class names.
+    classes: HashSet<String>,
+    /// Folded (class, parameter) of closed definitions.
+    parameters: HashSet<(String, String)>,
+    /// Folded (class, parameter) of unbound definitions.
+    unbound: HashSet<(String, String)>,
+}
+
+impl RemovedNames {
+    fn is_empty(&self) -> bool {
+        self.classes.is_empty() && self.parameters.is_empty() && self.unbound.is_empty()
+    }
+
+    fn read(conn: &Connection, c: i64) -> Result<Self, DbError> {
+        let mut out = RemovedNames::default();
+        let pairs = |sql: &str| -> Result<Vec<(String, String)>, DbError> {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt
+                .query_map(params![c], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            Ok(rows)
+        };
+        let mut stmt = conn.prepare(
+            "SELECT name FROM entity_class WHERE valid_to_commit = ?1 \
+             AND id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL)",
+        )?;
+        for n in stmt.query_map(params![c], |r| r.get::<_, String>(0))? {
+            out.classes.insert(fold(&n?));
+        }
+        // The class's name before the call.
+        let class_name = "(SELECT arg_max(ec.name, ec.version) FROM entity_class ec \
+                          WHERE ec.id = t.entity_class_id AND ec.valid_from_commit < ?1)";
+        for (cl, p) in pairs(&format!(
+            "SELECT {class_name}, t.name FROM parameter_definition t \
+             WHERE t.valid_to_commit = ?1 \
+               AND t.id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)"
+        ))? {
+            out.parameters.insert((fold(&cl), fold(&p)));
+        }
+        for (cl, p) in pairs(&format!(
+            "SELECT {class_name}, t.name FROM parameter_definition t \
+             JOIN parameter_definition l ON l.id = t.id AND l.valid_to_commit IS NULL \
+             WHERE t.valid_to_commit = ?1 AND t.parameter_value_list_id IS NOT NULL \
+               AND l.parameter_value_list_id IS NULL"
+        ))? {
+            out.unbound.insert((fold(&cl), fold(&p)));
+        }
+        Ok(out)
+    }
+}
+
+/// Rewrite the two name-keyed metadata documents at the end of a call
+/// (class_param_rename_PLAN §5.2, OD8; purge plan §3.7, V-S2): the
+/// `presentation` document's `parameter_group_membership` keys
+/// (`"{class}.{parameter}"`) and the `audit_rules` document's `class`,
+/// `selector` and `require[]` names. Runs ONCE per call, after every
+/// channel (B1: `set_metadata` closes the current row, so a second write of
+/// one document in one commit would trip the span CHECK), and writes a
+/// document only when it changed. Removals (`removals`: the call closed or
+/// unbound vocabulary) apply first, on the pre-call names the documents
+/// hold; then the renames:
+///   - a closed parameter's membership key goes; an audit rule goes when its
+///     class or selector closed, or its selector lost its value list (a
+///     selector must be a list parameter), and so does a closed `require[]`
+///     entry (and a rule left with none); `when` keys stay;
+///   - renamed classes and parameters follow (below).
 ///
-/// Membership keys are matched by fold against keys BUILT from the original
-/// class and parameter names, never by splitting on `.` (a class `a.b` with
-/// parameter `c` and a class `a` with parameter `b.c` give the same key: a
-/// known limitation). A renamed entry wins over a stale one that lands on
-/// the same key. `audit_rules` is parsed as the IR block and serialized
-/// through [`normalize_audit_rules`], the one canonical form; a document
-/// that does not parse is left as it is (template export reports it).
+/// When every rule goes, the `audit_rules` document is cleared. Membership
+/// keys are matched by fold against keys BUILT from the original class and
+/// parameter names, never by splitting on `.` (a class `a.b` with parameter
+/// `c` and a class `a` with parameter `b.c` give the same key: a known
+/// limitation). A renamed entry wins over a stale one that lands on the
+/// same key. `audit_rules` is parsed as the IR block and serialized through
+/// [`normalize_audit_rules`], the one canonical form; a document that does
+/// not parse is left as it is (template export reports it).
 pub(crate) fn rewrite_name_documents(
     conn: &Connection,
     c: i64,
     calls: &CallRenames,
+    removals: bool,
 ) -> Result<(), DbError> {
-    if !calls.renamed_vocabulary() {
+    if !calls.renamed_vocabulary() && !removals {
         return Ok(());
     }
     let presentation = read_metadata_key(conn, "presentation")?;
@@ -619,7 +689,19 @@ pub(crate) fn rewrite_name_documents(
     if presentation.is_none() && audit_rules.is_none() {
         return Ok(());
     }
-    let classes = doc_classes(conn, calls)?;
+    let removed = if removals {
+        RemovedNames::read(conn, c)?
+    } else {
+        RemovedNames::default()
+    };
+    let classes = if calls.renamed_vocabulary() {
+        doc_classes(conn, calls)?
+    } else {
+        Vec::new()
+    };
+    if removed.is_empty() && classes.is_empty() {
+        return Ok(());
+    }
 
     if let Some(doc) = presentation {
         if let Ok(serde_json::Value::Object(mut root)) = serde_json::from_str(&doc) {
@@ -634,10 +716,19 @@ pub(crate) fn rewrite_name_documents(
                         }
                     }
                 }
+                let gone: HashSet<String> = removed
+                    .parameters
+                    .iter()
+                    .map(|(cl, p)| format!("{cl}.{p}"))
+                    .collect();
                 let mut changed = false;
                 let mut kept = serde_json::Map::new();
                 let mut moved = serde_json::Map::new();
                 for (k, v) in m {
+                    if gone.contains(&fold(k)) {
+                        changed = true;
+                        continue;
+                    }
                     match renamed.get(&fold(k)) {
                         Some(to) => {
                             changed = true;
@@ -665,6 +756,35 @@ pub(crate) fn rewrite_name_documents(
     if let Some(doc) = audit_rules {
         if let Ok(mut rules) = serde_json::from_str::<AuditRules>(&doc) {
             let mut changed = false;
+            // Removals, on the pre-call names.
+            if !removed.is_empty() {
+                let before = rules.conditional_requirements.len();
+                rules.conditional_requirements.retain_mut(|r| {
+                    let cl = fold(&r.class);
+                    let sel = (cl.clone(), fold(&r.selector));
+                    if removed.classes.contains(&cl)
+                        || removed.parameters.contains(&sel)
+                        || removed.unbound.contains(&sel)
+                    {
+                        return false;
+                    }
+                    let mut dropped = false;
+                    let mut left = 0usize;
+                    for w in r.when.0.values_mut() {
+                        let n = w.require.len();
+                        w.require
+                            .retain(|q| !removed.parameters.contains(&(cl.clone(), fold(q))));
+                        dropped |= w.require.len() != n;
+                        left += w.require.len();
+                    }
+                    if dropped {
+                        changed = true;
+                    }
+                    !(dropped && left == 0)
+                });
+                changed |= rules.conditional_requirements.len() != before;
+            }
+            // Renames.
             for r in &mut rules.conditional_requirements {
                 let Some(dc) = classes
                     .iter()
@@ -694,9 +814,14 @@ pub(crate) fn rewrite_name_documents(
                 }
             }
             if changed {
-                if let Some(v) = normalize_audit_rules(&rules) {
-                    let text = serde_json::to_string(&v).expect("a JSON value serializes");
-                    set_metadata(conn, c, "audit_rules", &text)?;
+                match normalize_audit_rules(&rules) {
+                    Some(v) => {
+                        let text = serde_json::to_string(&v).expect("a JSON value serializes");
+                        set_metadata(conn, c, "audit_rules", &text)?;
+                    }
+                    // Every rule dropped: the document goes, as reconcile
+                    // clears it (V-S2), never left stale.
+                    None => clear_metadata(conn, c, "audit_rules")?,
                 }
             }
         }

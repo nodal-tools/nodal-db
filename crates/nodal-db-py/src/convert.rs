@@ -28,8 +28,9 @@ use nodal_db_core::types::{
 
 use crate::{
     ApiError, ArrowError, Busy, CanonError, Conflict, CoveredWrite, DatabaseError, InternalError,
-    ReadSurfaceStale, SchemaError, SchemaMismatch, ShadowedBuiltin, Stale, TemplateStampedRename,
-    UndeclaredValueType, UnreplayableWal, VersionTooOld, WriteAndDeleteSameKey,
+    ReadSurfaceStale, SchemaError, SchemaMismatch, ShadowedBuiltin, Stale, TemplateStampedPurge,
+    TemplateStampedRename, UndeclaredValueType, UnreplayableWal, VersionTooOld,
+    WriteAndDeleteSameKey,
 };
 
 /// `DbError` -> the one exception hierarchy. Message text is the core's own
@@ -63,6 +64,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::SchemaDir { .. } => SchemaError::new_err(msg),
         DbError::UnreplayableWal { wal, cause } => unreplayable_wal_err(msg, wal, cause),
         DbError::TemplateStampedRename(d) => template_stamped_rename_err(msg, *d),
+        DbError::TemplateStampedPurge(d) => template_stamped_purge_err(msg, *d),
         DbError::UndeclaredValueType(d) => undeclared_value_type_err(msg, *d),
         DbError::ShadowedBuiltin { name, schema, kind } => {
             shadowed_builtin_err(msg, name, schema, kind)
@@ -225,6 +227,32 @@ fn template_stamped_rename_err(
             let _ = renames.append(item);
         }
         let _ = v.setattr("renames", renames);
+    });
+    err
+}
+
+/// A `TemplateStampedPurge` exception carrying the stamped template and
+/// every refused request (`requests`: dicts) as attributes.
+fn template_stamped_purge_err(
+    msg: String,
+    d: nodal_db_core::error::TemplateStampedPurgeDetails,
+) -> PyErr {
+    let err = TemplateStampedPurge::new_err(msg);
+    Python::attach(|py| {
+        let v = err.value(py);
+        let _ = v.setattr("template_name", d.template_name);
+        let _ = v.setattr("template_version", d.template_version);
+        let requests = PyList::empty(py);
+        for r in d.requests {
+            let item = PyDict::new(py);
+            let _ = item.set_item("request_index", r.request_index);
+            let _ = item.set_item("classes", r.classes);
+            let _ = item.set_item("parameters", r.parameters);
+            let _ = item.set_item("value_lists", r.value_lists);
+            let _ = item.set_item("sample", r.sample);
+            let _ = requests.append(item);
+        }
+        let _ = v.setattr("requests", requests);
     });
     err
 }

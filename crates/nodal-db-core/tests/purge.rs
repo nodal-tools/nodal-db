@@ -1139,3 +1139,525 @@ fn a_purged_alternative_can_still_be_erased() {
     assert!(rep.erased);
     assert_eq!(q(&db, "SELECT count(*) FROM value_array_hist"), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Vocabulary scopes (tests 14, 15, 17, 19-22)
+// ---------------------------------------------------------------------------
+
+const DOCS_TEMPLATE: &str = "\
+template: {name: t, version: \"1\"}
+value_lists:
+  - name: method
+    members: [{value: a}, {value: b}]
+  - name: spare
+    members: [{value: x}]
+parameter_groups:
+  - {name: basics}
+classes:
+  - name: unit
+    parameters:
+      - {name: method, value_list: method, group: basics}
+      - {name: eff, types: [{kind: float}], group: basics, default: {kind: float, value: 1.0}}
+      - {name: rate, types: [{kind: float}]}
+  - name: node
+    parameters:
+      - {name: demand, types: [{kind: float}], group: basics}
+audit_rules:
+  conditional_requirements:
+    - class: unit
+      selector: method
+      when:
+        a: {require: [eff]}
+        b: {require: [rate, eff]}
+seed:
+  entities:
+    - {class: node, name: seed_n}
+";
+
+fn apply_t(db: &Path, yaml: &str, recreate_removed: bool) -> Result<(), DbError> {
+    nodal_db_core::template::apply(
+        db,
+        &nodal_db_core::template::parse_str(yaml).unwrap(),
+        &nodal_db_core::template::MigrationRegistry::new(),
+        "t",
+        "",
+        &nodal_db_core::template::ApplyOptions {
+            recreate_removed,
+            ..Default::default()
+        },
+    )
+    .map(|_| ())
+}
+
+/// The documents template applied (stamped), with values on unit and node.
+fn stamped(dir: &tempfile::TempDir) -> PathBuf {
+    let db = dir.path().join("t.duckdb");
+    init_schema(&db).unwrap();
+    apply_t(&db, DOCS_TEMPLATE, false).unwrap();
+    call(
+        &db,
+        ChangeSet {
+            segments: vec![
+                seg("unit", "eff", "Base", scalars(&[("u1", 0.5), ("u2", 0.6)])),
+                seg("node", "demand", "Base", scalars(&[("n1", 1.0)])),
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db
+}
+
+fn allowed(scope: PS) -> PurgeRequest {
+    PurgeRequest {
+        allow_on_template: true,
+        ..req(scope)
+    }
+}
+
+fn meta(db: &Path, key: &str) -> Option<String> {
+    let conn = Connection::open(db).unwrap();
+    conn.query_row(
+        &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+        [],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+#[test]
+fn stamped_database_refuses_vocabulary_requests_without_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = stamped(&dir);
+    let before = head(&db);
+    let err = purge(
+        &db,
+        vec![
+            req(PS::Values {
+                class: None,
+                parameter: None,
+                alternative: None,
+            }),
+            req(PS::Parameters {
+                class: Some("unit".into()),
+            }),
+            // Would also reach outside its scope (the binding of `method`):
+            // the template refusal is reported first, listing every request.
+            req(PS::ValueLists { except: vec![] }),
+        ],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap_err();
+    let DbError::TemplateStampedPurge(d) = &err else {
+        panic!("{err}");
+    };
+    assert_eq!(d.template_name, "t");
+    assert_eq!(d.template_version.as_deref(), Some("1"));
+    let idx: Vec<usize> = d.requests.iter().map(|r| r.request_index).collect();
+    assert_eq!(idx, [1, 2]);
+    assert_eq!(d.requests[0].parameters, 3);
+    assert_eq!(d.requests[1].value_lists, 2);
+    assert_eq!(head(&db), before);
+    // A data scope needs no flag, seeds included; and a vocabulary request
+    // closing only what the same call creates passes.
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![class("scratch", &[])],
+            purges: vec![
+                req(PS::Entities {
+                    class: Some("node".into()),
+                }),
+                req(PS::Classes {
+                    except: vec!["unit".into(), "node".into()],
+                }),
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(r.commit_id > 0);
+    assert_eq!(
+        names(
+            &db,
+            "SELECT e.name FROM entity e JOIN entity_class c ON c.id = e.entity_class_id \
+             WHERE e.valid_to_commit IS NULL AND c.name = 'node'"
+        ),
+        Vec::<String>::new(),
+        "the seed closes too"
+    );
+    // The data purge left the certified hash alone (V-B2).
+    assert!(meta(&db, "template_content_hash").is_some());
+}
+
+#[test]
+fn parameters_purge_closes_the_definition_and_its_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = stamped(&dir);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("UPDATE parameter_definition SET retain_content = FALSE WHERE name = 'eff'")
+        .unwrap();
+    drop(conn);
+    let r = purge(
+        &db,
+        vec![PurgeRequest {
+            allow_outside_scope: true,
+            ..allowed(PS::Parameters {
+                class: Some("unit".into()),
+            })
+        }],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap();
+    let c = r.commit_id;
+    assert_eq!(r.purges[0].objects, 3);
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM parameter_definition p JOIN entity_class c \
+                ON c.id = p.entity_class_id WHERE p.valid_to_commit IS NULL AND c.name = 'unit'"
+        ),
+        0
+    );
+    assert_eq!(
+        q(
+            &db,
+            &format!("SELECT count(*) FROM parameter_type WHERE valid_to_commit = {c}")
+        ),
+        3, // method (inferred from its list), eff, rate
+    );
+    assert_eq!(
+        q(
+            &db,
+            &format!("SELECT count(*) FROM definition_value_scalar WHERE valid_to_commit = {c}")
+        ),
+        1
+    );
+    // V-S3: the definition closed in the same purge still stubs its values.
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM value_scalar WHERE valid_to_commit = {c} \
+                         AND NOT content_retained AND v_float IS NULL"
+            )
+        ),
+        2
+    );
+    assert_eq!(live(&db, "value_scalar"), 1, "node.demand stays");
+    // The lists stay (a closed definition's orphan list is not purged).
+    assert_eq!(live(&db, "parameter_value_list"), 2);
+    // V-B2: vocabulary closed on a stamped database clears the hash; the
+    // same template then blocks, and recreate_removed converges.
+    assert!(meta(&db, "template_content_hash").is_none());
+    let err = apply_t(&db, DOCS_TEMPLATE, false).unwrap_err().to_string();
+    assert!(
+        err.contains("parameter `unit.eff` was removed locally"),
+        "{err}"
+    );
+    apply_t(&db, DOCS_TEMPLATE, true).unwrap();
+    assert!(meta(&db, "template_content_hash").is_some());
+    // V-S2: the purged keys went from the documents, and the rule whose
+    // selector closed with them too (the document is cleared), until the
+    // re-apply put them back.
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM metadata WHERE lower(name) = 'audit_rules' \
+                         AND valid_to_commit = {c}"
+            )
+        ),
+        1
+    );
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM metadata WHERE lower(name) = 'audit_rules' \
+                         AND valid_from_commit = {c}"
+            )
+        ),
+        0,
+        "cleared, not rewritten"
+    );
+}
+
+#[test]
+fn value_list_binding_is_refused_or_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = stamped(&dir);
+    let err = purge(
+        &db,
+        vec![allowed(PS::ValueLists { except: vec![] })],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("outside its scope"), "{err}");
+    assert!(
+        err.contains("parameter_definition of parameter_value_list_id (unit.method)"),
+        "{err}"
+    );
+    let before = head(&db);
+    let r = purge(
+        &db,
+        vec![PurgeRequest {
+            allow_outside_scope: true,
+            ..allowed(PS::ValueLists {
+                except: vec!["spare".into()],
+            })
+        }],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap();
+    assert_eq!(r.purges[0].unbound, 1);
+    assert_eq!(r.purges[0].objects, 1);
+    assert_eq!(
+        names(
+            &db,
+            "SELECT name FROM parameter_value_list WHERE valid_to_commit IS NULL"
+        ),
+        ["spare"]
+    );
+    // The binding is removed by a revision (version + 1); as of before it
+    // still shows.
+    assert_eq!(
+        q(
+            &db,
+            "SELECT version FROM parameter_definition WHERE cur_name = 'method'"
+        ),
+        2
+    );
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM parameter_definition WHERE cur_name = 'method' \
+                AND parameter_value_list_id IS NULL"
+        ),
+        1
+    );
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM parameter_definition_asof({before}) \
+                         WHERE name = 'method' AND parameter_value_list_id IS NOT NULL"
+            )
+        ),
+        1
+    );
+    // The rule whose selector lost its list is dropped (the only rule: the
+    // document is cleared), and the database's template export validates.
+    assert!(meta(&db, "audit_rules").is_none());
+    let (t, _) = nodal_db_core::template::export(&db).unwrap();
+    nodal_db_core::template::validate(&t).unwrap();
+}
+
+#[test]
+fn classes_purge_with_restated_classes_keeps_their_descriptors() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = stamped(&dir);
+    // Display mode and annotations on both classes.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "INSERT INTO commit (user, message) VALUES ('t', 'descriptors'); \
+         INSERT INTO display_mode (name, valid_from_commit) VALUES ('dm', (SELECT max(id) FROM commit)); \
+         INSERT INTO entity_class_display_mode (display_mode_id, entity_class_id, valid_from_commit) \
+           SELECT (SELECT id FROM display_mode), id, (SELECT max(id) FROM commit) \
+           FROM entity_class WHERE valid_to_commit IS NULL; \
+         INSERT INTO semantic_annotation (object_type, object_id, term_iri, valid_from_commit) \
+           SELECT 'entity_class', id, 'x:' || name, (SELECT max(id) FROM commit) \
+           FROM entity_class WHERE valid_to_commit IS NULL;",
+    )
+    .unwrap();
+    drop(conn);
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![
+                class("unit", &[]),
+                // A NoOp create naming an unknown list: no error, no re-bind.
+                SC::CreateParameter {
+                    class: "unit".into(),
+                    name: "method".into(),
+                    types: vec![],
+                    value_list: Some("nope".into()),
+                    description: None,
+                },
+            ],
+            purges: vec![PurgeRequest {
+                allow_outside_scope: true,
+                ..allowed(PS::Classes { except: vec![] })
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(r.commit_id > 0);
+    assert_eq!(
+        names(
+            &db,
+            "SELECT name FROM entity_class WHERE valid_to_commit IS NULL"
+        ),
+        ["unit"]
+    );
+    // unit keeps its descriptors; node's closed.
+    assert_eq!(live(&db, "entity_class_display_mode"), 1);
+    assert_eq!(live(&db, "semantic_annotation"), 1);
+    // Below the spared class, unstated entities and parameters close; the
+    // re-stated method survives with its binding (the NoOp create never
+    // re-binds) and so does the list it binds.
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM entity e JOIN entity_class c ON c.id = e.entity_class_id \
+                WHERE e.valid_to_commit IS NULL AND c.name = 'unit'"
+        ),
+        0
+    );
+    assert_eq!(
+        names(
+            &db,
+            "SELECT p.name FROM parameter_definition p WHERE p.valid_to_commit IS NULL"
+        ),
+        ["method"]
+    );
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM parameter_definition p JOIN parameter_value_list l \
+                ON l.id = p.parameter_value_list_id AND l.valid_to_commit IS NULL \
+                WHERE p.valid_to_commit IS NULL AND l.name = 'method'"
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_rename_and_a_purge_rewrite_the_documents_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = stamped(&dir);
+    // Rename unit -> gen and purge gen.rate in the same call: the key
+    // "unit.rate" goes (pre-call name), "unit.eff" moves to "gen.eff".
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![SC::RenameEntityClass {
+                current: "unit".into(),
+                new_name: "gen".into(),
+                description: None,
+                allow_on_template: true,
+            }],
+            purges: vec![allowed(PS::Parameters {
+                class: Some("gen".into()),
+            })],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let c = r.commit_id;
+    // method, eff and rate all closed (none re-stated): every rule goes.
+    let p: serde_json::Value = serde_json::from_str(&meta(&db, "presentation").unwrap()).unwrap();
+    let keys: Vec<&String> = p["parameter_group_membership"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(keys, ["node.demand"]);
+    assert_eq!(
+        q(
+            &db,
+            &format!(
+                "SELECT count(*) FROM metadata WHERE lower(name) = 'presentation' \
+                         AND valid_from_commit = {c}"
+            )
+        ),
+        1,
+        "written once"
+    );
+    assert!(meta(&db, "audit_rules").is_none());
+
+    // An object delete of a parameter removes its keys too.
+    let dir2 = tempfile::tempdir().unwrap();
+    let db2 = stamped(&dir2);
+    nodal_db_core::api::delete_objects(
+        &db2,
+        vec![(
+            ObjectDeleteKey {
+                kind: ObjectKind::Parameter,
+                class: Some("unit".into()),
+                target: ObjectRef::Name("rate".into()),
+            },
+            ObjectDeleteOpts { cascade: true },
+        )],
+        "t",
+        "m",
+        o(),
+    )
+    .unwrap();
+    let rules: serde_json::Value =
+        serde_json::from_str(&meta(&db2, "audit_rules").unwrap()).unwrap();
+    assert_eq!(
+        rules["conditional_requirements"][0]["when"]["b"]["require"],
+        serde_json::json!(["eff"])
+    );
+}
+
+#[test]
+fn classes_except_must_be_closed_under_class_set_dimensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.duckdb");
+    init_schema(&db).unwrap();
+    apply_t(
+        &db,
+        "template: {name: s, version: \"1\"}\n\
+         class_sets:\n  - {name: S, members: [p, q]}\n\
+         classes:\n  - {name: p}\n  - {name: q}\n  - name: k\n    dimensions: [{class_set: S}]\n",
+        false,
+    )
+    .unwrap();
+    call(
+        &db,
+        ChangeSet {
+            structural: vec![entity("p", "p1"), nd("k", &["p1"])],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Purging p keeps k, whose dimension is the set containing p: its
+    // entity k1 = (p1) is reached through B1.
+    let purge_p = |outside: bool| {
+        purge(
+            &db,
+            vec![PurgeRequest {
+                allow_outside_scope: outside,
+                ..allowed(PS::Classes {
+                    except: vec!["k".into(), "q".into()],
+                })
+            }],
+            "t",
+            "m",
+            o(),
+        )
+    };
+    let err = purge_p(false).unwrap_err().to_string();
+    assert!(err.contains("1 entity of k (p1)"), "{err}");
+    purge_p(true).unwrap();
+    assert_eq!(live(&db, "entity"), 0);
+    assert_eq!(
+        names(
+            &db,
+            "SELECT name FROM entity_class WHERE valid_to_commit IS NULL ORDER BY name"
+        ),
+        ["k", "q"]
+    );
+}

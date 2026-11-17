@@ -211,6 +211,19 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    TemplateStampedPurge,
+    ApiError,
+    "A purge's vocabulary request (classes, parameters, value_lists) would \
+     close classes, parameters or value lists that existed before the call, \
+     on a template-stamped database, without allow_on_template \
+     (DbError::TemplateStampedPurge); nothing was written. Attributes: \
+     `template_name`, `template_version` and `requests`, a list of dicts \
+     (`request_index`, `classes`, `parameters`, `value_lists`, `sample`), one \
+     per refused request. Ask the user, then resend those requests with \
+     \"allow_on_template\": True. A subclass of ApiError."
+);
+create_exception!(
+    nodal_db,
     ShadowedBuiltin,
     NodalDbError,
     "The database file defines a macro named like a DuckDB built-in function \
@@ -1353,6 +1366,10 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "TemplateStampedRename",
         py.get_type::<TemplateStampedRename>(),
+    )?;
+    m.add(
+        "TemplateStampedPurge",
+        py.get_type::<TemplateStampedPurge>(),
     )?;
     m.add("CanonError", py.get_type::<CanonError>())?;
     m.add("ArrowError", py.get_type::<ArrowError>())?;

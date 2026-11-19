@@ -603,12 +603,13 @@ def parse_contract(text: str):
     return major, sv, objs
 
 
-def mirror_base(name: str) -> str:
-    """The base table a mirror `<table>_current` / `<table>_asof` reads."""
+def mirror_base(name: str) -> str | None:
+    """The base table a mirror `<table>_current` / `<table>_asof` reads;
+    None for a name without either suffix (no lenient treatment)."""
     for suffix in ("_current", "_asof"):
         if name.endswith(suffix):
             return name[: -len(suffix)]
-    return name
+    return None
 
 
 def classify_change(old, new, tables=None) -> tuple[list[str], list[str]]:
@@ -637,13 +638,18 @@ def classify_change(old, new, tables=None) -> tuple[list[str], list[str]]:
                             f"{len(cols) - len(n[3])} column(s) removed")
                 major.append(f"stable object {name}: existing columns changed ({diff})")
         elif cls == "mirror":
+            base = mirror_base(name)
             if n is None:
                 # A mirror follows its table: it goes with its table (a
                 # SCHEMA_VERSION change); without it, it is a removal.
-                if tables is not None and mirror_base(name) not in tables:
+                if tables is not None and base is not None and base not in tables:
                     schema.append(f"table mirror {name} removed with its table")
                 else:
                     major.append(f"table mirror {name} removed or renamed (its table remains)")
+            elif n[0] not in ("mirror", "stable"):
+                # Retagged away from the contract (e.g. to internal) while
+                # it still exists: a removal from the contract.
+                major.append(f"table mirror {name} reclassified as {n[0]}")
             elif (n[1], n[2], n[3]) != (kind, ps, cols):
                 schema.append(f"table mirror {name}: columns or parameters changed")
     return major, schema

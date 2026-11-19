@@ -132,6 +132,10 @@ def test_misspelled_keys_are_refused(db):
         {"op": "value_metadata", "scope": "save",
          "action": {"set": [{"source": "IEA", "rol": "x"}]}},
         {"op": "set_property", "key": "title"},
+        {"op": "link", "subject": {"dataset": True},
+         "target": {"source": "IEA", "pair": ["keyword", "grid"]}},
+        {"op": "value_metadata", "scope": "save",
+         "action": {"set": [{"source": "IEA"}], "keep": True}},
     ]
     for item in bad:
         with pytest.raises(nodal_db.ApiError):

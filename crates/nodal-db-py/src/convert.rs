@@ -1053,6 +1053,16 @@ fn md_target(obj: &Bound<'_, PyAny>) -> PyResult<Target> {
 fn md_target_in(obj: &Bound<'_, PyAny>, with_role: bool) -> PyResult<Target> {
     let base: &[&str] = &["source", "license", "pair", "id", "kind", "role"];
     md_keys(obj, "a target", if with_role { base } else { &base[..5] })?;
+    let kinds = ["source", "license", "pair", "id"]
+        .iter()
+        .filter(|k| md_opt(obj, k).is_some())
+        .count();
+    if kinds != 1 {
+        return Err(md_err(format!(
+            "a target names exactly one of \"source\", \"license\", \"pair\" or \"id\" (with \
+             \"kind\"), got {obj}"
+        )));
+    }
     if let Some(v) = md_opt(obj, "source") {
         return Ok(Target::Source(md_ref(&v)?));
     }
@@ -1160,6 +1170,7 @@ pub(crate) fn md_action(obj: &Bound<'_, PyAny>) -> PyResult<Action> {
             ))),
         };
     }
+    md_keys(obj, "a value-metadata action", &["set"])?;
     let list = md_opt(obj, "set").ok_or_else(|| {
         md_err(format!(
             "a value-metadata action is \"keep\", \"clear\" or {{\"set\": [...]}}, got {obj}"

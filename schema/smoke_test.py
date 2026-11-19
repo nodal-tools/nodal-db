@@ -2306,11 +2306,15 @@ def contract_gate_checks(gen_schema):
     def mirror_removed(new):
         del new["entity_asof"]
 
+    def mirror_retagged(new):
+        new["entity_current"] = ("internal", *new["entity_current"][1:])
+
     def reparam(new):
         new["scenario_diff"] = (*new["scenario_diff"][:2], ["a"], new["scenario_diff"][3])
 
     # the base tables behind the listing's mirrors (every versioned table)
-    base_tables = {gen_schema.mirror_base(n) for n, (c, *_r) in objs.items() if c == "mirror"}
+    base_tables = {gen_schema.mirror_base(n) for n, (c, *_r) in objs.items()
+                   if c == "mirror"} - {None}
 
     def gate(new, m=major, tables=base_tables):
         return gen_schema.contract_gate(text, new, m, tables)
@@ -2332,6 +2336,14 @@ def contract_gate_checks(gen_schema):
     problems = gate(mutate(mirror_removed))
     check("contract gate: a mirror removed while its table remains needs a major bump",
           any("contract_major" in p for p in problems), str(problems))
+    problems = gate(mutate(mirror_retagged))
+    check("contract gate: a mirror retagged internal while its table remains needs a major bump",
+          any("contract_major" in p for p in problems), str(problems))
+    check("contract gate: a mirror name without _current/_asof gets no lenient treatment",
+          gen_schema.mirror_base("entity") is None
+          and gen_schema.classify_change(
+              {"entity": ("mirror", "view", [], [])}, {}, base_tables)[0] != [],
+          "")
     problems = gate(mutate(mirror_changed))
     check("contract gate: a changed mirror without a SCHEMA_VERSION bump fails",
           any("SCHEMA_VERSION" in p for p in problems), str(problems))

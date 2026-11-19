@@ -1022,9 +1022,32 @@ fn refuse_renamed_away_references(
         Ok::<(), DbError>(())
     };
     // An entity of `class` (as it resolves now) by a renamed-away name.
+    // Class names resolve once per fold (`types::fold` is DuckDB's
+    // `lower()`, engine rule 8), only when an entity was renamed.
     let renamed_classes = calls.entity_rename_classes();
+    let class_ids: std::cell::RefCell<HashMap<String, Option<i64>>> = Default::default();
+    let class_id = |class: &str| -> Result<Option<i64>, DbError> {
+        let k = fold(class);
+        if let Some(id) = class_ids.borrow().get(&k) {
+            return Ok(*id);
+        }
+        let id = lookup_entity_class(conn, class)?;
+        class_ids.borrow_mut().insert(k, id);
+        Ok(id)
+    };
+    let renamed_entity = |class: &str, name: &str| -> Result<Option<String>, DbError> {
+        if renamed_classes.is_empty() {
+            return Ok(None);
+        }
+        match class_id(class)? {
+            Some(cid) if renamed_classes.contains(&cid) => {
+                calls.renamed_entity_of(conn, cid, name)
+            }
+            _ => Ok(None),
+        }
+    };
     let check_entity = |what: &str, class: &str, name: &str| {
-        if let Some(to) = calls.renamed_entity(conn, class, name)? {
+        if let Some(to) = renamed_entity(class, name)? {
             return Err(refuse(what.to_string(), "entity", name, &to));
         }
         Ok::<(), DbError>(())
@@ -1035,7 +1058,7 @@ fn refuse_renamed_away_references(
         if renamed_classes.is_empty() {
             continue;
         }
-        let Some(cid) = lookup_entity_class(conn, &s.class)? else {
+        let Some(cid) = class_id(&s.class)? else {
             continue;
         };
         if !renamed_classes.contains(&cid) {
@@ -1148,9 +1171,7 @@ fn refuse_renamed_away_references(
             Subject::Scenario(n) => calls.renamed_scenario(conn, n)?.map(|t| ("scenario", n, t)),
             Subject::Entity { class, name } => match calls.renamed_class(conn, class)? {
                 Some(t) => Some(("class", class, t)),
-                None => calls
-                    .renamed_entity(conn, class, name)?
-                    .map(|t| ("entity", name, t)),
+                None => renamed_entity(class, name)?.map(|t| ("entity", name, t)),
             },
             Subject::Parameter { class, name } => match calls.renamed_class(conn, class)? {
                 Some(t) => Some(("class", class, t)),

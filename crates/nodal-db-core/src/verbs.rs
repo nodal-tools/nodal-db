@@ -542,12 +542,15 @@ pub fn ensure_entity(
     let pre = with_read_plain(db, |conn| {
         let s = entity_class_shape(conn, class)?;
         match lookup_entity(conn, s.cid, &effective_name)? {
-            Some(eid) if verify_entity_elements(conn, class, &effective_name, eid, elements)
-                .is_ok() =>
+            // A tuple mismatch (an Api refusal) falls through; a database
+            // error does not.
+            Some(eid) => match verify_entity_elements(conn, class, &effective_name, eid, elements)
             {
-                Ok(Some(eid))
-            }
-            _ => Ok(None),
+                Ok(()) => Ok(Some(eid)),
+                Err(DbError::Api(_)) => Ok(None),
+                Err(e) => Err(e),
+            },
+            None => Ok(None),
         }
     })?;
     if let Some(eid) = pre {

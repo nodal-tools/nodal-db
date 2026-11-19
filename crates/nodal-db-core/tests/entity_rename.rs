@@ -1359,3 +1359,25 @@ fn the_set_path_matches_the_per_item_path_across_every_channel() {
     stale(s, "activation");
     assert_eq!(all_rows(&c), all_rows(&d));
 }
+
+#[test]
+fn the_renamed_to_note_names_the_rename_in_the_elements_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    ok(&db, vec![ent("node", "q"), ent("unit", "q")]);
+    // `q` was renamed in both classes; the element at the node position
+    // names the node's rename.
+    let m = api_err(st(
+        &db,
+        vec![
+            ren("unit", "q", "uq"),
+            ren("node", "q", "nq"),
+            nd("unit__node", None, &["u1", "q"]),
+        ],
+    ));
+    assert!(
+        m.contains("entity \"q\" was renamed to \"nq\" earlier in this call")
+            && !m.contains("\"uq\""),
+        "{m}"
+    );
+}

@@ -559,8 +559,8 @@ impl CallRenames {
 
     /// The renamed-away entity names `change` writes, for the "renamed to"
     /// note on its not-found error (entity_rename_PLAN §4): `(old, new)`
-    /// per name. Elements of a `CreateEntity` match by fold in any class
-    /// (the note only explains an error that already happened).
+    /// per name. An element of a `CreateEntity` matches in its dimension's
+    /// class, or in every member class of a class-set dimension.
     fn renamed_entity_refs(
         &self,
         conn: &Connection,
@@ -583,13 +583,22 @@ impl CallRenames {
                 by_class(&member.class, &member.name)?;
             }
             StructuralChange::RenameEntity { class, current, .. } => by_class(class, current)?,
-            StructuralChange::CreateEntity { elements, .. } => {
-                for el in elements {
-                    if let Some(((cid, _), (_, to))) =
-                        self.entities.iter().find(|((_, f), _)| *f == fold(el))
-                    {
-                        if lookup_entity(conn, *cid, el)?.is_none() {
-                            out.push((el.clone(), to.clone()));
+            StructuralChange::CreateEntity {
+                class, elements, ..
+            } => {
+                let Ok(shape) = entity_class_shape(conn, class) else {
+                    return Ok(out);
+                };
+                for ((_, dc, ds), el) in shape.dims.iter().zip(elements) {
+                    let classes = match (dc, ds) {
+                        (Some(c), _) => vec![*c],
+                        (None, Some(set)) => class_set_members(conn, *set)?,
+                        (None, None) => Vec::new(),
+                    };
+                    for c in classes {
+                        if let Some(to) = self.renamed_entity_of(conn, c, el)? {
+                            out.push((el.clone(), to));
+                            break;
                         }
                     }
                 }

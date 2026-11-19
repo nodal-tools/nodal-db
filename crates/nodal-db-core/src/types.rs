@@ -525,6 +525,18 @@ pub enum WarningKind {
         stored: String,
         spellings: Vec<FoldedSpelling>,
     },
+    /// A purge request's scope holds more long-tier cells plus array
+    /// elements than `threshold` ([`crate::purge::PURGE_LARGE_CELLS`]): one
+    /// long transaction that holds the write lock and needs memory in
+    /// proportion (measured: about 105 million long cells, ten minutes and
+    /// 3.4 GB at the peak, within a 6.4 GB DuckDB limit). Not a refusal.
+    /// `cells` counts the scope before the call's survivors are spared (an
+    /// upper bound). `object_type` is `"purge"`, `name` empty, `id` 0.
+    PurgeLarge {
+        request_index: usize,
+        cells: u64,
+        threshold: u64,
+    },
 }
 
 /// One reference of a [`WarningKind::NameFolded`] warning: the spelling
@@ -608,6 +620,9 @@ pub struct WriteReport {
     /// membership) changes in this commit (structural_write_api_plan §2.3).
     /// Empty for pure value work. Additive, like `object_deletes`.
     pub structural: Vec<StructuralOutcome>,
+    /// Per-request outcomes of any purges in this commit (purge plan §3.4).
+    /// Additive, like `object_deletes`.
+    pub purges: Vec<PurgeOutcome>,
     /// Set when the database file's read surface was older than this
     /// build's and the refresh that runs before the write failed (a user
     /// table holding a reserved read-surface name): the write itself went
@@ -882,10 +897,15 @@ pub enum StructuralChange {
         active: Option<bool>,
     },
     /// Idempotent 0-D/N-D entity create (existing ⇒ its id, verifies tuple).
+    /// `description` applies on create only: an existing entity is a NoOp
+    /// that verifies the element tuple and ignores it (the first of two
+    /// creates of one entity in a call wins); `Some("")` stores no
+    /// description. Free text: never NFC-normalized.
     CreateEntity {
         class: String,
         name: Option<String>,
         elements: Vec<String>,
+        description: Option<String>,
     },
     /// Idempotent entity-class create (0-D or N-D). `description` applies on
     /// create only (an existing class is a NoOp that checks the dims and
@@ -981,6 +1001,150 @@ pub struct StructuralOutcome {
     /// The affected/created object id (0 where n/a, e.g. a cleared membership).
     pub object_id: i64,
     pub effect: StructuralEffect,
+}
+
+// ---------------------------------------------------------------------------
+// Purge (entity_descriptions_purge plan §3): a bulk, versioned close-out of
+// every item in a named scope, in the same atomic commit as the call's other
+// channels. Names, not ids; resolved lookup-only, case-insensitively.
+// ---------------------------------------------------------------------------
+
+/// What one purge request closes (purge plan §3.4). Every filter name is
+/// resolved lookup-only after the call's structural changes; an unknown or
+/// blank name is refused, and so is a name a rename of the same call freed.
+///
+/// **True replace.** A purge closes everything in its scope except exactly
+/// what the same call writes, at each scope's own level: a value key the
+/// call writes (unchanged ones included), an activation, membership or
+/// scenario ranking it sets, an object it names or creates. Sparing goes
+/// upward to the objects a spared row's identity references (an entity's
+/// class and elements, a parameter's class and bound list, …); a spared
+/// object keeps only its row and identity rows, and every dependent closes
+/// unless spared at its own level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PurgeScope {
+    /// Values (all tiers, with their value metadata), optionally of one
+    /// class, one parameter of it (`parameter` needs `class`), and one
+    /// alternative. Never closes objects.
+    Values {
+        class: Option<String>,
+        parameter: Option<String>,
+        alternative: Option<String>,
+    },
+    /// Entities of one class (or all), with the full entity cascade: their
+    /// values, activations, memberships, locations, units, metadata and
+    /// annotations, and the N-D entities that use them as elements.
+    Entities { class: Option<String> },
+    /// Activation rows, of one class's entities (or all) and one
+    /// alternative (or all).
+    Activations {
+        class: Option<String>,
+        alternative: Option<String>,
+    },
+    /// Membership rows of the groups of one class (or all).
+    Memberships { group_class: Option<String> },
+    /// Every alternative except those named, with their values,
+    /// activations, scoped memberships and scenario rankings.
+    Alternatives {
+        #[serde(default)]
+        except: Vec<String>,
+    },
+    /// Every scenario with its ranking.
+    Scenarios,
+    /// Every entity class except those named, with the full class cascade
+    /// (entities, parameters, dimensions, display modes, class-set
+    /// membership, annotations, and the classes that use a purged class as
+    /// a dimension).
+    Classes {
+        #[serde(default)]
+        except: Vec<String>,
+    },
+    /// Every parameter definition (of one class, or all) with its types,
+    /// defaults, values, units, value metadata and annotations.
+    Parameters { class: Option<String> },
+    /// Every value list except those named, with its members and
+    /// annotations.
+    ValueLists {
+        #[serde(default)]
+        except: Vec<String>,
+    },
+}
+
+/// One purge request: a scope and its two opt-ins (purge plan §3.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeRequest {
+    pub scope: PurgeScope,
+    /// Allow the request to close objects outside its scope that its
+    /// cascade reaches (N-D entities of other classes, classes that use a
+    /// purged class as a dimension) and, for `ValueLists`, to remove the
+    /// binding of a list a parameter outside every scope of the call still
+    /// binds. Without it such a reach refuses the whole call, listing it.
+    #[serde(default)]
+    pub allow_outside_scope: bool,
+    /// Allow a vocabulary request (`Classes`, `Parameters`, `ValueLists`) to
+    /// close classes, parameters or lists that existed before the call on a
+    /// template-stamped database. Without it the call is refused with
+    /// `DbError::TemplateStampedPurge`.
+    #[serde(default)]
+    pub allow_on_template: bool,
+}
+
+impl PurgeRequest {
+    /// A request with both opt-ins off.
+    pub fn new(scope: PurgeScope) -> Self {
+        PurgeRequest {
+            scope,
+            allow_outside_scope: false,
+            allow_on_template: false,
+        }
+    }
+}
+
+/// What one purge request did, in `WriteReport::purges` (purge plan §3.4).
+/// Counts come from the close-out statements' row counts: a row two
+/// requests (or an object delete and a request) reach is counted once, by
+/// the first that closed it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeOutcome {
+    /// Position in the call's purge requests.
+    pub request_index: usize,
+    /// Rows closed: `object_rows` the objects and their identity rows,
+    /// `per_table` the dependents (value tiers included).
+    pub closed_out: CascadeCounts,
+    /// Objects closed (their own rows, identity rows not counted).
+    pub objects: usize,
+    /// What the call's own writes spared: `object_rows` the objects in
+    /// scope that survived, `per_table` the dependent rows the call
+    /// re-states (values, activations, memberships, rankings, value
+    /// metadata).
+    pub spared: CascadeCounts,
+    /// Value-list bindings removed (`ValueLists` with
+    /// `allow_outside_scope`).
+    pub unbound: usize,
+}
+
+/// Read-only preview of one purge request (purge plan §3.6). Computed with
+/// no survivors (nothing is written), so its counts, `outside_scope` and
+/// `template_stamped` are upper bounds of what a call that also writes
+/// would close.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgePreview {
+    pub request_index: usize,
+    /// Objects the request would close.
+    pub objects: usize,
+    /// Rows it would close, distinct per table.
+    pub cascade: CascadeCounts,
+    /// Its reach outside its scope (one entry per reached kind and class,
+    /// with a count and a bounded sample); non-empty refuses the call
+    /// without `allow_outside_scope`.
+    pub outside_scope: Vec<Blocker>,
+    /// Long-tier cells plus array elements in its scope (the memory guard).
+    pub cells: u64,
+    /// [`WarningKind::PurgeLarge`] when `cells` passes the threshold.
+    pub warnings: Vec<Warning>,
+    /// It would close vocabulary that exists on a template-stamped
+    /// database (refused without `allow_on_template`).
+    pub template_stamped: bool,
 }
 
 /// Read-only preview of ONE object delete (object_delete plan §3, decision D6).

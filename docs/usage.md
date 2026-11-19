@@ -224,9 +224,9 @@ do either.
                    'name': 'high_demand', 'id': 2}]}
     ```
 
-    Several writes, deletions and structural changes can go into one
-    commit with `db.commit_changes(segments=..., structural=...,
-    deletes=..., object_deletes=..., user=...)`.
+    Several writes, deletions, structural changes and purges can go into
+    one commit with `db.commit_changes(segments=..., structural=...,
+    deletes=..., object_deletes=..., purges=..., user=...)`.
 
 === "Rust"
 
@@ -589,8 +589,12 @@ database; parameter names are unique within their class.
   database (creates and templates follow the same rule). The same name
   with no description change, or `""` on an object with no description,
   is `NoOp`; a call of only no-ops makes no commit (`commit_id` 0).
-  `CreateEntityClass` also takes a `description`, applied only when the
-  class is created.
+  `CreateEntityClass` and `CreateEntity` (Python `create_entity_class`,
+  `create_entity`) also take a `description`, applied only when the
+  class or entity is created: a create of an existing one is a `NoOp`
+  that keeps the stored description (when one call creates the same
+  entity twice, the first description wins). An entity's description
+  cannot be revised yet.
 - **Several changes in one call** apply in order. Address an object by
   the name it has at that point of the call: after `node -> bus`, a
   later item, segment or delete uses `bus`. A reference by the old name
@@ -626,12 +630,185 @@ database; parameter names are unique within their class.
   changed template creates the old name anew.
 - **Template documents.** The template-owned parameter groups and audit
   rules (the `presentation` and `audit_rules` metadata documents) name
-  classes and parameters; a rename updates them in the same commit.
+  classes and parameters; a rename updates them in the same commit, and so
+  does an object delete or a purge that closes them (see [Purge](#purge)).
 - **Outside the database.** Names that other programs store (Arrow import
   files, results templates, saved SQL such as
   `read_parameter('node', 'demand')`) are not updated: after a rename a
   read by the old name returns no rows, and a write by it creates a new
   object. Update those references together with the rename.
+
+### Purge
+
+A purge closes out everything in a named scope in one commit: all values
+of a class, every entity, every alternative but some, every class. It is
+the counterpart of Spine Toolbox's "purge before writing". **Most work
+does not need it**: a write replaces the values it names, an object
+delete removes one object with its dependents, and an import into a new
+file starts empty. Use a purge when a source is the whole truth for a
+scope and anything it no longer states must go.
+
+=== "Python"
+
+    ```python
+    db.preview_purge([{"scope": "values", "class": "node"}])
+    db.purge([{"scope": "values", "class": "node"}], user="alice")
+
+    # Purge and re-import in one commit: a true replace.
+    db.commit_changes(segments=[...], structural=[...],
+                      purges=[{"scope": "entities"}], user="alice")
+    ```
+
+=== "CLI"
+
+    ```bash
+    nodal-db purge demo.duckdb --scope values --class node --preview
+    nodal-db purge demo.duckdb --scope classes --except node --user alice
+    ```
+
+    `--allow-outside-scope` and `--allow-on-template` are the two opt-ins;
+    `template apply --recreate-removed` re-creates removed vocabulary.
+
+=== "Rust"
+
+    `api::purge` and `api::preview_purge`, or the `purges` channel of
+    `api::commit_change_set` (`ChangeSet { purges, .. }`) with
+    `types::PurgeRequest` and `types::PurgeScope`.
+
+**Scopes.** Each request names one scope and its filters:
+
+| Scope | Closes |
+|---|---|
+| `values` (`class`, `parameter` (needs `class`), `alternative`) | values of every tier and their value metadata |
+| `entities` (`class`) | entities with everything keyed on them: values, activations, memberships, locations, units, metadata, annotations, and the N-D entities that use them as elements |
+| `activations` (`class`, `alternative`) | activation rows |
+| `memberships` (`group_class`) | membership rows of the class's groups |
+| `alternatives` (`except`) | every alternative but those listed, with their values, activations, scoped memberships and scenario rankings |
+| `scenarios` | every scenario and its ranking |
+| `classes` (`except`) | every class but those listed, with their entities, parameters, dimensions, display modes, class-set membership, annotations, and the classes that use them as a dimension |
+| `parameters` (`class`) | parameter definitions with their types, defaults, values, units, value metadata and annotations |
+| `value_lists` (`except`) | every list but those listed, with its members and annotations |
+
+Filter and `except` names are looked up as written (case-insensitively,
+in NFC) after the call's structural changes and value writes (so a class
+a segment of the same call creates is known, with nothing to close yet);
+an unknown or empty name is refused, and so is a name that a rename
+earlier in the same call replaced. A filter or flag the scope does not
+take is refused too (Python and the CLI), since ignoring it would widen
+the purge. Purges run last in the call, under its commit; the report's
+`purges` list has one outcome per request (`closed_out`, `objects`,
+`spared`, `unbound`). A purge that closes nothing and a call that also
+writes nothing make no commit.
+
+**True replace.** A purge closes everything in its scope *except
+exactly what the same call writes*, at each scope's own level: the value
+keys it writes (unchanged ones included), the activations, memberships
+and scenario rankings it sets, and the objects it names or creates.
+Sparing goes upward: a spared value keeps its entity, parameter and
+alternative; a spared entity keeps its class and its elements; a spared
+parameter keeps its class and the value list it binds. A spared object
+keeps only its own row and identity (an N-D entity's elements, a
+parameter's types and defaults, a list's members); everything else under
+it closes unless the call states it too. So `entities` plus a
+re-import keeps the re-imported entities and closes their unstated
+values, activations and memberships. Three limits:
+
+- A spared entity keeps its attachments: its location, its parameter
+  units, its metadata links and its annotations. A call cannot re-state
+  all of them, so closing them would lose them for good. They close only
+  with an entity the purge closes.
+- A spared class, parameter or value list keeps its display modes,
+  class-set membership and annotations: nothing in a call re-states
+  them, and a template does not carry them.
+- The replace stops at identity: a spared parameter definition keeps its
+  old types, description and value-list binding, because a create of an
+  existing definition changes nothing.
+
+Rows the call itself writes are never closed, and closed values follow
+their definition's retention (`retain_content`, or the call's
+`retain_override`; `force_replace` keeps no content, as for a value
+delete). Structural rows and parameter defaults are always
+kept in history.
+
+**Reach outside the scope.** A request whose cascade would close objects
+that no request of the call has in scope is refused, with nothing
+written, and the error lists them per kind and class. The refusal comes
+only after the call's writes have run (and been rolled back), so preview
+first. The objects it lists are N-D entities of
+other classes that use a purged entity as an element, classes that keep
+a purged class as a dimension (also through a class set), and, for
+`value_lists`, the parameters outside every scope that still bind a
+purged list. Add those objects to the call's scopes, or set
+`"allow_outside_scope": True` on the request. For a bound list the flag
+removes the binding: the definition gets a new version without its list,
+its values stay as they are, and as-of reads before the purge still show
+the binding. Only the value-list audit stops checking it, and an audit
+rule whose selector lost its list is dropped. A later re-import does not
+re-bind the definition.
+
+**Template-stamped databases.** On a database a template stamped, a
+`classes`, `parameters` or `value_lists` request that would close
+vocabulary that existed before the call is refused with
+`TemplateStampedPurge` (`DbError::TemplateStampedPurge`,
+`nodal_db.TemplateStampedPurge`, an `ApiError` subclass), listing every
+such request; resend it with `"allow_on_template": True`. Data scopes
+need no flag, also for entities the template seeded, and re-creating
+seeds is the template's (or the import's) job. An object delete of a
+declared class or parameter, and `drop_value_list`, need no
+`allow_on_template` (they name what they remove); a purge does, since
+its scope covers vocabulary it does not name.
+
+A purge, object delete or `drop_value_list` that closes vocabulary
+withdraws the template's certified content hash, so the next apply of
+**the same template** no longer skips as a no-op, and neither the same
+nor a changed template re-creates what was removed: the apply stops with
+"class `X` was removed locally in commit N: re-create it with
+`recreate_removed`, or drop it from the template". Apply with
+`recreate_removed=True` (Python), `ApplyOptions::recreate_removed` (Rust)
+or `template apply --recreate-removed` (CLI) to re-create the removed
+items with new ids; the plan notes each, and `template_plan` /
+`template plan` take the same option to preview it. **This is a
+behaviour change for object deletes and `drop_value_list`** of declared
+items: an apply used to re-create them silently. Removals made by the template's
+own migration steps and `run:` programs never block. For a `run:`
+program, "its commits" means every commit since the template's last
+commit up to the program's progress commit, so a removal some other
+writer made in that window (for example while an interrupted apply was
+waiting to be resumed) counts as the template's and does not block. After a
+history-free extract the removal history is gone, and a changed template
+re-creates such items silently again.
+
+**Template documents.** A purge or object delete that closes classes or
+parameters removes their names from the template's parameter groups and
+audit rules in the same commit: a closed parameter's group entry, a rule
+whose class or selector is gone, and a closed parameter from a rule's
+requirements (a rule left with none goes too). When no rule is left the
+audit rules document is removed.
+
+**History and size.** A purge closes rows; it never removes them. As-of
+reads before the purge see everything, no erasure marker is written, and
+the file does not shrink: it grows by the closed rows' new versions until
+[compaction](features.md#compaction). A purge is one transaction that
+holds the database's write lock throughout: purging about 105 million
+long-tier cells took about ten minutes and peaked at 3.4 GB of memory,
+within the 6.4 GB DuckDB limit of an 8 GB budget (scalars and arrays are
+far cheaper). Preview a large purge first: when a request's scope holds
+more than 50 million long-tier cells plus array elements
+(`purge::PURGE_LARGE_CELLS`, half that measured point), the preview and
+the purge add a `purge_large` warning (`WarningKind::PurgeLarge`, with
+`cells` and `threshold`). The purge still runs. Purging and re-importing on
+every run without unchanged-value skipping grows the history by the
+whole scope each time. To discard data for good, use
+[Erase an alternative](#erase-an-alternative); to start over without the
+history, [extract a database without its history](#extract-a-database-without-its-history)
+or import into a new file.
+
+**Preview.** `preview_purge` reports, per request, the objects and rows
+(per table) it would close, its reach outside the scope and whether it
+closes template vocabulary. A row an earlier request of the call covers
+counts in that earlier request only, as in the commit. It writes
+nothing, so nothing is spared: its counts are upper bounds of a call
+that also writes.
 
 ### Read with SQL
 
@@ -991,7 +1168,9 @@ residue items: 0
 
 `version` is the source schema version to record; a profile can instead
 read it from the source by overriding `version_of`. The report lists
-everything that could not be imported.
+everything that could not be imported. The descriptions of classes,
+parameters, alternatives, scenarios and entities are imported with
+them.
 
 **The import creates a new file, all or nothing.** The importer builds
 the database in a temporary directory next to the target and moves it

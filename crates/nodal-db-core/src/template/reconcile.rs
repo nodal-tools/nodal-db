@@ -163,6 +163,12 @@ pub struct ApplyOptions {
     /// (`conn::TxnOptions`). A mismatch, outside or inside, is
     /// `DbError::Stale`.
     pub expect_commit: Option<i64>,
+    /// Re-create the declared classes, parameters and value lists that
+    /// were removed locally (purge plan §3.8, V-OD1: closed by a commit
+    /// that is not template-owned — an object delete, a purge, a
+    /// `drop_value_list`), as ordinary creates with new ids, noted in the
+    /// plan. Without it a changed template blocks on them.
+    pub recreate_removed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +668,13 @@ fn max_commit(conn: &Connection) -> Result<i64, DbError> {
 /// (CLAUDE.md invariant 1). Best-effort snapshot — [`apply`] recomputes
 /// everything; quote `db_commit` to `expect_commit` to pin it.
 pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
+    plan_with(db, t, &ApplyOptions::default())
+}
+
+/// [`plan`] with the apply's options that change the diff
+/// (`recreate_removed`: the dry run shows the re-creates instead of the
+/// removed-locally blockers).
+pub fn plan_with(db: &Path, t: &Template, opts: &ApplyOptions) -> Result<ReconcilePlan, DbError> {
     // Names in NFC (the text rule, `crate::text`).
     let t = &ir::nfc_names(t);
     let chk = ir::validate(t)?;
@@ -706,7 +719,7 @@ pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
             });
             simulate_span(&mut vocab, t, m, &mut warnings, &mut chain_blocked);
         }
-        let mut p = diff(&vocab, &chk)?;
+        let mut p = diff(&vocab, &chk, opts.recreate_removed)?;
         p.db_commit = db_commit;
         p.pending_migrations = planned_spans;
         if let Err(e) = guard {
@@ -918,7 +931,7 @@ pub fn apply(
         for m in &spans {
             simulate_span(&mut vocab, t, m, &mut w, &mut chain_blocked);
         }
-        let mut sim = diff(&vocab, &chk)?;
+        let mut sim = diff(&vocab, &chk, opts.recreate_removed)?;
         sim.blocked.splice(0..0, chain_blocked);
         if !sim.blocked.is_empty() {
             return Err(blocked_error(&sim));
@@ -987,7 +1000,32 @@ pub fn apply(
                         t.template.name, span.from, span.to
                     );
                     let c = core_write_txn_retrying(db, user, &msg, |conn, c| {
+                        // The range starts after the last template-owned
+                        // commit, not at this apply's cursor: after a crash
+                        // between the program's commits and this one, the
+                        // re-run's range still covers the earlier run's.
+                        // Known window (documented, owner ruling
+                        // 2026-11-19): a commit another writer made in that
+                        // crash window, or between the last template commit
+                        // and this apply, falls in the range too, so a
+                        // removal it made counts as template-owned. A
+                        // program's own commits carry no step marker, so
+                        // the range cannot be narrowed to them.
+                        let first = super::dbvocab::template_owned(conn)?
+                            .iter()
+                            .map(|&(_, b)| b + 1)
+                            .max()
+                            .unwrap_or(cursor + 1)
+                            .min(cursor + 1);
                         set_metadata(conn, c, "template_migration_step", &substamp)?;
+                        // The program's commits through this one are
+                        // template-owned (V-S1): the range.
+                        set_metadata(
+                            conn,
+                            c,
+                            "template_applied_commit",
+                            &format!("{first}..={c}"),
+                        )?;
                         // The chain moved the content past any certified
                         // hash: close it so a stale certification can never
                         // outlive a partially-walked chain.
@@ -1006,6 +1044,7 @@ pub fn apply(
                     let effects = core_write_txn_retrying(db, user, &msg, |conn, c| {
                         let mut fx = StepEffects::default();
                         execute_step(conn, c, declarative, &mut fx)?;
+                        set_metadata(conn, c, "template_applied_commit", &c.to_string())?;
                         // Same-commit progress substamp: atomic with the
                         // step — but a SKIPPED step does NOT substamp (D14
                         // pause semantics): re-apply must retry it.
@@ -1048,6 +1087,7 @@ pub fn apply(
         let c = core_write_txn_retrying(db, user, &msg, |conn, c| {
             set_metadata(conn, c, "template_version", &span.to)?;
             clear_metadata(conn, c, "template_migration_step")?;
+            set_metadata(conn, c, "template_applied_commit", &c.to_string())?;
             Ok(c)
         })?;
         out.commits.push(c);
@@ -1084,7 +1124,7 @@ pub fn apply(
     let pre_plan = with_read_plain(db, |conn| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
-        diff(&vocab, &chk)
+        diff(&vocab, &chk, opts.recreate_removed)
     })?;
     if !pre_plan.blocked.is_empty() {
         return Err(blocked_error(&pre_plan));
@@ -1115,7 +1155,7 @@ pub fn apply(
     let applied = core_write_txn_retrying_opts(db, user, &msg, txn, |conn, c| {
         let mut w = Vec::new();
         let vocab = read_vocab(conn, &mut w)?;
-        let mut p = diff(&vocab, &chk)?;
+        let mut p = diff(&vocab, &chk, opts.recreate_removed)?;
         if !p.blocked.is_empty() {
             return Err(blocked_error(&p));
         }
@@ -1127,6 +1167,9 @@ pub fn apply(
         for a in &p.actions {
             execute_action(conn, c, a, &mut ctx)?;
         }
+        // Every template-apply commit is template-owned (purge plan §3.8,
+        // V-S1): what it closes is never "removed locally".
+        set_metadata(conn, c, "template_applied_commit", &c.to_string())?;
         p.skipped = ctx.skipped;
         p.warnings.extend(ctx.warnings);
         p.warnings.splice(0..0, w);
@@ -1148,8 +1191,7 @@ pub fn apply(
 
 fn blocked_error(p: &ReconcilePlan) -> DbError {
     DbError::Api(format!(
-        "template apply refused: {} blocking conflict(s) (in-place reshape of existing \
-         declarations is not supported yet):\n  - {}",
+        "template apply refused: {} blocking conflict(s):\n  - {}",
         p.blocked.len(),
         p.blocked.join("\n  - ")
     ))
@@ -1292,6 +1334,15 @@ fn simulate_drop_class(vocab: &mut DbVocab, class: &str) {
             break;
         }
     }
+    // The drop is template-owned: the live names it closes are no longer
+    // "removed locally" after it (the latest closure decides).
+    let closed: HashSet<String> = vocab
+        .classes
+        .keys()
+        .filter(|k| doomed.contains(*k))
+        .cloned()
+        .collect();
+    vocab.removed_classes.retain(|k, _| !closed.contains(k));
     vocab.classes.retain(|k, _| !doomed.contains(k));
     for s in vocab.class_sets.values_mut() {
         s.members.retain(|m| !doomed.contains(&fold(m)));
@@ -1492,7 +1543,10 @@ fn simulate_span(
             }
             MigrationStep::DropParameter { class, parameter } => {
                 if let Some(c) = vocab.classes.get_mut(&fold(class)) {
-                    c.params.remove(&fold(parameter));
+                    if c.params.remove(&fold(parameter)).is_some() {
+                        let id = c.id;
+                        vocab.removed_parameters.remove(&(id, fold(parameter)));
+                    }
                 }
             }
             MigrationStep::DropClass { class } => simulate_drop_class(vocab, class),
@@ -1508,7 +1562,9 @@ fn simulate_span(
                     })
                     .collect();
                 if bound.is_empty() {
-                    vocab.value_lists.remove(&fold(list));
+                    if vocab.value_lists.remove(&fold(list)).is_some() {
+                        vocab.removed_value_lists.remove(&fold(list));
+                    }
                 } else {
                     blocked.push(format!(
                         "apply will refuse: drop_value_list {list:?} — {} definition(s) \
@@ -1540,7 +1596,7 @@ fn simulate_span(
 
 /// Compute the additive reconcile plan between a vocabulary snapshot and a
 /// validated template. Pure — no DB access.
-fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
+fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcilePlan, DbError> {
     let t = chk.template;
     let mut p = ReconcilePlan {
         template_name: t.template.name.clone(),
@@ -1584,6 +1640,13 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     //     extras re-numbered after the template members — review item 13) ---
     for l in &t.value_lists {
         match vocab.value_lists.get(&fold(&l.name)) {
+            None if removed_locally(
+                "value list",
+                &l.name,
+                vocab.removed_value_lists.get(&fold(&l.name)),
+                recreate,
+                &mut p,
+            ) => {}
             None => p.actions.push(Action::CreateValueList {
                 name: l.name.clone(),
                 description: l.description.clone(),
@@ -1676,6 +1739,13 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     for c in &t.classes {
         match vocab.classes.get(&fold(&c.name)) {
             None if renamed_away_class(vocab, t, c, &mut p.blocked) => {}
+            None if removed_locally(
+                "class",
+                &c.name,
+                vocab.removed_classes.get(&fold(&c.name)),
+                recreate,
+                &mut p,
+            ) => {}
             None => {
                 p.actions.push(Action::CreateClass {
                     name: c.name.clone(),
@@ -1791,6 +1861,15 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
             match db_param {
                 None if db_class.is_some_and(|dc| {
                     renamed_away_parameter(vocab, dc, c, param, &mut p.blocked)
+                }) => {}
+                None if db_class.is_some_and(|dc| {
+                    removed_locally(
+                        "parameter",
+                        &format!("{}.{}", c.name, param.name),
+                        vocab.removed_parameters.get(&(dc.id, fold(&param.name))),
+                        recreate,
+                        &mut p,
+                    )
                 }) => {}
                 None => {
                     p.actions.push(Action::CreateParameter {
@@ -2010,6 +2089,40 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>) -> Result<ReconcilePlan, DbError> {
     p.actions.sort_by_key(action_rank);
     p.no_op = p.actions.is_empty() && p.blocked.is_empty();
     Ok(p)
+}
+
+/// The removed-locally blocker (purge plan §3.8, V-OD1) for a declared
+/// class, parameter or value list missing from the database: when an
+/// object of its folded name was closed by a commit that is not
+/// template-owned (an object delete, a purge, `drop_value_list`), a changed
+/// template must not silently undo that removal. Blocks, naming the commit,
+/// unless `recreate` (`ApplyOptions::recreate_removed`): then the create
+/// goes ahead, noted. Returns whether it blocked. Seeds are data and never
+/// block.
+fn removed_locally(
+    kind: &str,
+    name: &str,
+    removed: Option<&super::dbvocab::RemovedLocally>,
+    recreate: bool,
+    p: &mut ReconcilePlan,
+) -> bool {
+    let Some(r) = removed else {
+        return false;
+    };
+    if recreate {
+        p.notes.push(format!(
+            "{kind} `{name}` was removed locally in commit {}: re-created \
+             (recreate_removed), with a new id",
+            r.at_commit
+        ));
+        return false;
+    }
+    p.blocked.push(format!(
+        "{kind} `{name}` was removed locally in commit {}: re-create it with \
+         `recreate_removed`, or drop it from the template",
+        r.at_commit
+    ));
+    true
 }
 
 /// The renamed-away blocker for a declared class missing from the database
@@ -2393,8 +2506,6 @@ impl IdCache {
 //     (review item 20: replaces the hand-written copies; RenameParameter /
 //     MoveParameter / UpdateParameter share one parameter_definition INSERT) --
 
-/// Close the current row(s) of `table` carrying `id` (versioned tables share
-/// the id across versions; exactly one row is current). Returns rows closed.
 /// Count the CURRENT parameter definitions still bound to a value list — the
 /// orphan-only guard shared by the `drop_value_list` migration step and the
 /// [`crate::verbs::drop_value_list`] verb (a bound list has a live binding a
@@ -2408,20 +2519,75 @@ pub(crate) fn value_list_binding_count(conn: &Connection, lid: i64) -> Result<i6
     )?)
 }
 
-/// Close out a value list and its member rows under `c` (the single close
-/// path shared by the `drop_value_list` migration step and verb — invariant
-/// #2: one door). Caller checks [`value_list_binding_count`] first. Returns
-/// the number of member rows closed.
+/// Close out a value list, its member rows and the list's and members'
+/// `semantic_annotation` rows under `c` (the single close path shared by the
+/// `drop_value_list` migration step and verb, and in set form by the purge
+/// — invariant #2: one door). Caller checks [`value_list_binding_count`]
+/// first. Returns the number of member rows closed; exactly one list row
+/// must close.
 pub(crate) fn close_value_list(conn: &Connection, c: i64, lid: i64) -> Result<usize, DbError> {
-    let members = conn.execute(
-        "UPDATE list_value SET valid_to_commit = ? \
-         WHERE parameter_value_list_id = ? AND valid_to_commit IS NULL",
-        params![c, lid],
-    )?;
-    close_row(conn, c, "parameter_value_list", lid)?;
-    Ok(members)
+    let closed = close_value_lists_where(conn, c, &format!("= {lid}"))?;
+    if closed.lists != 1 {
+        return Err(DbError::Api(format!(
+            "revision of parameter_value_list id {lid}: expected exactly one current row, \
+             closed {}",
+            closed.lists
+        )));
+    }
+    Ok(closed.members)
 }
 
+/// What [`close_value_lists_set`] closed.
+#[derive(Default)]
+pub(crate) struct ClosedLists {
+    pub(crate) lists: usize,
+    pub(crate) members: usize,
+    pub(crate) annotations: usize,
+}
+
+/// [`close_value_list`] over every list id of the txn-local id table `set`
+/// (the purge's set form; no one-row check).
+pub(crate) fn close_value_lists_set(
+    conn: &Connection,
+    c: i64,
+    set: &str,
+) -> Result<ClosedLists, DbError> {
+    close_value_lists_where(conn, c, &format!("IN (SELECT id FROM {set})"))
+}
+
+/// The one body of both forms: `ids` is the list-id predicate (`= <id>` or
+/// `IN (…)`). Every close carries the same-commit guard.
+fn close_value_lists_where(conn: &Connection, c: i64, ids: &str) -> Result<ClosedLists, DbError> {
+    let guard = "valid_from_commit < ? AND valid_to_commit IS NULL";
+    let annotations = conn.execute(
+        &format!(
+            "UPDATE semantic_annotation SET valid_to_commit = ? WHERE {guard} AND \
+             ((object_type = 'parameter_value_list' AND object_id {ids}) OR \
+              (object_type = 'list_value' AND object_id IN \
+                 (SELECT id FROM list_value WHERE parameter_value_list_id {ids})))"
+        ),
+        params![c, c],
+    )?;
+    let members = conn.execute(
+        &format!(
+            "UPDATE list_value SET valid_to_commit = ? \
+             WHERE parameter_value_list_id {ids} AND {guard}"
+        ),
+        params![c, c],
+    )?;
+    let lists = conn.execute(
+        &format!("UPDATE parameter_value_list SET valid_to_commit = ? WHERE id {ids} AND {guard}"),
+        params![c, c],
+    )?;
+    Ok(ClosedLists {
+        lists,
+        members,
+        annotations,
+    })
+}
+
+/// Close the current row of `table` carrying `id` (versioned tables share
+/// the id across versions; exactly one row is current). Returns rows closed.
 fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, DbError> {
     let n = conn.execute(
         &format!("UPDATE {table} SET valid_to_commit = ? WHERE id = ? AND valid_to_commit IS NULL"),
@@ -2973,7 +3139,7 @@ pub(crate) fn insert_entity_row(
     Ok(conn.query_row(
         "INSERT INTO entity (entity_class_id, name, description, valid_from_commit) \
          VALUES (?, ?, ?, ?) RETURNING id",
-        params![class_id, name, description, c],
+        params![class_id, name, stored_description(description), c],
         |r| r.get(0),
     )?)
 }

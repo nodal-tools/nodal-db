@@ -1056,6 +1056,38 @@ def test_class_and_parameter_rename_ops(db):
         )
 
 
+def test_create_entity_description_round_trip(db):
+    rep = db.commit_structural(
+        [
+            {"op": "create_entity_class", "name": "unit", "dims": []},
+            {"op": "create_entity", "class": "unit", "name": "u1",
+             "description": "Gas turbine."},
+            {"op": "create_entity", "class": "unit", "name": "u2"},
+        ],
+        user="t",
+    )
+    assert [o["effect"] for o in rep["structural"]] == ["created"] * 3
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'u1'")
+        == "Gas turbine."
+    )
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'u2'")
+        is None
+    )
+    # Create only: a re-create with another description is a no-op.
+    n = commit_count(db)
+    rep = db.commit_structural(
+        [{"op": "create_entity", "class": "unit", "name": "u1", "description": "x"}],
+        user="t",
+    )
+    assert rep["commit_id"] == 0 and commit_count(db) == n
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'u1'")
+        == "Gas turbine."
+    )
+
+
 def test_template_stamped_rename_is_typed_and_resendable(db):
     db.write_parameter("node", "demand", "Base", scalar_batch(["n1"], [1.0]), user="t")
     db.stamp_template_identity("flextool", "40", user="t")
@@ -1301,3 +1333,111 @@ def test_nfd_names_and_labels_read_back_in_nfc(db):
                           rb.column("v_str").to_pylist()))
         assert rows == [(f"n{E_NFC}", "b", "plain"), (f"n{E_NFC}", E_NFC, E_NFD + "!")]
 
+
+
+# ---------------------------------------------------------------------------
+# purge (entity_descriptions_purge_PLAN §3.10)
+# ---------------------------------------------------------------------------
+
+
+def _purge_fixture(db):
+    db.commit_changes(
+        structural=[
+            {"op": "create_entity_class", "name": "unit", "dims": []},
+            {"op": "create_entity", "class": "unit", "name": "u1"},
+            {"op": "create_entity", "class": "unit", "name": "u2"},
+            {"op": "create_alternative", "name": "high"},
+            {"op": "set_entity_activation", "class": "unit", "entity": "u1",
+             "alternative": "Base", "active": True},
+            {"op": "set_scenario_alternatives", "scenario": "sc",
+             "alternatives": ["Base"]},
+        ],
+        segments=[{"class": "unit", "parameter": "cap", "alternative": "Base",
+                   "batch": scalar_batch(["u1", "u2"], [1.0, 2.0])}],
+        user="t",
+    )
+
+
+def test_purge_scope_dicts_report_and_preview(db):
+    _purge_fixture(db)
+    requests = [
+        {"scope": "values", "class": "unit", "parameter": "cap", "alternative": "Base"},
+        {"scope": "activations", "class": "unit", "alternative": "Base"},
+        {"scope": "memberships", "group_class": "unit"},
+        {"scope": "scenarios"},
+        {"scope": "alternatives", "except": ["Base"]},
+        {"scope": "entities", "class": "unit"},
+        {"scope": "parameters", "class": "unit"},
+        {"scope": "value_lists"},
+        {"scope": "classes", "except": ["unit"]},
+    ]
+    pv = db.preview_purge(requests)
+    assert [p["request_index"] for p in pv] == list(range(9))
+    assert pv[0]["cascade"]["total_rows"] == 2
+    assert pv[5]["objects"] == 2
+    assert pv[5]["outside_scope"] == []
+    assert pv[6]["template_stamped"] is False
+    assert pv[0]["cells"] == 0 and pv[0]["warnings"] == []
+    rep = db.purge(requests, user="t", message="purge")
+    out = rep["purges"]
+    assert [o["request_index"] for o in out] == list(range(9))
+    assert out[0]["closed_out"]["per_table"] == [{"table": "value_scalar", "rows": 2}]
+    assert out[1]["closed_out"]["total_rows"] == 1
+    assert out[3]["objects"] == 1
+    assert out[4]["objects"] == 1
+    assert out[5]["objects"] == 2
+    assert out[6]["objects"] == 1
+    assert set(out[0]) == {"request_index", "closed_out", "objects", "spared", "unbound"}
+    assert one_value(db, "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL") == 0
+
+
+def test_purge_in_commit_changes_spares_what_the_call_writes(db):
+    _purge_fixture(db)
+    rep = db.commit_changes(
+        segments=[{"class": "unit", "parameter": "cap", "alternative": "Base",
+                   "batch": scalar_batch(["u1"], [1.0])}],
+        purges=[{"scope": "values", "class": "unit"}],
+        user="t",
+    )
+    assert rep["values_unchanged"] == 1
+    assert rep["purges"][0]["closed_out"]["total_rows"] == 1
+    assert rep["purges"][0]["spared"]["per_table"] == [{"table": "value_scalar", "rows": 1}]
+    # Unknown scopes and names refuse.
+    with pytest.raises(nodal_db.ApiError, match="unknown purge scope"):
+        db.purge([{"scope": "everything"}], user="t")
+    # The scope name is checked before the keys.
+    with pytest.raises(nodal_db.ApiError, match="unknown purge scope"):
+        db.purge([{"scope": "everything", "class": "unit"}], user="t")
+    with pytest.raises(nodal_db.ApiError, match="unknown class"):
+        db.purge([{"scope": "entities", "class": "nope"}], user="t")
+    # A key the scope does not take refuses (it would widen the purge).
+    with pytest.raises(nodal_db.ApiError, match="does not take"):
+        db.purge([{"scope": "memberships", "class": "unit"}], user="t")
+    with pytest.raises(nodal_db.ApiError, match="does not take"):
+        db.preview_purge([{"scope": "values", "clas": "unit"}])
+
+
+def test_purge_on_a_template_is_typed_and_recreate_removed_converges(db, tmp_path):
+    tpl = tmp_path / "t.yaml"
+    tpl.write_text(
+        "template: {name: t, version: \"1\"}\n"
+        "classes:\n  - name: unit\n    parameters:\n"
+        "      - {name: cap, types: [{kind: float}]}\n"
+    )
+    db.template_apply(str(tpl), user="t")
+    with pytest.raises(nodal_db.TemplateStampedPurge) as ei:
+        db.purge([{"scope": "classes"}], user="t")
+    e = ei.value
+    assert isinstance(e, nodal_db.ApiError)
+    assert (e.template_name, e.template_version) == ("t", "1")
+    assert e.requests == [{"request_index": 0, "classes": 1, "parameters": 1,
+                           "value_lists": 0, "sample": ["unit", "unit.cap"]}]
+    rep = db.purge([{"scope": "classes", "allow_on_template": True}], user="t")
+    assert rep["purges"][0]["objects"] == 2
+    with pytest.raises(nodal_db.ApiError, match="removed locally"):
+        db.template_apply(str(tpl), user="t")
+    assert db.template_plan(str(tpl))["blocked"]
+    assert db.template_plan(str(tpl), recreate_removed=True)["blocked"] == []
+    out = db.template_apply(str(tpl), user="t", recreate_removed=True)
+    assert out["converged"]
+    assert one_value(db, "SELECT count(*) FROM entity_class WHERE cur_name = 'unit'") == 1

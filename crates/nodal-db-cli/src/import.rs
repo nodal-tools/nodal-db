@@ -248,6 +248,15 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             ),
             // Summarized below, once per spelling across the segments.
             WarningKind::NameFolded { .. } => {}
+            // Import never purges; the match is exhaustive.
+            WarningKind::PurgeLarge {
+                request_index,
+                cells,
+                threshold,
+            } => println!(
+                "warning: purge request {request_index} covers {cells} cells (more than \
+                 {threshold})"
+            ),
         }
     }
     for line in name_folded_lines(&report.warnings) {

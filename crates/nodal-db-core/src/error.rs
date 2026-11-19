@@ -222,6 +222,21 @@ pub enum DbError {
     #[error("{}", .0.message)]
     TemplateStampedRename(Box<TemplateStampedRenameDetails>),
 
+    /// A purge's vocabulary request (`Classes`, `Parameters`, `ValueLists`)
+    /// would close classes, parameters or value lists that existed before
+    /// the call, on a template-stamped database (metadata `template_name`
+    /// present), without `allow_on_template` (purge plan §3.7, OD7). The
+    /// core cannot tell declared from local vocabulary, so every such
+    /// request is refused; `requests` lists each one with what it would
+    /// close, so a client can ask once and resend with the flag. Requests
+    /// that close only objects the same call created pass, and data scopes
+    /// (values, entities, seeds included) need no flag. Checked after the
+    /// purge's names resolved and before its outside-scope check; the
+    /// transaction rolls back, so nothing was written. Boxed like
+    /// [`DbError::CoveredWrite`].
+    #[error("{}", .0.message)]
+    TemplateStampedPurge(Box<TemplateStampedPurgeDetails>),
+
     /// A value write whose batch instantiates none of its parameter's
     /// declared member types (VMP Part 7 entry check, set-membership): for
     /// example a string batch for a parameter declared float only, or an
@@ -352,6 +367,31 @@ pub struct TemplateStampedRenameItem {
     /// The item's `current`, as written (after NFC).
     pub current: String,
     pub new_name: String,
+}
+
+/// [`DbError::TemplateStampedPurge`]'s payload.
+#[derive(Debug)]
+pub struct TemplateStampedPurgeDetails {
+    /// The database's stamped `template_name`.
+    pub template_name: String,
+    /// The database's stamped `template_version`, if any.
+    pub template_version: Option<String>,
+    /// Every refused request of the call, in call order.
+    pub requests: Vec<TemplateStampedPurgeItem>,
+    pub message: String,
+}
+
+/// One purge request [`DbError::TemplateStampedPurge`] refused: what it
+/// would close of the vocabulary that existed before the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateStampedPurgeItem {
+    /// The request's position in the call's purges.
+    pub request_index: usize,
+    pub classes: usize,
+    pub parameters: usize,
+    pub value_lists: usize,
+    /// A bounded sample of the names (`class`, `class.parameter`, `list`).
+    pub sample: Vec<String>,
 }
 
 /// The statement that drops a [`DbError::ShadowedBuiltin`] macro, valid for

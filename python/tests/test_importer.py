@@ -15,7 +15,7 @@ Covered:
   datetime time series, integer-position Array); value-less definitions
   import typeless; list bindings carry over;
 - the ``parameter_type_list`` drift table (declared vs observed);
-- LOUD residue: time patterns, entity/scenario descriptions, entity groups,
+- LOUD residue: time patterns, entity groups,
   metadata items, non-literal defaults, ragged multi-shape values;
 - structural sections (alternatives, scenarios, entities incl. 2-D,
   activation) and value fidelity read back against the Spine source;
@@ -475,7 +475,7 @@ def test_hostile_source_reports_loud_residue(tmp_path):
                            name="mixed")
         _value(db, "hub", ["h1"], "mixed", "Base",
                Map(["a", "b", "c"], [1.0, 2.0, Map(["x"], [3.0])]))
-        # descriptions with no store slot + an entity group
+        # descriptions (carried on create) + an entity group
         db.add_update_item("entity", entity_class_name="widget", entity_byname=("w3",),
                            description="a described widget")
         db.add_update_item("scenario", name="sc_described", description="has text")
@@ -483,16 +483,69 @@ def test_hostile_source_reports_loud_residue(tmp_path):
                            group_name="w1", member_name="w2")
         db.commit_session("hostile payload")
 
-    rep, _out = run_import(tmp_path, spine)
+    rep, out = run_import(tmp_path, spine)
     res = "\n".join(rep.residue)
     assert "hub.seasonality" in res and "time_pattern" in res, res
     assert "hub.fallback_level" in res and "not carried" in res, res
     assert "hub.mixed" in res and "ragged" in res, res
-    assert "entity widget/w3: description not carried" in res, res
-    assert "scenario sc_described: description not carried" in res, res
+    # Entity and scenario descriptions are carried, not residue.
+    assert "description" not in res, res
+    got = _rows(_nodal(out), "SELECT description FROM entity_current "
+                             "WHERE name = 'w3'")
+    assert got == [{"description": "a described widget"}], got
+    got = _rows(_nodal(out), "SELECT description FROM scenario "
+                             "WHERE name = 'sc_described' AND valid_to_commit IS NULL")
+    assert got == [{"description": "has text"}], got
     assert "entity_group row(s) present, not imported" in res, res
     # the ragged value's largest group still landed (+1 over the clean 9)
     assert rep.counts["values_written"] == 10
+
+
+def test_import_stream_with_descriptions_is_idempotent(tmp_path, monkeypatch):
+    """A write-stream test: the importer only ever writes NEW files, so this
+    replays its write stream (``_import_into``) on the database it built. It
+    makes no commit (skip-unchanged, D1): descriptions are create-only, so
+    the re-stated entities and scenarios are no-ops."""
+    import nodal_db
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("entity", entity_class_name="widget", entity_byname=("w3",),
+                           description="a described widget")
+        db.add_update_item("scenario", name="sc_described", description="has text")
+        db.commit_session("descriptions")
+    _rep, out = run_import(tmp_path, spine)
+    n = _rows(_nodal(out), "SELECT count(*) AS n FROM commit")[0]["n"]
+    monkeypatch.setattr(nodal_db, "init", nodal_db.open)
+    imp = SpineImporter(str(spine), str(out), SyntheticProfile(), user="t", version="7")
+    rep = imp._import_into(str(out))
+    assert all(cid == 0 for _kind, cid in rep.commits if _kind != "vocabulary"), rep.commits
+    assert _rows(_nodal(out), "SELECT count(*) AS n FROM commit")[0]["n"] == n
+
+
+def test_purge_classes_then_reimport_converges(tmp_path, monkeypatch):
+    """A write-stream test: the importer only ever writes NEW files, so this
+    replays its write stream (``_import_into``) on a database whose classes
+    a purge closed. The bootstrap apply re-creates the purged vocabulary
+    (``recreate_removed``) and the data lands again (purge plan V-B2)."""
+    import nodal_db
+
+    spine = make_basic_spine(tmp_path)
+    _rep, out = run_import(tmp_path, spine)
+    db = _nodal(out)
+    n_values = _rows(db, "SELECT count(*) AS n FROM value_scalar WHERE valid_to_commit IS NULL")
+    db.purge([{"scope": "classes", "allow_on_template": True,
+               "allow_outside_scope": True}], user="t")
+    assert _rows(db, "SELECT count(*) AS n FROM entity_class WHERE valid_to_commit IS NULL") \
+        == [{"n": 0}]
+    monkeypatch.setattr(nodal_db, "init", nodal_db.open)
+    imp = SpineImporter(str(spine), str(out), SyntheticProfile(), user="t", version="7")
+    imp._import_into(str(out))
+    assert _rows(db, "SELECT count(*) AS n FROM entity_class WHERE valid_to_commit IS NULL") \
+        == [{"n": 3}]
+    assert _rows(db, "SELECT count(*) AS n FROM value_scalar WHERE valid_to_commit IS NULL") \
+        == n_values
 
 
 def test_case_colliding_names_refuse(tmp_path):

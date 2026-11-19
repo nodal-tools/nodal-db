@@ -146,6 +146,50 @@ enum Command {
         #[arg(long)]
         user: Option<String>,
     },
+    /// Close out everything in one scope in one commit (a versioned
+    /// close-out: history is kept, nothing is removed and the file does not
+    /// shrink). Refuses a reach outside the scope unless
+    /// --allow-outside-scope, and on a template-stamped database a classes,
+    /// parameters or value-lists purge unless --allow-on-template.
+    Purge {
+        /// Target DuckDB file.
+        db: PathBuf,
+        /// values, entities, activations, memberships, alternatives,
+        /// scenarios, classes, parameters or value-lists.
+        #[arg(long)]
+        scope: String,
+        /// Class filter (values, entities, activations, parameters).
+        #[arg(long)]
+        class: Option<String>,
+        /// Parameter filter (values; needs --class).
+        #[arg(long)]
+        parameter: Option<String>,
+        /// Alternative filter (values, activations).
+        #[arg(long)]
+        alternative: Option<String>,
+        /// Group class filter (memberships).
+        #[arg(long)]
+        group_class: Option<String>,
+        /// Names to keep (alternatives, classes, value-lists); repeatable.
+        #[arg(long = "except")]
+        except: Vec<String>,
+        /// Allow closing objects outside the scope that the cascade
+        /// reaches, and removing bindings of purged value lists.
+        #[arg(long)]
+        allow_outside_scope: bool,
+        /// Allow closing template vocabulary on a template-stamped database.
+        #[arg(long)]
+        allow_on_template: bool,
+        /// Report what WOULD be closed and exit without writing.
+        #[arg(long)]
+        preview: bool,
+        /// Commit author; defaults to the OS username.
+        #[arg(long)]
+        user: Option<String>,
+        /// Commit message (may be empty).
+        #[arg(long, default_value = "")]
+        message: String,
+    },
     /// Not implemented in v1 core (verb reserved; the v1 reconcile runner is
     /// `template apply`).
     Migrate,
@@ -460,6 +504,147 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                  {} fail in it (the source keeps the full history)",
                 r.extract_commit
             );
+            Ok(())
+        }
+        Command::Purge {
+            db,
+            scope,
+            class,
+            parameter,
+            alternative,
+            group_class,
+            except,
+            allow_outside_scope,
+            allow_on_template,
+            preview,
+            user,
+            message,
+        } => {
+            import::require_db(&db)?;
+            use nodal_db_core::types::{PurgeRequest, PurgeScope};
+            // A flag the scope does not take is refused: ignoring it would
+            // silently widen the purge.
+            let takes: &[&str] = match scope.as_str() {
+                "values" => &["class", "parameter", "alternative"],
+                "entities" | "parameters" => &["class"],
+                "activations" => &["class", "alternative"],
+                "memberships" => &["group-class"],
+                "alternatives" | "classes" | "value-lists" | "value_lists" => &["except"],
+                _ => &[],
+            };
+            for (flag, given) in [
+                ("class", class.is_some()),
+                ("parameter", parameter.is_some()),
+                ("alternative", alternative.is_some()),
+                ("group-class", group_class.is_some()),
+                ("except", !except.is_empty()),
+            ] {
+                if given && !takes.contains(&flag) {
+                    bail!("--scope {scope} does not take --{flag}");
+                }
+            }
+            let s = match scope.as_str() {
+                "values" => PurgeScope::Values {
+                    class,
+                    parameter,
+                    alternative,
+                },
+                "entities" => PurgeScope::Entities { class },
+                "activations" => PurgeScope::Activations { class, alternative },
+                "memberships" => PurgeScope::Memberships { group_class },
+                "alternatives" => PurgeScope::Alternatives { except },
+                "scenarios" => PurgeScope::Scenarios,
+                "classes" => PurgeScope::Classes { except },
+                "parameters" => PurgeScope::Parameters { class },
+                "value-lists" | "value_lists" => PurgeScope::ValueLists { except },
+                other => bail!(
+                    "unknown scope {other:?} (values, entities, activations, memberships, \
+                     alternatives, scenarios, classes, parameters, value-lists)"
+                ),
+            };
+            let req = PurgeRequest {
+                scope: s,
+                allow_outside_scope,
+                allow_on_template,
+            };
+            if preview {
+                let p = nodal_db_core::api::preview_purge(&db, vec![req])?;
+                let p = &p[0];
+                println!(
+                    "would close {} object(s), {} row(s):",
+                    p.objects, p.cascade.total_rows
+                );
+                println!(
+                    "  {:<28} {:>10} rows",
+                    "objects + identity", p.cascade.object_rows
+                );
+                for tc in &p.cascade.per_table {
+                    println!("  {:<28} {:>10} rows", tc.table, tc.rows);
+                }
+                for b in &p.outside_scope {
+                    println!(
+                        "  outside the scope: {} {} of {} ({})",
+                        b.count,
+                        b.table,
+                        b.column,
+                        b.sample.join(", ")
+                    );
+                }
+                if p.template_stamped {
+                    println!("  closes template vocabulary (needs --allow-on-template)");
+                }
+                println!(
+                    "  long-tier cells + array elements in the scope: {}",
+                    p.cells
+                );
+                for w in &p.warnings {
+                    if let nodal_db_core::types::WarningKind::PurgeLarge { threshold, .. } = w.kind
+                    {
+                        println!(
+                            "  warning: more than {threshold} cells: one long transaction that \
+                             holds the write lock (about 10 min and 3.4 GB per 105 M cells \
+                             measured)"
+                        );
+                    }
+                }
+                println!("(an upper bound: nothing is written, so nothing is spared)");
+                return Ok(());
+            }
+            let user = import::resolve_user_from(user.as_deref())?;
+            let r = nodal_db_core::api::purge(
+                &db,
+                vec![req],
+                &user,
+                &message,
+                nodal_db_core::types::WriteOptions::default(),
+            )?;
+            for w in &r.warnings {
+                if let nodal_db_core::types::WarningKind::PurgeLarge {
+                    cells, threshold, ..
+                } = w.kind
+                {
+                    eprintln!("warning: the purge covered {cells} cells (more than {threshold})");
+                }
+            }
+            let o = &r.purges[0];
+            if r.commit_id == 0 {
+                println!("nothing to purge (no commit)");
+                return Ok(());
+            }
+            println!(
+                "purged {} object(s), {} row(s) at commit {}{}",
+                o.objects,
+                o.closed_out.total_rows,
+                r.commit_id,
+                if o.unbound > 0 {
+                    format!("; {} value-list binding(s) removed", o.unbound)
+                } else {
+                    String::new()
+                }
+            );
+            for tc in &o.closed_out.per_table {
+                println!("  {:<28} {:>10} rows", tc.table, tc.rows);
+            }
             Ok(())
         }
         Command::Migrate => bail!(

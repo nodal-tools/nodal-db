@@ -23,6 +23,7 @@ fn cli_help_has_no_private_spec_refs() {
         &["init", "--help"],
         &["erase-alternative", "--help"],
         &["extract", "--help"],
+        &["purge", "--help"],
         &["maintain", "--help"],
         &["maintain", "compact", "--help"],
         &["maintain", "refresh-views", "--help"],

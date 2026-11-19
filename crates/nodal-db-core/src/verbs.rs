@@ -368,6 +368,9 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
             )));
         }
         close_value_list(conn, c, lid)?;
+        // A closed list leaves a template-stamped database unconverged
+        // (purge plan §3.8, V-B2): the next apply replans.
+        clear_metadata(conn, c, "template_content_hash")?;
         Ok(())
     })
 }
@@ -548,7 +551,8 @@ pub fn ensure_entity(
     let msg = format!("ensure_entity {class}:{effective_name}");
     // The shared applier is the one entity+element create body (invariant 2).
     core_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_entity(conn, c, class, name, elements, &mut no_report()).map(|(id, _)| id)
+        apply_create_entity(conn, c, class, name, elements, None, &mut no_report())
+            .map(|(id, _)| id)
     })
 }
 

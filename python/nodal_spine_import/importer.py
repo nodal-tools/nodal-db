@@ -853,8 +853,14 @@ class SpineImporter:
             ) as f:
                 json.dump(tpl, f)  # JSON is valid YAML 1.2
                 tpl_path = f.name
+            # The import re-states the source's vocabulary: declared items a
+            # purge or delete removed are re-created, not refused. (The
+            # importer writes new files, where nothing was removed; this
+            # matters only when its write stream runs against an existing
+            # database.)
             outcome = db.template_apply(tpl_path, user=self.user,
-                                        message="spine import: vocabulary (as found)")
+                                        message="spine import: vocabulary (as found)",
+                                        recreate_removed=True)
             rep.commits.append(("vocabulary", outcome.get("commit_id")))
             rep.counts["classes"] = len(classes)
             rep.counts["parameter_definitions"] = len(defs)
@@ -899,11 +905,10 @@ class SpineImporter:
                     "class": e["entity_class_name"],
                     "name": e["name"],
                     "elements": list(e.get("element_name_list") or ()),
+                    # Applies on create only: a re-import keeps an existing
+                    # entity's stored description.
+                    "description": e.get("description"),
                 })
-                if e.get("description"):
-                    rep.residue.append(
-                        f"entity {e['entity_class_name']}/{e['name']}: description not carried"
-                    )
             rep.counts["entities"] = len(entities)
 
             # -- scenarios --
@@ -915,15 +920,18 @@ class SpineImporter:
             scenario_changes = []
             for s in scenarios:
                 _check_name("scenario", s["name"])
+                # Created first so its description lands (create only, like
+                # the entity's); the ranking then resolves to it.
+                scenario_changes.append({
+                    "op": "create_scenario",
+                    "name": s["name"],
+                    "description": s.get("description"),
+                })
                 scenario_changes.append({
                     "op": "set_scenario_alternatives",
                     "scenario": s["name"],
                     "alternatives": order_by_scen.get(s["name"], []),
                 })
-                if s.get("description"):
-                    rep.residue.append(
-                        f"scenario {s['name']}: description not carried (no store slot)"
-                    )
             rep.counts["scenarios"] = len(scenarios)
 
             # -- activation: ALL classes' rows, as found --

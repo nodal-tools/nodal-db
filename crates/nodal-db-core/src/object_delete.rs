@@ -46,52 +46,173 @@ use crate::types::{
 // Leg registry (§4) — the single source of truth for every consumer.
 // ---------------------------------------------------------------------------
 
-/// One dependent/identity leg: a table + the match-predicate that selects the
-/// rows referencing the target object's id. The predicate is a SQL fragment
-/// with EXACTLY ONE `?` bound to the target id, so the SAME leg drives a forward
-/// COUNT (preview / blocker), a guarded close-out UPDATE (cascade), and a
-/// blocker `sample` SELECT — one predicate string, so those three can never
-/// drift (CLAUDE.md invariant 2).
+/// How a leg's rows reference the target object: a key column matched
+/// against the target id, optionally through an indirect table, optionally
+/// filtered (purge plan §3.6, critique S7: a predicate *template*, rendered
+/// in two forms, never derived by string replacement).
 ///
-/// The predicate generalizes past a bare `column = ?` to cover two shapes the
-/// parameter leg set (§4d) needs:
-///   - **indirect key** — the target is referenced via a join, e.g.
-///     `parameter_type_dimension` keys on `parameter_type_id`, whose predicate
-///     is `"parameter_type_id IN (SELECT id FROM parameter_type WHERE
-///     parameter_definition_id = ?)"`;
-///   - **filtered leg** — a polymorphic table where only some rows count, e.g.
-///     `semantic_annotation` with predicate `"object_id = ? AND
-///     object_type = 'parameter_definition'"`.
+/// Rendered by [`LegKey::render`]:
+///   - **per-id** ([`IdSet::One`], exactly one `?` bound to the target id):
+///     `alternative_id = ?`, the form the object delete, its preview and
+///     erasure have always run;
+///   - **set** ([`IdSet::Table`] / [`IdSet::List`]): `alternative_id IN
+///     (SELECT id FROM purge_close_alternative)` (no bind) or `alternative_id
+///     IN (SELECT unnest(?::BIGINT[]))` (one bind), the purge's form.
 ///
-/// A direct leg is just `"alternative_id = ?"` etc. `column` is kept purely as
-/// the human-facing label for [`Blocker::column`]; it no longer drives SQL.
-#[derive(Clone, Copy)]
-struct DepLeg {
-    /// Owning table, e.g. `"value_scalar"`.
-    table: &'static str,
-    /// FK-intent column label for [`Blocker::column`] (reporting only — the SQL
-    /// is driven by `predicate`), e.g. `"alternative_id"`.
+/// The shapes the registry needs:
+///   - **direct** ([`LegKey::col`]): `entity_id = ?`;
+///   - **indirect** ([`LegKey::via`]): `parameter_type_dimension` keys on
+///     `parameter_type_id`, rendered `parameter_type_id IN (SELECT id FROM
+///     parameter_type WHERE parameter_definition_id = ?)`;
+///   - **filtered** ([`LegKey::filtered`]): a polymorphic table where only some
+///     rows count, `object_id = ? AND object_type = 'parameter_definition'`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LegKey {
     column: &'static str,
-    /// Match predicate with exactly one `?` bound to the target id, e.g.
-    /// `"alternative_id = ?"`. Drives COUNT, sample, and close-out identically.
-    predicate: &'static str,
+    via: Option<(&'static str, &'static str)>,
+    filter: Option<&'static str>,
+}
+
+/// The id form a [`LegKey`] (or a [`CascadeEdge`]) is rendered against.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum IdSet<'a> {
+    /// One target id, bound as the single `?`.
+    One,
+    /// Every `id` of a txn-local table (no bind).
+    Table(&'a str),
+    /// A bound `BIGINT[]` list (one bind).
+    #[allow(dead_code)] // the render guard test's second set form
+    List,
+    /// The ids a one-column `SELECT` returns (no bind), e.g. a set minus
+    /// another.
+    Query(&'a str),
+}
+
+impl IdSet<'_> {
+    /// `= ?`, `IN (SELECT id FROM t)`, `IN (SELECT unnest(?::BIGINT[]))` or
+    /// `IN (<query>)`.
+    pub(crate) fn render(&self) -> String {
+        match self {
+            IdSet::One => "= ?".to_string(),
+            IdSet::Table(t) => format!("IN (SELECT id FROM {t})"),
+            IdSet::List => "IN (SELECT unnest(?::BIGINT[]))".to_string(),
+            IdSet::Query(q) => format!("IN ({q})"),
+        }
+    }
+}
+
+impl LegKey {
+    const fn col(column: &'static str) -> Self {
+        LegKey {
+            column,
+            via: None,
+            filter: None,
+        }
+    }
+    const fn via(column: &'static str, table: &'static str, key: &'static str) -> Self {
+        LegKey {
+            column,
+            via: Some((table, key)),
+            filter: None,
+        }
+    }
+    const fn filtered(column: &'static str, filter: &'static str) -> Self {
+        LegKey {
+            column,
+            via: None,
+            filter: Some(filter),
+        }
+    }
+
+    /// The match predicate against `ids`.
+    pub(crate) fn render(&self, ids: IdSet<'_>) -> String {
+        let ids = ids.render();
+        let mut out = match self.via {
+            None => format!("{} {ids}", self.column),
+            Some((table, key)) => {
+                format!(
+                    "{} IN (SELECT id FROM {table} WHERE {key} {ids})",
+                    self.column
+                )
+            }
+        };
+        if let Some(f) = self.filter {
+            out.push_str(" AND ");
+            out.push_str(f);
+        }
+        out
+    }
+}
+
+/// What, in a purge, can spare a dependent leg's rows (purge plan §3.5.3,
+/// §3.6 "two sets per kind"): the survivor grain of its table. A leg with a
+/// grain runs over the scope's dependent set with its own survivor
+/// anti-join; a [`Grain::Attached`] leg runs over the close set (a spared
+/// object keeps its descriptors and attachments, §3.7); a [`Grain::Plain`] leg
+/// closes over the whole dependent set. The object delete ignores grains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Grain {
+    /// A value tier: the purge closes it through the value close-out path
+    /// (retention per definition, arrays by `array_id`), never `close_leg`.
+    Value,
+    /// `entity_alternative`: `(entity, alternative)` pairs the call sets.
+    Activation,
+    /// `membership`: `(group, member, alternative)` triples the call sets.
+    Membership,
+    /// `scenario_alternative`: every ranking row of a scenario the call
+    /// ranks.
+    Ranking,
+    /// `parameter_value_metadata`: the value keys the call writes.
+    ValueMeta,
+    /// Describes or is attached to an object and no op of a call re-states
+    /// it: kept for a spared object, closed with a closing one (runs over
+    /// the close set). Vocabulary descriptors (display modes, class-set
+    /// membership, annotations of classes, parameters and lists; V-S5) and,
+    /// by the owner's ruling of 2026-11-19, an entity's attachments
+    /// (locations, units, metadata links, annotations), which the core
+    /// cannot write back for all of them.
+    Attached,
+    /// Closes over the dependent set; also the identity legs' grain (they
+    /// always run over the close set).
+    Plain,
+}
+
+/// One dependent/identity leg: a table + the match-predicate template that
+/// selects the rows referencing the target object's id. The SAME leg drives
+/// a forward COUNT (preview / blocker), a guarded close-out UPDATE
+/// (cascade), a blocker `sample` SELECT, erasure's DELETE and the purge's
+/// set-form close-out — one [`LegKey`], so they can never drift (CLAUDE.md
+/// invariant 2). `column` is kept purely as the human-facing label for
+/// [`Blocker::column`]; it does not drive SQL.
+#[derive(Clone, Copy)]
+pub(crate) struct DepLeg {
+    /// Owning table, e.g. `"value_scalar"`.
+    pub(crate) table: &'static str,
+    /// FK-intent column label for [`Blocker::column`] (reporting only — the SQL
+    /// is driven by `key`), e.g. `"alternative_id"`.
+    column: &'static str,
+    /// The match-predicate template (per-id: exactly one `?` bound to the
+    /// target id). Drives COUNT, sample, and close-out identically.
+    pub(crate) key: LegKey,
     /// The array tier (`value_array`) has no `valid_to_commit` column — its
     /// current table holds only live rows and it closes by move-to-`_hist` +
     /// DELETE (mirroring `history::close_out_tier`). Everything else closes with
     /// `SET valid_to_commit = ?`.
-    array: bool,
+    pub(crate) array: bool,
     /// A SQL expression producing a human-readable identifier per referencing
     /// row, for the bounded blocker `sample`.
     sample_expr: &'static str,
     /// Erase participation (erasure_compaction_plan §3): `true` ⇒ the erase
     /// execution arm ([`erase_scope_legs`]) physically DELETEs this leg's rows
-    /// — same `predicate`, ANY validity, plain DELETE, no hist-move, no
+    /// — same `key`, ANY validity, plain DELETE, no hist-move, no
     /// live-guard. The SHARED predicate is what keeps delete's close-outs,
     /// erase's preview COUNTs, and erase's DELETEs from ever drifting
     /// (CLAUDE.md invariant 2). `true` on the whole Alternative set; `false`
     /// on other kinds' legs (their erase grains are future designs — the core
     /// refuses to erase them in v1).
     erase: bool,
+    /// The purge's survivor grain for this leg ([`Grain`]).
+    pub(crate) grain: Grain,
 }
 
 impl DepLeg {
@@ -103,6 +224,17 @@ impl DepLeg {
         } else {
             " AND valid_to_commit IS NULL"
         }
+    }
+
+    /// The per-id match predicate (one `?`).
+    fn predicate(&self) -> String {
+        self.key.render(IdSet::One)
+    }
+
+    /// The column the key matches against the target id (the indirect
+    /// leg's own column).
+    pub(crate) fn key_column(&self) -> &'static str {
+        self.key.column
     }
 }
 
@@ -121,10 +253,10 @@ impl DepLeg {
 ///     close-out paths never see these legs). They live HERE, in the one
 ///     registry, so erase's dependency definition stays a single source of
 ///     truth with delete's (invariant 2 — one dependency finder, never two).
-struct ObjectLegSet {
-    object_table: &'static str,
-    identity: Vec<DepLeg>,
-    dependents: Vec<DepLeg>,
+pub(crate) struct ObjectLegSet {
+    pub(crate) object_table: &'static str,
+    pub(crate) identity: Vec<DepLeg>,
+    pub(crate) dependents: Vec<DepLeg>,
     erase_extra: Vec<DepLeg>,
 }
 
@@ -133,7 +265,7 @@ struct ObjectLegSet {
 /// alternative + parameter sets; entity/class are not wired yet (P3/P4) and surface a
 /// clear "not implemented" error at [`apply_object_delete`] rather than here, so
 /// the registry stays a pure data description.
-fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
+pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
     match kind {
         // §4a — alternative, target `alternative` row by id.
         ObjectKind::Alternative => Some(ObjectLegSet {
@@ -143,34 +275,38 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 DepLeg {
                     table: "value_scalar",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                     erase: true,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "value_long",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                     erase: true,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "value_array",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: true,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                     erase: true,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "entity_alternative",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id",
                     erase: true,
+                    grain: Grain::Activation,
                 },
                 // Only alternative-scoped membership rows: base rows carry
                 // alternative_id IS NULL, which `alternative_id = ?` never
@@ -178,26 +314,29 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 DepLeg {
                     table: "membership",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'group=' || group_entity_id || ',member=' || member_entity_id",
                     erase: true,
+                    grain: Grain::Membership,
                 },
                 DepLeg {
                     table: "scenario_alternative",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'scenario=' || scenario_id || ',rank=' || rank",
                     erase: true,
+                    grain: Grain::Ranking,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
                     column: "alternative_id",
-                    predicate: "alternative_id = ?",
+                    key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                     erase: true,
+                    grain: Grain::ValueMeta,
                 },
             ],
             // The one leg erase adds beyond the delete dependents (critique
@@ -207,10 +346,11 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
             erase_extra: vec![DepLeg {
                 table: "value_array_hist",
                 column: "alternative_id",
-                predicate: "alternative_id = ?",
+                key: LegKey::col("alternative_id"),
                 array: true, // no live close-out semantics; erase-only anyway
                 sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                 erase: true,
+                grain: Grain::Value,
             }],
         }),
         // §4d — parameter, target `parameter_definition` row by id.
@@ -223,10 +363,11 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 DepLeg {
                     table: "parameter_type",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'type=' || id",
                     erase: false,
+                    grain: Grain::Plain,
                 },
                 // Named index dimensions — keyed INDIRECTLY via the definition's
                 // parameter_type rows (§4d amended: this is an identity leg with
@@ -234,11 +375,15 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 DepLeg {
                     table: "parameter_type_dimension",
                     column: "parameter_type_id",
-                    predicate: "parameter_type_id IN \
-                                (SELECT id FROM parameter_type WHERE parameter_definition_id = ?)",
+                    key: LegKey::via(
+                        "parameter_type_id",
+                        "parameter_type",
+                        "parameter_definition_id",
+                    ),
                     array: false,
                     sample_expr: "'dim=' || dimension_name",
                     erase: false,
+                    grain: Grain::Plain,
                 },
                 // The definition's OWN default/prefill content (mirrors). §4d
                 // amended: these are IDENTITY, not dependents — a param whose
@@ -248,78 +393,87 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 DepLeg {
                     table: "definition_value_scalar",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'slot=' || slot",
                     erase: false,
+                    grain: Grain::Plain,
                 },
                 DepLeg {
                     table: "definition_value_long",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'slot=' || slot",
                     erase: false,
+                    grain: Grain::Plain,
                 },
                 DepLeg {
                     table: "definition_value_array",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false, // no `_hist` twin ⇒ plain UPDATE, NOT move-to-hist
                     sample_expr: "'slot=' || slot",
                     erase: false,
+                    grain: Grain::Plain,
                 },
             ],
             dependents: vec![
                 DepLeg {
                     table: "value_scalar",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "value_long",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "value_array",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: true,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "entity_parameter_unit",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',unit=' || unit_id",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
                     column: "parameter_definition_id",
-                    predicate: "parameter_definition_id = ?",
+                    key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::ValueMeta,
                 },
                 // Polymorphic annotation table — FILTERED to the
                 // parameter_definition rows (object_type discriminator).
                 DepLeg {
                     table: "semantic_annotation",
                     column: "object_id",
-                    predicate: "object_id = ? AND object_type = 'parameter_definition'",
+                    key: LegKey::filtered("object_id", "object_type = 'parameter_definition'"),
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
+                    grain: Grain::Attached,
                 },
             ],
             erase_extra: Vec::new(),
@@ -335,104 +489,116 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
             identity: vec![DepLeg {
                 table: "entity_element",
                 column: "entity_id",
-                predicate: "entity_id = ?",
+                key: LegKey::col("entity_id"),
                 array: false,
                 sample_expr: "'pos=' || position || ',elem=' || element_entity_id",
                 erase: false,
+                grain: Grain::Plain,
             }],
             dependents: vec![
                 DepLeg {
                     table: "value_scalar",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "value_long",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "value_array",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: true,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Value,
                 },
                 DepLeg {
                     table: "entity_location",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'loc=' || entity_id",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "entity_alternative",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::Activation,
                 },
                 // membership has TWO entity legs (§4b): the entity as group and
                 // as member. Both are dependents.
                 DepLeg {
                     table: "membership",
                     column: "group_entity_id",
-                    predicate: "group_entity_id = ?",
+                    key: LegKey::col("group_entity_id"),
                     array: false,
                     sample_expr:
                         "'member=' || member_entity_id || ',alt=' || coalesce(alternative_id, 0)",
                     erase: false,
+                    grain: Grain::Membership,
                 },
                 DepLeg {
                     table: "membership",
                     column: "member_entity_id",
-                    predicate: "member_entity_id = ?",
+                    key: LegKey::col("member_entity_id"),
                     array: false,
                     sample_expr:
                         "'group=' || group_entity_id || ',alt=' || coalesce(alternative_id, 0)",
                     erase: false,
+                    grain: Grain::Membership,
                 },
                 DepLeg {
                     table: "entity_parameter_unit",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',unit=' || unit_id",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "entity_metadata",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'metadata=' || metadata_id",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
                     column: "entity_id",
-                    predicate: "entity_id = ?",
+                    key: LegKey::col("entity_id"),
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',alt=' || alternative_id",
                     erase: false,
+                    grain: Grain::ValueMeta,
                 },
                 // Polymorphic annotation table — FILTERED to entity rows.
                 DepLeg {
                     table: "semantic_annotation",
                     column: "object_id",
-                    predicate: "object_id = ? AND object_type = 'entity'",
+                    key: LegKey::filtered("object_id", "object_type = 'entity'"),
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 // EXCLUDED: run.tool_entity_id — immutable append-only leg (§10
                 // ruling 2), like run.result_alternative_id for alternatives.
@@ -449,37 +615,41 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
             identity: vec![DepLeg {
                 table: "entity_class_dimension",
                 column: "entity_class_id",
-                predicate: "entity_class_id = ?",
+                key: LegKey::col("entity_class_id"),
                 array: false,
                 sample_expr: "'pos=' || position",
                 erase: false,
+                grain: Grain::Plain,
             }],
             dependents: vec![
                 // The class as a member of a named class-set.
                 DepLeg {
                     table: "class_set_member",
                     column: "member_class_id",
-                    predicate: "member_class_id = ?",
+                    key: LegKey::col("member_class_id"),
                     array: false,
                     sample_expr: "'set=' || class_set_id",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "entity_class_display_mode",
                     column: "entity_class_id",
-                    predicate: "entity_class_id = ?",
+                    key: LegKey::col("entity_class_id"),
                     array: false,
                     sample_expr: "'mode=' || display_mode_id",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 // Polymorphic annotation table — FILTERED to entity_class rows.
                 DepLeg {
                     table: "semantic_annotation",
                     column: "object_id",
-                    predicate: "object_id = ? AND object_type = 'entity_class'",
+                    key: LegKey::filtered("object_id", "object_type = 'entity_class'"),
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
+                    grain: Grain::Attached,
                 },
                 // C7 — class-dimension annotations (object_id = the class id,
                 // object_subkey = position). Deliberately EXCLUDED from
@@ -488,10 +658,11 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                 DepLeg {
                     table: "semantic_annotation",
                     column: "object_id",
-                    predicate: "object_id = ? AND object_type = 'class_dimension'",
+                    key: LegKey::filtered("object_id", "object_type = 'class_dimension'"),
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
+                    grain: Grain::Attached,
                 },
             ],
             erase_extra: Vec::new(),
@@ -508,10 +679,11 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
             dependents: vec![DepLeg {
                 table: "scenario_alternative",
                 column: "scenario_id",
-                predicate: "scenario_id = ?",
+                key: LegKey::col("scenario_id"),
                 array: false,
                 sample_expr: "'alternative=' || alternative_id || ',rank=' || rank",
-                erase: false, // scenario erase grain is undesigned
+                erase: false,
+                grain: Grain::Ranking, // scenario erase grain is undesigned
             }],
             erase_extra: Vec::new(),
         }),
@@ -534,7 +706,7 @@ fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
 /// validity — no liveness applied).
 pub(crate) struct EraseLeg {
     pub(crate) table: &'static str,
-    pub(crate) predicate: &'static str,
+    pub(crate) predicate: String,
 }
 
 /// The tables (with predicates) `erase` physically DELETEs from for `kind`:
@@ -560,7 +732,7 @@ pub(crate) fn erase_scope_legs(kind: ObjectKind) -> Option<Vec<EraseLeg>> {
         .filter(|l| l.erase)
         .map(|l| EraseLeg {
             table: l.table,
-            predicate: l.predicate,
+            predicate: l.predicate(),
         })
         .collect();
     debug_assert!(
@@ -593,36 +765,42 @@ pub(crate) fn erase_scope_legs(kind: ObjectKind) -> Option<Vec<EraseLeg>> {
 /// finds the neighboring objects (possibly of a DIFFERENT kind) a `cascade:true`
 /// delete also closes, plus the reporting metadata a `cascade:false` blocker
 /// needs.
-struct CascadeEdge {
+pub(crate) struct CascadeEdge {
     /// The kind of the neighbor objects this edge reaches.
-    neighbor_kind: ObjectKind,
+    pub(crate) neighbor_kind: ObjectKind,
     /// Blocker table label — the real dependent table — for [`Blocker::table`].
-    table: &'static str,
+    pub(crate) table: &'static str,
     /// Blocker column label for [`Blocker::column`].
-    column: &'static str,
-    /// SQL selecting the neighbor ids: EXACTLY ONE `?` bound to the source id,
-    /// returning a single id column, live-guarded. Drives the closure walk AND
-    /// (wrapped) the blocker COUNT + sample, so they can never drift.
-    select_ids: &'static str,
+    pub(crate) column: &'static str,
+    /// The neighbor-id query, as a predicate template like [`LegKey`]:
+    /// `SELECT … FROM …` (`select`) returning a single id column, the
+    /// source-id column (`key`) matched against an [`IdSet`] (`= ?` with
+    /// EXACTLY ONE `?` bound to the source id, or a set form), and the
+    /// live guards (`live`). Drives the closure walk, the purge's set
+    /// frontier AND (wrapped) the blocker COUNT + sample, so they can never
+    /// drift.
+    select: &'static str,
+    key: &'static str,
+    live: &'static str,
     /// The table carrying `(id, name)` for the neighbor kind, for the bounded
     /// blocker `sample`.
-    name_table: &'static str,
+    pub(crate) name_table: &'static str,
 }
 
 /// The cross-kind cascade edges out of `kind` (§10 ruling 1, §4e). Entity has the
 /// single B1 edge; a class has three (child entities, child parameters, and the
 /// B2 dependent classes). Alternative and Parameter have none, so their closure
 /// reduces to `[self]` and the P1/P2 behavior is unchanged.
-fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
+pub(crate) fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
     match kind {
         ObjectKind::Entity => vec![CascadeEdge {
             neighbor_kind: ObjectKind::Entity,
             table: "entity",
             column: "element_entity_id",
-            select_ids: "SELECT DISTINCT ee.entity_id \
-                         FROM entity_element ee \
-                         JOIN entity e ON e.id = ee.entity_id AND e.valid_to_commit IS NULL \
-                         WHERE ee.element_entity_id = ? AND ee.valid_to_commit IS NULL",
+            select: "SELECT DISTINCT ee.entity_id FROM entity_element ee \
+                     JOIN entity e ON e.id = ee.entity_id AND e.valid_to_commit IS NULL",
+            key: "ee.element_entity_id",
+            live: "ee.valid_to_commit IS NULL",
             name_table: "entity",
         }],
         ObjectKind::Class => vec![
@@ -631,8 +809,9 @@ fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
                 neighbor_kind: ObjectKind::Entity,
                 table: "entity",
                 column: "entity_class_id",
-                select_ids: "SELECT id FROM entity \
-                             WHERE entity_class_id = ? AND valid_to_commit IS NULL",
+                select: "SELECT id FROM entity",
+                key: "entity_class_id",
+                live: "valid_to_commit IS NULL",
                 name_table: "entity",
             },
             // Child parameter definitions — each runs its own §4d cascade.
@@ -640,8 +819,9 @@ fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
                 neighbor_kind: ObjectKind::Parameter,
                 table: "parameter_definition",
                 column: "entity_class_id",
-                select_ids: "SELECT id FROM parameter_definition \
-                             WHERE entity_class_id = ? AND valid_to_commit IS NULL",
+                select: "SELECT id FROM parameter_definition",
+                key: "entity_class_id",
+                live: "valid_to_commit IS NULL",
                 name_table: "parameter_definition",
             },
             // B2 — classes that declare THIS class as a dimension type; each such
@@ -650,11 +830,11 @@ fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
                 neighbor_kind: ObjectKind::Class,
                 table: "entity_class",
                 column: "dimension_class_id",
-                select_ids: "SELECT DISTINCT ecd.entity_class_id \
-                             FROM entity_class_dimension ecd \
-                             JOIN entity_class ec ON ec.id = ecd.entity_class_id \
-                                                 AND ec.valid_to_commit IS NULL \
-                             WHERE ecd.dimension_class_id = ? AND ecd.valid_to_commit IS NULL",
+                select: "SELECT DISTINCT ecd.entity_class_id FROM entity_class_dimension ecd \
+                         JOIN entity_class ec ON ec.id = ecd.entity_class_id \
+                           AND ec.valid_to_commit IS NULL",
+                key: "ecd.dimension_class_id",
+                live: "ecd.valid_to_commit IS NULL",
                 name_table: "entity_class",
             },
         ],
@@ -662,9 +842,22 @@ fn cascade_edges(kind: ObjectKind) -> Vec<CascadeEdge> {
     }
 }
 
+impl CascadeEdge {
+    /// The neighbor-id SELECT against `ids`.
+    pub(crate) fn select_ids(&self, ids: IdSet<'_>) -> String {
+        format!(
+            "{} WHERE {} {} AND {}",
+            self.select,
+            self.key,
+            ids.render(),
+            self.live
+        )
+    }
+}
+
 /// The neighbor ids one edge reaches from `id`.
 fn edge_neighbors(conn: &Connection, edge: &CascadeEdge, id: i64) -> Result<Vec<i64>, DbError> {
-    let mut stmt = conn.prepare(edge.select_ids)?;
+    let mut stmt = conn.prepare(&edge.select_ids(IdSet::One))?;
     let ids = stmt
         .query_map(params![id], |r| r.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -718,7 +911,7 @@ fn collect_container_blockers(
     let mut blockers = Vec::new();
     for edge in cascade_edges(kind) {
         let count: i64 = conn.query_row(
-            &format!("SELECT count(*) FROM ({}) t", edge.select_ids),
+            &format!("SELECT count(*) FROM ({}) t", edge.select_ids(IdSet::One)),
             params![target_id],
             |r| r.get(0),
         )?;
@@ -727,7 +920,9 @@ fn collect_container_blockers(
         }
         let mut stmt = conn.prepare(&format!(
             "SELECT name FROM {} WHERE id IN ({}) AND valid_to_commit IS NULL LIMIT {}",
-            edge.name_table, edge.select_ids, SAMPLE_LIMIT
+            edge.name_table,
+            edge.select_ids(IdSet::One),
+            SAMPLE_LIMIT
         ))?;
         let sample = stmt
             .query_map(params![target_id], |r| r.get::<_, String>(0))?
@@ -743,7 +938,7 @@ fn collect_container_blockers(
 }
 
 /// Max blocker-sample rows rendered per leg (bounded — §1).
-const SAMPLE_LIMIT: usize = 5;
+pub(crate) const SAMPLE_LIMIT: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Preparation (pure over the request; §2).
@@ -1133,7 +1328,7 @@ fn count_leg(conn: &Connection, leg: &DepLeg, target_id: i64) -> Result<usize, D
     let sql = format!(
         "SELECT count(*) FROM {} WHERE {}{}",
         leg.table,
-        leg.predicate,
+        leg.predicate(),
         leg.live_predicate()
     );
     let n: i64 = conn.query_row(&sql, params![target_id], |r| r.get(0))?;
@@ -1146,7 +1341,7 @@ fn sample_leg(conn: &Connection, leg: &DepLeg, target_id: i64) -> Result<Vec<Str
         "SELECT {} FROM {} WHERE {}{} LIMIT {}",
         leg.sample_expr,
         leg.table,
-        leg.predicate,
+        leg.predicate(),
         leg.live_predicate(),
         SAMPLE_LIMIT
     );
@@ -1173,15 +1368,15 @@ fn preview_dependent_counts(
 ) -> Result<Vec<TableCount>, DbError> {
     // table -> (array flag, [(predicate, bound id)]). One entry per physical
     // table; every leg on a given table shares its tier (array vs versioned).
-    type TableGroup = (&'static str, bool, Vec<(&'static str, i64)>);
+    type TableGroup = (&'static str, bool, Vec<(String, i64)>);
     let mut groups: Vec<TableGroup> = Vec::new();
     for (k, id) in closure {
         let legs = object_legs(*k).expect("cascade-closure item kind has a leg set");
         for leg in &legs.dependents {
             if let Some(g) = groups.iter_mut().find(|g| g.0 == leg.table) {
-                g.2.push((leg.predicate, *id));
+                g.2.push((leg.predicate(), *id));
             } else {
-                groups.push((leg.table, leg.array, vec![(leg.predicate, *id)]));
+                groups.push((leg.table, leg.array, vec![(leg.predicate(), *id)]));
             }
         }
     }
@@ -1253,14 +1448,16 @@ fn close_leg(
             &format!(
                 "INSERT INTO value_array_hist SELECT *, ?, TRUE FROM {} \
                  WHERE {} AND valid_from_commit < ?",
-                leg.table, leg.predicate
+                leg.table,
+                leg.predicate()
             ),
             params![commit_id, target_id, commit_id],
         )?;
         let deleted = conn.execute(
             &format!(
                 "DELETE FROM {} WHERE {} AND valid_from_commit < ?",
-                leg.table, leg.predicate
+                leg.table,
+                leg.predicate()
             ),
             params![target_id, commit_id],
         )?;
@@ -1268,9 +1465,9 @@ fn close_leg(
     } else {
         let closed = conn.execute(
             &format!(
-                "UPDATE {} SET valid_to_commit = ? \
-                 WHERE {} AND valid_from_commit < ? AND valid_to_commit IS NULL",
-                leg.table, leg.predicate
+                "UPDATE {} {CLOSE_SET} WHERE {} AND {LIVE_GUARD}",
+                leg.table,
+                leg.predicate()
             ),
             params![commit_id, target_id, commit_id],
         )?;
@@ -1307,11 +1504,89 @@ pub(crate) fn close_current_row(
     id: i64,
 ) -> Result<usize, DbError> {
     Ok(conn.execute(
-        &format!(
-            "UPDATE {table} SET valid_to_commit = ? \
-             WHERE id = ? AND valid_from_commit < ? AND valid_to_commit IS NULL"
-        ),
+        &format!("UPDATE {table} {CLOSE_SET} WHERE id = ? AND {LIVE_GUARD}"),
         params![commit_id, id, commit_id],
+    )?)
+}
+
+/// The SET list of every guarded structural close-out (one bind: the
+/// commit id), shared by the per-id and set forms.
+const CLOSE_SET: &str = "SET valid_to_commit = ?";
+
+/// The same-commit guard of every structural close-out (one bind: the commit
+/// id): a row this commit wrote is never closed (§2, purge plan §3.5.1).
+const LIVE_GUARD: &str = "valid_from_commit < ? AND valid_to_commit IS NULL";
+
+// ---------------------------------------------------------------------------
+// Set-form twins (purge plan §3.6): the same legs, SET list and guard, keyed
+// by a txn-local id set instead of one id. Array legs never close here: the
+// purge closes the value tiers through the history path (engine rule 2).
+// ---------------------------------------------------------------------------
+
+/// [`close_leg`] over every id of `set` (a txn-local `id` table), with an
+/// optional extra conjunct (a purge survivor anti-join). Non-array legs only.
+pub(crate) fn close_leg_set(
+    conn: &Connection,
+    leg: &DepLeg,
+    commit_id: i64,
+    set: &str,
+    extra: Option<&str>,
+) -> Result<usize, DbError> {
+    if leg.array {
+        return Err(DbError::Internal(format!(
+            "set-form close of the array leg {}.{}: arrays close by array_id",
+            leg.table, leg.column
+        )));
+    }
+    Ok(crate::purge::exec(
+        conn,
+        &close_leg_set_sql(leg, set, extra),
+        params![commit_id, commit_id],
+    )?)
+}
+
+/// The statement of [`close_leg_set`] (two binds: the commit id, twice).
+pub(crate) fn close_leg_set_sql(leg: &DepLeg, set: &str, extra: Option<&str>) -> String {
+    let extra = extra.map(|e| format!(" AND {e}")).unwrap_or_default();
+    format!(
+        "UPDATE {} {CLOSE_SET} WHERE {} AND {LIVE_GUARD}{extra}",
+        leg.table,
+        leg.key.render(IdSet::Table(set))
+    )
+}
+
+/// [`count_leg`] over every id of `set` (live rows, the purge preview and
+/// the purge's spared counts), with an optional extra conjunct.
+pub(crate) fn count_leg_set(
+    conn: &Connection,
+    leg: &DepLeg,
+    set: &str,
+    extra: Option<&str>,
+) -> Result<usize, DbError> {
+    let extra = extra.map(|e| format!(" AND {e}")).unwrap_or_default();
+    let n: i64 = crate::purge::query_count(
+        conn,
+        &format!(
+            "SELECT count(*) FROM {} WHERE {}{}{extra}",
+            leg.table,
+            leg.key.render(IdSet::Table(set)),
+            leg.live_predicate()
+        ),
+    )?;
+    Ok(n as usize)
+}
+
+/// [`close_current_row`] over every id of `set`.
+pub(crate) fn close_current_rows_set(
+    conn: &Connection,
+    table: &str,
+    commit_id: i64,
+    set: &str,
+) -> Result<usize, DbError> {
+    Ok(crate::purge::exec(
+        conn,
+        &format!("UPDATE {table} {CLOSE_SET} WHERE id IN (SELECT id FROM {set}) AND {LIVE_GUARD}"),
+        params![commit_id, commit_id],
     )?)
 }
 
@@ -1631,4 +1906,98 @@ pub(crate) fn preview_one(
         cascade,
         blockers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KINDS: [ObjectKind; 5] = [
+        ObjectKind::Entity,
+        ObjectKind::Parameter,
+        ObjectKind::Alternative,
+        ObjectKind::Class,
+        ObjectKind::Scenario,
+    ];
+
+    fn binds(sql: &str) -> usize {
+        sql.matches('?').count()
+    }
+
+    /// Every leg and cascade edge renders in the per-id form with exactly
+    /// one bind, in the bound-list set form with exactly one bind and in the
+    /// table set form with none (purge plan §3.6, test 11), and every form
+    /// is valid SQL against the schema.
+    #[test]
+    fn every_leg_renders_both_forms_with_one_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.duckdb");
+        crate::schema_init::init_schema(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TEMP TABLE ids (id BIGINT)")
+            .unwrap();
+        let mut legs = 0;
+        for kind in KINDS {
+            let set = object_legs(kind).expect("every kind has a leg set");
+            for leg in set
+                .identity
+                .iter()
+                .chain(&set.dependents)
+                .chain(&set.erase_extra)
+            {
+                legs += 1;
+                let one = leg.key.render(IdSet::One);
+                let list = leg.key.render(IdSet::List);
+                let table = leg.key.render(IdSet::Table("ids"));
+                assert_eq!(binds(&one), 1, "{}: {one}", leg.table);
+                assert_eq!(binds(&list), 1, "{}: {list}", leg.table);
+                assert_eq!(binds(&table), 0, "{}: {table}", leg.table);
+                for (sql, n) in [(&one, 1), (&list, 1), (&table, 0)] {
+                    let q = format!("SELECT count(*) FROM {} WHERE {sql}", leg.table);
+                    let mut stmt = conn.prepare(&q).unwrap_or_else(|e| panic!("{q}: {e}"));
+                    let c: i64 = match n {
+                        0 => stmt.query_row([], |r| r.get(0)),
+                        _ if sql.contains("unnest") => stmt
+                            .query_row([duckdb::types::Value::List(vec![1i64.into()])], |r| {
+                                r.get(0)
+                            }),
+                        _ => stmt.query_row([1i64], |r| r.get(0)),
+                    }
+                    .unwrap_or_else(|e| panic!("{q}: {e}"));
+                    assert_eq!(c, 0);
+                }
+            }
+            for edge in cascade_edges(kind) {
+                assert_eq!(binds(&edge.select_ids(IdSet::One)), 1);
+                assert_eq!(binds(&edge.select_ids(IdSet::Table("ids"))), 0);
+                conn.prepare(&edge.select_ids(IdSet::Table("ids"))).unwrap();
+            }
+        }
+        assert!(legs >= 37, "{legs} legs");
+        // The per-id forms are the predicates the object delete has always
+        // run (indirect and filtered legs included).
+        let pd = object_legs(ObjectKind::Parameter).unwrap();
+        let ptd = pd
+            .identity
+            .iter()
+            .find(|l| l.table == "parameter_type_dimension")
+            .unwrap();
+        assert_eq!(
+            ptd.key.render(IdSet::One),
+            "parameter_type_id IN (SELECT id FROM parameter_type WHERE parameter_definition_id = ?)"
+        );
+        let ann = pd
+            .dependents
+            .iter()
+            .find(|l| l.table == "semantic_annotation")
+            .unwrap();
+        assert_eq!(
+            ann.key.render(IdSet::One),
+            "object_id = ? AND object_type = 'parameter_definition'"
+        );
+        assert_eq!(
+            ann.key.render(IdSet::Table("s")),
+            "object_id IN (SELECT id FROM s) AND object_type = 'parameter_definition'"
+        );
+    }
 }

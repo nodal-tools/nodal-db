@@ -46,6 +46,10 @@ pub enum TemplateCommand {
         file: PathBuf,
         #[arg(long)]
         db: PathBuf,
+        /// Plan as `apply --recreate-removed` would: re-create removed
+        /// classes, parameters and value lists instead of blocking on them.
+        #[arg(long)]
+        recreate_removed: bool,
     },
     /// Reconcile the database to the template: run the pending migration
     /// chain, then apply the additive diff in one commit (plan-then-apply).
@@ -62,6 +66,11 @@ pub enum TemplateCommand {
         /// `template plan` printed) — the plan→apply staleness guard.
         #[arg(long)]
         expect_commit: Option<i64>,
+        /// Re-create the declared classes, parameters and value lists that
+        /// were removed locally (by an object delete, a purge or a dropped
+        /// list) instead of refusing on them.
+        #[arg(long)]
+        recreate_removed: bool,
     },
     /// Re-emit the template IR from a loaded database (semantic round-trip:
     /// export and source compare equal under the normalized object model).
@@ -84,11 +93,19 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
             db,
             user,
             message,
-        } => apply_file(&file, &db, user.as_deref(), &message, None),
-        TemplateCommand::Plan { file, db } => {
+        } => apply_file(&file, &db, user.as_deref(), &message, None, false),
+        TemplateCommand::Plan {
+            file,
+            db,
+            recreate_removed,
+        } => {
             require_db(&db)?;
             let t = parse(&file)?;
-            let p = tpl::plan(&db, &t).map_err(anyhow::Error::from)?;
+            let opts = tpl::ApplyOptions {
+                recreate_removed,
+                ..Default::default()
+            };
+            let p = tpl::plan_with(&db, &t, &opts).map_err(anyhow::Error::from)?;
             print!("{p}");
             Ok(())
         }
@@ -98,7 +115,15 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
             user,
             message,
             expect_commit,
-        } => apply_file(&file, &db, user.as_deref(), &message, expect_commit),
+            recreate_removed,
+        } => apply_file(
+            &file,
+            &db,
+            user.as_deref(),
+            &message,
+            expect_commit,
+            recreate_removed,
+        ),
         TemplateCommand::Export { db, out, json } => {
             require_db(&db)?;
             let (t, warnings) = tpl::export(&db).map_err(anyhow::Error::from)?;
@@ -130,7 +155,7 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
 
 /// The `init --template` path: load right after schema init.
 pub fn load_into(file: &Path, db: &Path, user: Option<&str>) -> Result<()> {
-    apply_file(file, db, user, "", None)
+    apply_file(file, db, user, "", None, false)
 }
 
 fn parse(file: &Path) -> Result<tpl::Template> {
@@ -145,6 +170,7 @@ fn apply_file(
     user: Option<&str>,
     message: &str,
     expect_commit: Option<i64>,
+    recreate_removed: bool,
 ) -> Result<()> {
     require_db(db)?;
     let t = parse(file)?;
@@ -152,6 +178,7 @@ fn apply_file(
     let registry = tpl::MigrationRegistry::new();
     let opts = tpl::ApplyOptions {
         expect_commit,
+        recreate_removed,
         ..Default::default()
     };
     let outcome = tpl::apply(db, &t, &registry, &user, message, &opts).map_err(|e| match e {

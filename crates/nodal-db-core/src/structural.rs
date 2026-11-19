@@ -27,8 +27,8 @@ use duckdb::{params, Connection};
 
 use crate::api::{
     find_alternative, find_entity, find_entity_class, find_parameter, find_scenario,
-    find_value_list, insert_alternative_row, lookup_alternative, lookup_entity_class,
-    lookup_parameter, lookup_scenario,
+    find_value_list, insert_alternative_row, lookup_alternative, lookup_entity,
+    lookup_entity_class, lookup_parameter, lookup_scenario,
 };
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
@@ -36,10 +36,10 @@ use crate::template::dbvocab::read_metadata_key;
 use crate::template::ir::{normalize_audit_rules, AuditRules};
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    insert_class_dim_row, insert_class_row, insert_definition_row, insert_entity_element_row,
-    insert_entity_row, insert_membership_row, insert_scenario_row, insert_type_member, read_ec_row,
-    read_pd_row, revise_alternative_row, revise_ec_row, revise_pd_row, revise_scenario_row,
-    set_metadata,
+    clear_metadata, insert_class_dim_row, insert_class_row, insert_definition_row,
+    insert_entity_element_row, insert_entity_row, insert_membership_row, insert_scenario_row,
+    insert_type_member, read_ec_row, read_pd_row, revise_alternative_row, revise_ec_row,
+    revise_pd_row, revise_scenario_row, set_metadata,
 };
 use crate::text::NameFolds;
 use crate::types::{
@@ -58,7 +58,9 @@ use crate::types::{
 ///
 /// Every reference to an existing object (an idempotent create's own name
 /// included, a rename's new name excluded) is noted in `folds` for the
-/// call's `NameFolded` warnings; every rename is recorded in `calls`.
+/// call's `NameFolded` warnings; every rename is recorded in `calls`, and
+/// what the item names, by id, in `touches` (the purge survivors).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_structural(
     conn: &Connection,
     c: i64,
@@ -67,6 +69,7 @@ pub(crate) fn apply_structural(
     report: &mut WriteReport,
     folds: &mut NameFolds,
     calls: &mut CallRenames,
+    touches: &mut CallTouches,
 ) -> Result<(), DbError> {
     let (kind, object_id, effect) = match change {
         StructuralChange::CreateAlternative { name, description } => {
@@ -148,8 +151,17 @@ pub(crate) fn apply_structural(
             class,
             name,
             elements,
+            description,
         } => {
-            let (id, e) = apply_create_entity(conn, c, class, name.as_deref(), elements, folds)?;
+            let (id, e) = apply_create_entity(
+                conn,
+                c,
+                class,
+                name.as_deref(),
+                elements,
+                description.as_deref(),
+                folds,
+            )?;
             (StructuralKind::Entity, id, e)
         }
         StructuralChange::CreateEntityClass {
@@ -214,6 +226,7 @@ pub(crate) fn apply_structural(
             (StructuralKind::Parameter, id, e)
         }
     };
+    touches.note(conn, change, object_id)?;
     report.structural.push(StructuralOutcome {
         change_index,
         kind,
@@ -221,6 +234,113 @@ pub(crate) fn apply_structural(
         effect,
     });
     Ok(())
+}
+
+/// What the structural items of one `commit_change_set` attempt name or
+/// create, by resolved id, at each purge grain (purge plan §3.5.3, critique
+/// S9): the purge spares exactly these (and, upward, what their identity
+/// references). Filled by [`apply_structural`] like [`CallRenames`], from
+/// resolved ids, never from outcomes (an activation outcome carries only
+/// the entity id). Every item counts, `NoOp` included. A closure local of
+/// the write transaction, so a conflict retry rebuilds it. Disabled (and
+/// empty) unless the call purges: then no extra lookup runs.
+#[derive(Default)]
+pub(crate) struct CallTouches {
+    pub(crate) enabled: bool,
+    pub(crate) entities: HashSet<i64>,
+    pub(crate) classes: HashSet<i64>,
+    pub(crate) parameters: HashSet<i64>,
+    pub(crate) alternatives: HashSet<i64>,
+    pub(crate) scenarios: HashSet<i64>,
+    /// `(entity, alternative)` of every `SetEntityActivation`.
+    pub(crate) activations: HashSet<(i64, i64)>,
+    /// `(group, member, alternative or 0)` of every `SetMembership`.
+    pub(crate) memberships: HashSet<(i64, i64, i64)>,
+    /// The scenarios a `SetScenarioAlternatives` ranks.
+    pub(crate) rankings: HashSet<i64>,
+}
+
+impl CallTouches {
+    pub(crate) fn new(enabled: bool) -> Self {
+        CallTouches {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// Record what `change` (applied, with outcome id `object_id`) names.
+    /// Names resolve by lookup in the open transaction, right after the
+    /// item applied, so they find the rows the item resolved (nothing
+    /// renames between the two).
+    fn note(
+        &mut self,
+        conn: &Connection,
+        change: &StructuralChange,
+        object_id: i64,
+    ) -> Result<(), DbError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let alt = |n: &str| lookup_alternative(conn, n);
+        let entity = |a: &EntityAddr| -> Result<Option<i64>, DbError> {
+            match lookup_entity_class(conn, &a.class)? {
+                Some(cid) => lookup_entity(conn, cid, &a.name),
+                None => Ok(None),
+            }
+        };
+        match change {
+            StructuralChange::CreateAlternative { .. }
+            | StructuralChange::RenameAlternative { .. } => {
+                self.alternatives.insert(object_id);
+            }
+            StructuralChange::CreateScenario { .. } | StructuralChange::RenameScenario { .. } => {
+                self.scenarios.insert(object_id);
+            }
+            StructuralChange::SetScenarioAlternatives { alternatives, .. } => {
+                self.scenarios.insert(object_id);
+                self.rankings.insert(object_id);
+                for a in alternatives {
+                    self.alternatives.extend(alt(a)?);
+                }
+            }
+            StructuralChange::SetEntityActivation { alternative, .. } => {
+                self.entities.insert(object_id);
+                if let Some(a) = alt(alternative)? {
+                    self.alternatives.insert(a);
+                    self.activations.insert((object_id, a));
+                }
+            }
+            StructuralChange::SetMembership {
+                group,
+                member,
+                alternative,
+                ..
+            } => {
+                let a = match alternative {
+                    Some(n) => alt(n)?,
+                    None => Some(0),
+                };
+                if let (Some(g), Some(m), Some(a)) = (entity(group)?, entity(member)?, a) {
+                    self.entities.extend([g, m]);
+                    if a != 0 {
+                        self.alternatives.insert(a);
+                    }
+                    self.memberships.insert((g, m, a));
+                }
+            }
+            StructuralChange::CreateEntity { .. } => {
+                self.entities.insert(object_id);
+            }
+            StructuralChange::CreateEntityClass { .. }
+            | StructuralChange::RenameEntityClass { .. } => {
+                self.classes.insert(object_id);
+            }
+            StructuralChange::CreateParameter { .. } | StructuralChange::RenameParameter { .. } => {
+                self.parameters.insert(object_id);
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -470,28 +590,98 @@ fn doc_classes(conn: &Connection, calls: &CallRenames) -> Result<Vec<DocClass>, 
     Ok(out)
 }
 
-/// Rewrite the two name-keyed metadata documents after the call's renames
-/// (class_param_rename_PLAN §5.2, OD8): the `presentation` document's
-/// `parameter_group_membership` keys (`"{class}.{parameter}"`) and the
-/// `audit_rules` document's `class`, `selector` and `require[]` names. Runs
-/// ONCE per call, after the last structural item (B1: `set_metadata`
-/// closes the current row, so a second write of one document in one commit
-/// would trip the span CHECK), and writes a document only when a name in it
-/// changed.
+/// What a call closed or unbound of the vocabulary the name-keyed
+/// documents name (purge plan §3.7, V-S2), by **pre-call** names (the
+/// documents hold those): classes and parameter definitions whose id has
+/// no live row after a close at `c` (a purge or an object delete), and
+/// definitions a purge unbound from their value list (a revision at `c`
+/// that dropped the binding). A parameter's class is named as it was
+/// before the call (its latest row older than `c`), so a closed parameter
+/// of a class this call renamed is keyed under the original class name.
+#[derive(Default)]
+struct RemovedNames {
+    /// Folded class names.
+    classes: HashSet<String>,
+    /// Folded (class, parameter) of closed definitions.
+    parameters: HashSet<(String, String)>,
+    /// Folded (class, parameter) of unbound definitions.
+    unbound: HashSet<(String, String)>,
+}
+
+impl RemovedNames {
+    fn is_empty(&self) -> bool {
+        self.classes.is_empty() && self.parameters.is_empty() && self.unbound.is_empty()
+    }
+
+    fn read(conn: &Connection, c: i64) -> Result<Self, DbError> {
+        let mut out = RemovedNames::default();
+        let pairs = |sql: &str| -> Result<Vec<(String, String)>, DbError> {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt
+                .query_map(params![c], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            Ok(rows)
+        };
+        let mut stmt = conn.prepare(
+            "SELECT name FROM entity_class WHERE valid_to_commit = ?1 \
+             AND id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL)",
+        )?;
+        for n in stmt.query_map(params![c], |r| r.get::<_, String>(0))? {
+            out.classes.insert(fold(&n?));
+        }
+        // The class's name before the call.
+        let class_name = "(SELECT arg_max(ec.name, ec.version) FROM entity_class ec \
+                          WHERE ec.id = t.entity_class_id AND ec.valid_from_commit < ?1)";
+        for (cl, p) in pairs(&format!(
+            "SELECT {class_name}, t.name FROM parameter_definition t \
+             WHERE t.valid_to_commit = ?1 \
+               AND t.id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)"
+        ))? {
+            out.parameters.insert((fold(&cl), fold(&p)));
+        }
+        for (cl, p) in pairs(&format!(
+            "SELECT {class_name}, t.name FROM parameter_definition t \
+             JOIN parameter_definition l ON l.id = t.id AND l.valid_to_commit IS NULL \
+             WHERE t.valid_to_commit = ?1 AND t.parameter_value_list_id IS NOT NULL \
+               AND l.parameter_value_list_id IS NULL"
+        ))? {
+            out.unbound.insert((fold(&cl), fold(&p)));
+        }
+        Ok(out)
+    }
+}
+
+/// Rewrite the two name-keyed metadata documents at the end of a call
+/// (class_param_rename_PLAN §5.2, OD8; purge plan §3.7, V-S2): the
+/// `presentation` document's `parameter_group_membership` keys
+/// (`"{class}.{parameter}"`) and the `audit_rules` document's `class`,
+/// `selector` and `require[]` names. Runs ONCE per call, after every
+/// channel (B1: `set_metadata` closes the current row, so a second write of
+/// one document in one commit would trip the span CHECK), and writes a
+/// document only when it changed. Removals (`removals`: the call closed or
+/// unbound vocabulary) apply first, on the pre-call names the documents
+/// hold; then the renames:
+///   - a closed parameter's membership key goes; an audit rule goes when its
+///     class or selector closed, or its selector lost its value list (a
+///     selector must be a list parameter), and so does a closed `require[]`
+///     entry (and a rule left with none); `when` keys stay;
+///   - renamed classes and parameters follow (below).
 ///
-/// Membership keys are matched by fold against keys BUILT from the original
-/// class and parameter names, never by splitting on `.` (a class `a.b` with
-/// parameter `c` and a class `a` with parameter `b.c` give the same key: a
-/// known limitation). A renamed entry wins over a stale one that lands on
-/// the same key. `audit_rules` is parsed as the IR block and serialized
-/// through [`normalize_audit_rules`], the one canonical form; a document
-/// that does not parse is left as it is (template export reports it).
+/// When every rule goes, the `audit_rules` document is cleared. Membership
+/// keys are matched by fold against keys BUILT from the original class and
+/// parameter names, never by splitting on `.` (a class `a.b` with parameter
+/// `c` and a class `a` with parameter `b.c` give the same key: a known
+/// limitation). A renamed entry wins over a stale one that lands on the
+/// same key. `audit_rules` is parsed as the IR block and serialized through
+/// [`normalize_audit_rules`], the one canonical form; a document that does
+/// not parse is left as it is (template export reports it).
 pub(crate) fn rewrite_name_documents(
     conn: &Connection,
     c: i64,
     calls: &CallRenames,
+    removals: bool,
 ) -> Result<(), DbError> {
-    if !calls.renamed_vocabulary() {
+    if !calls.renamed_vocabulary() && !removals {
         return Ok(());
     }
     let presentation = read_metadata_key(conn, "presentation")?;
@@ -499,7 +689,19 @@ pub(crate) fn rewrite_name_documents(
     if presentation.is_none() && audit_rules.is_none() {
         return Ok(());
     }
-    let classes = doc_classes(conn, calls)?;
+    let removed = if removals {
+        RemovedNames::read(conn, c)?
+    } else {
+        RemovedNames::default()
+    };
+    let classes = if calls.renamed_vocabulary() {
+        doc_classes(conn, calls)?
+    } else {
+        Vec::new()
+    };
+    if removed.is_empty() && classes.is_empty() {
+        return Ok(());
+    }
 
     if let Some(doc) = presentation {
         if let Ok(serde_json::Value::Object(mut root)) = serde_json::from_str(&doc) {
@@ -514,10 +716,19 @@ pub(crate) fn rewrite_name_documents(
                         }
                     }
                 }
+                let gone: HashSet<String> = removed
+                    .parameters
+                    .iter()
+                    .map(|(cl, p)| format!("{cl}.{p}"))
+                    .collect();
                 let mut changed = false;
                 let mut kept = serde_json::Map::new();
                 let mut moved = serde_json::Map::new();
                 for (k, v) in m {
+                    if gone.contains(&fold(k)) {
+                        changed = true;
+                        continue;
+                    }
                     match renamed.get(&fold(k)) {
                         Some(to) => {
                             changed = true;
@@ -545,6 +756,35 @@ pub(crate) fn rewrite_name_documents(
     if let Some(doc) = audit_rules {
         if let Ok(mut rules) = serde_json::from_str::<AuditRules>(&doc) {
             let mut changed = false;
+            // Removals, on the pre-call names.
+            if !removed.is_empty() {
+                let before = rules.conditional_requirements.len();
+                rules.conditional_requirements.retain_mut(|r| {
+                    let cl = fold(&r.class);
+                    let sel = (cl.clone(), fold(&r.selector));
+                    if removed.classes.contains(&cl)
+                        || removed.parameters.contains(&sel)
+                        || removed.unbound.contains(&sel)
+                    {
+                        return false;
+                    }
+                    let mut dropped = false;
+                    let mut left = 0usize;
+                    for w in r.when.0.values_mut() {
+                        let n = w.require.len();
+                        w.require
+                            .retain(|q| !removed.parameters.contains(&(cl.clone(), fold(q))));
+                        dropped |= w.require.len() != n;
+                        left += w.require.len();
+                    }
+                    if dropped {
+                        changed = true;
+                    }
+                    !(dropped && left == 0)
+                });
+                changed |= rules.conditional_requirements.len() != before;
+            }
+            // Renames.
             for r in &mut rules.conditional_requirements {
                 let Some(dc) = classes
                     .iter()
@@ -574,9 +814,14 @@ pub(crate) fn rewrite_name_documents(
                 }
             }
             if changed {
-                if let Some(v) = normalize_audit_rules(&rules) {
-                    let text = serde_json::to_string(&v).expect("a JSON value serializes");
-                    set_metadata(conn, c, "audit_rules", &text)?;
+                match normalize_audit_rules(&rules) {
+                    Some(v) => {
+                        let text = serde_json::to_string(&v).expect("a JSON value serializes");
+                        set_metadata(conn, c, "audit_rules", &text)?;
+                    }
+                    // Every rule dropped: the document goes, as reconcile
+                    // clears it (V-S2), never left stale.
+                    None => clear_metadata(conn, c, "audit_rules")?,
                 }
             }
         }
@@ -1554,6 +1799,7 @@ pub(crate) fn apply_create_entity(
     class: &str,
     name: Option<&str>,
     elements: &[String],
+    description: Option<&str>,
     folds: &mut NameFolds,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let effective_name = effective_entity_name(name, elements)?;
@@ -1589,7 +1835,7 @@ pub(crate) fn apply_create_entity(
             .noted(folds, "entity", el);
         el_ids.push((*pos, id));
     }
-    let eid = insert_entity_row(conn, c, s.cid, &effective_name, None)?;
+    let eid = insert_entity_row(conn, c, s.cid, &effective_name, description)?;
     for (pos, el_id) in &el_ids {
         insert_entity_element_row(conn, c, eid, *pos, *el_id)?;
     }
@@ -2059,6 +2305,7 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             class,
             name,
             elements,
+            description: _,
         } => {
             require_nonempty("class", class)?;
             let effective = effective_entity_name(name.as_deref(), elements)?;

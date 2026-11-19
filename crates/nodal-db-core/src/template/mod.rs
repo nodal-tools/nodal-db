@@ -30,5 +30,6 @@ pub mod reconcile;
 pub use export::export;
 pub use ir::{parse_file, parse_str, template_content_hash, to_json, to_yaml, validate, Template};
 pub use reconcile::{
-    apply, plan, ApplyOptions, ApplyOutcome, MigrationRegistry, ReconcilePlan, RunProgramReport,
+    apply, plan, plan_with, ApplyOptions, ApplyOutcome, MigrationRegistry, ReconcilePlan,
+    RunProgramReport,
 };

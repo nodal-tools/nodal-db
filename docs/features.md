@@ -348,6 +348,9 @@ is what an editor save needs.
 Deleting an object (alternative, scenario, parameter, entity or class)
 closes out the object and its dependents. A preview reports what would be
 affected, and deletion can either cascade or refuse when dependents exist.
+A **purge** closes out a whole scope (values of a class, every entity,
+every class but some, …) in one commit, sparing exactly what the same
+call writes, so purge-and-reimport is a true replace that keeps history.
 
 Names that a write refers to but that do not exist yet are created
 automatically, and each creation is reported as a machine-readable

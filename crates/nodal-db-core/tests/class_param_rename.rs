@@ -202,6 +202,7 @@ fn entity(class: &str, name: &str) -> SC {
         class: class.into(),
         name: Some(name.into()),
         elements: vec![],
+        description: None,
     }
 }
 
@@ -777,6 +778,7 @@ fn nd_dimensions_and_class_sets_follow_a_class_rename() {
                 class: "unit__node".into(),
                 name: None,
                 elements: vec!["u1".into(), "b1".into()],
+                description: None,
             },
         ],
     );
@@ -882,6 +884,7 @@ fn class_set_members_follow_a_class_rename() {
                 class: "flow".into(),
                 name: None,
                 elements: vec!["b1".into()],
+                description: None,
             },
         ],
     );
@@ -1714,11 +1717,13 @@ fn a_selector_rename_and_a_chain_rewrite_by_id() {
 }
 
 #[test]
-fn export_drops_stale_audit_rule_names_with_a_warning() {
+fn object_deletes_drop_their_names_from_the_documents() {
+    // Behaviour change (entity_descriptions_purge_PLAN §3.7, V-S2): an
+    // object delete of a class or parameter now feeds the documents'
+    // removal pass in its own commit (it used to leave the stale names for
+    // template export to drop with a warning).
     let dir = tempfile::tempdir().unwrap();
     let db = docs_db(&dir);
-    // An object delete does not rewrite the documents: `rate` stays in a
-    // `require` list.
     call(
         &db,
         vec![],
@@ -1727,13 +1732,19 @@ fn export_drops_stale_audit_rule_names_with_a_warning() {
         vec![okey(ObjectKind::Parameter, Some("unit"), "rate")],
     )
     .unwrap();
+    let rules = metadata(&db, "audit_rules");
+    assert_eq!(
+        rules["conditional_requirements"][0]["when"]["b"]["require"],
+        serde_json::json!(["eff"])
+    );
     let (t, warnings) = nodal_db_core::template::export(&db).unwrap();
     assert!(
-        warnings.iter().any(|w| w.contains("requires \"rate\"")),
+        !warnings.iter().any(|w| w.contains("requires \"rate\"")),
         "{warnings:?}"
     );
     nodal_db_core::template::validate(&t).unwrap();
-    // A rule whose class is gone is dropped whole.
+    // A class delete drops its rules (here every rule: the document is
+    // cleared) and its parameters' group membership keys.
     call(
         &db,
         vec![],
@@ -1742,12 +1753,53 @@ fn export_drops_stale_audit_rule_names_with_a_warning() {
         vec![okey(ObjectKind::Class, None, "unit")],
     )
     .unwrap();
-    let (t, warnings) = nodal_db_core::template::export(&db).unwrap();
+    assert_eq!(
+        q1(
+            &db,
+            "SELECT count(*) FROM metadata WHERE cur_name = 'audit_rules'"
+        ),
+        0
+    );
+    let p = metadata(&db, "presentation");
+    let keys: Vec<&String> = p["parameter_group_membership"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(keys, vec!["node.demand"]);
+    let (t, _warnings) = nodal_db_core::template::export(&db).unwrap();
     assert!(t.audit_rules.is_none());
+    nodal_db_core::template::validate(&t).unwrap();
+}
+
+#[test]
+fn export_drops_stale_audit_rule_names_with_a_warning() {
+    // A stale document (written by direct SQL, or left by a history-free
+    // extract) still exports: the unknown class's rule and the unknown
+    // requirement are dropped with a warning, and the template validates.
+    let dir = tempfile::tempdir().unwrap();
+    let db = docs_db(&dir);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE metadata SET value = ? WHERE cur_name = 'audit_rules'",
+        [r#"{"conditional_requirements": [
+              {"class": "unit", "selector": "method",
+               "when": {"a": {"require": ["eff", "rate_gone"]}}},
+              {"class": "ghost", "selector": "x", "when": {"a": {"require": ["y"]}}}]}"#],
+    )
+    .unwrap();
+    drop(conn);
+    let (t, warnings) = nodal_db_core::template::export(&db).unwrap();
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("rule for class \"unit\"")),
+            .any(|w| w.contains("requires \"rate_gone\"")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("rule for class \"ghost\" omitted")),
         "{warnings:?}"
     );
     nodal_db_core::template::validate(&t).unwrap();

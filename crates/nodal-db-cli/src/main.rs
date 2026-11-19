@@ -593,6 +593,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 if p.template_stamped {
                     println!("  closes template vocabulary (needs --allow-on-template)");
                 }
+                println!(
+                    "  long-tier cells + array elements in the scope: {}",
+                    p.cells
+                );
+                for w in &p.warnings {
+                    if let nodal_db_core::types::WarningKind::PurgeLarge { threshold, .. } = w.kind
+                    {
+                        println!(
+                            "  warning: more than {threshold} cells: one long transaction that \
+                             holds the write lock (about 10 min and 3.4 GB per 105 M cells \
+                             measured)"
+                        );
+                    }
+                }
                 println!("(an upper bound: nothing is written, so nothing is spared)");
                 return Ok(());
             }
@@ -604,6 +618,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 &message,
                 nodal_db_core::types::WriteOptions::default(),
             )?;
+            for w in &r.warnings {
+                if let nodal_db_core::types::WarningKind::PurgeLarge {
+                    cells, threshold, ..
+                } = w.kind
+                {
+                    eprintln!("warning: the purge covered {cells} cells (more than {threshold})");
+                }
+            }
             let o = &r.purges[0];
             if r.commit_id == 0 {
                 println!("nothing to purge (no commit)");

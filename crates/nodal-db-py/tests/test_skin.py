@@ -1377,6 +1377,7 @@ def test_purge_scope_dicts_report_and_preview(db):
     assert pv[5]["objects"] == 2
     assert pv[5]["outside_scope"] == []
     assert pv[6]["template_stamped"] is False
+    assert pv[0]["cells"] == 0 and pv[0]["warnings"] == []
     rep = db.purge(requests, user="t", message="purge")
     out = rep["purges"]
     assert [o["request_index"] for o in out] == list(range(9))
@@ -1404,6 +1405,9 @@ def test_purge_in_commit_changes_spares_what_the_call_writes(db):
     # Unknown scopes and names refuse.
     with pytest.raises(nodal_db.ApiError, match="unknown purge scope"):
         db.purge([{"scope": "everything"}], user="t")
+    # The scope name is checked before the keys.
+    with pytest.raises(nodal_db.ApiError, match="unknown purge scope"):
+        db.purge([{"scope": "everything", "class": "unit"}], user="t")
     with pytest.raises(nodal_db.ApiError, match="unknown class"):
         db.purge([{"scope": "entities", "class": "nope"}], user="t")
     # A key the scope does not take refuses (it would widen the purge).

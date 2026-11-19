@@ -525,6 +525,18 @@ pub enum WarningKind {
         stored: String,
         spellings: Vec<FoldedSpelling>,
     },
+    /// A purge request's scope holds more long-tier cells plus array
+    /// elements than `threshold` ([`crate::purge::PURGE_LARGE_CELLS`]): one
+    /// long transaction that holds the write lock and needs memory in
+    /// proportion (measured: about 105 million long cells, ten minutes and
+    /// 3.4 GB at the peak, within a 6.4 GB DuckDB limit). Not a refusal.
+    /// `cells` counts the scope before the call's survivors are spared (an
+    /// upper bound). `object_type` is `"purge"`, `name` empty, `id` 0.
+    PurgeLarge {
+        request_index: usize,
+        cells: u64,
+        threshold: u64,
+    },
 }
 
 /// One reference of a [`WarningKind::NameFolded`] warning: the spelling
@@ -1126,6 +1138,10 @@ pub struct PurgePreview {
     /// with a count and a bounded sample); non-empty refuses the call
     /// without `allow_outside_scope`.
     pub outside_scope: Vec<Blocker>,
+    /// Long-tier cells plus array elements in its scope (the memory guard).
+    pub cells: u64,
+    /// [`WarningKind::PurgeLarge`] when `cells` passes the threshold.
+    pub warnings: Vec<Warning>,
     /// It would close vocabulary that exists on a template-stamped
     /// database (refused without `allow_on_template`).
     pub template_stamped: bool,

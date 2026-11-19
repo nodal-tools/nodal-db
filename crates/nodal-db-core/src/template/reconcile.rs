@@ -1004,6 +1004,13 @@ pub fn apply(
                         // commit, not at this apply's cursor: after a crash
                         // between the program's commits and this one, the
                         // re-run's range still covers the earlier run's.
+                        // Known window (documented, owner ruling
+                        // 2026-11-19): a commit another writer made in that
+                        // crash window, or between the last template commit
+                        // and this apply, falls in the range too, so a
+                        // removal it made counts as template-owned. A
+                        // program's own commits carry no step marker, so
+                        // the range cannot be narrowed to them.
                         let first = super::dbvocab::template_owned(conn)?
                             .iter()
                             .map(|&(_, b)| b + 1)

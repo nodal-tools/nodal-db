@@ -1012,6 +1012,8 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         | WarningKind::TextNormalized { .. }
         // Resolving a reference by the name fold is not a write by itself.
         | WarningKind::NameFolded { .. }
+        // A size notice is not a write.
+        | WarningKind::PurgeLarge { .. }
         | WarningKind::UnknownReferent { .. }
         | WarningKind::NothingToDelete { .. }
         // A dropped write is not a write (CoveredWrites::DeleteWins).

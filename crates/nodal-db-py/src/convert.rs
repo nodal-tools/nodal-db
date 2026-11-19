@@ -541,7 +541,8 @@ fn str_list(obj: &Bound<'_, PyAny>, key: &str) -> PyResult<Vec<String>> {
 
 pub(crate) fn purge_request_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PurgeRequest> {
     let scope_name = req_str(obj, "purge", "scope")?;
-    // A key the scope does not take is refused: ignoring it would silently
+    // The scope name first (an unknown scope is named as such), then: a key
+    // the scope does not take is refused, since ignoring it would silently
     // widen the purge (e.g. memberships with "class" purges every group).
     let filters: &[&str] = match scope_name.as_str() {
         "values" => &["class", "parameter", "alternative"],
@@ -549,7 +550,13 @@ pub(crate) fn purge_request_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PurgeReq
         "activations" => &["class", "alternative"],
         "memberships" => &["group_class"],
         "alternatives" | "classes" | "value_lists" => &["except"],
-        _ => &[],
+        "scenarios" => &[],
+        other => {
+            return Err(ApiError::new_err(format!(
+                "unknown purge scope {other:?} (expected values, entities, activations, \
+                 memberships, alternatives, scenarios, classes, parameters or value_lists)"
+            )))
+        }
     };
     let dict = obj
         .cast::<PyDict>()
@@ -636,6 +643,12 @@ pub(crate) fn purge_previews_to_py<'py>(
         d.set_item("cascade", cascade_to_py(py, &p.cascade)?)?;
         d.set_item("outside_scope", blockers_to_py(py, &p.outside_scope)?)?;
         d.set_item("template_stamped", p.template_stamped)?;
+        d.set_item("cells", p.cells)?;
+        let warnings = PyList::empty(py);
+        for w in &p.warnings {
+            warnings.append(warning_to_py(py, w)?)?;
+        }
+        d.set_item("warnings", warnings)?;
         out.append(d)?;
     }
     Ok(out)
@@ -847,6 +860,16 @@ fn warning_to_py<'py>(py: Python<'py>, w: &Warning) -> PyResult<Bound<'py, PyDic
             }
             d.set_item("spellings", list)?;
             "name_folded"
+        }
+        WarningKind::PurgeLarge {
+            request_index,
+            cells,
+            threshold,
+        } => {
+            d.set_item("request_index", request_index)?;
+            d.set_item("cells", cells)?;
+            d.set_item("threshold", threshold)?;
+            "purge_large"
         }
     };
     d.set_item("kind", kind)?;

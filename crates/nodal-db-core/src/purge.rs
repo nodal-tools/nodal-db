@@ -54,7 +54,7 @@ use crate::template::reconcile::{close_value_lists_set, read_pd_row, revise_pd_r
 use crate::text::{NameFolds, Normalized};
 use crate::types::{
     Blocker, CascadeCounts, ObjectKind, PurgeOutcome, PurgePreview, PurgeRequest, PurgeScope,
-    TableCount, WriteReport,
+    TableCount, Warning, WarningKind, WriteReport,
 };
 
 // ---------------------------------------------------------------------------
@@ -368,6 +368,11 @@ pub(crate) fn run(
         build_request_sets(conn, r, scope)?;
     }
     build_all_close_parameters(conn, call.requests.len())?;
+    for (r, scope) in call.scopes.iter().enumerate() {
+        report
+            .warnings
+            .extend(large_warning(r, scope_cells(conn, r, scope)?));
+    }
     refuse_template_stamped(conn, call)?;
     refuse_outside_scope(conn, call)?;
     let mut vocabulary = false;
@@ -383,6 +388,74 @@ pub(crate) fn run(
     }
     drop_tables(conn)?;
     Ok(vocabulary)
+}
+
+/// The memory guard's threshold (owner ruling 2026-11-19): a purge request
+/// whose scope holds more long-tier cells plus array elements than this
+/// gets a [`WarningKind::PurgeLarge`] warning, in the preview and the
+/// commit; it is not refused. Half the largest point the P0 spike measured
+/// (105 M long cells: about ten minutes and 3.4 GB at the peak, within a
+/// 6.4 GB DuckDB limit; `scripts/bench/RESULTS_purge_spike.md`).
+pub const PURGE_LARGE_CELLS: u64 = 50_000_000;
+
+/// Long-tier cells plus array elements request `r`'s value steps cover
+/// (before survivors: an upper bound), counted once per table.
+fn scope_cells(conn: &Connection, r: usize, scope: &Scope) -> Result<u64, DbError> {
+    let mut long: Vec<String> = Vec::new();
+    let mut array: Vec<String> = Vec::new();
+    for step in steps(conn, r, scope)? {
+        if let Step::Values { table, pred, .. } = step {
+            match table {
+                "value_long" => long.push(format!("({pred})")),
+                "value_array" => array.push(format!("({pred})")),
+                _ => {}
+            }
+        }
+    }
+    let mut cells = 0i64;
+    if !long.is_empty() {
+        cells += query_count(
+            conn,
+            &format!(
+                "SELECT count(*) FROM value_long WHERE ({}) AND valid_to_commit IS NULL",
+                long.join(" OR ")
+            ),
+        )?;
+    }
+    if !array.is_empty() {
+        // Axis lengths on narrow columns, never the payload (engine rule 2).
+        cells += query_count(
+            conn,
+            &format!(
+                "SELECT coalesce(sum(a1.length::BIGINT * coalesce(a2.length, 1) \
+                   * coalesce(a3.length, 1) * coalesce(a4.length, 1)), 0)::BIGINT \
+                 FROM (SELECT axis1_id, axis2_id, axis3_id, axis4_id FROM value_array \
+                       WHERE {}) v \
+                 JOIN axis a1 ON a1.id = v.axis1_id \
+                 LEFT JOIN axis a2 ON a2.id = v.axis2_id \
+                 LEFT JOIN axis a3 ON a3.id = v.axis3_id \
+                 LEFT JOIN axis a4 ON a4.id = v.axis4_id",
+                array.join(" OR ")
+            ),
+        )?;
+    }
+    Ok(cells.max(0) as u64)
+}
+
+/// The [`WarningKind::PurgeLarge`] warning of request `r`, if its scope
+/// passes the threshold.
+fn large_warning(r: usize, cells: u64) -> Option<Warning> {
+    let threshold = test_hooks::large_threshold();
+    (cells > threshold).then(|| Warning {
+        kind: WarningKind::PurgeLarge {
+            request_index: r,
+            cells,
+            threshold,
+        },
+        object_type: "purge".into(),
+        name: String::new(),
+        id: 0,
+    })
 }
 
 /// Did commit `c` close a class, parameter definition or value list that
@@ -1391,11 +1464,14 @@ pub(crate) fn preview(
             let i = stamped_item(conn, r)?;
             i.classes + i.parameters + i.value_lists > 0
         };
+        let cells = scope_cells(conn, r, scope)?;
         out.push(PurgePreview {
             request_index: r,
             objects,
             cascade: counts(object_rows, per_table),
             outside_scope: outside_scope(conn, r, reqs.len())?,
+            cells,
+            warnings: large_warning(r, cells).into_iter().collect(),
             template_stamped,
         });
     }
@@ -1919,6 +1995,27 @@ pub mod test_hooks {
         static NO_UPWARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static NO_SURVIVORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static CONFLICTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static LARGE: std::cell::Cell<u64> = const { std::cell::Cell::new(super::PURGE_LARGE_CELLS) };
+    }
+
+    /// Run `f` with the memory guard's threshold set to `n` cells.
+    #[cfg(debug_assertions)]
+    pub fn with_large_threshold<R>(n: u64, f: impl FnOnce() -> R) -> R {
+        LARGE.with(|c| c.set(n));
+        let out = f();
+        LARGE.with(|c| c.set(super::PURGE_LARGE_CELLS));
+        out
+    }
+
+    pub(crate) fn large_threshold() -> u64 {
+        #[cfg(debug_assertions)]
+        {
+            LARGE.with(|c| c.get())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            super::PURGE_LARGE_CELLS
+        }
     }
 
     /// Make the next `n` purge phases on this thread fail with a synthetic

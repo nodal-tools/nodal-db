@@ -770,7 +770,11 @@ items with new ids; the plan notes each, and `template_plan` /
 `template plan` take the same option to preview it. **This is a
 behaviour change for object deletes and `drop_value_list`** of declared
 items: an apply used to re-create them silently. Removals made by the template's
-own migration steps and `run:` programs never block. After a
+own migration steps and `run:` programs never block. For a `run:`
+program, "its commits" means every commit since the template's last
+commit up to the program's progress commit, so a removal some other
+writer made in that window (for example while an interrupted apply was
+waiting to be resumed) counts as the template's and does not block. After a
 history-free extract the removal history is gone, and a changed template
 re-creates such items silently again.
 
@@ -788,7 +792,11 @@ the file does not shrink: it grows by the closed rows' new versions until
 holds the database's write lock throughout: purging about 105 million
 long-tier cells took about ten minutes and peaked at 3.4 GB of memory,
 within the 6.4 GB DuckDB limit of an 8 GB budget (scalars and arrays are
-far cheaper). Preview a large purge first. Purging and re-importing on
+far cheaper). Preview a large purge first: when a request's scope holds
+more than 50 million long-tier cells plus array elements
+(`purge::PURGE_LARGE_CELLS`, half that measured point), the preview and
+the purge add a `purge_large` warning (`WarningKind::PurgeLarge`, with
+`cells` and `threshold`). The purge still runs. Purging and re-importing on
 every run without unchanged-value skipping grows the history by the
 whole scope each time. To discard data for good, use
 [Erase an alternative](#erase-an-alternative); to start over without the

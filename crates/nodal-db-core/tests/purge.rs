@@ -1765,6 +1765,44 @@ fn purge_and_full_reimport_with_locations_is_a_noop() {
     assert_eq!(live(&db, "entity_location"), 2);
 }
 
+/// The memory guard (owner ruling 2026-11-19): a scope with more long
+/// cells plus array elements than the threshold warns, in the preview and
+/// the commit, and is not refused.
+#[test]
+fn a_large_scope_warns_and_proceeds() {
+    use nodal_db_core::types::WarningKind;
+    assert_eq!(nodal_db_core::purge::PURGE_LARGE_CELLS, 50_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let all = || {
+        vec![req(PS::Values {
+            class: None,
+            parameter: None,
+            alternative: None,
+        })]
+    };
+    let pv = nodal_db_core::api::preview_purge(&db, all()).unwrap();
+    assert_eq!(pv[0].cells, 3, "the 3-element array");
+    assert!(pv[0].warnings.is_empty());
+    let large = |w: &nodal_db_core::types::Warning| {
+        matches!(
+            w.kind,
+            WarningKind::PurgeLarge {
+                request_index: 0,
+                cells: 3,
+                threshold: 2
+            }
+        )
+    };
+    nodal_db_core::purge::test_hooks::with_large_threshold(2, || {
+        let pv = nodal_db_core::api::preview_purge(&db, all()).unwrap();
+        assert!(pv[0].warnings.iter().any(large), "{:?}", pv[0].warnings);
+        let r = purge(&db, all(), "t", "m", o()).unwrap();
+        assert!(r.commit_id > 0);
+        assert!(r.warnings.iter().any(large), "{:?}", r.warnings);
+    });
+}
+
 /// `force_replace` stubs every value a purge closes, as for a value delete.
 #[test]
 fn force_replace_stubs_purged_values() {

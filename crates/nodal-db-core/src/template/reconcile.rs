@@ -2569,6 +2569,10 @@ fn close_value_lists_where(conn: &Connection, c: i64, ids: &str) -> Result<Close
         ),
         params![c, c],
     )?;
+    // The lists' own metadata links close with them (no registry leg: value
+    // lists close only through this door).
+    let ids_sql = format!("SELECT id FROM parameter_value_list WHERE id {ids}");
+    crate::metadata::close_object_links_of(conn, c, "parameter_value_list", &ids_sql)?;
     let members = conn.execute(
         &format!(
             "UPDATE list_value SET valid_to_commit = ? \
@@ -3699,6 +3703,7 @@ fn rewrite_list_bound_values(
     lid: i64,
     from: &str,
     to: &str,
+    fx: &mut StepEffects,
 ) -> Result<usize, DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, retain_content FROM parameter_definition \
@@ -3708,9 +3713,17 @@ fn rewrite_list_bound_values(
         .query_map(params![lid], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
     let mut rewritten = 0usize;
+    let mut kept = 0usize;
     for (pd_id, retain) in defs {
-        rewritten += rewrite_scalar_string_values(conn, c, pd_id, from, to, retain)?;
+        let (n, k) = rewrite_scalar_string_values(conn, c, pd_id, from, to, retain)?;
+        rewritten += n;
+        kept += k;
         rewrite_definition_string_values(conn, c, pd_id, from, to)?;
+    }
+    if kept > 0 {
+        fx.notes.push(format!(
+            "{from:?} -> {to:?}: the rewritten values kept {kept} metadata link(s)"
+        ));
     }
     Ok(rewritten)
 }
@@ -3815,13 +3828,21 @@ fn apply_value_map(
         }
     }
     let mut rewritten = 0usize;
+    let mut kept = 0usize;
     for (old, new) in map.iter() {
-        rewritten += rewrite_scalar_string_values(conn, c, pd_id, old, new, retain)?;
+        let (n, k) = rewrite_scalar_string_values(conn, c, pd_id, old, new, retain)?;
+        rewritten += n;
+        kept += k;
         rewrite_definition_string_values(conn, c, pd_id, old, new)?;
     }
     if rewritten > 0 {
         fx.notes
             .push(format!("{step}: translated {rewritten} stored value(s)"));
+    }
+    if kept > 0 {
+        fx.notes.push(format!(
+            "{step}: the translated values kept {kept} metadata link(s)"
+        ));
     }
     Ok(())
 }
@@ -4076,7 +4097,7 @@ fn execute_step(
                         )));
                     }
                     let rewritten = if *rewrite_values {
-                        rewrite_list_bound_values(conn, c, lid, from, to)?
+                        rewrite_list_bound_values(conn, c, lid, from, to, fx)?
                     } else {
                         0
                     };
@@ -4105,7 +4126,7 @@ fn execute_step(
                         // definition, through the history protocol, which
                         // honors the definition's retain_content (VMP Part 5
                         // stub contract; review item 5).
-                        rewrite_list_bound_values(conn, c, lid, from, to)?;
+                        rewrite_list_bound_values(conn, c, lid, from, to, fx)?;
                     }
                 }
             }
@@ -4305,6 +4326,18 @@ fn execute_step(
                     fx.notes.push(format!(
                         "{step_name}: carried {copied} value(s) into empty target slots"
                     ));
+                    // The carried values keep their metadata links, and the
+                    // source definition's own links move to the target,
+                    // before the source cascade closes them.
+                    let carried =
+                        crate::metadata::carry_merged_links(conn, c, src_id, tgt_id)?;
+                    if carried.value_links + carried.object_links > 0 {
+                        fx.notes.push(format!(
+                            "{step_name}: carried {} value metadata link(s) and {} \
+                             parameter metadata link(s)",
+                            carried.value_links, carried.object_links
+                        ));
+                    }
                     // The source (with its remaining, superseded-by-target
                     // values) closes through the one object-delete cascade.
                     cascade_close(
@@ -4362,7 +4395,7 @@ fn execute_step(
                     row.v_str = Some(to.clone());
                     close_row(conn, c, "list_value", fid)?;
                     insert_member_row(conn, c, &row)?;
-                    let n = rewrite_list_bound_values(conn, c, lid, from, to)?;
+                    let n = rewrite_list_bound_values(conn, c, lid, from, to, fx)?;
                     fx.notes.push(format!(
                         "{step_name}: target member absent — renamed the member, \
                          rewrote {n} stored value(s)"
@@ -4371,7 +4404,7 @@ fn execute_step(
                 (Some(fid), Some(_)) => {
                     // Both live (the v52 glpsol→highs shape): rewrite stored
                     // values onto the surviving member, close the source row.
-                    let n = rewrite_list_bound_values(conn, c, lid, from, to)?;
+                    let n = rewrite_list_bound_values(conn, c, lid, from, to, fx)?;
                     close_row(conn, c, "list_value", fid)?;
                     fx.notes.push(format!(
                         "{step_name}: rewrote {n} stored value(s), closed member {from:?}"

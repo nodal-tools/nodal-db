@@ -325,7 +325,12 @@ fn restrict_blocks_and_reports() {
         other => panic!("expected Restricted, got {other:?}"),
     };
     // Every seeded dependent leg is reported.
+    // Metadata links never block (OD2): they close with the object.
     for table in DEP_TABLES {
+        if table.ends_with("metadata_link") {
+            assert!(blocker(blockers, table).is_none(), "{table} must not block");
+            continue;
+        }
         let b = blocker(blockers, table).unwrap_or_else(|| panic!("missing blocker for {table}"));
         assert!(b.count >= 1, "{table} blocker count");
         assert!(!b.sample.is_empty(), "{table} sample present");
@@ -802,7 +807,7 @@ fn preview_matches_commit() {
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
     // And the blocker framing lists the same dependent tables.
-    for tc in &cc.per_table {
+    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -1000,7 +1005,12 @@ fn param_restrict_blocks_and_reports() {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
     };
+    // Metadata links never block (OD2): they close with the object.
     for table in PARAM_DEP_TABLES {
+        if table.ends_with("metadata_link") {
+            assert!(blocker(blockers, table).is_none(), "{table} must not block");
+            continue;
+        }
         let b = blocker(blockers, table).unwrap_or_else(|| panic!("missing blocker for {table}"));
         assert!(b.count >= 1, "{table} blocker count");
         assert!(!b.sample.is_empty(), "{table} sample present");
@@ -1447,7 +1457,7 @@ fn param_preview_matches_commit() {
             .unwrap_or_else(|| panic!("preview missing {}", tc.table));
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
-    for tc in &cc.per_table {
+    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -1656,7 +1666,12 @@ fn entity_restrict_blocks_and_reports() {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
     };
+    // Metadata links never block (OD2): they close with the object.
     for table in ENT_DEP_TABLES {
+        if table.ends_with("metadata_link") {
+            assert!(blocker(blockers, table).is_none(), "{table} must not block");
+            continue;
+        }
         let b = blocker(blockers, table).unwrap_or_else(|| panic!("missing blocker for {table}"));
         assert!(b.count >= 1, "{table} blocker count");
     }

@@ -317,6 +317,8 @@ pub fn write_value(
 ) -> Result<WriteOutcome, DbError> {
     debug_assert_value_floats_canonical(value);
     let retained = keeps_content(opts);
+    // A raw writer cannot state keep / set / clear for an annotated value.
+    crate::metadata::refuse_linked(conn, &[triple(&key)])?;
 
     // --- 0. A scalar goes through the one set-based scalar writer with
     // N = 1 (set_based_scalar_write_PLAN D2): it does its own live-tier
@@ -379,6 +381,8 @@ pub fn write_long_values(
     values: &[(ValueKey, &CanonicalValue, Option<i64>, &WriteOptions)],
     cache: &mut AxisCache,
 ) -> Result<Vec<WriteOutcome>, DbError> {
+    let keys: Vec<Triple> = values.iter().map(|(k, ..)| triple(k)).collect();
+    crate::metadata::refuse_linked(conn, &keys)?;
     let mut w = Vec::with_capacity(values.len());
     for &(key, value, parameter_type_id, opts) in values {
         let retained = keeps_content(opts);
@@ -444,15 +448,28 @@ pub(crate) struct DeleteWrite {
 /// be distinct (the caller guarantees it); a repeated key or an affected-row
 /// count that differs from the probes fails as [`DbError::Internal`].
 /// Returns one [`WriteOutcome`] per input, in input order.
+///
+/// The deleted values' metadata links close in the same round
+/// (`metadata::close_links`; skipped on a file without live value links, one
+/// probe per invocation); they are not counted in `rows_closed`.
 pub(crate) fn delete_values(
     conn: &Connection,
     commit_id: i64,
     w: &[DeleteWrite],
 ) -> Result<Vec<WriteOutcome>, DbError> {
     check_distinct_keys("delete batch", w.iter().map(|d| &d.key))?;
+    let links = crate::metadata::has_value_links(conn)?;
     let mut out = Vec::with_capacity(w.len());
     for chunk in w.chunks(LONG_INSERT_CHUNK) {
         out.extend(delete_round(conn, commit_id, chunk)?);
+        if links {
+            let triples: Vec<Triple> = chunk.iter().map(|d| triple(&d.key)).collect();
+            crate::metadata::close_links(
+                conn,
+                commit_id,
+                &crate::metadata::TripleSet::Lists(&triples),
+            )?;
+        }
     }
     Ok(out)
 }
@@ -742,7 +759,9 @@ pub(crate) fn close_definition_default(
 /// (`retained = false`, VMP Part 5's stub contract) — turn the closed row
 /// into a stub (payload nulled, `content_retained = FALSE`). Sequenced
 /// close → reinsert → stub so the reinsert can still read the pre-image.
-/// Returns the number of values rewritten.
+/// The rewritten values keep their metadata links (owner ruling OD3: the
+/// step re-spells the same datum): closed and reopened at `commit_id`.
+/// Returns the number of values rewritten and of links kept.
 pub(crate) fn rewrite_scalar_string_values(
     conn: &Connection,
     commit_id: i64,
@@ -750,7 +769,7 @@ pub(crate) fn rewrite_scalar_string_values(
     from: &str,
     to: &str,
     retained: bool,
-) -> Result<usize, DbError> {
+) -> Result<(usize, usize), DbError> {
     conn.execute(
         "UPDATE value_scalar SET valid_to_commit = ?1 \
          WHERE valid_to_commit IS NULL AND parameter_definition_id = ?2 \
@@ -779,7 +798,20 @@ pub(crate) fn rewrite_scalar_string_values(
             params![commit_id, pd_id, from],
         )?;
     }
-    Ok(written)
+    let kept = if written > 0 {
+        crate::metadata::keep_value_links_where(
+            conn,
+            commit_id,
+            &format!(
+                "SELECT entity_id, parameter_definition_id, alternative_id FROM value_scalar \
+                 WHERE valid_from_commit = {commit_id} AND valid_to_commit IS NULL \
+                   AND parameter_definition_id = {pd_id}"
+            ),
+        )?
+    } else {
+        0
+    };
+    Ok((written, kept))
 }
 
 /// The `unmapped_values: drop` arm of the G6 translation table
@@ -826,6 +858,10 @@ pub(crate) fn drop_scalar_values_not_matching(
             ),
             params![commit_id, pd_id],
         )?;
+    }
+    if closed > 0 {
+        // The dropped values' metadata links close with them.
+        crate::metadata::close_orphaned_value_links(conn, commit_id, pd_id)?;
     }
     Ok(closed)
 }

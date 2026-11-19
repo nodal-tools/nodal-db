@@ -569,7 +569,10 @@ const ID_CLOSE_SQL: &str = "UPDATE entity SET valid_to_commit = ?1 WHERE id = ?2
 fn row_groups(plan: &Json) -> Vec<(u64, u64)> {
     fn walk(node: &Json, out: &mut Vec<(u64, u64)>) {
         if node.get("type").and_then(Json::as_str) == Some("TABLE_SCAN")
-            && node["extra_info"].get("Table").and_then(Json::as_str).map(|t| t.rsplit('.').next())
+            && node["extra_info"]
+                .get("Table")
+                .and_then(Json::as_str)
+                .map(|t| t.rsplit('.').next())
                 == Some(Some("entity"))
         {
             let g = |k: &str| node.get(k).and_then(Json::as_u64).unwrap_or(u64::MAX);
@@ -582,7 +585,12 @@ fn row_groups(plan: &Json) -> Vec<(u64, u64)> {
         }
     }
     let mut out = Vec::new();
-    for r in plan.get("operator").and_then(Json::as_array).into_iter().flatten() {
+    for r in plan
+        .get("operator")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+    {
         walk(r, &mut out);
     }
     out
@@ -616,11 +624,9 @@ fn the_rename_close_by_rowid_reads_few_row_groups() {
     // Mid-range ids: near the extremes even scattered zone maps prune.
     for name in ["e600000", "e1000001", "e1400000"] {
         let (rowid, id): (i64, i64) = conn
-            .query_row(
-                "SELECT rowid, id FROM entity WHERE name = ?",
-                [name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT rowid, id FROM entity WHERE name = ?", [name], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         let run = |sql: &str, p: &[&dyn duckdb::ToSql]| {
             conn.execute_batch("BEGIN").unwrap();

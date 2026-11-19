@@ -1113,7 +1113,10 @@ fn a_name_freed_in_another_class_of_a_set_cannot_be_taken_in_the_call() {
     add_class_set(&db, "site", &["node", "unit"]);
     // node:n1 -> x2 frees `n1` in the set; unit:u1 -> n1 would make a later
     // set-typed element `n1` bind to the unit.
-    let m = api_err(st(&db, vec![ren("node", "n1", "x2"), ren("unit", "u1", "n1")]));
+    let m = api_err(st(
+        &db,
+        vec![ren("node", "n1", "x2"), ren("unit", "u1", "n1")],
+    ));
     assert!(
         m.contains("was renamed away from node (to \"x2\") earlier in this call")
             && m.contains("shares class set \"site\""),
@@ -1149,5 +1152,210 @@ fn the_batch_path_refuses_an_in_set_swap_as_the_per_item_path() {
     let ma = api_err(st(&a, call()));
     let mb = set_hooks::without_set_path(|| api_err(st(&b, call())));
     assert_eq!(ma, mb);
-    assert!(ma.contains("was renamed away from node (to \"r3\")"), "{ma}");
+    assert!(
+        ma.contains("was renamed away from node (to \"r3\")"),
+        "{ma}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch vs per item across every channel (review fix 3)
+// ---------------------------------------------------------------------------
+
+/// `many(40)` plus `unit` (u0..u4), the 2-D `unit__node` (`u1__e1` over
+/// (u1, e1)) and a `spare` class (x0, x1) for the purge.
+fn rich(dir: &tempfile::TempDir) -> PathBuf {
+    let db = many(dir, 40);
+    let mut v = vec![
+        class("unit", &[]),
+        class("unit__node", &["unit", "node"]),
+        class("spare", &[]),
+        ent("spare", "x0"),
+        ent("spare", "x1"),
+    ];
+    for i in 0..5 {
+        v.push(ent("unit", &format!("u{i}")));
+    }
+    v.push(nd("unit__node", None, &["u1", "e1"]));
+    ok(&db, v);
+    db
+}
+
+fn pair_link() -> LinkSpec {
+    LinkSpec {
+        target: Target::Pair(PairRef::Pair {
+            name: "src".into(),
+            value: "survey".into(),
+        }),
+        role: RoleSel::NoRole,
+    }
+}
+
+/// One call over every channel around a 30-item rename run.
+fn every_channel() -> ChangeSet {
+    let mut s = vec![
+        ren("node", "e0", "a0"),
+        ren("node", "a0", "b0"),            // chain
+        ren("node", "e1", "E1"),            // case-only
+        ren("unit", "u0", "uu0"),           // another class, inside the run
+        ren("unit__node", "u1__e1", "lnk"), // an N-D entity
+        desc("node", "e2", "two"),
+    ];
+    for i in 3..28 {
+        s.push(ren("node", &format!("e{i}"), &format!("r{i}")));
+    }
+    s.push(nd("unit__node", Some("link_new"), &["uu0", "r5"])); // N-D create, new name
+    s.push(ent("node", "e4")); // re-create of an old name
+    ChangeSet {
+        structural: s,
+        segments: vec![seg2("r5", 2.0, "e4", 3.0)],
+        deletes: vec![DeleteKey {
+            class: "node".into(),
+            parameter: "demand".into(),
+            alternative: "Base".into(),
+            entity: "e38".into(),
+        }],
+        object_deletes: vec![by_name("node", "e39")],
+        purges: vec![PurgeRequest::new(PurgeScope::Entities {
+            class: Some("spare".into()),
+        })],
+        metadata: vec![
+            MetadataChange::CreatePair {
+                name: "src".into(),
+                value: "survey".into(),
+            },
+            MetadataChange::Link {
+                subject: Subject::Entity {
+                    class: "node".into(),
+                    name: "r6".into(),
+                },
+                link: pair_link(),
+            },
+            MetadataChange::LinkValue {
+                value: ValueAddr {
+                    class: "node".into(),
+                    parameter: "demand".into(),
+                    alternative: "Base".into(),
+                    entity: "r7".into(),
+                },
+                link: pair_link(),
+            },
+        ],
+    }
+}
+
+/// One `node.demand` segment in `Base` with two entities.
+fn seg2(e1: &str, v1: f64, e2: &str, v2: f64) -> Segment {
+    let mut s = seg("node", "demand", e1, v1);
+    let schema = s.batches[0].schema();
+    s.batches = vec![RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![e1, e2])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![v1, v2])) as ArrayRef,
+        ],
+    )
+    .unwrap()];
+    s
+}
+
+fn all_rows(db: &Path) -> Vec<String> {
+    let mut out = entity_rows(db);
+    for sql in [
+        "SELECT 'el|' || entity_id || '|' || position || '|' || element_entity_id || '|' || \
+         valid_from_commit || '|' || coalesce(CAST(valid_to_commit AS VARCHAR), '-') \
+         FROM entity_element ORDER BY ALL",
+        "SELECT 'v|' || entity_id || '|' || parameter_definition_id || '|' || alternative_id \
+         || '|' || CAST(v_float AS VARCHAR) || '|' || version || '|' || valid_from_commit || \
+         '|' || coalesce(CAST(valid_to_commit AS VARCHAR), '-') FROM value_scalar ORDER BY ALL",
+        "SELECT 'ol|' || object_type || '|' || object_id || '|' || target_kind || '|' || \
+         target_id || '|' || valid_from_commit FROM object_metadata_link ORDER BY ALL",
+        "SELECT 'vl|' || entity_id || '|' || target_kind || '|' || target_id || '|' || \
+         valid_from_commit FROM value_metadata_link ORDER BY ALL",
+    ] {
+        out.extend(qs(db, sql));
+    }
+    out
+}
+
+#[test]
+fn the_set_path_matches_the_per_item_path_across_every_channel() {
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let (a, b) = (rich(&d1), rich(&d2));
+    let s0 = set_hooks::statements();
+    let ra = set(&a, every_channel()).unwrap();
+    assert!(set_hooks::statements() > s0, "the run took the set path");
+    let rb = set_hooks::without_set_path(|| set(&b, every_channel())).unwrap();
+    assert_eq!(ra, rb);
+    assert_eq!(all_rows(&a), all_rows(&b));
+    // What the call did, on the batch side.
+    assert_eq!(demand(&a, "r5"), vec!["r5=2.0"]);
+    assert_eq!(demand(&a, "e4"), vec!["e4=3.0"]);
+    assert!(demand(&a, "e38").is_empty());
+    assert_eq!(id_of(&a, "lnk"), id_of(&b, "lnk"));
+    assert_eq!(
+        q1(
+            &a,
+            "SELECT count(*) FROM entity_current WHERE name IN ('x0', 'x1', 'e39')"
+        ),
+        0
+    );
+    assert_eq!(q1(&a, "SELECT count(*) FROM object_metadata_link"), 1);
+    assert_eq!(q1(&a, "SELECT count(*) FROM value_metadata_link"), 1);
+
+    // The old-name refusals are the same on both paths.
+    let d3 = tempfile::tempdir().unwrap();
+    let d4 = tempfile::tempdir().unwrap();
+    let (c, d) = (rich(&d3), rich(&d4));
+    let stale = |s: ChangeSet, what: &str| {
+        let mc = api_err(set(&c, s.clone()));
+        let md = set_hooks::without_set_path(|| api_err(set(&d, s)));
+        assert_eq!(mc, md, "{what}");
+        assert!(mc.contains("renamed to"), "{what}: {mc}");
+    };
+    let base = || {
+        let mut s = every_channel();
+        s.segments.clear();
+        s.deletes.clear();
+        s.object_deletes.clear();
+        s.metadata.clear();
+        s.structural.truncate(31); // the run only
+        s
+    };
+    let mut s = base();
+    s.segments = vec![seg("node", "demand", "e10", 9.0)];
+    stale(s, "segment");
+    let mut s = base();
+    s.deletes = vec![DeleteKey {
+        class: "node".into(),
+        parameter: "demand".into(),
+        alternative: "Base".into(),
+        entity: "e11".into(),
+    }];
+    stale(s, "value delete");
+    let mut s = base();
+    s.object_deletes = vec![entity_key(
+        "unit__node",
+        ObjectRef::Elements(vec!["u0".into(), "e1".into()]),
+    )];
+    stale(s, "object delete by elements");
+    let mut s = base();
+    s.metadata = vec![MetadataChange::Link {
+        subject: Subject::Entity {
+            class: "node".into(),
+            name: "e12".into(),
+        },
+        link: pair_link(),
+    }];
+    stale(s, "metadata");
+    let mut s = base();
+    s.structural.push(SC::SetEntityActivation {
+        class: "node".into(),
+        entity: "e13".into(),
+        alternative: "Base".into(),
+        active: Some(false),
+    });
+    stale(s, "activation");
+    assert_eq!(all_rows(&c), all_rows(&d));
 }

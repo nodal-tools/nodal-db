@@ -91,6 +91,8 @@ mod gate;
 mod import;
 mod longbig;
 mod maint;
+#[cfg(feature = "metadata_channel")]
+mod metadata;
 mod save_path;
 mod synth;
 

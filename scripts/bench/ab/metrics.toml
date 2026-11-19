@@ -429,6 +429,18 @@ class = "io"
 needs = ["skip_unchanged"]
 check = "no commit and no new history row; the 10 000 values read back + digest"
 
+[metric.wr_reimport_keep_100k_links]
+class = "io"
+needs = ["metadata_channel"]
+check = "1 commit; every one of the 10^5 links kept (closed and reopened at version 2); digest of the named links"
+note = "a fresh file, 10^5 scalars each linked to one source (untimed), then the timed changed re-import with a save-scope keep"
+
+[metric.wr_results_next_to_links_100k]
+class = "io"
+needs = ["metadata_channel"]
+check = "1 commit; no link row touched; the 10^5 results and the 10^5 links read back + digests"
+note = "a link-free results write of 10^5 values into a file whose input values carry 10^5 links, with no statement: the write path records no changed values of a target without links"
+
 [metric.wr_array_100x8760_changed_pinned]
 layout_floor = 0.030
 class = "io"

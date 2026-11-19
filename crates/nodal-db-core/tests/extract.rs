@@ -23,7 +23,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_structural, db_identity, delete_objects, delete_values, write_parameter, DeleteKey,
+    commit_change_set, commit_structural, db_identity, delete_objects, delete_values, DeleteKey,
 };
 use nodal_db_core::compaction::compact;
 use nodal_db_core::erasure::{erase_alternative, EraseOpts};
@@ -31,7 +31,8 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::extract::{extract, ExtractOpts, ExtractReport};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
-    ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, StructuralChange, WriteOptions,
+    Action, LicenseFields, LinkSpec, MetadataChange, ObjectDeleteKey, PairRef, Ref, RoleSel,
+    Scope, SourceFields, Subject, Target, ValueAddr, ObjectDeleteOpts, ObjectKind, ObjectRef, StructuralChange, WriteOptions,
 };
 use nodal_db_core::verbs::stamp_template_identity;
 
@@ -90,19 +91,153 @@ fn long_batch(entity: &str, coords: &[i64], vals: &[i64]) -> RecordBatch {
     .unwrap()
 }
 
-fn write(db: &Path, class: &str, param: &str, alt: &str, batch: RecordBatch) {
-    write_parameter(
+/// A metadata-only commit (the metadata channel).
+fn meta(db: &Path, items: Vec<MetadataChange>) {
+    commit_change_set(
         db,
-        class,
-        param,
-        alt,
-        batch,
-        &[],
-        WriteOptions::default(),
+        nodal_db_core::api::ChangeSet {
+            metadata: items,
+            ..Default::default()
+        },
         "tester",
-        "extract fixture",
+        "metadata",
+        WriteOptions::default(),
     )
-    .expect("write_parameter");
+    .expect("metadata");
+}
+
+/// A value write whose new versions keep their metadata links.
+fn write_keep(db: &Path, class: &str, param: &str, alt: &str, batch: RecordBatch) {
+    commit_change_set(
+        db,
+        nodal_db_core::api::ChangeSet {
+            segments: vec![nodal_db_core::api::Segment {
+                class: class.into(),
+                parameter: param.into(),
+                alternative: alt.into(),
+                batches: vec![batch],
+                domains: vec![],
+            }],
+            metadata: vec![MetadataChange::ValueMetadata {
+                scope: Scope::Save,
+                action: Action::Keep,
+            }],
+            ..Default::default()
+        },
+        "tester",
+        "extract fixture (keep)",
+        WriteOptions::default(),
+    )
+    .expect("write keep");
+}
+
+/// The fixture's metadata: sources, a license, a role, pairs, user and tool
+/// properties, dataset / alternative / entity links and value links (the
+/// Base demand values keep theirs over the churn's new versions).
+fn seed_metadata(db: &Path) {
+    let name = |s: &str| Ref::Name(s.into());
+    let pair = || Target::Pair(PairRef::Pair {
+        name: "keyword".into(),
+        value: "grid".into(),
+    });
+    let link = |t: Target, role: Option<&str>| LinkSpec {
+        target: t,
+        role: role.map_or(RoleSel::NoRole, |r| RoleSel::Named(r.into())),
+    };
+    let value = |e: &str, p: &str, a: &str| ValueAddr {
+        class: "Node".into(),
+        parameter: p.into(),
+        alternative: a.into(),
+        entity: e.into(),
+    };
+    let prop = |k: &str, v: &str| MetadataChange::SetProperty {
+        key: k.into(),
+        value: Some(v.into()),
+    };
+    meta(
+        db,
+        vec![
+            MetadataChange::PutSource {
+                source: name("IEA"),
+                rename: None,
+                fields: SourceFields {
+                    title: Some("World Energy Outlook".into()),
+                    issued: Some("2024-10-16".into()),
+                    ..Default::default()
+                },
+            },
+            MetadataChange::PutLicense {
+                license: name("CC-BY-4.0"),
+                rename: None,
+                fields: LicenseFields {
+                    spdx: true,
+                    ..Default::default()
+                },
+            },
+            MetadataChange::SetSourceLicenses {
+                source: name("IEA"),
+                licenses: vec![name("CC-BY-4.0")],
+            },
+            MetadataChange::PutRole {
+                role: name("primary_source"),
+                rename: None,
+                description: None,
+                iri: Some("http://www.w3.org/ns/prov#hadPrimarySource".into()),
+            },
+            MetadataChange::CreatePair {
+                name: "keyword".into(),
+                value: "grid".into(),
+            },
+            prop("title", "Fixture"),
+            prop("base_iri", "https://example.org/fixture/"),
+            prop("identifier", "doi:10.0/fixture"),
+            prop("fixture:frozen", "1"),
+            MetadataChange::Link {
+                subject: Subject::Dataset,
+                link: link(Target::Source(name("IEA")), Some("primary_source")),
+            },
+            MetadataChange::Link {
+                subject: Subject::Dataset,
+                link: link(Target::License(name("CC-BY-4.0")), None),
+            },
+            MetadataChange::Link {
+                subject: Subject::Alternative("runB".into()),
+                link: link(pair(), None),
+            },
+            MetadataChange::Link {
+                subject: Subject::Alternative("runA".into()),
+                link: link(pair(), None),
+            },
+            MetadataChange::Link {
+                subject: Subject::Entity {
+                    class: "Node".into(),
+                    name: "n4".into(),
+                },
+                link: link(pair(), None),
+            },
+            MetadataChange::LinkValue {
+                value: value("n1", "demand", "Base"),
+                link: link(Target::Source(name("IEA")), None),
+            },
+            MetadataChange::LinkValue {
+                value: value("n2", "demand", "Base"),
+                link: link(pair(), Some("primary_source")),
+            },
+            MetadataChange::LinkValue {
+                value: value("n1", "demand", "runB"),
+                link: link(Target::Source(name("IEA")), None),
+            },
+            MetadataChange::LinkValue {
+                value: value("n1", "profile", "runA"),
+                link: link(pair(), None),
+            },
+        ],
+    );
+}
+
+/// A value write (keeping the metadata links of the values it changes).
+fn write(db: &Path, class: &str, param: &str, alt: &str, batch: RecordBatch) {
+    write_keep(db, class, param, alt, batch);
 }
 
 // --- query helpers -----------------------------------------------------------
@@ -322,15 +457,14 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
              AND va.alternative_id = (SELECT id FROM alternative WHERE cur_name = 'base');",
     )
     .expect("plant structure");
-    let c_initial: i64 = conn
-        .query_row("SELECT max(id) FROM \"commit\"", [], |r| r.get(0))
-        .unwrap();
     conn.close().unwrap();
+    seed_metadata(&db);
+    let c_initial = scalar(&db, "SELECT max(id) FROM \"commit\"");
 
     // Round 2: churn every tier.
     for i in 1..=3 {
         let f = i as f64;
-        write(
+        write_keep(
             &db,
             "Node",
             "demand",
@@ -434,6 +568,19 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
         )
         .expect("erase runA");
         assert!(r.erased);
+        // The erase removed runA's links physically (value and object).
+        let runa = scalar(&db, "SELECT max(id) FROM alternative WHERE lower(name) = 'runa'");
+        assert_eq!(
+            scalar(
+                &db,
+                &format!(
+                    "SELECT (SELECT count(*) FROM value_metadata_link WHERE alternative_id = {runa}) \
+                     + (SELECT count(*) FROM object_metadata_link \
+                        WHERE object_type = 'alternative' AND object_id = {runa})"
+                )
+            ),
+            0
+        );
     }
 
     Fixture {
@@ -562,6 +709,41 @@ fn t1_head_extract_reads_identically() {
     );
     let md = "SELECT * FROM database_property_current WHERE lower(key) <> 'db_identity'";
     assert_eq!(fingerprint(&fx.db, md), fingerprint(&dest, md));
+    // M5: the user and tool keys survive a history-free extract (the
+    // identity does not).
+    for (k, v) in [
+        ("title", "Fixture"),
+        ("base_iri", "https://example.org/fixture/"),
+        ("identifier", "doi:10.0/fixture"),
+        ("fixture:frozen", "1"),
+    ] {
+        assert_eq!(
+            string(
+                &dest,
+                &format!("SELECT value FROM database_properties WHERE key = '{k}'")
+            ),
+            v
+        );
+    }
+    assert_ne!(
+        string(&dest, "SELECT value FROM database_properties WHERE key = 'db_identity'"),
+        string(&fx.db, "SELECT value FROM database_properties WHERE key = 'db_identity'")
+    );
+    // The metadata is really there (the view comparison above is not
+    // vacuous): live value links over kept versions, the dataset's source
+    // and license, a source under its license.
+    assert_eq!(scalar(&dest, "SELECT count(*) FROM value_metadata_named"), 3);
+    assert_eq!(scalar(&dest, "SELECT count(*) FROM dataset_metadata"), 2);
+    assert_eq!(scalar(&dest, "SELECT count(*) FROM value_licenses"), 2);
+    assert_eq!(
+        scalar(
+            &fx.db,
+            "SELECT max(version) FROM value_metadata_link WHERE valid_to_commit IS NULL"
+        ),
+        4,
+        "the Base demand links were kept over three new versions"
+    );
+    assert_eq!(scalar(&dest, "SELECT count(*) FROM audit_value_link_version"), 0);
     // value_timeline: the scalar and array legs carry the surviving
     // versions verbatim. The long leg is value-level change spans derived
     // from the cells (skip_unchanged_writes_PLAN §4.3), clipped at the
@@ -1463,7 +1645,7 @@ fn t9_asof_refusals() {
         array_batch("n1", 24, 0.0),
     );
     let c1 = scalar(&stub_db, "SELECT max(id) FROM \"commit\"");
-    write_parameter(
+    nodal_db_core::api::write_parameter(
         &stub_db,
         "Node",
         "profile",

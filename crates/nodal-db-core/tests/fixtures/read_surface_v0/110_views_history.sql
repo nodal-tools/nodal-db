@@ -61,19 +61,19 @@
 -- ---------------------------------------------------------------------------
 
 CREATE MACRO metadata_asof(c) AS TABLE
-SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata
+SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata_pair
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
 CREATE MACRO entity_metadata_asof(c) AS TABLE
-SELECT * EXCLUDE (cur_e, cur_m) FROM entity_metadata
+SELECT * EXCLUDE (cur_ot, cur_o, cur_tk, cur_t, cur_r) FROM object_metadata_link
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
 CREATE MACRO parameter_value_metadata_asof(c) AS TABLE
-SELECT * EXCLUDE (cur_e, cur_p, cur_a, cur_m) FROM parameter_value_metadata
+SELECT * EXCLUDE (cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e) FROM value_metadata_link
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);

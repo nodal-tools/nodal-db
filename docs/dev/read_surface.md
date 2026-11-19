@@ -139,11 +139,16 @@ The read surface lives **inside each database file**: `init` writes the
 views and macros of the nodal-db that creates the file, and the file
 keeps them. `nodal_read_surface()` says which:
 
-- `contract_major` is `0` until the encoding freeze and `1` from then
-  on. It changes only for a breaking change: a stable object, column or
-  parameter removed or renamed, a stable column's type or position
-  changed, a documented semantics changed (case sensitivity, the NULL
-  conventions, the alternative default), or a mirror removed or renamed.
+- `contract_major` increases with every breaking change, before the
+  encoding freeze too (it starts at `0`; from the freeze on, a bump is a
+  breaking release): a stable object, column or parameter removed or
+  renamed, a stable column's type or position changed, a documented
+  semantics changed (case sensitivity, the NULL conventions, the
+  alternative default), or a mirror removed or renamed while its table
+  remains. A mirror removed together with its table, or a mirror whose
+  columns change, goes with a `SCHEMA_VERSION` bump instead (the mirrors
+  follow the tables). This list is the one statement of the rule; the
+  generator's gate enforces it.
 - `revision` increases with every change to the surface DDL, breaking or
   not: appended columns, new objects, faster bodies, bug fixes, any
   change to an advisory or internal object.

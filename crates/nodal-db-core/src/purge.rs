@@ -49,7 +49,7 @@ use crate::object_delete::{
     Grain, IdSet, SAMPLE_LIMIT,
 };
 use crate::structural::{CallRenames, CallTouches};
-use crate::template::dbvocab::read_metadata_key;
+use crate::property;
 use crate::template::reconcile::{close_value_lists_set, read_pd_row, revise_pd_row};
 use crate::text::{NameFolds, Normalized};
 use crate::types::{
@@ -527,10 +527,10 @@ fn refuse_template_stamped(conn: &Connection, call: &PurgeCall<'_>) -> Result<()
     if items.is_empty() {
         return Ok(());
     }
-    let Some(template_name) = read_metadata_key(conn, "template_name")? else {
+    let Some(template_name) = property::read(conn, "template_name")? else {
         return Ok(());
     };
-    let template_version = read_metadata_key(conn, "template_version")?;
+    let template_version = property::read(conn, "template_version")?;
     let lines: Vec<String> = items
         .iter()
         .map(|i| {
@@ -1043,7 +1043,7 @@ fn counts(object_rows: usize, per_table: Vec<TableCount>) -> CascadeCounts {
 /// commit runs them ([`run_step`]); the preview counts the rows they match
 /// ([`preview_one`]): one list of predicates, so the two cannot drift.
 enum Step {
-    /// A value tier (or `parameter_value_metadata`, `meta`) over `pred`,
+    /// A value tier (or `value_metadata_link`, `meta`) over `pred`,
     /// spared by the value-key anti-join, retention per definition.
     Values {
         table: &'static str,
@@ -1104,7 +1104,7 @@ fn steps(conn: &Connection, r: usize, scope: &Scope) -> Result<Vec<Step>, DbErro
                 "value_scalar",
                 "value_long",
                 "value_array",
-                "parameter_value_metadata",
+                "value_metadata_link",
             ] {
                 let pred = filter(&[
                     (
@@ -1119,7 +1119,7 @@ fn steps(conn: &Connection, r: usize, scope: &Scope) -> Result<Vec<Step>, DbErro
                 out.push(Step::Values {
                     table,
                     pred,
-                    meta: table == "parameter_value_metadata",
+                    meta: table == "value_metadata_link",
                 });
             }
             return Ok(out);
@@ -1355,7 +1355,7 @@ pub(crate) fn preview(
         build_request_sets(conn, r, scope)?;
     }
     build_all_close_parameters(conn, reqs.len())?;
-    let stamped = read_metadata_key(conn, "template_name")?.is_some();
+    let stamped = property::read(conn, "template_name")?.is_some();
     let mut out = Vec::with_capacity(reqs.len());
     // (table, predicate) of every earlier request's steps.
     let mut earlier: Vec<(&'static str, String)> = Vec::new();

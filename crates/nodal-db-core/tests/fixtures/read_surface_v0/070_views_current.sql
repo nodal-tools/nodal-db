@@ -9,11 +9,11 @@
 CREATE VIEW dataset_version AS SELECT max(id) AS version FROM commit;
 
 CREATE VIEW metadata_current AS
-  SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata WHERE valid_to_commit IS NULL;
+  SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata_pair WHERE valid_to_commit IS NULL;
 CREATE VIEW entity_metadata_current AS
-  SELECT * EXCLUDE (cur_e, cur_m) FROM entity_metadata WHERE valid_to_commit IS NULL;
+  SELECT * EXCLUDE (cur_ot, cur_o, cur_tk, cur_t, cur_r) FROM object_metadata_link WHERE valid_to_commit IS NULL;
 CREATE VIEW parameter_value_metadata_current AS
-  SELECT * EXCLUDE (cur_e, cur_p, cur_a, cur_m) FROM parameter_value_metadata WHERE valid_to_commit IS NULL;
+  SELECT * EXCLUDE (cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e) FROM value_metadata_link WHERE valid_to_commit IS NULL;
 CREATE VIEW entity_class_current AS
   SELECT * EXCLUDE (cur_id, cur_name) FROM entity_class WHERE valid_to_commit IS NULL;
 CREATE VIEW class_set_current AS

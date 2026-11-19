@@ -38,6 +38,7 @@ use crate::api::{
     lookup_parameter, lookup_scenario, lookup_value_list,
 };
 use crate::conn::{core_write_txn_retrying, with_read_plain};
+use crate::property;
 use crate::error::DbError;
 use crate::structural::{
     apply_create_entity, apply_create_entity_class, apply_create_parameter,
@@ -46,7 +47,7 @@ use crate::structural::{
 };
 use crate::template::ir::TypeDecl;
 use crate::template::reconcile::{
-    clear_metadata, close_value_list, read_ec_row, revise_ec_row, set_metadata,
+    close_value_list, read_ec_row, revise_ec_row,
     value_list_binding_count,
 };
 use crate::text::nfc;
@@ -370,7 +371,7 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
         close_value_list(conn, c, lid)?;
         // A closed list leaves a template-stamped database unconverged
         // (purge plan §3.8, V-B2): the next apply replans.
-        clear_metadata(conn, c, "template_content_hash")?;
+        property::clear_core(conn, c, "template_content_hash")?;
         Ok(())
     })
 }
@@ -568,7 +569,7 @@ pub fn ensure_entity(
 /// stamp is therefore non-optional in its commit sequence.
 ///
 /// Wraps the loader's one reserved-metadata write
-/// (`template::reconcile::set_metadata` — the same close-out-then-insert the
+/// (`property::set_core` — the same close-out-then-insert the
 /// reconcile's `StampIdentity` action uses). Guard (mirrors
 /// `allow_retarget`'s posture): a DIFFERENT existing stamp — name (folded) or
 /// version — refuses unless `overwrite` is set. Restamping the identical
@@ -591,18 +592,10 @@ pub fn stamp_template_identity(
     }
 
     fn read_stamp(conn: &Connection) -> Result<(Option<String>, Option<String>), DbError> {
-        let get = |key: &str| -> Result<Option<String>, DbError> {
-            match conn.query_row(
-                "SELECT value FROM metadata WHERE cur_name = lower(?)",
-                params![key],
-                |r| r.get::<_, String>(0),
-            ) {
-                Ok(v) => Ok(Some(v)),
-                Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(e.into()),
-            }
-        };
-        Ok((get("template_name")?, get("template_version")?))
+        Ok((
+            property::read(conn, "template_name")?,
+            property::read(conn, "template_version")?,
+        ))
     }
     fn guard(
         existing: &(Option<String>, Option<String>),
@@ -648,12 +641,12 @@ pub fn stamp_template_identity(
         if guard(&existing, name, version, overwrite)? {
             return Ok(()); // raced into the desired stamp
         }
-        set_metadata(conn, c, "template_name", name)?;
-        set_metadata(conn, c, "template_version", version)?;
+        property::set_core(conn, c, "template_name", name)?;
+        property::set_core(conn, c, "template_version", version)?;
         // The stamped identity changed: any prior certified content hash
         // belongs to the OLD identity — close it so the apply short-circuit
         // can never believe stale certification.
-        clear_metadata(conn, c, "template_content_hash")?;
+        property::clear_core(conn, c, "template_content_hash")?;
         Ok(())
     })
 }

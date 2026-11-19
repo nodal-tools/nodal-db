@@ -6,7 +6,8 @@
 //!   error text;
 //! - the refresh before a write: an old file (its views and macros from the
 //!   frozen DDL in `tests/fixtures/read_surface_v0/`, the `070`-`120` files
-//!   at `f2bb4a5^`, whose tables equal this build's) gets this build's
+//!   at `f2bb4a5^` with their metadata objects rewritten to the 0.6 tables,
+//!   so its tables equal this build's) gets this build's
 //!   surface with its data untouched; user views survive; a user table with
 //!   a reserved name blocks the refresh with a warning while the write goes
 //!   through; a newer file is never touched; dev drift refreshes;
@@ -380,7 +381,7 @@ fn surface_tag_census() {
             count("advisory"),
             count("internal")
         ),
-        (28, 62, 27, 9)
+        (35, 72, 28, 9)
     );
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("census.duckdb");
@@ -700,7 +701,7 @@ fn another_schema_version_is_not_refreshed() {
     let db = data_file(dir.path(), "other.duckdb");
     age(&db);
     let c = raw(&db);
-    c.execute_batch("UPDATE metadata SET value = '0.0-other' WHERE name = 'schema_version'")
+    c.execute_batch("UPDATE database_property SET value = '0.0-other' WHERE key = 'schema_version'")
         .unwrap();
     c.close().unwrap();
     let cat = catalog_sql(&db);

@@ -23,11 +23,13 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 
-use nodal_db_core::api::{ingest_segments, Segment};
+use nodal_db_core::api::{commit_change_set, ChangeSet, Segment};
 use nodal_db_core::canon::timestamp_in_range;
 use nodal_db_core::error::DbError;
 use nodal_db_core::reconstruct::expand_dense_row;
-use nodal_db_core::types::{FoldedSpelling, Tier, WarningKind, WriteOptions};
+use nodal_db_core::types::{
+    Action, FoldedSpelling, MetadataChange, Scope, Tier, WarningKind, WriteOptions,
+};
 
 /// Compile-time proof (risk R2) that the pinned direct `arrow` and the
 /// `duckdb::arrow` re-export are ONE crate: an IPC-read batch crosses into the
@@ -63,6 +65,14 @@ pub struct ImportArgs {
     pub user: Option<String>,
     pub message: String,
     pub force_replace: bool,
+    pub value_metadata: Option<ValueMetadataArg>,
+}
+
+/// `--value-metadata`: the save-scope keep / clear statement of the import.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ValueMetadataArg {
+    Keep,
+    Clear,
 }
 
 pub fn run(args: &ImportArgs) -> Result<()> {
@@ -167,8 +177,25 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         ..Default::default()
     };
     let n_segments = segments.len();
+    // The import's keep / clear statement (one save-scope item of the
+    // metadata channel, through the one write entry point).
+    let metadata = match args.value_metadata {
+        None => vec![],
+        Some(v) => vec![MetadataChange::ValueMetadata {
+            scope: Scope::Save,
+            action: match v {
+                ValueMetadataArg::Keep => Action::Keep,
+                ValueMetadataArg::Clear => Action::Clear,
+            },
+        }],
+    };
+    let set = ChangeSet {
+        segments,
+        metadata,
+        ..Default::default()
+    };
     let report =
-        ingest_segments(&args.db, segments, &user, &args.message, opts).map_err(|e| match e {
+        commit_change_set(&args.db, set, &user, &args.message, opts).map_err(|e| match e {
             // E9: busy / conflict budget exhausted at commit.
             DbError::Busy { .. } | DbError::Conflict { .. } => anyhow!("E9: {e}"),
             // Everything else the core rejects is the E6 malformed-payload

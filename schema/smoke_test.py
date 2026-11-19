@@ -488,6 +488,14 @@ def main():
     order = unique_index_order(con, "one_current_long")
     check("index key order: one_current_long is (c4, c3, c2, ca, cp, ce, c1)",
           order == "[c4, c3, c2, ca, cp, ce, c1]", str(order))
+    # metadata links: targets and roles are few, values and objects many, so
+    # the entity / object id trails (size guarded by long_index_size.rs)
+    order = unique_index_order(con, "uq_value_metadata_link")
+    check("index key order: uq_value_metadata_link is (cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e)",
+          order == "[cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e]", str(order))
+    order = unique_index_order(con, "uq_object_metadata_link")
+    check("index key order: uq_object_metadata_link is (cur_ot, cur_tk, cur_r, cur_t, cur_o)",
+          order == "[cur_ot, cur_tk, cur_r, cur_t, cur_o]", str(order))
 
     # ---- ix_entity_lname is used only behind the OFFSET 0 fence. A realistic
     # fixture (2 classes, a closed-out row) so statistics cannot drop the
@@ -525,7 +533,7 @@ def main():
     # ---- DB-identity UUID (schema_interop.md §9): minted once at init by
     # 900_bootstrap.sql. Captured BEFORE any writes; asserted well-formed here,
     # distinct per init, and (at suite end) unchanged across the whole flow.
-    ident_sql = ("SELECT value FROM metadata WHERE lower(name) = 'db_identity'"
+    ident_sql = ("SELECT value FROM database_property WHERE lower(key) = 'db_identity'"
                  " AND valid_to_commit IS NULL")
     dbid = con.execute(ident_sql).fetchone()[0]
     check("db_identity: minted at init with RFC-4122 shape",
@@ -1222,29 +1230,108 @@ def main():
     n = one("SELECT count(*) FROM scenario_diff('s1', 's0')")[0]
     check("F8: scenario_diff between real scenarios still reports", n > 0, f"n={n}")
 
-    # ---- F5: forked reserved metadata key fires the reserved-dup audit
-    con.execute("BEGIN")
-    con.execute("INSERT INTO metadata (id, name, value, valid_from_commit)"
-                " VALUES (nextval('seq_metadata'), 'schema_version', 'CONFLICTING', ?)", [c3])
-    con.execute("COMMIT")
-    dup = allrows("SELECT name, n FROM audit_metadata_reserved_dup")
-    check("F5: second current schema_version row fires audit_metadata_reserved_dup",
-          dup == [("schema_version", 2)], str(dup))
-    con.execute("DELETE FROM metadata WHERE value = 'CONFLICTING'")
-    # audit_rules is a reserved single-valued key too (template_ir_plan D4 —
-    # the one-string additive allowlist edit named in its Appendix)
-    con.execute("BEGIN")
-    for v in ("{}", '{"conditional_requirements": []}'):
-        con.execute("INSERT INTO metadata (id, name, value, valid_from_commit)"
-                    " VALUES (nextval('seq_metadata'), 'audit_rules', ?, ?)", [v, c3])
-    con.execute("COMMIT")
-    dup = allrows("SELECT name, n FROM audit_metadata_reserved_dup")
-    check("D4: forked audit_rules key fires audit_metadata_reserved_dup",
-          dup == [("audit_rules", 2)], str(dup))
-    con.execute("DELETE FROM metadata WHERE lower(name) = 'audit_rules'")
+    # ---- F5/D4: a single-valued property cannot fork: a second current row
+    # of a key (any spelling) is a unique-index violation
+    expect_constraint(
+        "F5: second current schema_version property row rejected (uq_database_property)",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('Schema_Version', 'CONFLICTING', 'core', ?)", [c3])
+    expect_constraint(
+        "db_identity: a second current identity row rejected (uq_database_property)",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('DB_IDENTITY', 'second', 'core', ?)", [c3])
+    expect_constraint(
+        "D4: second current audit_rules property row rejected (uq_database_property)",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('audit_rules', '{}', 'core', ?), ('audit_rules', '{\"a\": 1}', 'core', ?)",
+        [c3, c3])
     check("F10: bootstrap schema_version matches build.py constant",
-          one("SELECT value FROM metadata_current WHERE lower(name) = 'schema_version'")[0]
+          one("SELECT value FROM database_property_current WHERE lower(key) = 'schema_version'")[0]
           == schema_build.SCHEMA_VERSION)
+    boot = allrows("SELECT key, owner, valid_from_commit FROM database_property"
+                   " ORDER BY key")
+    check("bootstrap: exactly the two core properties at the bootstrap commit",
+          [(k, o) for k, o, _ in boot] == [("db_identity", "core"), ("schema_version", "core")]
+          and len({c for _, _, c in boot}) == 1, str(boot))
+    check("bootstrap: a fresh file seeds no roles, pairs, sources, licenses or links",
+          one("SELECT (SELECT count(*) FROM metadata_role) + (SELECT count(*) FROM metadata_pair)"
+              " + (SELECT count(*) FROM source) + (SELECT count(*) FROM license)"
+              " + (SELECT count(*) FROM object_metadata_link)"
+              " + (SELECT count(*) FROM value_metadata_link)")[0] == 0)
+
+    # ---- database_property ownership is CHECKed against the key namespace
+    expect_constraint(
+        "property: a core key stored as owner 'user' rejected",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('template_name', 'x', 'user', ?)", [c3])
+    expect_constraint(
+        "property: a user key stored as owner 'core' rejected",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('title', 'x', 'core', ?)", [c3])
+    expect_constraint(
+        "property: a '<tool>:<name>' key stored as owner 'user' rejected",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('flextool:frozen', 'x', 'user', ?)", [c3])
+    expect_constraint(
+        "property: a leading-colon key stored as owner 'tool' rejected",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES (':x', 'x', 'tool', ?)", [c3])
+    expect_constraint(
+        "property: an unknown owner tag rejected",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('title', 'x', 'admin', ?)", [c3])
+    con.execute("BEGIN")
+    con.execute("INSERT INTO database_property (key, value, owner, valid_from_commit)"
+                " VALUES ('title', 'T', 'user', ?), ('flextool:frozen', '1', 'tool', ?)", [c3, c3])
+    con.execute("ROLLBACK")
+    check("property: user and tool keys with matching owners accepted", True)
+
+    # ---- metadata link CHECKs and keys
+    expect_constraint(
+        "object link: a 'dataset' subject must have object_id 0",
+        "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
+        " valid_from_commit) VALUES ('dataset', 5, 'pair', 1, ?)", [c3])
+    expect_constraint(
+        "object link: a non-dataset subject may not use object_id 0",
+        "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
+        " valid_from_commit) VALUES ('entity', 0, 'pair', 1, ?)", [c3])
+    expect_constraint(
+        "object link: a source linking to itself rejected",
+        "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
+        " valid_from_commit) VALUES ('source', 7, 'source', 7, ?)", [c3])
+    expect_constraint(
+        "object link: an unknown object type rejected",
+        "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
+        " valid_from_commit) VALUES ('commit', 1, 'pair', 1, ?)", [c3])
+    expect_constraint(
+        "value link: a license target rejected (values reach licenses through sources)",
+        "INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id,"
+        " target_kind, target_id, valid_from_commit) VALUES (1, 1, 1, 'license', 1, ?)", [c3])
+    expect_constraint(
+        "object link: the same edge with no role twice rejected (NULL role is one key)",
+        "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
+        " valid_from_commit) VALUES ('entity', 3, 'pair', 1, ?), ('entity', 3, 'pair', 1, ?)",
+        [c3, c3])
+    expect_constraint(
+        "value link: the same edge and role twice rejected",
+        "INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id,"
+        " target_kind, target_id, role_id, valid_from_commit)"
+        " VALUES (1, 1, 1, 'source', 1, 2, ?), (1, 1, 1, 'source', 1, 2, ?)", [c3, c3])
+    con.execute("BEGIN")
+    con.execute("INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id,"
+                " target_kind, target_id, role_id, valid_from_commit)"
+                " VALUES (1, 1, 1, 'source', 1, NULL, ?), (1, 1, 1, 'source', 1, 2, ?),"
+                " (1, 1, 1, 'pair', 1, NULL, ?)", [c3, c3, c3])
+    con.execute("ROLLBACK")
+    check("value link: one target under two roles (and no role), and one id as two kinds, accepted",
+          True)
+    expect_constraint(
+        "pool: two current pairs differing only in key case rejected",
+        "INSERT INTO metadata_pair (name, value, valid_from_commit)"
+        " VALUES ('Source', 'x', ?), ('source', 'x', ?)", [c3, c3])
+    expect_constraint(
+        "source: two current sources differing only in case rejected",
+        "INSERT INTO source (name, valid_from_commit) VALUES ('IEA', ?), ('iea', ?)", [c3, c3])
 
     # ---- F6: element arity — missing / undeclared / zero-element entities
     con.execute("BEGIN")
@@ -1708,18 +1795,29 @@ def main():
     check("M2: base membership flattening not gated on scenarios", n > 0, f"n={n}")
     con.execute("DELETE FROM membership WHERE group_entity_id = ?", [node_a])
 
-    # ---- M1: parameter_value_metadata dangling entity / dangling triple
-    meta_id = one("SELECT id FROM metadata_current WHERE lower(name) = 'schema_version'")[0]
+    # ---- M1: value_metadata_link dangling entity / dangling triple
     con.execute("BEGIN")
-    con.execute("INSERT INTO parameter_value_metadata (entity_id, parameter_definition_id,"
-                " alternative_id, metadata_id, valid_from_commit)"
-                " VALUES (99999, ?, ?, ?, ?)", [demand, base, meta_id, c3])
+    meta_id = one("INSERT INTO metadata_pair (name, value, valid_from_commit)"
+                  " VALUES ('m1_note', 'x', ?) RETURNING id", c3)[0]
+    con.execute("INSERT INTO value_metadata_link (entity_id, parameter_definition_id,"
+                " alternative_id, target_kind, target_id, valid_from_commit)"
+                " VALUES (99999, ?, ?, 'pair', ?, ?)", [demand, base, meta_id, c3])
     con.execute("COMMIT")
     refs = {r for (r,) in allrows("SELECT ref_table FROM audit_dangling_ref"
-                                  " WHERE src_table = 'parameter_value_metadata'")}
+                                  " WHERE src_table = 'value_metadata_link'")}
     check("M1: value-metadata link with dead entity fires entity AND triple branches",
           refs == {"entity", "value_keys (triple)"}, str(refs))
-    con.execute("DELETE FROM parameter_value_metadata WHERE entity_id = 99999")
+    con.execute("DELETE FROM value_metadata_link WHERE entity_id = 99999")
+    # an object link whose subject, target and role are gone fires all three
+    con.execute("INSERT INTO object_metadata_link (object_type, object_id, target_kind,"
+                " target_id, role_id, valid_from_commit)"
+                " VALUES ('scenario', 99999, 'source', 99998, 99997, ?)", [c3])
+    refs = {r for (r,) in allrows("SELECT ref_table FROM audit_dangling_ref"
+                                  " WHERE src_table = 'object_metadata_link'")}
+    check("M1: object link with dead subject, target and role fires all three legs",
+          refs == {"scenario", "source", "metadata_role"}, str(refs))
+    con.execute("DELETE FROM object_metadata_link WHERE object_id = 99999")
+    con.execute("DELETE FROM metadata_pair WHERE name = 'm1_note'")
 
     # ---- M3: an empty scenario does not flood the missing-required audit
     con.execute("BEGIN")
@@ -1943,8 +2041,9 @@ def main():
         " VALUES ('poison', ?, 0)", [c3])
 
     asof_macros = [
-        "metadata_asof", "entity_metadata_asof", "parameter_value_metadata_asof",
-        "entity_class_asof", "class_set_asof", "class_set_member_asof",
+        "database_property_asof", "metadata_pair_asof", "source_asof", "license_asof",
+        "source_license_asof", "metadata_role_asof", "object_metadata_link_asof",
+        "value_metadata_link_asof", "entity_class_asof", "class_set_asof", "class_set_member_asof",
         "entity_class_dimension_asof", "entity_asof", "entity_location_asof",
         "entity_element_asof", "alternative_asof", "scenario_asof",
         "scenario_alternative_asof", "entity_alternative_asof", "membership_asof",
@@ -1965,18 +2064,22 @@ def main():
     asof_calls = {m: (lambda c, m=m: f"{m}({c})") for m in asof_macros}
     asof_calls["value_array_asof_for"] = (
         lambda c: "value_array_asof_for({}, {}, {}, {})".format(c, *pt_key))
+    # The named value-link read joins the guarded mirrors (no column parity:
+    # it is a named read, its commit column is linked_at_commit).
+    asof_calls["value_metadata_asof_named"] = lambda c: f"value_metadata_asof_named({c})"
 
     def guard_shapes(m, c):
         # The B1 consumer shapes: bare, aggregate (projection fully pruned),
         # column-pruned constant projection, join into another relation
         # (every macro exposes valid_from_commit).
         call = asof_calls[m](c)
+        col = "linked_at_commit" if m == "value_metadata_asof_named" else "valid_from_commit"
         return [
             f"SELECT * FROM {call}",
             f"SELECT count(*) FROM {call}",
             f"SELECT 1 FROM {call}",
             f'SELECT count(*) FROM {call} t JOIN "commit" cm'
-            f" ON cm.id = t.valid_from_commit"]
+            f" ON cm.id = t.{col}"]
 
     def guard_sweep(c):
         """Per macro: 'error' if all shapes fail loudly on the guard,
@@ -2004,7 +2107,7 @@ def main():
         " WHERE NOT internal AND function_type = 'table_macro'"
         " AND contains(function_name, '_asof')"))
     check("erasure guard: sweep list == catalog census of as-of table macros"
-          " (32, no stragglers)",
+          " (38, no stragglers)",
           census == sorted(asof_calls), str(set(census) ^ set(asof_calls)))
 
     # Column parity: every *_asof macro projects every real (non-generated)
@@ -2020,6 +2123,8 @@ def main():
 
     drift = {}
     for m in asof_calls:
+        if m == "value_metadata_asof_named":
+            continue
         base_table = ("value_array_hist" if m in ("value_array_asof", "value_array_asof_for")
                       else m[:-len("_asof")])
         cols = [r[0] for r in allrows(f"DESCRIBE SELECT * FROM {asof_calls[m](1)}")]
@@ -2105,7 +2210,7 @@ def main():
                  "audit_value_list_membership", "audit_scenario_empty",
                  "audit_required_class_empty", "audit_axis_integrity",
                  "audit_array_payload_xor", "audit_position_range",
-                 "audit_metadata_reserved_dup",
+                 "audit_value_link_version",
                  "audit_realizes_cycle", "audit_dangling_semantic_ref",
                  "audit_array_id_coherence", "audit_long_value_coherence"]
     for view in final_sweep:
@@ -2116,7 +2221,8 @@ def main():
     # report view) — the next audit cannot silently miss the sweeps.
     # report views: never "clean" by row count (asserted elsewhere by content)
     report_views = {"audit_health", "audit_erasure", "audit_tier_intent",
-                    "audit_entity_alternative_redundant", "audit_missing_required_value"}
+                    "audit_entity_alternative_redundant", "audit_missing_required_value",
+                    "audit_license_non_spdx"}
     catalog = {r[0] for r in allrows(
         "SELECT view_name FROM duckdb_views() WHERE NOT internal"
         " AND view_name LIKE 'audit\\_%' ESCAPE '\\'")}
@@ -2196,15 +2302,24 @@ def contract_gate_checks(gen_schema):
 
     def removed(new):
         del new["read_values"]
+
+    def mirror_removed(new):
         del new["entity_asof"]
+
+    def mirror_retagged(new):
+        new["entity_current"] = ("internal", *new["entity_current"][1:])
 
     def reparam(new):
         new["scenario_diff"] = (*new["scenario_diff"][:2], ["a"], new["scenario_diff"][3])
 
-    def gate(new, m=major):
-        return gen_schema.contract_gate(text, new, m)
+    # the base tables behind the listing's mirrors (every versioned table)
+    base_tables = {gen_schema.mirror_base(n) for n, (c, *_r) in objs.items()
+                   if c == "mirror"} - {None}
+
+    def gate(new, m=major, tables=base_tables):
+        return gen_schema.contract_gate(text, new, m, tables)
     for name, fn in (("renaming a stable column", renamed), ("retyping a stable column", retyped),
-                     ("removing stable objects and a mirror", removed),
+                     ("removing a stable object", removed),
                      ("changing a stable parameter list", reparam)):
         problems = gate(mutate(fn))
         check(f"contract gate: {name} without a major bump fails",
@@ -2214,6 +2329,21 @@ def contract_gate_checks(gen_schema):
     problems = gate(mutate(appended))
     check("contract gate: appended columns, a new object and an advisory change pass",
           not problems, str(problems))
+    problems = gate(mutate(mirror_removed), tables=base_tables - {"entity"})
+    check("contract gate: a mirror removed with its table without a SCHEMA_VERSION bump fails",
+          any("SCHEMA_VERSION" in p for p in problems)
+          and not any("contract_major" in p for p in problems), str(problems))
+    problems = gate(mutate(mirror_removed))
+    check("contract gate: a mirror removed while its table remains needs a major bump",
+          any("contract_major" in p for p in problems), str(problems))
+    problems = gate(mutate(mirror_retagged))
+    check("contract gate: a mirror retagged internal while its table remains needs a major bump",
+          any("contract_major" in p for p in problems), str(problems))
+    check("contract gate: a mirror name without _current/_asof gets no lenient treatment",
+          gen_schema.mirror_base("entity") is None
+          and gen_schema.classify_change(
+              {"entity": ("mirror", "view", [], [])}, {}, base_tables)[0] != [],
+          "")
     problems = gate(mutate(mirror_changed))
     check("contract gate: a changed mirror without a SCHEMA_VERSION bump fails",
           any("SCHEMA_VERSION" in p for p in problems), str(problems))

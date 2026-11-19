@@ -9,10 +9,11 @@
 
 use std::collections::BTreeMap;
 
-use duckdb::{params, Connection};
+use duckdb::Connection;
 
 use crate::api::{index_kind_tag, read_all_declared_types};
 use crate::error::DbError;
+use crate::property;
 use crate::types::{fold, ScalarValue};
 
 /// One declared type member as stored (`parameter_type` +
@@ -213,14 +214,14 @@ pub struct RemovedLocally {
 }
 
 /// The template-owned commits (purge plan §3.8, V-S1): every commit that
-/// wrote a version of the reserved metadata key `template_applied_commit`
+/// wrote a version of the core property `template_applied_commit`
 /// (each template-apply and migration-step commit writes one), plus the
 /// ranges a `run:` program's progress commit records (`"a..=c"`: the
 /// program's own commits through its progress commit). Inclusive ranges.
 pub fn template_owned(conn: &Connection) -> Result<Vec<(i64, i64)>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT valid_from_commit, value FROM metadata \
-         WHERE lower(name) = 'template_applied_commit'",
+        "SELECT valid_from_commit, value FROM database_property \
+         WHERE lower(key) = 'template_applied_commit'",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
     let mut out = Vec::new();
@@ -317,20 +318,6 @@ fn push_renamed(list: &mut Vec<RenamedAway>, r: RenamedAway) {
         Some(x) if x.at_commit < r.at_commit => *x = r,
         Some(_) => {}
         None => list.push(r),
-    }
-}
-
-/// Read one reserved single-valued metadata key's current value.
-pub fn read_metadata_key(conn: &Connection, key: &str) -> Result<Option<String>, DbError> {
-    let r = conn.query_row(
-        "SELECT value FROM metadata WHERE cur_name = lower(?)",
-        params![key],
-        |r| r.get::<_, String>(0),
-    );
-    match r {
-        Ok(v) => Ok(Some(v)),
-        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -850,12 +837,12 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
     }
 
     // --- metadata documents + identity ---
-    v.template_name = read_metadata_key(conn, "template_name")?;
-    v.template_version = read_metadata_key(conn, "template_version")?;
-    v.template_content_hash = read_metadata_key(conn, "template_content_hash")?;
-    v.schema_version = read_metadata_key(conn, "schema_version")?;
-    v.audit_rules = read_metadata_key(conn, "audit_rules")?;
-    if let Some(doc) = read_metadata_key(conn, "presentation")? {
+    v.template_name = property::read(conn, "template_name")?;
+    v.template_version = property::read(conn, "template_version")?;
+    v.template_content_hash = property::read(conn, "template_content_hash")?;
+    v.schema_version = property::read(conn, "schema_version")?;
+    v.audit_rules = property::read(conn, "audit_rules")?;
+    if let Some(doc) = property::read(conn, "presentation")? {
         match serde_json::from_str::<serde_json::Value>(&doc) {
             Ok(val) => v.presentation = Some(val),
             Err(e) => warnings.push(format!(

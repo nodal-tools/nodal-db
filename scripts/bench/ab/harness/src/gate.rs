@@ -400,8 +400,22 @@ pub fn run(mode: &str, dir: &Path) -> Option<Sample> {
             return crate::synth::run(mode, dir)
                 .or_else(|| crate::axes::run(mode))
                 .or_else(|| crate::maint::run(mode, dir))
+                .or_else(|| metadata_run(mode, dir))
         }
     })
+}
+
+#[cfg(feature = "metadata_channel")]
+fn metadata_run(mode: &str, dir: &Path) -> Option<Sample> {
+    crate::metadata::run(mode, dir)
+}
+
+#[cfg(not(feature = "metadata_channel"))]
+fn metadata_run(mode: &str, _dir: &Path) -> Option<Sample> {
+    if mode.contains("_links") {
+        panic!("{mode} needs the metadata_channel capability (feature)");
+    }
+    None
 }
 
 #[cfg(feature = "lookup_const")]

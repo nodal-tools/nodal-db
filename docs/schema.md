@@ -22,7 +22,7 @@ The DDL files form layers, each building on the ones before:
 
 | Files | Layer |
 | --- | --- |
-| 001_meta | The append-only `commit` log, key/value `metadata` and its link tables, and the `erasure_marker` trace. |
+| 001_meta | The append-only `commit` log, the `erasure_marker` trace, the single-valued `database_property` table, and the metadata tables: the `metadata_pair` pool, `source`, `license`, `source_license`, `metadata_role`, and the `object_metadata_link` / `value_metadata_link` link tables. |
 | 010_entities | Entity classes (N-dimensional), class-sets, entities, their elements and locations. |
 | 020_alternatives | Alternatives, scenarios (rank-ordered alternatives), entity activation, and group membership. |
 | 030_parameters | Units registry, value lists, parameter definitions, per-entity unit overrides, declared parameter types. |

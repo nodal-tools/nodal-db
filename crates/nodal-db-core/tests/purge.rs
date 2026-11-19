@@ -1219,7 +1219,7 @@ fn allowed(scope: PS) -> PurgeRequest {
 fn meta(db: &Path, key: &str) -> Option<String> {
     let conn = Connection::open(db).unwrap();
     conn.query_row(
-        &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+        &format!("SELECT value FROM database_property WHERE cur_key = '{key}'"),
         [],
         |r| r.get(0),
     )
@@ -1369,7 +1369,7 @@ fn parameters_purge_closes_the_definition_and_its_identity() {
         q(
             &db,
             &format!(
-                "SELECT count(*) FROM metadata WHERE lower(name) = 'audit_rules' \
+                "SELECT count(*) FROM database_property WHERE lower(key) = 'audit_rules' \
                          AND valid_to_commit = {c}"
             )
         ),
@@ -1379,7 +1379,7 @@ fn parameters_purge_closes_the_definition_and_its_identity() {
         q(
             &db,
             &format!(
-                "SELECT count(*) FROM metadata WHERE lower(name) = 'audit_rules' \
+                "SELECT count(*) FROM database_property WHERE lower(key) = 'audit_rules' \
                          AND valid_from_commit = {c}"
             )
         ),
@@ -1590,7 +1590,7 @@ fn a_rename_and_a_purge_rewrite_the_documents_once() {
             q(
                 &db,
                 &format!(
-                    "SELECT count(*) FROM metadata WHERE lower(name) = '{key}' \
+                    "SELECT count(*) FROM database_property WHERE lower(key) = '{key}' \
                      AND (valid_from_commit = {c} OR valid_to_commit = {c})"
                 )
             ),

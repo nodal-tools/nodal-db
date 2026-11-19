@@ -3025,13 +3025,16 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 "seq_entity"|10
 "seq_entity_class"|1
 "seq_erasure_marker"|NULL
+"seq_license"|NULL
 "seq_list_value"|NULL
-"seq_metadata"|2
+"seq_metadata_pair"|NULL
+"seq_metadata_role"|NULL
 "seq_parameter_definition"|14
 "seq_parameter_type"|15
 "seq_parameter_value_list"|NULL
 "seq_run"|NULL
 "seq_scenario"|NULL
 "seq_semantic_annotation"|NULL
+"seq_source"|NULL
 "seq_units_of_measure"|NULL
 "seq_value_array"|53

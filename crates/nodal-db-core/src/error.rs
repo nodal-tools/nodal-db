@@ -253,6 +253,19 @@ pub enum DbError {
     #[error("{}", .0.message)]
     UndeclaredValueType(Box<UndeclaredValueTypeDetails>),
 
+    /// A save gave a new version to values that carry metadata links
+    /// without a keep / set / clear statement for them (a statement per
+    /// save, per target or per value of the metadata channel; the CLI's
+    /// `--value-metadata`; the skin's `value_metadata=`). The whole call is
+    /// rolled back. `count` values were unstated; `sample` names up to ten
+    /// as `class.entity / parameter / alternative`.
+    #[error("{message}")]
+    ValueMetadataUnstated {
+        count: usize,
+        sample: Vec<String>,
+        message: String,
+    },
+
     /// A writer-internal invariant failed before any data reached DuckDB —
     /// e.g. the columnar-insert length check (a bound list shorter or longer
     /// than its chunk would be NULL-padded silently by the zip-unnest). Never

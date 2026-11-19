@@ -101,9 +101,14 @@ const ALL_TABLES: &[&str] = &[
     "commit",
     "axis",
     "erasure_marker",
-    "metadata",
-    "entity_metadata",
-    "parameter_value_metadata",
+    "database_property",
+    "metadata_pair",
+    "object_metadata_link",
+    "value_metadata_link",
+    "source",
+    "license",
+    "source_license",
+    "metadata_role",
     "run",
     "alternative",
     "scenario",
@@ -300,8 +305,8 @@ fn compact_preserves_db_identity() {
     assert_eq!(before, after, "compaction must not re-mint the DB identity");
     let n = scalar(
         &db,
-        "SELECT count(*) FROM metadata \
-         WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",
+        "SELECT count(*) FROM database_property \
+         WHERE lower(key) = 'db_identity' AND valid_to_commit IS NULL",
     );
     assert_eq!(n, 1, "exactly one current db_identity row after compact");
 }
@@ -318,7 +323,7 @@ fn compact_rejects_schema_version_mismatch() {
     {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
-            "UPDATE metadata SET value = '9.9-bogus' WHERE lower(name) = 'schema_version'",
+            "UPDATE database_property SET value = '9.9-bogus' WHERE lower(key) = 'schema_version'",
         )
         .unwrap();
         conn.close().unwrap();
@@ -1244,7 +1249,7 @@ fn failed_repack_backs_off() {
     let set_version = |v: &str| {
         let conn = Connection::open(&db).unwrap();
         conn.execute(
-            "UPDATE metadata SET value = ? WHERE lower(name) = 'schema_version' \
+            "UPDATE database_property SET value = ? WHERE lower(key) = 'schema_version' \
              AND valid_to_commit IS NULL",
             [v],
         )
@@ -1255,7 +1260,7 @@ fn failed_repack_backs_off() {
         let conn = Connection::open(&db).unwrap();
         let v: String = conn
             .query_row(
-                "SELECT value FROM metadata WHERE lower(name) = 'schema_version' \
+                "SELECT value FROM database_property WHERE lower(key) = 'schema_version' \
                  AND valid_to_commit IS NULL",
                 [],
                 |r| r.get(0),
@@ -1516,8 +1521,9 @@ fn size_guard_rule_per_trigger() {
 /// The commit backstop on a rebuild that is strictly larger than the source
 /// keeps the original (and resets the baseline); the same source under the
 /// growth trigger keeps it too. The fixture: a never-compacted file with a
-/// few checkpointed commits, which DuckDB keeps below the size of its
-/// rebuild (measured at DuckDB 2.0.0: 9 449 472 vs 10 760 192 bytes), and a
+/// checkpointed write (one: with five, the 0.6-metadata catalog made the
+/// source a block larger than its rebuild), which DuckDB keeps below the
+/// size of its rebuild, and a
 /// hand-written baseline three commits back. Which side of a block boundary
 /// each file lands on depends on the catalog's size: the previous fixture (a
 /// compacted file plus three commits) stopped being smaller than its rebuild
@@ -1527,7 +1533,7 @@ fn commit_backstop_keeps_original_only_when_rebuild_is_larger() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("due.duckdb");
     init_schema_with_default(&db, Some("Base")).expect("init");
-    for i in 0..5 {
+    for i in 0..1 {
         write_scalar(&db, "Widget", "size", "Base", "w1", 10.0 + i as f64);
         checkpoint(&db);
     }

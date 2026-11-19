@@ -629,6 +629,11 @@ pub struct WriteReport {
     /// through. `nodal-db maintain refresh-views` reports the cause loudly.
     /// Additive, like `object_deletes`.
     pub read_surface_warning: Option<String>,
+    /// Per-item outcomes of the metadata channel (`ChangeSet::metadata`), in
+    /// item order. Additive, like `object_deletes`.
+    pub metadata: Vec<MetadataOutcome>,
+    /// What happened to value metadata links in this call.
+    pub value_links: ValueLinkCounts,
 }
 
 impl WriteReport {
@@ -1159,6 +1164,246 @@ pub struct ObjectDeletePreview {
     pub found: bool,
     pub cascade: CascadeCounts,
     pub blockers: Vec<Blocker>,
+}
+
+
+// ---------------------------------------------------------------------------
+// The metadata channel (`api::ChangeSet::metadata`)
+// ---------------------------------------------------------------------------
+
+/// A source, license or role, by id or by name (names are case-insensitive).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Ref {
+    Id(i64),
+    Name(String),
+}
+
+/// A pair of the pool, by id or by its `(name, value)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PairRef {
+    Id(i64),
+    Pair { name: String, value: String },
+}
+
+/// What a link points at. A value link takes a source or a pair; values
+/// reach licenses through their sources.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Target {
+    Source(Ref),
+    License(Ref),
+    Pair(PairRef),
+}
+
+/// What an object link hangs on.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Subject {
+    /// The dataset as a whole.
+    Dataset,
+    /// An entity, by its class and (0-D or N-D) name.
+    Entity { class: String, name: String },
+    Class(String),
+    Parameter { class: String, name: String },
+    Alternative(String),
+    Scenario(String),
+    Run(i64),
+    Source(Ref),
+    License(Ref),
+    ValueList(String),
+    Unit(String),
+}
+
+/// One value, by its four names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ValueAddr {
+    pub class: String,
+    pub parameter: String,
+    pub alternative: String,
+    pub entity: String,
+}
+
+/// The role of a link: none, or a role created with `PutRole`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoleSel {
+    NoRole,
+    Named(String),
+}
+
+/// One link: its target and role.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LinkSpec {
+    pub target: Target,
+    pub role: RoleSel,
+}
+
+/// Where a keep / set / clear statement applies (precedence Value > Target
+/// > Save).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Scope {
+    /// Every value that gets a new version in this call (the per-save
+    /// default).
+    Save,
+    /// Every value of one `(class, parameter, alternative)` that gets a new
+    /// version in this call.
+    Target {
+        class: String,
+        parameter: String,
+        alternative: String,
+    },
+    /// One value. `Set` and `Clear` also apply when the value is unchanged
+    /// (an edit of its links); `Keep` on an unchanged value is a no-op.
+    Value(ValueAddr),
+}
+
+/// What happens to the links of a new value version.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Action {
+    /// The new version keeps the old version's links.
+    Keep,
+    /// The new version has no links.
+    Clear,
+    /// The new version has exactly these links.
+    Set(Vec<LinkSpec>),
+}
+
+/// The descriptive fields of a source (`PutSource` writes exactly these;
+/// `None` clears a field). Dates are ISO `YYYY-MM-DD`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceFields {
+    pub title: Option<String>,
+    pub path: Option<String>,
+    pub edition: Option<String>,
+    pub publisher: Option<String>,
+    pub issued: Option<String>,
+    pub retrieved: Option<String>,
+    pub citation: Option<String>,
+    pub description: Option<String>,
+}
+
+/// The fields of a license. `policy` is an ODRL policy (JSON-LD), stored
+/// as given and never interpreted; it must parse as JSON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LicenseFields {
+    pub title: Option<String>,
+    pub path: Option<String>,
+    pub spdx: bool,
+    pub policy: Option<String>,
+}
+
+/// One item of the metadata channel.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MetadataChange {
+    /// Create the source (an unknown `Ref::Name`) or revise it to exactly
+    /// `fields` (and `rename`); `Ref::Id` never creates.
+    PutSource {
+        source: Ref,
+        rename: Option<String>,
+        fields: SourceFields,
+    },
+    PutLicense {
+        license: Ref,
+        rename: Option<String>,
+        fields: LicenseFields,
+    },
+    /// The exact set of licenses of a source.
+    SetSourceLicenses { source: Ref, licenses: Vec<Ref> },
+    /// Create a pair (no-op when it exists; a key that differs from an
+    /// existing key only in case is stored in the existing spelling).
+    CreatePair { name: String, value: String },
+    /// A pair's new value (same id).
+    RevisePair { pair: PairRef, value: String },
+    /// Re-spell or rename the key of every pair of `from`.
+    RenamePairKey { from: String, to: String },
+    /// Create or revise a role.
+    PutRole {
+        role: Ref,
+        rename: Option<String>,
+        description: Option<String>,
+        iri: Option<String>,
+    },
+    /// Set (or with `None`, clear) a user or tool database property.
+    SetProperty { key: String, value: Option<String> },
+    /// Delete a source; without `cascade` a remaining link restricts it.
+    DeleteSource { source: Ref, cascade: bool },
+    DeleteLicense { license: Ref, cascade: bool },
+    DeletePair { pair: PairRef, cascade: bool },
+    /// Delete a role (restricted while any link uses it).
+    DeleteRole { role: Ref },
+    Link { subject: Subject, link: LinkSpec },
+    Unlink {
+        subject: Subject,
+        target: Target,
+        role: RoleSel,
+    },
+    LinkValue { value: ValueAddr, link: LinkSpec },
+    UnlinkValue {
+        value: ValueAddr,
+        target: Target,
+        role: RoleSel,
+    },
+    /// A keep / set / clear statement for new value versions.
+    ValueMetadata { scope: Scope, action: Action },
+}
+
+/// The kind of object a metadata outcome is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MetadataKind {
+    Source,
+    License,
+    SourceLicenses,
+    Pair,
+    Role,
+    Property,
+    Link,
+    ValueLink,
+    ValueMetadata,
+}
+
+/// What one metadata item did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MetadataEffect {
+    Created,
+    Updated,
+    Renamed,
+    NoOp,
+    Cleared,
+    Deleted,
+    /// A delete without `cascade` blocked by links (nothing closed).
+    Restricted,
+    /// The item's subject or value was deleted by this call
+    /// (`CoveredWrites::DeleteWins`); nothing was done.
+    DroppedByDelete,
+}
+
+/// One metadata item's outcome (`WriteReport::metadata`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataOutcome {
+    /// The item's position in `ChangeSet::metadata`.
+    pub index: usize,
+    pub kind: MetadataKind,
+    /// The object's id (0 for a property, a statement or a key rename).
+    pub id: i64,
+    pub effect: MetadataEffect,
+    /// Links closed by the item (a delete's cascade, a rename never).
+    pub links_closed: usize,
+    /// What restricted a delete (`Restricted`).
+    pub blockers: Vec<Blocker>,
+}
+
+/// What happened to value links in one call (`WriteReport::value_links`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueLinkCounts {
+    /// Links a new value version kept (closed and reopened).
+    pub kept: usize,
+    /// Links set (inserted) by a statement or a `LinkValue`.
+    pub set: usize,
+    /// Links a statement or an `UnlinkValue` removed.
+    pub cleared: usize,
+    /// Links closed because their value was deleted by this call (a value
+    /// delete, an object delete, a purge).
+    pub closed_by_delete: usize,
+    /// Links carried to another value (a template merge); 0 on the write
+    /// path.
+    pub carried: usize,
 }
 
 #[cfg(test)]

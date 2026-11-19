@@ -2186,3 +2186,59 @@ fn name_folded_is_reported_once_per_spelling_across_segments() {
         "{stdout}"
     );
 }
+
+/// Re-importing a value that carries metadata links needs a keep / clear
+/// statement: refused without `--value-metadata` (the message names it),
+/// and with `keep` the new version keeps its link.
+#[test]
+fn reimport_of_an_annotated_value_states_keep_or_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let args = ["--alternative", "Base", "--user", "tester"];
+    let v1 = write_file(
+        dir.path(),
+        "v1.arrows",
+        &long_segment("node", "profile", 1, &[("n1", 0, 1.0), ("n1", 1, 2.0)]),
+    );
+    assert!(import(&db, &v1, &args).status.success());
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "INSERT INTO commit (user, message) VALUES ('t', 'annotate');
+             INSERT INTO metadata_pair (name, value, valid_from_commit)
+               VALUES ('note', 'x', currval('seq_commit'));
+             INSERT INTO value_metadata_link (entity_id, parameter_definition_id,
+                 alternative_id, target_kind, target_id, valid_from_commit)
+               SELECT DISTINCT v.entity_id, v.parameter_definition_id, v.alternative_id,
+                      'pair', m.id, currval('seq_commit')
+               FROM value_keys v, metadata_pair m;",
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
+    let v2 = write_file(
+        dir.path(),
+        "v2.arrows",
+        &long_segment("node", "profile", 1, &[("n1", 0, 1.0), ("n1", 1, 3.0)]),
+    );
+    let out = import(&db, &v2, &args);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--value-metadata"), "{stderr}");
+    let out = import(&db, &v2, &[&args[..], &["--value-metadata", "keep"]].concat());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let conn = Connection::open(&db).unwrap();
+    let v: i64 = conn
+        .query_row(
+            "SELECT version FROM value_metadata_link WHERE valid_to_commit IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, 2, "kept: closed and reopened");
+    conn.close().unwrap();
+}

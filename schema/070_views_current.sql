@@ -10,14 +10,29 @@
 CREATE VIEW dataset_version AS SELECT max(id) AS version FROM commit;
 
 -- @surface: mirror
-CREATE VIEW metadata_current AS
-  SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata WHERE valid_to_commit IS NULL;
+CREATE VIEW database_property_current AS
+  SELECT * EXCLUDE (cur_key) FROM database_property WHERE valid_to_commit IS NULL;
 -- @surface: mirror
-CREATE VIEW entity_metadata_current AS
-  SELECT * EXCLUDE (cur_e, cur_m) FROM entity_metadata WHERE valid_to_commit IS NULL;
+CREATE VIEW metadata_pair_current AS
+  SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata_pair WHERE valid_to_commit IS NULL;
 -- @surface: mirror
-CREATE VIEW parameter_value_metadata_current AS
-  SELECT * EXCLUDE (cur_e, cur_p, cur_a, cur_m) FROM parameter_value_metadata WHERE valid_to_commit IS NULL;
+CREATE VIEW source_current AS
+  SELECT * EXCLUDE (cur_id, cur_name) FROM source WHERE valid_to_commit IS NULL;
+-- @surface: mirror
+CREATE VIEW license_current AS
+  SELECT * EXCLUDE (cur_id, cur_name) FROM license WHERE valid_to_commit IS NULL;
+-- @surface: mirror
+CREATE VIEW source_license_current AS
+  SELECT * EXCLUDE (cur_s, cur_l) FROM source_license WHERE valid_to_commit IS NULL;
+-- @surface: mirror
+CREATE VIEW metadata_role_current AS
+  SELECT * EXCLUDE (cur_id, cur_name) FROM metadata_role WHERE valid_to_commit IS NULL;
+-- @surface: mirror
+CREATE VIEW object_metadata_link_current AS
+  SELECT * EXCLUDE (cur_ot, cur_o, cur_tk, cur_t, cur_r) FROM object_metadata_link WHERE valid_to_commit IS NULL;
+-- @surface: mirror
+CREATE VIEW value_metadata_link_current AS
+  SELECT * EXCLUDE (cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e) FROM value_metadata_link WHERE valid_to_commit IS NULL;
 -- @surface: mirror
 CREATE VIEW entity_class_current AS
   SELECT * EXCLUDE (cur_id, cur_name) FROM entity_class WHERE valid_to_commit IS NULL;

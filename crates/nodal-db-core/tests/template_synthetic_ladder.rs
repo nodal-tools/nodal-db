@@ -582,7 +582,7 @@ fn qs(db: &Path, sql: &str) -> Option<String> {
 fn meta(db: &Path, key: &str) -> Option<String> {
     qs(
         db,
-        &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+        &format!("SELECT value FROM database_property WHERE cur_key = '{key}'"),
     )
 }
 
@@ -609,7 +609,7 @@ const MUST_BE_EMPTY: &[&str] = &[
     "audit_cross_tier_duplicate",
     "audit_tier_intent",
     "audit_value_list_membership",
-    "audit_metadata_reserved_dup",
+    "audit_value_link_version",
     "audit_membership_cycle",
     "audit_realizes_cycle",
     "audit_history_tiling",

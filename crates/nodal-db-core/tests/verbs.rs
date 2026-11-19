@@ -679,7 +679,7 @@ fn stamp_template_identity_guards_and_restamps() {
     let meta = |k: &str| {
         qs(
             &db,
-            &format!("SELECT value FROM metadata WHERE cur_name = '{k}'"),
+            &format!("SELECT value FROM database_property WHERE cur_key = '{k}'"),
         )
     };
 
@@ -752,7 +752,7 @@ fn stamp_then_apply_enters_the_chain() {
     assert_eq!(
         qs(
             &db2,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("3")

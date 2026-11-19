@@ -181,8 +181,12 @@ fails silently: the file is just bigger. The measurements are in
 
 **Guards.**
 [`crates/nodal-db-core/tests/long_index_size.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/long_index_size.rs)
-(fails when the order or a DuckDB upgrade makes the index grow) and the
-key-order checks in `schema/smoke_test.py`.
+(fails when the order or a DuckDB upgrade makes the index grow),
+[`crates/nodal-db-core/tests/metadata_schema.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/metadata_schema.rs)
+(the value-link index `uq_value_metadata_link`, targets and roles first
+and the entity last, at 10^5 links against the reverse order: about 24
+against 126 bytes per link) and the key-order checks in
+`schema/smoke_test.py`.
 
 ## 5. Every connection turns off DuckDB's caching operators
 
@@ -546,12 +550,9 @@ stable object also bumps `contract_major`. Procedure:
 3. Run `just docs-gen`. It rewrites the reference and the committed
    listing `schema/read_surface_contract.tsv`, and refuses when the
    change is breaking without the matching bump:
-   - a stable object, column or parameter removed or renamed, or a
-     stable column's type or position changed: bump `contract_major`
-     (from 1 on this is a breaking release; pre-freeze, major 0 allows it
-     but it still needs the bump);
-   - a mirror's columns changed: only together with a `SCHEMA_VERSION`
-     bump (the mirrors follow the tables);
+   - the breaking changes and the bump each needs (`contract_major`, or
+     `SCHEMA_VERSION` for mirrors that change or go with their table)
+     are listed once, in [The read surface](read_surface.md#versions-and-old-files);
    - columns appended at the end, new objects, any change to an
      advisory or internal object: the revision bump of step 2 is enough.
    A stable column whose type changes with no DDL edit (a DuckDB upgrade

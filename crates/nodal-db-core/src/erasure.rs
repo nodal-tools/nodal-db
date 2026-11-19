@@ -174,6 +174,7 @@ pub fn preview_erase_alternative(
         .map(|s| crate::text::nfc(s).into_owned())
         .collect();
     with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
         let Some(resolved) = resolve_alternative_any(conn, &name)? else {
             return Ok(ErasePreview::default());
         };
@@ -415,12 +416,7 @@ pub fn erase_alternative(
 /// [`crate::compaction::SCHEMA_VERSION`] (see its bump rule).
 fn assert_schema_version(db: &Path) -> Result<(), DbError> {
     let found: String = with_read_plain(db, |conn| {
-        Ok(conn.query_row(
-            "SELECT value FROM metadata \
-             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
-            [],
-            |r| r.get(0),
-        )?)
+        Ok(crate::property::schema_version_any(conn)?.unwrap_or_default())
     })?;
     let expected = crate::compaction::SCHEMA_VERSION;
     if found != expected {

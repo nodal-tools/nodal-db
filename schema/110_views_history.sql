@@ -61,22 +61,57 @@
 -- ---------------------------------------------------------------------------
 
 -- @surface: mirror
-CREATE MACRO metadata_asof(c) AS TABLE
-SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata
+CREATE MACRO database_property_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_key) FROM database_property
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
 -- @surface: mirror
-CREATE MACRO entity_metadata_asof(c) AS TABLE
-SELECT * EXCLUDE (cur_e, cur_m) FROM entity_metadata
+CREATE MACRO metadata_pair_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_id, cur_name, cur_val) FROM metadata_pair
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
 
 -- @surface: mirror
-CREATE MACRO parameter_value_metadata_asof(c) AS TABLE
-SELECT * EXCLUDE (cur_e, cur_p, cur_a, cur_m) FROM parameter_value_metadata
+CREATE MACRO source_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_id, cur_name) FROM source
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
+-- @surface: mirror
+CREATE MACRO license_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_id, cur_name) FROM license
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
+-- @surface: mirror
+CREATE MACRO source_license_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_s, cur_l) FROM source_license
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
+-- @surface: mirror
+CREATE MACRO metadata_role_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_id, cur_name) FROM metadata_role
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
+-- @surface: mirror
+CREATE MACRO object_metadata_link_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_ot, cur_o, cur_tk, cur_t, cur_r) FROM object_metadata_link
+WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
+       OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
+  AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
+
+-- @surface: mirror
+CREATE MACRO value_metadata_link_asof(c) AS TABLE
+SELECT * EXCLUDE (cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e) FROM value_metadata_link
 WHERE (NOT EXISTS (SELECT 1 FROM erasure_marker em WHERE em.at_commit > c)
        OR error('as-of ' || c || ' is unreliable: content erased at a later commit — see erasure_marker / audit_erasure'))
   AND valid_from_commit <= c AND (valid_to_commit IS NULL OR valid_to_commit > c);
@@ -426,3 +461,23 @@ FROM value_array_hist;
 -- @surface: stable
 CREATE VIEW history_untrusted_span AS
 SELECT * FROM value_timeline WHERE NOT content_retained;
+
+-- The value links as of commit c, by the names valid at c (through the
+-- marker-guarded *_asof mirrors: it fails loudly before an erasure marker).
+-- @surface: stable
+CREATE MACRO value_metadata_asof_named(c) AS TABLE
+SELECT ec.name AS class, e.name AS entity, pd.name AS parameter, a.name AS alternative,
+       l.entity_id, l.parameter_definition_id, l.alternative_id,
+       l.target_kind, l.target_id,
+       coalesce(s.name, p.name) AS target_name,
+       p.value AS pair_value,
+       r.name AS role,
+       l.valid_from_commit AS linked_at_commit
+FROM value_metadata_link_asof(c) l
+JOIN entity_asof(c) e ON e.id = l.entity_id
+JOIN entity_class_asof(c) ec ON ec.id = e.entity_class_id
+JOIN parameter_definition_asof(c) pd ON pd.id = l.parameter_definition_id
+JOIN alternative_asof(c) a ON a.id = l.alternative_id
+LEFT JOIN source_asof(c) s ON l.target_kind = 'source' AND s.id = l.target_id
+LEFT JOIN metadata_pair_asof(c) p ON l.target_kind = 'pair' AND p.id = l.target_id
+LEFT JOIN metadata_role_asof(c) r ON r.id = l.role_id;

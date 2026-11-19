@@ -257,14 +257,14 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
                      (SELECT id FROM alternative WHERE cur_name=lower('{alt}')),
                      TRUE, (SELECT max(id) FROM commit));
 
-             INSERT INTO metadata (name, value, valid_from_commit)
+             INSERT INTO metadata_pair (name, value, valid_from_commit)
              VALUES ('note', 'x', (SELECT max(id) FROM commit));
-             INSERT INTO parameter_value_metadata
-               (entity_id, parameter_definition_id, alternative_id, metadata_id, valid_from_commit)
+             INSERT INTO value_metadata_link
+               (entity_id, parameter_definition_id, alternative_id, target_kind, target_id, valid_from_commit)
              VALUES ((SELECT id FROM entity WHERE cur_name=lower('node_1')),
                      (SELECT id FROM parameter_definition WHERE cur_name=lower('demand')),
                      (SELECT id FROM alternative WHERE cur_name=lower('{alt}')),
-                     (SELECT id FROM metadata WHERE cur_name=lower('note')),
+                     'pair', (SELECT id FROM metadata_pair WHERE cur_name=lower('note')),
                      (SELECT max(id) FROM commit));"
         ),
     );
@@ -277,7 +277,7 @@ const DEP_TABLES: &[&str] = &[
     "entity_alternative",
     "membership",
     "scenario_alternative",
-    "parameter_value_metadata",
+    "value_metadata_link",
 ];
 
 /// Total live rows referencing alternative id `a` across the seeded dependent
@@ -292,7 +292,7 @@ fn live_dep_rows(db: &std::path::Path, a: i64) -> i64 {
         + count(db, &format!("SELECT count(*) FROM entity_alternative WHERE alternative_id={a} AND valid_to_commit IS NULL"))
         + count(db, &format!("SELECT count(*) FROM membership WHERE alternative_id={a} AND valid_to_commit IS NULL"))
         + count(db, &format!("SELECT count(*) FROM scenario_alternative WHERE alternative_id={a} AND valid_to_commit IS NULL"))
-        + count(db, &format!("SELECT count(*) FROM parameter_value_metadata WHERE alternative_id={a} AND valid_to_commit IS NULL"))
+        + count(db, &format!("SELECT count(*) FROM value_metadata_link WHERE alternative_id={a} AND valid_to_commit IS NULL"))
 }
 
 // --- test 1: RESTRICT blocks + reports -------------------------------------
@@ -325,7 +325,12 @@ fn restrict_blocks_and_reports() {
         other => panic!("expected Restricted, got {other:?}"),
     };
     // Every seeded dependent leg is reported.
+    // Metadata links never block (OD2): they close with the object.
     for table in DEP_TABLES {
+        if table.ends_with("metadata_link") {
+            assert!(blocker(blockers, table).is_none(), "{table} must not block");
+            continue;
+        }
         let b = blocker(blockers, table).unwrap_or_else(|| panic!("missing blocker for {table}"));
         assert!(b.count >= 1, "{table} blocker count");
         assert!(!b.sample.is_empty(), "{table} sample present");
@@ -393,7 +398,7 @@ fn cascade_closes_and_reports() {
     assert_eq!(per_table(cc, "entity_alternative").unwrap().rows, 1);
     assert_eq!(per_table(cc, "membership").unwrap().rows, 1);
     assert_eq!(per_table(cc, "scenario_alternative").unwrap().rows, 1);
-    assert_eq!(per_table(cc, "parameter_value_metadata").unwrap().rows, 1);
+    assert_eq!(per_table(cc, "value_metadata_link").unwrap().rows, 1);
     assert_eq!(
         cc.total_rows,
         1 + 1 + 1 + 3 + 1 + 1 + 1 + 1,
@@ -802,7 +807,7 @@ fn preview_matches_commit() {
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
     // And the blocker framing lists the same dependent tables.
-    for tc in &cc.per_table {
+    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -912,7 +917,7 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
         db,
         "INSERT INTO units_of_measure (name, valid_from_commit)
            VALUES ('MW', (SELECT max(id) FROM commit));
-         INSERT INTO metadata (name, value, valid_from_commit)
+         INSERT INTO metadata_pair (name, value, valid_from_commit)
            VALUES ('pnote', 'x', (SELECT max(id) FROM commit));
 
          -- Identity: definition-scoped default/prefill mirrors (two shapes).
@@ -933,12 +938,12 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
                    (SELECT id FROM parameter_definition WHERE cur_name=lower('profile')),
                    (SELECT id FROM units_of_measure WHERE cur_name=lower('MW')),
                    (SELECT max(id) FROM commit));
-         INSERT INTO parameter_value_metadata
-           (entity_id, parameter_definition_id, alternative_id, metadata_id, valid_from_commit)
+         INSERT INTO value_metadata_link
+           (entity_id, parameter_definition_id, alternative_id, target_kind, target_id, valid_from_commit)
            VALUES ((SELECT id FROM entity WHERE cur_name=lower('node_1')),
                    (SELECT id FROM parameter_definition WHERE cur_name=lower('profile')),
                    (SELECT id FROM alternative WHERE cur_name=lower('altA')),
-                   (SELECT id FROM metadata WHERE cur_name=lower('pnote')),
+                   'pair', (SELECT id FROM metadata_pair WHERE cur_name=lower('pnote')),
                    (SELECT max(id) FROM commit));
          INSERT INTO semantic_annotation
            (object_type, object_id, term_iri, valid_from_commit)
@@ -956,7 +961,7 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
 const PARAM_DEP_TABLES: &[&str] = &[
     "value_array",
     "entity_parameter_unit",
-    "parameter_value_metadata",
+    "value_metadata_link",
     "semantic_annotation",
 ];
 
@@ -965,7 +970,7 @@ const PARAM_DEP_TABLES: &[&str] = &[
 fn live_param_deps(db: &std::path::Path, pd: i64) -> i64 {
     count(db, &format!("SELECT count(*) FROM value_array WHERE parameter_definition_id={pd}"))
         + count(db, &format!("SELECT count(*) FROM entity_parameter_unit WHERE parameter_definition_id={pd} AND valid_to_commit IS NULL"))
-        + count(db, &format!("SELECT count(*) FROM parameter_value_metadata WHERE parameter_definition_id={pd} AND valid_to_commit IS NULL"))
+        + count(db, &format!("SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id={pd} AND valid_to_commit IS NULL"))
         + count(db, &format!("SELECT count(*) FROM semantic_annotation WHERE object_id={pd} AND object_type='parameter_definition' AND valid_to_commit IS NULL"))
 }
 
@@ -1000,7 +1005,12 @@ fn param_restrict_blocks_and_reports() {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
     };
+    // Metadata links never block (OD2): they close with the object.
     for table in PARAM_DEP_TABLES {
+        if table.ends_with("metadata_link") {
+            assert!(blocker(blockers, table).is_none(), "{table} must not block");
+            continue;
+        }
         let b = blocker(blockers, table).unwrap_or_else(|| panic!("missing blocker for {table}"));
         assert!(b.count >= 1, "{table} blocker count");
         assert!(!b.sample.is_empty(), "{table} sample present");
@@ -1062,7 +1072,7 @@ fn param_cascade_closes_and_reports() {
     // Dependents.
     assert_eq!(per_table(cc, "value_array").unwrap().rows, 2);
     assert_eq!(per_table(cc, "entity_parameter_unit").unwrap().rows, 1);
-    assert_eq!(per_table(cc, "parameter_value_metadata").unwrap().rows, 1);
+    assert_eq!(per_table(cc, "value_metadata_link").unwrap().rows, 1);
     assert_eq!(per_table(cc, "semantic_annotation").unwrap().rows, 1);
     assert!(
         per_table(cc, "value_scalar").is_none(),
@@ -1447,7 +1457,7 @@ fn param_preview_matches_commit() {
             .unwrap_or_else(|| panic!("preview missing {}", tc.table));
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
-    for tc in &cc.per_table {
+    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -1506,8 +1516,8 @@ const ENT_DEP_TABLES: &[&str] = &[
     "entity_alternative",
     "membership",
     "entity_parameter_unit",
-    "entity_metadata",
-    "parameter_value_metadata",
+    "object_metadata_link",
+    "value_metadata_link",
     "semantic_annotation",
 ];
 
@@ -1572,7 +1582,7 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         db,
         "INSERT INTO units_of_measure (name, valid_from_commit)
            VALUES ('MW', (SELECT max(id) FROM commit));
-         INSERT INTO metadata (name, value, valid_from_commit)
+         INSERT INTO metadata_pair (name, value, valid_from_commit)
            VALUES ('enote', 'x', (SELECT max(id) FROM commit));
 
          INSERT INTO entity_location (entity_id, lat, lon, valid_from_commit)
@@ -1599,17 +1609,17 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
                    (SELECT id FROM units_of_measure WHERE cur_name=lower('MW')),
                    (SELECT max(id) FROM commit));
 
-         INSERT INTO entity_metadata (entity_id, metadata_id, valid_from_commit)
-           VALUES ((SELECT id FROM entity WHERE cur_name=lower('node_1')),
-                   (SELECT id FROM metadata WHERE cur_name=lower('enote')),
+         INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id, valid_from_commit)
+           VALUES ('entity', (SELECT id FROM entity WHERE cur_name=lower('node_1')), 'pair',
+                   (SELECT id FROM metadata_pair WHERE cur_name=lower('enote')),
                    (SELECT max(id) FROM commit));
 
-         INSERT INTO parameter_value_metadata
-           (entity_id, parameter_definition_id, alternative_id, metadata_id, valid_from_commit)
+         INSERT INTO value_metadata_link
+           (entity_id, parameter_definition_id, alternative_id, target_kind, target_id, valid_from_commit)
            VALUES ((SELECT id FROM entity WHERE cur_name=lower('node_1')),
                    (SELECT id FROM parameter_definition WHERE cur_name=lower('demand')),
                    (SELECT id FROM alternative WHERE cur_name=lower('Base')),
-                   (SELECT id FROM metadata WHERE cur_name=lower('enote')),
+                   'pair', (SELECT id FROM metadata_pair WHERE cur_name=lower('enote')),
                    (SELECT max(id) FROM commit));
 
          INSERT INTO semantic_annotation (object_type, object_id, term_iri, valid_from_commit)
@@ -1631,8 +1641,8 @@ fn live_entity_deps(db: &std::path::Path, e: i64) -> i64 {
         + count(db, &format!("SELECT count(*) FROM membership WHERE group_entity_id={e} AND valid_to_commit IS NULL"))
         + count(db, &format!("SELECT count(*) FROM membership WHERE member_entity_id={e} AND valid_to_commit IS NULL"))
         + count(db, &format!("SELECT count(*) FROM entity_parameter_unit WHERE entity_id={e} AND valid_to_commit IS NULL"))
-        + count(db, &format!("SELECT count(*) FROM entity_metadata WHERE entity_id={e} AND valid_to_commit IS NULL"))
-        + count(db, &format!("SELECT count(*) FROM parameter_value_metadata WHERE entity_id={e} AND valid_to_commit IS NULL"))
+        + count(db, &format!("SELECT count(*) FROM object_metadata_link WHERE object_type='entity' AND object_id={e} AND valid_to_commit IS NULL"))
+        + count(db, &format!("SELECT count(*) FROM value_metadata_link WHERE entity_id={e} AND valid_to_commit IS NULL"))
         + count(db, &format!("SELECT count(*) FROM semantic_annotation WHERE object_id={e} AND object_type='entity' AND valid_to_commit IS NULL"))
 }
 
@@ -1656,7 +1666,12 @@ fn entity_restrict_blocks_and_reports() {
         ObjectDeleteResult::Restricted { blockers } => blockers,
         other => panic!("expected Restricted, got {other:?}"),
     };
+    // Metadata links never block (OD2): they close with the object.
     for table in ENT_DEP_TABLES {
+        if table.ends_with("metadata_link") {
+            assert!(blocker(blockers, table).is_none(), "{table} must not block");
+            continue;
+        }
         let b = blocker(blockers, table).unwrap_or_else(|| panic!("missing blocker for {table}"));
         assert!(b.count >= 1, "{table} blocker count");
     }
@@ -1705,8 +1720,8 @@ fn entity_cascade_closes_and_reports() {
         "group + member legs merged"
     );
     assert_eq!(per_table(cc, "entity_parameter_unit").unwrap().rows, 1);
-    assert_eq!(per_table(cc, "entity_metadata").unwrap().rows, 1);
-    assert_eq!(per_table(cc, "parameter_value_metadata").unwrap().rows, 1);
+    assert_eq!(per_table(cc, "object_metadata_link").unwrap().rows, 1);
+    assert_eq!(per_table(cc, "value_metadata_link").unwrap().rows, 1);
     assert_eq!(per_table(cc, "semantic_annotation").unwrap().rows, 1);
     assert_eq!(cc.total_rows, 1 + 13, "object + all deps");
 

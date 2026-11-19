@@ -156,6 +156,18 @@ create_exception!(
 );
 create_exception!(
     nodal_db,
+    ValueMetadataUnstated,
+    ApiError,
+    "A save gave a new version to values that carry metadata links without \
+     saying what the new versions keep (DbError::ValueMetadataUnstated): \
+     pass value_metadata=\"keep\" | \"clear\" | {\"set\": [...]} (or a \
+     value_metadata item in metadata=, per save, target or value). Nothing \
+     was written. Attributes: `count` (the unstated values) and `sample` (up \
+     to ten names, \"class.entity / parameter / alternative\"). A subclass \
+     of ApiError."
+);
+create_exception!(
+    nodal_db,
     ReadSurfaceStale,
     ApiError,
     "A read needed a view or macro that the database file lacks because its \
@@ -311,6 +323,34 @@ impl Database {
             .and_then(|v| with_notices(py, v))
     }
 
+    /// One database property's current value (None when unset; keys are
+    /// case-insensitive). One per-operation read.
+    fn database_property(&self, py: Python<'_>, key: String) -> PyResult<Option<String>> {
+        let path = self.path.clone();
+        py.detach(move || api::database_property(&path, &key))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
+    }
+
+    /// Every current database property as a list of dicts `{"key",
+    /// "value", "owner"}` (owner "core", "user" or "tool"), ordered by key.
+    fn database_properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let path = self.path.clone();
+        let props = py
+            .detach(move || api::database_properties(&path))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
+        let out = PyList::empty(py);
+        for p in props {
+            let d = PyDict::new(py);
+            d.set_item("key", p.key)?;
+            d.set_item("value", p.value)?;
+            d.set_item("owner", p.owner)?;
+            out.append(d)?;
+        }
+        Ok(out)
+    }
+
     /// The database's head commit id (`max(commit.id)`, 0 on an empty log).
     /// One per-operation read. Quote it to `expect_commit=` on a later write
     /// to commit only if nobody else committed in between.
@@ -432,9 +472,13 @@ impl Database {
     /// changes nothing makes no commit: the report's `commit_id` is 0 and
     /// the message is not recorded (use `head_commit()` for the commit the
     /// data is current at).
+    ///
+    /// `value_metadata`: what the new versions of values that carry metadata
+    /// links keep: "keep", "clear" or {"set": [target, ...]}; required when
+    /// the write changes such a value (else `ValueMetadataUnstated`).
     #[pyo3(signature = (class_name, parameter, alternative, batch, *, user, message = String::new(),
                         domains = None, force_replace = false, retain_override = None,
-                        expect_commit = None))]
+                        expect_commit = None, value_metadata = None))]
     #[allow(clippy::too_many_arguments)]
     fn write_parameter<'py>(
         &self,
@@ -449,8 +493,10 @@ impl Database {
         force_replace: bool,
         retain_override: Option<bool>,
         expect_commit: Option<i64>,
+        value_metadata: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let batches = batches_from_py(batch)?;
+        let metadata = metadata_from_py(None, value_metadata)?;
         let path = self.path.clone();
         let opts = WriteOptions {
             force_replace,
@@ -465,8 +511,13 @@ impl Database {
             batches,
             domains: domains_from_py(domains),
         };
+        let set = api::ChangeSet {
+            segments: vec![seg],
+            metadata,
+            ..Default::default()
+        };
         let report = py
-            .detach(move || api::ingest_segments(&path, vec![seg], &user, &message, opts))
+            .detach(move || api::commit_change_set(&path, set, &user, &message, opts))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
@@ -522,6 +573,29 @@ impl Database {
     ///   A reach outside the scopes raises `ApiError` unless allowed; a
     ///   vocabulary purge on a template-stamped database raises
     ///   `TemplateStampedPurge` unless `"allow_on_template": True`.
+    /// * `metadata`: list of `"op"`-keyed dicts, applied last: `put_source`
+    ///   (`source`, `rename`?, `fields`?), `put_license` (`license`,
+    ///   `rename`?, `fields`? incl. `spdx`, `policy`), `set_source_licenses`
+    ///   (`source`, `licenses`), `create_pair` / `revise_pair` (`pair`:
+    ///   `[name, value]`, `value`) / `rename_pair_key` (`from`, `to`),
+    ///   `put_role` (`role`, `rename`?, `description`?, `iri`?),
+    ///   `set_property` (`key`, `value`: None clears), `delete_source` /
+    ///   `delete_license` / `delete_pair` (`cascade`?), `delete_role`,
+    ///   `link` / `unlink` (`subject`, `target`, `role`?), `link_value` /
+    ///   `unlink_value` (`value`: {class, parameter, alternative, entity},
+    ///   `target`, `role`?), `value_metadata` (`scope`: "save" | {class,
+    ///   parameter, alternative} | {..., entity}; `action`: "keep" |
+    ///   "clear" | {"set": [target, ...]}). Targets: `{"source": ..}`,
+    ///   `{"license": ..}`, `{"pair": [name, value]}`, `{"id": n, "kind":
+    ///   ..}`; names or ids. Subjects: `{"dataset": True}`, `{"entity":
+    ///   [class, name]}`, `{"class": ..}`, `{"parameter": [class, name]}`,
+    ///   `{"alternative": ..}`, `{"scenario": ..}`, `{"run": id}`,
+    ///   `{"source": ..}`, `{"license": ..}`, `{"value_list": ..}`,
+    ///   `{"unit": ..}`. Outcomes land in the report's `"metadata"` list,
+    ///   value-link counts in `"value_links"`.
+    /// * `value_metadata`: shorthand for one save-scope `value_metadata`
+    ///   item ("keep", "clear" or {"set": [...]}). A changed value that has
+    ///   metadata links needs a statement, else `ValueMetadataUnstated`.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
     /// * `covered_writes`: `"refuse"` (the default) or `"delete_wins"`; see
@@ -544,9 +618,10 @@ impl Database {
     /// `ApiError` and commits nothing. A dropped write is not a write: if
     /// nothing else changes, nothing is committed.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
-                        object_deletes = None, purges = None, user, message = String::new(),
-                        force_replace = false, retain_override = None, expect_commit = None,
-                        covered_writes = "refuse"))]
+                        object_deletes = None, purges = None, metadata = None, user,
+                        message = String::new(), force_replace = false, retain_override = None,
+                        expect_commit = None, covered_writes = "refuse",
+                        value_metadata = None))]
     #[allow(clippy::too_many_arguments)]
     fn commit_changes<'py>(
         &self,
@@ -556,13 +631,16 @@ impl Database {
         deletes: Option<&Bound<'py, PyAny>>,
         object_deletes: Option<&Bound<'py, PyAny>>,
         purges: Option<&Bound<'py, PyAny>>,
+        metadata: Option<&Bound<'py, PyAny>>,
         user: String,
         message: String,
         force_replace: bool,
         retain_override: Option<bool>,
         expect_commit: Option<i64>,
         covered_writes: &str,
+        value_metadata: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let metadata = metadata_from_py(metadata, value_metadata)?;
         let covered_writes = covered_writes_from_str(covered_writes)?;
         let mut segs = Vec::new();
         if let Some(s) = segments {
@@ -599,6 +677,7 @@ impl Database {
             deletes: dels,
             object_deletes: odels,
             purges,
+            metadata,
         };
         let report = py
             .detach(move || api::commit_change_set(&path, set, &user, &message, opts))
@@ -1428,6 +1507,7 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<WriteAndDeleteSameKey>(),
     )?;
     m.add("UndeclaredValueType", py.get_type::<UndeclaredValueType>())?;
+    m.add("ValueMetadataUnstated", py.get_type::<ValueMetadataUnstated>())?;
     m.add("SchemaMismatch", py.get_type::<SchemaMismatch>())?;
     m.add("ReadSurfaceStale", py.get_type::<ReadSurfaceStale>())?;
     m.add(

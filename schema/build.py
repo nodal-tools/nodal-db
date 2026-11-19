@@ -32,7 +32,7 @@ SCHEMA_DIR = pathlib.Path(__file__).resolve().parent
 MINIMUM_DUCKDB = (2, 0)
 
 # Must match the bootstrap row in 900_bootstrap.sql.
-SCHEMA_VERSION = "0.5-array-hash"
+SCHEMA_VERSION = "0.6-metadata"
 
 
 def check_duckdb_version() -> None:
@@ -76,7 +76,7 @@ def build(target: str, force: bool = False) -> None:
                 raise
             print(f"applied {sql_file.name}")
         row = con.execute(
-            "SELECT value FROM metadata WHERE lower(name) = 'schema_version'"
+            "SELECT value FROM database_property WHERE lower(key) = 'schema_version'"
             " AND valid_to_commit IS NULL").fetchone()
         if row is None or row[0] != SCHEMA_VERSION:
             raise RuntimeError(

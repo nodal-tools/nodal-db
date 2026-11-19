@@ -7,10 +7,9 @@
 --
 --   SELECT * FROM nodal_read_surface();
 --
--- contract_major: 0 until the encoding freeze, then 1; bumped only for a
---   breaking change to a stable object (a removed or renamed object, column
---   or parameter, a changed column type or position, changed semantics) or
---   a removed or renamed table mirror.
+-- contract_major: bumped for every breaking change; which changes are
+--   breaking, and which go with a SCHEMA_VERSION bump instead, is stated
+--   once in docs/dev/read_surface.md ("Versions and old files").
 -- revision: bumped on every change to the normalized text of 070-120
 --   (comments other than the `@surface:` tags and whitespace do not count).
 -- ddl_hash: the xxh3-64 hash (16 hex digits) of that normalized text. A
@@ -29,5 +28,5 @@
 -- @surface: stable
 CREATE MACRO nodal_read_surface() AS TABLE
 SELECT CAST(0 AS INTEGER) AS contract_major,
-       CAST(2 AS INTEGER) AS revision,
-       CAST('c8db002e58673ec9' AS VARCHAR) AS ddl_hash;
+       CAST(4 AS INTEGER) AS revision,
+       CAST('e8c2455d9632b716' AS VARCHAR) AS ddl_hash;

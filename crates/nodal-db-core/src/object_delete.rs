@@ -162,7 +162,7 @@ pub(crate) enum Grain {
     /// `scenario_alternative`: every ranking row of a scenario the call
     /// ranks.
     Ranking,
-    /// `parameter_value_metadata`: the value keys the call writes.
+    /// `value_metadata_link`: the value keys the call writes.
     ValueMeta,
     /// Describes or is attached to an object and no op of a call re-states
     /// it: kept for a spared object, closed with a closing one (runs over
@@ -224,6 +224,14 @@ impl DepLeg {
         } else {
             " AND valid_to_commit IS NULL"
         }
+    }
+
+    /// Does a live row of this leg block a `cascade:false` delete? Every
+    /// leg but the metadata links: links close with their object, counted,
+    /// and never block (owner ruling OD2, 2026-11-19); erasure still removes
+    /// them through the same legs.
+    pub(crate) fn blocks(&self) -> bool {
+        !matches!(self.table, "object_metadata_link" | "value_metadata_link")
     }
 
     /// The per-id match predicate (one `?`).
@@ -330,13 +338,23 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     grain: Grain::Ranking,
                 },
                 DepLeg {
-                    table: "parameter_value_metadata",
+                    table: "value_metadata_link",
                     column: "alternative_id",
                     key: LegKey::col("alternative_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',pd=' || parameter_definition_id",
                     erase: true,
                     grain: Grain::ValueMeta,
+                },
+                // Metadata links of the alternative (never a blocker, OD2).
+                DepLeg {
+                    table: "object_metadata_link",
+                    column: "object_id",
+                    key: LegKey::filtered("object_id", "object_type = 'alternative'"),
+                    array: false,
+                    sample_expr: "target_kind || '=' || target_id",
+                    erase: true,
+                    grain: Grain::Attached,
                 },
             ],
             // The one leg erase adds beyond the delete dependents (critique
@@ -456,13 +474,23 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     grain: Grain::Attached,
                 },
                 DepLeg {
-                    table: "parameter_value_metadata",
+                    table: "value_metadata_link",
                     column: "parameter_definition_id",
                     key: LegKey::col("parameter_definition_id"),
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',alt=' || alternative_id",
                     erase: false,
                     grain: Grain::ValueMeta,
+                },
+                // Metadata links of the parameter definition (never a blocker, OD2).
+                DepLeg {
+                    table: "object_metadata_link",
+                    column: "object_id",
+                    key: LegKey::filtered("object_id", "object_type = 'parameter_definition'"),
+                    array: false,
+                    sample_expr: "target_kind || '=' || target_id",
+                    erase: false,
+                    grain: Grain::Attached,
                 },
                 // Polymorphic annotation table — FILTERED to the
                 // parameter_definition rows (object_type discriminator).
@@ -573,16 +601,16 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     grain: Grain::Attached,
                 },
                 DepLeg {
-                    table: "entity_metadata",
-                    column: "entity_id",
-                    key: LegKey::col("entity_id"),
+                    table: "object_metadata_link",
+                    column: "object_id",
+                    key: LegKey::filtered("object_id", "object_type = 'entity'"),
                     array: false,
-                    sample_expr: "'metadata=' || metadata_id",
+                    sample_expr: "target_kind || '=' || target_id",
                     erase: false,
                     grain: Grain::Attached,
                 },
                 DepLeg {
-                    table: "parameter_value_metadata",
+                    table: "value_metadata_link",
                     column: "entity_id",
                     key: LegKey::col("entity_id"),
                     array: false,
@@ -641,6 +669,16 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     erase: false,
                     grain: Grain::Attached,
                 },
+                // Metadata links of the entity class (never a blocker, OD2).
+                DepLeg {
+                    table: "object_metadata_link",
+                    column: "object_id",
+                    key: LegKey::filtered("object_id", "object_type = 'entity_class'"),
+                    array: false,
+                    sample_expr: "target_kind || '=' || target_id",
+                    erase: false,
+                    grain: Grain::Attached,
+                },
                 // Polymorphic annotation table — FILTERED to entity_class rows.
                 DepLeg {
                     table: "semantic_annotation",
@@ -676,15 +714,27 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
         ObjectKind::Scenario => Some(ObjectLegSet {
             object_table: "scenario",
             identity: Vec::new(), // a scenario owns no identity rows
-            dependents: vec![DepLeg {
-                table: "scenario_alternative",
-                column: "scenario_id",
-                key: LegKey::col("scenario_id"),
-                array: false,
-                sample_expr: "'alternative=' || alternative_id || ',rank=' || rank",
-                erase: false,
-                grain: Grain::Ranking, // scenario erase grain is undesigned
-            }],
+            dependents: vec![
+                DepLeg {
+                    table: "scenario_alternative",
+                    column: "scenario_id",
+                    key: LegKey::col("scenario_id"),
+                    array: false,
+                    sample_expr: "'alternative=' || alternative_id || ',rank=' || rank",
+                    erase: false,
+                    grain: Grain::Ranking, // scenario erase grain is undesigned
+                },
+                // Metadata links of the scenario (never a blocker, OD2).
+                DepLeg {
+                    table: "object_metadata_link",
+                    column: "object_id",
+                    key: LegKey::filtered("object_id", "object_type = 'scenario'"),
+                    array: false,
+                    sample_expr: "target_kind || '=' || target_id",
+                    erase: false,
+                    grain: Grain::Attached,
+                },
+            ],
             erase_extra: Vec::new(),
         }),
     }
@@ -1412,7 +1462,7 @@ fn collect_blockers(
     target_id: i64,
 ) -> Result<Vec<Blocker>, DbError> {
     let mut blockers = Vec::new();
-    for leg in &legs.dependents {
+    for leg in legs.dependents.iter().filter(|l| l.blocks()) {
         let count = count_leg(conn, leg, target_id)?;
         if count > 0 {
             blockers.push(Blocker {
@@ -1681,19 +1731,24 @@ fn apply_one(
         if !blockers.is_empty() {
             return Ok(ObjectDeleteResult::Restricted { blockers });
         }
-        // No dependents / containers ⇒ bare delete of the object row + its own
-        // identity rows (guarded). RESTRICT never recurses.
+        // No blocking dependents / containers ⇒ delete of the object row,
+        // its own identity rows and its non-blocking dependents (metadata
+        // links, OD2), all guarded. RESTRICT never recurses.
         let object_rows = close_object_and_identity(conn, &legs, commit_id, target.id)?;
         if object_rows == 0 {
             // Same-commit-created target (guard matched nothing) ⇒ NotFound (§2).
             return Ok(ObjectDeleteResult::NotFound);
         }
+        let mut acc = CascadeAccum {
+            object_rows,
+            ..CascadeAccum::default()
+        };
+        for leg in legs.dependents.iter().filter(|l| !l.blocks()) {
+            let rows = close_leg(conn, leg, commit_id, target.id)?;
+            acc.add_table(leg.table, rows);
+        }
         return Ok(ObjectDeleteResult::Deleted {
-            closed_out: CascadeCounts {
-                object_rows,
-                per_table: Vec::new(),
-                total_rows: object_rows,
-            },
+            closed_out: acc.into_counts(),
         });
     }
 

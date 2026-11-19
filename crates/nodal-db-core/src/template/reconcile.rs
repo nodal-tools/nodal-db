@@ -680,6 +680,7 @@ pub fn plan_with(db: &Path, t: &Template, opts: &ApplyOptions) -> Result<Reconci
     let t = &ir::nfc_names(t);
     let chk = ir::validate(t)?;
     with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
         let mut warnings = chk.warnings.clone();
         let mut vocab = read_vocab(conn, &mut warnings)?;
         let db_commit = max_commit(conn)?;

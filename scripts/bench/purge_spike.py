@@ -278,14 +278,15 @@ def timed(log, label, f):
     return out
 
 
+# (table, key column, extra filter): the core registry's entity legs.
 ENTITY_LEGS = [
-    ("entity_location", "entity_id"),
-    ("entity_alternative", "entity_id"),
-    ("membership", "group_entity_id"),
-    ("membership", "member_entity_id"),
-    ("entity_parameter_unit", "entity_id"),
-    ("entity_metadata", "entity_id"),
-    ("parameter_value_metadata", "entity_id"),
+    ("entity_location", "entity_id", ""),
+    ("entity_alternative", "entity_id", ""),
+    ("membership", "group_entity_id", ""),
+    ("membership", "member_entity_id", ""),
+    ("entity_parameter_unit", "entity_id", ""),
+    ("object_metadata_link", "object_id", "AND object_type = 'entity' "),
+    ("value_metadata_link", "entity_id", ""),
 ]
 
 
@@ -345,10 +346,10 @@ def scenario(name, work):
         for t in ("value_scalar", "value_long"):
             timed(log, f"close {t}", lambda t=t: close_values_tier(con, c, t, scope, True))
         timed(log, "close value_array", lambda: close_arrays(con, c, scope, True))
-        for t, col in ENTITY_LEGS:
-            timed(log, f"close {t}.{col}", lambda t=t, col=col: con.execute(
+        for t, col, extra in ENTITY_LEGS:
+            timed(log, f"close {t}.{col}", lambda t=t, col=col, extra=extra: con.execute(
                 f"UPDATE {t} SET valid_to_commit = ? WHERE {col} IN "
-                "(SELECT id FROM purge_dep_entity) AND valid_from_commit < ? "
+                f"(SELECT id FROM purge_dep_entity) {extra}AND valid_from_commit < ? "
                 "AND valid_to_commit IS NULL", [c, c]).fetchone()[0])
         timed(log, "close semantic_annotation", lambda: con.execute(
             "UPDATE semantic_annotation SET valid_to_commit = ? WHERE object_id IN "

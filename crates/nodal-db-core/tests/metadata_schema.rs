@@ -141,3 +141,66 @@ fn value_link_index_key_order_is_smaller_than_the_reverse() {
         "the bundled key order must be smaller than the reverse (bundled {b} B, reverse {r} B)"
     );
 }
+
+/// Bytes freed by dropping `index` on a copy of `db`.
+fn named_index_bytes(db: &Path, index: &str) -> i64 {
+    let copy = db.with_extension("measure2.duckdb");
+    std::fs::copy(db, &copy).unwrap();
+    let conn = Connection::open(&copy).unwrap();
+    conn.execute_batch("CHECKPOINT").unwrap();
+    let used = "SELECT used_blocks FROM pragma_database_size()";
+    let before = query_i64(&conn, used);
+    let block = query_i64(&conn, "SELECT block_size FROM pragma_database_size()");
+    conn.execute_batch(&format!("DROP INDEX {index}; CHECKPOINT"))
+        .unwrap();
+    let freed = (before - query_i64(&conn, used)) * block;
+    conn.close().unwrap();
+    std::fs::remove_file(&copy).unwrap();
+    freed
+}
+
+/// The object-link index `uq_object_metadata_link (cur_ot, cur_tk, cur_r,
+/// cur_t, cur_o)` at 10^5 entity links (few targets, many entities) is
+/// smaller than in the reverse order.
+#[test]
+fn object_link_index_key_order_is_smaller_than_the_reverse() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = |name: &str, order: Option<&str>| {
+        let db = dir.path().join(name);
+        init_schema(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        if let Some(cols) = order {
+            conn.execute_batch(&format!(
+                "DROP INDEX uq_object_metadata_link; \
+                 CREATE UNIQUE INDEX uq_object_metadata_link ON object_metadata_link ({cols});"
+            ))
+            .unwrap();
+        }
+        let c = query_i64(
+            &conn,
+            "INSERT INTO \"commit\" (user, message) VALUES ('t', 'links') RETURNING id",
+        );
+        conn.execute_batch(&format!(
+            "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id, \
+               role_id, valid_from_commit) \
+             SELECT 'entity', 1001 + (i // 5), 'pair', 1 + (i % 5), NULL, {c} \
+             FROM range(100000) t(i) ORDER BY i; CHECKPOINT;"
+        ))
+        .unwrap();
+        conn.close().unwrap();
+        db
+    };
+    let bundled = mk("ob.duckdb", None);
+    let reverse = mk("or.duckdb", Some("cur_o, cur_t, cur_r, cur_tk, cur_ot"));
+    let (b, r) = (
+        named_index_bytes(&bundled, "uq_object_metadata_link"),
+        named_index_bytes(&reverse, "uq_object_metadata_link"),
+    );
+    eprintln!(
+        "uq_object_metadata_link at 1e5 links: bundled {b} B ({:.1} B/link), reverse {r} B \
+         ({:.1} B/link)",
+        b as f64 / 1e5,
+        r as f64 / 1e5
+    );
+    assert!(b < r, "bundled {b} B, reverse {r} B");
+}

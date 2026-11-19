@@ -1157,3 +1157,29 @@ def test_metadata_lands_as_pairs_links_and_tool_properties(tmp_path):
     ds = _rows(nd, "SELECT target_name, pair_value FROM dataset_metadata")
     assert ds == [{"target_name": "note", "pair_value": "dataset"}], ds
     assert _rows(nd, "SELECT count(*) AS n FROM audit_dangling_ref")[0]["n"] == 0
+
+
+def test_nd_entity_metadata_lands_on_the_nd_entity(tmp_path):
+    """An N-D entity is addressed by its element byname in Spine's
+    entity_metadata and parameter_value_metadata."""
+    from spinedb_api import DatabaseMapping
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        db.add_update_item("metadata", name="origin", value="survey")
+        db.add_update_item("entity_metadata", entity_class_name="widget__hub",
+                           entity_byname=("w1", "h1"), metadata_name="origin",
+                           metadata_value="survey")
+        db.add_update_item("parameter_value_metadata", entity_class_name="widget__hub",
+                           parameter_definition_name="share", entity_byname=("w1", "h1"),
+                           alternative_name="Base", metadata_name="origin",
+                           metadata_value="survey")
+        db.commit_session("N-D metadata")
+    rep, out = run_import(tmp_path, spine)
+    nd = _nodal(out)
+    ents = _rows(nd, "SELECT object_name FROM object_metadata_named "
+                     "WHERE object_type = 'entity'")
+    assert len(ents) == 1 and ents[0]["object_name"].startswith("widget__hub."), ents
+    vals = _rows(nd, "SELECT class, parameter FROM value_metadata_named")
+    assert vals == [{"class": "widget__hub", "parameter": "share"}], vals
+    assert "not linked" not in "\n".join(rep.residue), rep.residue

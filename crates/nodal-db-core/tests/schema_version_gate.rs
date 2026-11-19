@@ -263,6 +263,31 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
         "write",
         commit(&db, vec![scalar("b", 2.0)], WriteOptions::default()).map(|_| ()),
     );
+    // Read paths that touch the new tables are named too.
+    named(
+        "database_property",
+        nodal_db_core::api::database_property(&db, "title").map(|_| ()),
+    );
+    named(
+        "database_properties",
+        nodal_db_core::api::database_properties(&db).map(|_| ()),
+    );
+    named(
+        "preview_purge",
+        nodal_db_core::api::preview_purge(
+            &db,
+            vec![nodal_db_core::types::PurgeRequest {
+                scope: nodal_db_core::types::PurgeScope::Values {
+                    class: None,
+                    parameter: None,
+                    alternative: None,
+                },
+                allow_outside_scope: false,
+                allow_on_template: false,
+            }],
+        )
+        .map(|_| ()),
+    );
     named("compact", nodal_db_core::compaction::compact(&db).map(|_| ()));
     named(
         "extract",

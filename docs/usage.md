@@ -970,7 +970,10 @@ current value per key:
 
 - **core** keys the core writes (`schema_version`, `db_identity`, the
   template stamp, `presentation`, `audit_rules`); a save cannot set them;
-- **tool** keys `<tool>:<name>` a tool owns (e.g. `flextool:frozen`);
+- **tool** keys `<tool>:<name>` a tool owns (e.g. `flextool:frozen`).
+  Every key with a `:` after its first character is a tool key, so a
+  CURIE-style key such as `dct:title` is owned by a tool named `dct`;
+  use the plain documented keys below for the dataset's own facts;
 - **user** keys, everything else. Documented keys, with their crosswalk:
 
 | Key | Meaning | DCAT / Dublin Core / Frictionless |

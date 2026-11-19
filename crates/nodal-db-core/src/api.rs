@@ -1821,7 +1821,10 @@ pub fn preview_purge(
         crate::purge::nfc_request(r, &mut lookups);
     }
     crate::purge::validate_requests(&requests)?;
-    with_read_plain(db, |conn| crate::purge::preview(conn, &requests))
+    with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
+        crate::purge::preview(conn, &requests)
+    })
 }
 
 /// Read-only preview of each object delete (object_delete plan §3, decision D6):
@@ -3439,7 +3442,10 @@ pub fn db_identity(db: &Path) -> Result<String, DbError> {
 /// Keys are case-insensitive. One fresh RO connection per call.
 pub fn database_property(db: &Path, key: &str) -> Result<Option<String>, DbError> {
     let key = crate::text::nfc(key);
-    with_read_plain(db, |conn| crate::property::read(conn, &key))
+    with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
+        crate::property::read(conn, &key)
+    })
 }
 
 /// Every current database property, ordered by key, as
@@ -3447,6 +3453,7 @@ pub fn database_property(db: &Path, key: &str) -> Result<Option<String>, DbError
 /// connection per call.
 pub fn database_properties(db: &Path) -> Result<Vec<DatabaseProperty>, DbError> {
     with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
         Ok(crate::property::read_all(conn)?
             .into_iter()
             .map(|(key, value, owner)| DatabaseProperty { key, value, owner })

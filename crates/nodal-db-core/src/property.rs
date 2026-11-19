@@ -85,25 +85,74 @@ pub fn owner_of(key: &str) -> Owner {
 
 /// One key's current value.
 pub fn read(conn: &Connection, key: &str) -> Result<Option<String>, DbError> {
-    Ok(conn
-        .query_row(
-            "SELECT value FROM database_property WHERE cur_key = lower(?)",
-            params![key],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?)
+    conn.query_row(
+        "SELECT value FROM database_property WHERE cur_key = lower(?)",
+        params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|e| older_layout(conn, e))
 }
 
 /// Every current property as `(key, value, owner)`, ordered by folded key.
 pub fn read_all(conn: &Connection) -> Result<Vec<(String, String, String)>, DbError> {
-    let mut stmt = conn.prepare(
-        "SELECT key, value, owner FROM database_property \
-         WHERE valid_to_commit IS NULL ORDER BY lower(key)",
-    )?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+    let rows = (|| {
+        let mut stmt = conn.prepare(
+            "SELECT key, value, owner FROM database_property \
+             WHERE valid_to_commit IS NULL ORDER BY lower(key)",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, duckdb::Error>(rows)
+    })();
+    rows.map_err(|e| older_layout(conn, e))
+}
+
+/// Refuse a file of another schema version before a read that touches its
+/// tables (`SchemaMismatch` naming the file's own version, from either
+/// layout): the read paths that would otherwise fail on a missing table
+/// with a raw catalog error (template plan, purge preview, property reads).
+pub(crate) fn require_current(conn: &Connection) -> Result<(), DbError> {
+    match schema_version_any(conn)? {
+        Some(found) if found != crate::compaction::SCHEMA_VERSION => {
+            let expected = crate::compaction::SCHEMA_VERSION;
+            Err(DbError::SchemaMismatch {
+                message: format!(
+                    "read refused: database schema version {found:?} is not this nodal-db's \
+                     ({expected:?}); re-create the database (init + import) with this \
+                     nodal-db, or use a nodal-db build matching its schema version"
+                ),
+                found,
+                expected: expected.to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A read of `database_property` that failed because the file predates it
+/// (a pre-0.6 file): [`DbError::SchemaMismatch`] naming the file's own
+/// version, never the raw "table does not exist". Any other error passes.
+fn older_layout(conn: &Connection, e: duckdb::Error) -> DbError {
+    if !crate::read_surface::is_missing_object_error(&e) {
+        return e.into();
+    }
+    match schema_version_any(conn) {
+        Ok(Some(found)) if found != crate::compaction::SCHEMA_VERSION => {
+            let expected = crate::compaction::SCHEMA_VERSION;
+            DbError::SchemaMismatch {
+                message: format!(
+                    "read refused: database schema version {found:?} is not this nodal-db's \
+                     ({expected:?}); re-create the database (init + import) with this \
+                     nodal-db, or use a nodal-db build matching its schema version"
+                ),
+                found,
+                expected: expected.to_string(),
+            }
+        }
+        _ => e.into(),
+    }
 }
 
 /// What a property write did.

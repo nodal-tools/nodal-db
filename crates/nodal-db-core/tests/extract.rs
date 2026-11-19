@@ -453,6 +453,7 @@ const T1_EXCLUDED_VIEWS: &[&str] = &[
     "axis_position_stored",   // rendering helper over every axis: the same (asserted)
     "dataset_version",        // E (asserted)
     "database_property_current", // the identity row differs (asserted)
+    "database_properties",    // the identity row differs (as the mirror)
     "value_timeline",         // history view: only the surviving versions (asserted)
     "history_untrusted_span", // history view (asserted)
 ];

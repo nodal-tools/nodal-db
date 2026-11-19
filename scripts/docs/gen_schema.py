@@ -603,12 +603,23 @@ def parse_contract(text: str):
     return major, sv, objs
 
 
-def classify_change(old, new) -> tuple[list[str], list[str]]:
+def mirror_base(name: str) -> str:
+    """The base table a mirror `<table>_current` / `<table>_asof` reads."""
+    for suffix in ("_current", "_asof"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def classify_change(old, new, tables=None) -> tuple[list[str], list[str]]:
     """Compare two listings (parse_contract's object maps). Returns the
     changes that need a contract-major bump and those that need a
-    SCHEMA_VERSION bump (docs/dev/read_surface.md "Versioning"). Anything
-    else (appended columns, new objects, advisory changes) needs only the
-    revision bump the DDL hash gate already forces."""
+    SCHEMA_VERSION bump (docs/dev/read_surface.md "Versions and old
+    files"). `tables` is the new catalog's base-table set: a mirror removed
+    together with its table is a SCHEMA_VERSION change; a mirror removed
+    while its table survives (or with `tables` unknown) is a breaking
+    change. Anything else (appended columns, new objects, advisory changes)
+    needs only the revision bump the DDL hash gate already forces."""
     major, schema = [], []
     for name, (cls, kind, ps, cols) in sorted(old.items()):
         n = new.get(name)
@@ -627,22 +638,26 @@ def classify_change(old, new) -> tuple[list[str], list[str]]:
                 major.append(f"stable object {name}: existing columns changed ({diff})")
         elif cls == "mirror":
             if n is None:
-                # A mirror follows its table: it goes when its table leaves
-                # the schema, which is a SCHEMA_VERSION change.
-                schema.append(f"table mirror {name} removed (its table left the schema)")
+                # A mirror follows its table: it goes with its table (a
+                # SCHEMA_VERSION change); without it, it is a removal.
+                if tables is not None and mirror_base(name) not in tables:
+                    schema.append(f"table mirror {name} removed with its table")
+                else:
+                    major.append(f"table mirror {name} removed or renamed (its table remains)")
             elif (n[1], n[2], n[3]) != (kind, ps, cols):
                 schema.append(f"table mirror {name}: columns or parameters changed")
     return major, schema
 
 
-def contract_gate(old_text: str | None, surface, major: int) -> list[str]:
+def contract_gate(old_text: str | None, surface, major: int, tables=None) -> list[str]:
     """The gate: a breaking change to the listing needs the matching bump.
-    Returns the problems (empty = the new listing may be written)."""
+    `tables`: the new catalog's base tables (see classify_change). Returns
+    the problems (empty = the new listing may be written)."""
     if old_text is None:
         return []
     old_major, old_sv, old = parse_contract(old_text)
     new = {n: (c, k, p, cols) for n, (c, k, p, cols) in surface.items()}
-    need_major, need_schema = classify_change(old, new)
+    need_major, need_schema = classify_change(old, new, tables)
     problems = []
     if need_major and major == old_major:
         problems += [f"needs a contract_major bump in schema/130_read_surface.sql: {m}"
@@ -714,7 +729,7 @@ def generate() -> tuple[dict[pathlib.Path, str], list[str]]:
     if leaks:
         raise InternalRefError(leaks)
     old = CONTRACT_TSV.read_text() if CONTRACT_TSV.exists() else None
-    gate = contract_gate(old, surface, major)
+    gate = contract_gate(old, surface, major, set(tables))
     return {
         OUT_DIAGRAMS: render_diagrams(tables, pks, uks, fks, objects, titles),
         OUT_VIEWS: render_views(views, macros, objects, titles),

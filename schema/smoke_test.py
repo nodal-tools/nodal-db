@@ -1237,6 +1237,10 @@ def main():
         "INSERT INTO database_property (key, value, owner, valid_from_commit)"
         " VALUES ('Schema_Version', 'CONFLICTING', 'core', ?)", [c3])
     expect_constraint(
+        "db_identity: a second current identity row rejected (uq_database_property)",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('DB_IDENTITY', 'second', 'core', ?)", [c3])
+    expect_constraint(
         "D4: second current audit_rules property row rejected (uq_database_property)",
         "INSERT INTO database_property (key, value, owner, valid_from_commit)"
         " VALUES ('audit_rules', '{}', 'core', ?), ('audit_rules', '{\"a\": 1}', 'core', ?)",
@@ -2305,8 +2309,11 @@ def contract_gate_checks(gen_schema):
     def reparam(new):
         new["scenario_diff"] = (*new["scenario_diff"][:2], ["a"], new["scenario_diff"][3])
 
-    def gate(new, m=major):
-        return gen_schema.contract_gate(text, new, m)
+    # the base tables behind the listing's mirrors (every versioned table)
+    base_tables = {gen_schema.mirror_base(n) for n, (c, *_r) in objs.items() if c == "mirror"}
+
+    def gate(new, m=major, tables=base_tables):
+        return gen_schema.contract_gate(text, new, m, tables)
     for name, fn in (("renaming a stable column", renamed), ("retyping a stable column", retyped),
                      ("removing a stable object", removed),
                      ("changing a stable parameter list", reparam)):
@@ -2318,9 +2325,13 @@ def contract_gate_checks(gen_schema):
     problems = gate(mutate(appended))
     check("contract gate: appended columns, a new object and an advisory change pass",
           not problems, str(problems))
+    problems = gate(mutate(mirror_removed), tables=base_tables - {"entity"})
+    check("contract gate: a mirror removed with its table without a SCHEMA_VERSION bump fails",
+          any("SCHEMA_VERSION" in p for p in problems)
+          and not any("contract_major" in p for p in problems), str(problems))
     problems = gate(mutate(mirror_removed))
-    check("contract gate: a removed mirror (its table gone) without a SCHEMA_VERSION bump fails",
-          any("SCHEMA_VERSION" in p for p in problems), str(problems))
+    check("contract gate: a mirror removed while its table remains needs a major bump",
+          any("contract_major" in p for p in problems), str(problems))
     problems = gate(mutate(mirror_changed))
     check("contract gate: a changed mirror without a SCHEMA_VERSION bump fails",
           any("SCHEMA_VERSION" in p for p in problems), str(problems))

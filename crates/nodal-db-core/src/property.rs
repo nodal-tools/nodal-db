@@ -213,7 +213,6 @@ pub(crate) fn insert_core(
 /// Set or clear a user or tool key (the metadata channel's `SetProperty`).
 /// A core key is refused; a tool key must be `<tool>:<name>` with both parts
 /// non-empty (the DDL CHECK is the coarse backstop).
-#[allow(dead_code)] // the metadata channel's SetProperty (next phase)
 pub(crate) fn set_user(
     conn: &Connection,
     c: i64,
@@ -225,7 +224,6 @@ pub(crate) fn set_user(
 }
 
 /// The pure checks of a user or tool key (run in prepare, before any SQL).
-#[allow(dead_code)] // the metadata channel's prepare (next phase)
 pub(crate) fn validate_user_key(key: &str) -> Result<(), DbError> {
     if key.is_empty() || key.trim() != key {
         return Err(DbError::Api(format!(

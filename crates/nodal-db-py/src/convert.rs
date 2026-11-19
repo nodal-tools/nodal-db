@@ -42,6 +42,7 @@ pub(crate) fn db_err(e: DbError) -> PyErr {
         DbError::Busy { .. } => Busy::new_err(msg),
         DbError::Conflict { .. } => Conflict::new_err(msg),
         DbError::Api(_) => ApiError::new_err(msg),
+        DbError::ValueMetadataUnstated { .. } => ApiError::new_err(msg),
         DbError::Stale { expected, found } => stale_err(msg, expected, found),
         DbError::CoveredWrite(d) => {
             covered_write_err(msg, d.key_index, d.kind, d.target, d.class, d.resolved)

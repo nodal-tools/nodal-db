@@ -94,6 +94,12 @@ enum Command {
         /// segments.
         #[arg(long)]
         force_replace: bool,
+        /// What the new versions of values that carry metadata links keep:
+        /// `keep` (their links) or `clear` (none). Required when the import
+        /// changes such a value; values without links, new values and
+        /// unchanged values need nothing.
+        #[arg(long, value_enum)]
+        value_metadata: Option<import::ValueMetadataArg>,
     },
     /// Hard-erase one alternative's data (physical removal WITH a trace:
     /// closes the identity row, DELETEs every alternative-keyed row across
@@ -323,6 +329,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             user,
             message,
             force_replace,
+            value_metadata,
         } => import::run(&import::ImportArgs {
             file,
             db,
@@ -332,6 +339,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             user,
             message,
             force_replace,
+            value_metadata,
         }),
         Command::EraseAlternative {
             db,

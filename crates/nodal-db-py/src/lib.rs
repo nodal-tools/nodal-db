@@ -599,6 +599,7 @@ impl Database {
             deletes: dels,
             object_deletes: odels,
             purges,
+            metadata: Vec::new(),
         };
         let report = py
             .detach(move || api::commit_change_set(&path, set, &user, &message, opts))

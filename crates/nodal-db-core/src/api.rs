@@ -64,7 +64,8 @@ use crate::structural::{
 use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
 use crate::types::{
-    CoveredWrites, CoveringDelete, DeclaredType, IndexKind, ObjectDeleteKey, ObjectDeleteOpts,
+    CoveredWrites, CoveringDelete, DeclaredType, IndexKind, MetadataChange, MetadataEffect,
+    ObjectDeleteKey, ObjectDeleteOpts,
     ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, PurgePreview, PurgeRequest,
     ShapedData, StructuralChange, StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind,
     Warning, WarningKind, WriteOptions, WriteReport,
@@ -102,6 +103,9 @@ pub struct Segment {
 ///
 /// A thin single-segment wrapper over [`ingest_segments`] (spec OPEN-Q3-6):
 /// the per-parameter body is shared, the transaction shape is identical.
+/// It carries no metadata statement: rewriting a value that has metadata
+/// links fails with [`DbError::ValueMetadataUnstated`]; use
+/// [`commit_change_set`] with a keep / set / clear statement.
 #[allow(clippy::too_many_arguments)]
 pub fn write_parameter(
     db: &Path,
@@ -268,6 +272,7 @@ pub fn commit_changes(
             deletes,
             object_deletes,
             purges: Vec::new(),
+            metadata: Vec::new(),
         },
         user,
         message,
@@ -286,6 +291,10 @@ pub struct ChangeSet {
     pub deletes: Vec<DeleteKey>,
     pub object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
     pub purges: Vec<PurgeRequest>,
+    /// The metadata channel: pool and link ops and the keep / set / clear
+    /// statements for new value versions (applied last; see
+    /// [`commit_change_set`]).
+    pub metadata: Vec<MetadataChange>,
 }
 
 /// Commit a [`ChangeSet`] in ONE atomic, conflict-retried transaction under
@@ -306,6 +315,18 @@ pub struct ChangeSet {
 /// refuses the whole call unless it sets `allow_outside_scope`.
 /// Per-request outcomes land in `report.purges`; a call whose purges close
 /// nothing and that writes nothing makes no commit.
+///
+/// **Metadata** (`ChangeSet::metadata`) runs after the purges: pool creates
+/// and revisions in item order, the keep / set / clear statements and the
+/// value-link items, the object links, then the pool deletes (RESTRICT
+/// judged on the post-call state). A value that gets a new version in this
+/// call (not an unchanged write, not a new value, not a deleted one) and
+/// has metadata links needs a statement — `Scope::Value` over
+/// `Scope::Target` over `Scope::Save` — or the whole call fails with
+/// [`DbError::ValueMetadataUnstated`]. A save- or target-scope `Set` also
+/// annotates new values; a value-scope `Set` / `Clear` also edits an
+/// unchanged value. Outcomes land in `report.metadata` and
+/// `report.value_links`.
 pub fn commit_change_set(
     db: &Path,
     set: ChangeSet,
@@ -319,6 +340,7 @@ pub fn commit_change_set(
         mut deletes,
         mut object_deletes,
         mut purges,
+        mut metadata,
     } = set;
     // Every commit must carry a real author; message is the caller's choice
     // (may be empty) — jkiviluo 2026-08-18.
@@ -330,10 +352,11 @@ pub fn commit_change_set(
         && deletes.is_empty()
         && object_deletes.is_empty()
         && purges.is_empty()
+        && metadata.is_empty()
     {
         return Err(DbError::Api(
             "nothing to do: no segments, no structural changes, no deletes, no object deletes, \
-             no purges"
+             no purges, no metadata"
                 .into(),
         ));
     }
@@ -372,6 +395,7 @@ pub fn commit_change_set(
     for r in &mut purges {
         crate::purge::nfc_request(r, &mut lookups);
     }
+    crate::metadata::nfc_items(&mut metadata);
     // Two same-commit writes to one (class, parameter, alternative) key have no
     // defined history semantics (spec §4.2, E7 class); compare by the same
     // `lower()` fold every core name resolver applies. DuckDB `lower()` is
@@ -431,6 +455,10 @@ pub fn commit_change_set(
     prepare_structural(&structural, &object_deletes)?;
     // Purges: blank names and a parameter without its class (pure).
     crate::purge::validate_requests(&purges)?;
+    // Metadata: identifiers, dates, policies, one statement per scope, one
+    // item per edge and per object (pure).
+    crate::metadata::prepare(&metadata)?;
+    let bulk_set = crate::metadata::has_bulk_set(&metadata);
     // A value written and deleted in one call: rejected whatever the
     // content (D9); likewise a value written while an object delete in
     // the same call covers it (D10).
@@ -467,6 +495,22 @@ pub fn commit_change_set(
         // the last segment. A closure local, so a conflict retry rebuilds it
         // from scratch.
         let mut buffers = WriteBuffers::default();
+        // The values that get a new version are recorded for the metadata
+        // statements: of the targets that carry value links (read once per
+        // attempt), or of every target under a save- or target-scope set.
+        let linked = if prepared.is_empty() {
+            HashSet::new()
+        } else {
+            crate::metadata::linked_targets(conn)?
+        };
+        let had_links = !linked.is_empty() || crate::metadata::has_value_links(conn)?;
+        buffers.track = if bulk_set {
+            Track::All
+        } else if linked.is_empty() {
+            Track::Off
+        } else {
+            Track::Targets(linked)
+        };
         let mut entities = EntityCache::new();
         // The class / parameter / alternative resolutions of this attempt,
         // keyed by exact spelling (set_based_long_and_delete_PLAN §10 C11).
@@ -749,6 +793,22 @@ pub fn commit_change_set(
         if purged_vocabulary {
             crate::property::clear_core(conn, commit_id, "template_content_hash")?;
         }
+        // Metadata runs last (metadata_write plan §5): pool, statements and
+        // value links, object links, pool deletes. Its resolutions are
+        // fresh (closure locals), never the segment phase's caches.
+        if !metadata.is_empty() || !buffers.changed.is_empty() {
+            crate::metadata::apply_channel(
+                conn,
+                commit_id,
+                &crate::metadata::ChannelCall {
+                    items: &metadata,
+                    changed: &buffers.changed,
+                    covered_writes: opts.covered_writes,
+                    had_links,
+                },
+                &mut report,
+            )?;
+        }
         // The name-keyed metadata documents follow the renames and drop
         // what this call closed or unbound, once per document per call
         // (OD8, B1; purge plan §3.7, V-S2), at the end of the call: every
@@ -1002,6 +1062,8 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         object_deletes,
         structural,
         purges,
+        metadata,
+        value_links,
         // Not a write: the read-surface refresh runs in its own transaction.
         read_surface_warning: _,
     } = report;
@@ -1039,6 +1101,16 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         && purges
             .iter()
             .all(|p| p.closed_out.total_rows == 0 && p.unbound == 0)
+        && metadata.iter().all(|m| {
+            matches!(
+                m.effect,
+                MetadataEffect::NoOp | MetadataEffect::Restricted | MetadataEffect::DroppedByDelete
+            )
+        })
+        && value_links.set == 0
+        && value_links.cleared == 0
+        && value_links.kept == 0
+        && value_links.carried == 0
 }
 
 /// D9 (critique C1): a call that writes a value and also deletes it is
@@ -3049,9 +3121,54 @@ struct WriteBuffers {
     /// The tiers of the values actually written (not unchanged), for
     /// `WriteReport::tiers`.
     written_tiers: Vec<Tier>,
+    /// Which written values to record in `changed`.
+    track: Track,
+    /// The values that got a new version (not unchanged), of the tracked
+    /// targets: the metadata statements' subjects.
+    changed: Vec<(i64, i64, i64)>,
+}
+
+/// Which changed values [`WriteBuffers`] records for the metadata
+/// statements (a results write into an annotated file records nothing of
+/// the targets that carry no links).
+#[derive(Default)]
+enum Track {
+    #[default]
+    Off,
+    /// The `(parameter definition, alternative)` targets with value links.
+    Targets(HashSet<(i64, i64)>),
+    /// Every target (a save- or target-scope `Set` annotates new values).
+    All,
+}
+
+impl Track {
+    fn wants(&self, k: &ValueKey) -> bool {
+        match self {
+            Track::Off => false,
+            Track::All => true,
+            Track::Targets(t) => t.contains(&(k.parameter_definition_id, k.alternative_id)),
+        }
+    }
 }
 
 impl WriteBuffers {
+    /// Record the keys of the changed outcomes (`keys` in buffer order).
+    fn record_changed<'a>(
+        &mut self,
+        keys: impl Iterator<Item = &'a ValueKey>,
+        outcomes: &[crate::types::WriteOutcome],
+    ) {
+        if matches!(self.track, Track::Off) {
+            return;
+        }
+        for (k, o) in keys.zip(outcomes) {
+            if !o.unchanged && self.track.wants(k) {
+                self.changed
+                    .push((k.entity_id, k.parameter_definition_id, k.alternative_id));
+            }
+        }
+    }
+
     /// Record one buffered value of key `k`.
     fn track(&mut self, k: &ValueKey) {
         self.values += 1;
@@ -3084,6 +3201,8 @@ impl WriteBuffers {
             return Ok(());
         }
         let outcomes = write_scalars(conn, commit_id, &self.scalars)?;
+        let keys: Vec<ValueKey> = self.scalars.iter().map(|w| w.key).collect();
+        self.record_changed(keys.iter(), &outcomes);
         self.absorb(&outcomes, report);
         self.scalars.clear();
         Ok(())
@@ -3100,6 +3219,8 @@ impl WriteBuffers {
             return Ok(());
         }
         let outcomes = write_longs(conn, commit_id, &self.longs)?;
+        let keys: Vec<ValueKey> = self.longs.iter().map(|w| w.key).collect();
+        self.record_changed(keys.iter(), &outcomes);
         self.absorb(&outcomes, report);
         self.longs.clear();
         self.long_cells = 0;
@@ -3117,6 +3238,8 @@ impl WriteBuffers {
             return Ok(());
         }
         let outcomes = write_arrays(conn, commit_id, &self.arrays)?;
+        let keys: Vec<ValueKey> = self.arrays.iter().map(|w| w.key).collect();
+        self.record_changed(keys.iter(), &outcomes);
         self.absorb(&outcomes, report);
         self.arrays.clear();
         self.array_elems = 0;

@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use duckdb::{AccessMode, Config, Connection};
+use duckdb::{AccessMode, Config, Connection, OptionalExt};
 
 use crate::error::DbError;
 use crate::MINIMUM_DUCKDB;
@@ -565,15 +565,19 @@ where
     // Set when the `commit` row insert itself fails: the cue to check (after
     // the rollback) whether the file is a nodal-db database at all.
     let mut commit_insert_failed = false;
+    // Set when the gate's read hit no `database_property` table: after the
+    // rollback, the file's own (older-layout) version is read and named.
+    let mut older_layout = false;
     let result = (|| {
         // The schema-version gate: a file of another `SCHEMA_VERSION` is
         // refused before anything is written, whatever the write (tier,
         // retention mode, structural or a caller's own SQL), so no core write
         // ever touches it. A failing probe (not a nodal-db file) marks the
         // commit-table check: the file may not be a nodal-db database.
-        if let Some(found) =
-            foreign_schema_version(&conn).inspect_err(|_| commit_insert_failed = true)?
-        {
+        if let Some(found) = foreign_schema_version(&conn).inspect_err(|e| {
+            commit_insert_failed = true;
+            older_layout = crate::read_surface::is_missing_object(e);
+        })? {
             return Err(schema_mismatch(found));
         }
         // The staleness precondition (TxnOptions docs): after BEGIN, before
@@ -623,7 +627,14 @@ where
             // Probe only on this failure path (a successful insert proves the
             // table exists), and only after the rollback: the failed statement
             // leaves the transaction aborted, which would reject the probe.
-            let e = if commit_insert_failed && !has_commit_table(&conn) {
+            // A file without `database_property`: name its own version
+            // (read in autocommit now, from whichever layout it has).
+            let older = older_layout
+                .then(|| crate::property::schema_version_any(&conn).ok().flatten())
+                .flatten();
+            let e = if let Some(found) = older {
+                schema_mismatch(found)
+            } else if commit_insert_failed && !has_commit_table(&conn) {
                 DbError::Api(format!(
                     "{:?} is not an initialized nodal-db database (no `commit` table); \
                      create it with init first",
@@ -672,16 +683,18 @@ fn has_commit_table(conn: &Connection) -> bool {
 /// the row is missing); `None` when it matches. Run by every write cycle
 /// inside its transaction, before the `commit` row (one single-row read).
 fn foreign_schema_version(conn: &Connection) -> Result<Option<String>, DbError> {
-    // Either layout: a pre-0.6 file keeps its schema_version in `metadata`.
-    // A file with neither layout and no `commit` table is not a nodal-db
-    // database: fail the probe, so the caller names that cause.
-    let found = match crate::property::schema_version_any(conn)? {
-        Some(v) => v,
-        None if !has_commit_table(conn) => {
-            return Err(DbError::Api("no schema_version (not a nodal-db database)".into()))
-        }
-        None => String::new(),
-    };
+    // The 0.6 table only (no catalog listing on the hot path): a missing
+    // table fails the probe, and the caller names the file's own version
+    // (an older layout) or the missing nodal-db tables after its rollback.
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT value FROM database_property \
+             WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let found = found.unwrap_or_default();
     Ok((found != crate::compaction::SCHEMA_VERSION).then_some(found))
 }
 

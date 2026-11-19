@@ -301,32 +301,19 @@ pub(crate) fn validate_user_key(key: &str) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Does `table` exist in catalog `db` (`None`: the current database)?
-fn has_table(conn: &Connection, db: Option<&str>, table: &str) -> Result<bool, DbError> {
-    let n: i64 = match db {
-        None => conn.query_row(
-            "SELECT count(*) FROM duckdb_tables() \
-             WHERE database_name = current_database() AND schema_name = 'main' \
-               AND table_name = ?",
-            params![table],
-            |r| r.get(0),
-        )?,
-        Some(db) => conn.query_row(
-            "SELECT count(*) FROM duckdb_tables() \
-             WHERE database_name = ? AND schema_name = 'main' AND table_name = ?",
-            params![db, table],
-            |r| r.get(0),
-        )?,
-    };
-    Ok(n > 0)
-}
-
 /// The current `schema_version` rows of the file (or of the attached catalog
 /// `db`), from whichever layout the file has: `database_property` (0.6 on),
 /// else the pre-0.6 `metadata` table, so an older file is named by its own
 /// version (`SchemaMismatch { found: "0.4-array-id" }`), never a raw catalog
 /// error. Empty when neither table exists (not a nodal-db file) or the row
 /// is missing. As of commit `at` when given.
+///
+/// No catalog listing (a `duckdb_tables()` probe costs ~10 ms on a fresh
+/// connection, on every write cycle): the 0.6 table is read directly and the
+/// old one only after a missing-table error. Inside an explicit transaction
+/// that error aborts the transaction, so the fallback query fails too; the
+/// write cycle's gate therefore reads the 0.6 table only and resolves an
+/// older layout after its rollback (`conn::run_txn_once`).
 pub fn schema_versions_any(
     conn: &Connection,
     db: Option<&str>,
@@ -339,24 +326,27 @@ pub fn schema_versions_any(
             "valid_from_commit <= {n} AND (valid_to_commit IS NULL OR valid_to_commit > {n})"
         ),
     };
-    let sql = if has_table(conn, db, "database_property")? {
-        format!(
-            "SELECT value FROM {prefix}database_property \
-             WHERE lower(key) = 'schema_version' AND {live}"
-        )
-    } else if has_table(conn, db, "metadata")? {
-        format!(
-            "SELECT value FROM {prefix}metadata \
-             WHERE lower(name) = 'schema_version' AND {live}"
-        )
-    } else {
-        return Ok(Vec::new());
+    let read = |sql: String| -> Result<Vec<String>, duckdb::Error> {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     };
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+    match read(format!(
+        "SELECT value FROM {prefix}database_property \
+         WHERE lower(key) = 'schema_version' AND {live}"
+    )) {
+        Ok(v) => Ok(v),
+        Err(e) if crate::read_surface::is_missing_object_error(&e) => match read(format!(
+            "SELECT value FROM {prefix}metadata WHERE lower(name) = 'schema_version' AND {live}"
+        )) {
+            Ok(v) => Ok(v),
+            Err(e) if crate::read_surface::is_missing_object_error(&e) => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        },
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The file's current schema version from either layout

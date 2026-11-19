@@ -430,12 +430,14 @@ needs = ["skip_unchanged"]
 check = "no commit and no new history row; the 10 000 values read back + digest"
 
 [metric.wr_reimport_keep_100k_links]
+layout_floor = 0.010
 class = "io"
 needs = ["metadata_channel"]
 check = "1 commit; every one of the 10^5 links kept (closed and reopened at version 2); digest of the named links"
 note = "a fresh file, 10^5 scalars each linked to one source (untimed), then the timed changed re-import with a save-scope keep"
 
 [metric.wr_results_next_to_links_100k]
+layout_floor = 0.015
 class = "io"
 needs = ["metadata_channel"]
 check = "1 commit; no link row touched; the 10^5 results and the 10^5 links read back + digests"

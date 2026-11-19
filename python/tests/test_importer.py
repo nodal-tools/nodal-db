@@ -1097,3 +1097,63 @@ def test_final_sigma_case_collision_refuses(tmp_path):
     with pytest.raises(ImportError_, match="case-colliding alternative names"):
         run_import(tmp_path, spine)
     assert _leftovers(tmp_path) == []
+
+
+class MarkerProfile(SyntheticProfile):
+    """Routes the synthetic tool's marker entries to tool properties."""
+
+    def tool_property(self, name):
+        if name == "syn_frozen":
+            return "syn:frozen"
+        if name.startswith("syn_behaviour_change:"):
+            return "syn:behaviour_change:" + name[len("syn_behaviour_change:"):]
+        return None
+
+
+def test_metadata_lands_as_pairs_links_and_tool_properties(tmp_path):
+    from spinedb_api import DatabaseMapping, TimePattern
+
+    spine = make_basic_spine(tmp_path)
+    with DatabaseMapping(_url(spine), upgrade=False) as db:
+        for name, value in [("Source", "IEA"), ("source", "Eurostat"), ("note", "dataset"),
+                            ("syn_frozen", "1"), ("syn_behaviour_change:42", "on")]:
+            db.add_update_item("metadata", name=name, value=value)
+        db.add_update_item("entity_metadata", entity_class_name="widget",
+                           entity_byname=("w1",), metadata_name="Source",
+                           metadata_value="IEA")
+        db.add_update_item("parameter_value_metadata", entity_class_name="widget",
+                           parameter_definition_name="capacity", entity_byname=("w1",),
+                           alternative_name="Base", metadata_name="source",
+                           metadata_value="Eurostat")
+        # a value that does not land (unflattenable): its link is residue
+        db.add_update_item("parameter_definition", entity_class_name="hub",
+                           name="seasonality")
+        _value(db, "hub", ["h1"], "seasonality", "Base", TimePattern(["M1-6"], [1.0]))
+        db.add_update_item("parameter_value_metadata", entity_class_name="hub",
+                           parameter_definition_name="seasonality", entity_byname=("h1",),
+                           alternative_name="Base", metadata_name="note",
+                           metadata_value="dataset")
+        db.commit_session("metadata")
+    rep, out = run_import(tmp_path, spine, profile=MarkerProfile())
+    nd = _nodal(out)
+    pairs = sorted((r["name"], r["value"]) for r in _rows(
+        nd, "SELECT name, value FROM metadata_pair WHERE valid_to_commit IS NULL"))
+    # Source / source are one key in its first spelling; the markers are
+    # not pairs.
+    assert pairs == [("Source", "Eurostat"), ("Source", "IEA"), ("note", "dataset")], pairs
+    res = "\n".join(rep.residue)
+    assert "merged into 'Source'" in res, res
+    assert "hub.seasonality" in res and "metadata link is dropped" in res, res
+    assert _meta(nd)["syn:frozen"] == "1"
+    assert _meta(nd)["syn:behaviour_change:42"] == "on"
+    ents = _rows(nd, "SELECT object_name, target_name, pair_value FROM object_metadata_named "
+                     "WHERE object_type = 'entity'")
+    assert ents == [{"object_name": "widget.w1", "target_name": "Source",
+                     "pair_value": "IEA"}], ents
+    vals = _rows(nd, "SELECT entity, parameter, pair_value FROM value_metadata_named")
+    assert vals == [{"entity": "w1", "parameter": "capacity", "pair_value": "Eurostat"}], vals
+    # The unlinked entry (and the one whose value did not land) hangs on
+    # the dataset.
+    ds = _rows(nd, "SELECT target_name, pair_value FROM dataset_metadata")
+    assert ds == [{"target_name": "note", "pair_value": "dataset"}], ds
+    assert _rows(nd, "SELECT count(*) AS n FROM audit_dangling_ref")[0]["n"] == 0

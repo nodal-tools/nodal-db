@@ -1,6 +1,6 @@
 """Import profiles: the tool-specific half of the Spine -> nodal importer.
 
-The generic mechanism (importer.py) asks the profile exactly four things:
+The generic mechanism (importer.py) asks the profile exactly five things:
 
 1. the template identity to stamp (``template_name``, ``role``),
 2. where the source stores its schema version (``version_of``),
@@ -9,7 +9,9 @@ The generic mechanism (importer.py) asks the profile exactly four things:
    index-column names are the discriminator, so observed shapes must be
    normalized to the head template's declared dimension names or the final
    reconcile would see never-declared members and skip their narrowing),
-4. results-section class renames (``rename_class``).
+4. results-section class renames (``rename_class``),
+5. which Spine metadata entries are the tool's own markers, imported as
+   tool database properties instead of pairs (``tool_property``).
 
 Everything else is generic. Tool-specific profiles subclass `Profile` and
 live with the tool they serve, not in this package.
@@ -65,3 +67,11 @@ class Profile:
     def rename_class(self, class_name: str) -> str:
         """Results-section space renames; identity by default."""
         return class_name
+
+    def tool_property(self, name: str) -> str | None:
+        """The tool database property (``<tool>:<name>``) a Spine metadata
+        entry named ``name`` is a marker for, or None for an ordinary entry
+        (imported as a pair). Routing is by name (a prefix rule is the
+        profile's choice); the entry's value becomes the property's value.
+        None by default."""
+        return None

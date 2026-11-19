@@ -1357,6 +1357,17 @@ everything that could not be imported. The descriptions of classes,
 parameters, alternatives, scenarios and entities are imported with
 them.
 
+**Metadata.** Spine's `metadata` entries become pairs (see
+[Metadata and provenance](#metadata-and-provenance)), in one final
+commit: an entry's key spelled two ways (`Source`, `source`) is one key
+in its first spelling (the merge is residue), entity metadata becomes
+entity links, value metadata becomes value links of the imported
+version (a link of a value that was not imported is residue), and
+entries nothing links to are linked to the dataset. Spine `source` and
+`license` entries stay pairs. A profile can route a tool's own marker
+entries to tool database properties by overriding `tool_property(name)`
+(return `"<tool>:<name>"`, or `None` for an ordinary entry).
+
 **The import creates a new file, all or nothing.** The importer builds
 the database in a temporary directory next to the target and moves it
 to the target path only when every write has succeeded. If the import

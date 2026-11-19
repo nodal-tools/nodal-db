@@ -748,7 +748,6 @@ class SpineImporter:
 
             # unconsumed constructs — counted and named (loud residue)
             for probe, label in (
-                ("find_metadata_items", "metadata item"),
                 ("find_entity_groups", "entity_group row"),
                 ("find_superclass_subclasses", "superclass_subclass row"),
             ):
@@ -1049,6 +1048,16 @@ class SpineImporter:
             if total_unchanged:
                 rep.counts["values_unchanged"] = total_unchanged
 
+            # ---- metadata (one final commit, the metadata channel) --------
+            items = self._metadata_items(src, entities, db)
+            if items:
+                repm = db.commit_changes(
+                    metadata=items, user=self.user, message="spine import: metadata",
+                )
+                rep.commits.append(("metadata", repm.get("commit_id")))
+                for w in repm.get("warnings", []):
+                    rep.write_warnings.append(w)
+
             # ---- the final, non-optional identity stamp ------------------
             # The bootstrap template already stamped this identity; the verb
             # verifies it (an identical stamp is a commit-free no-op, a
@@ -1058,6 +1067,152 @@ class SpineImporter:
         return rep
 
     # -- helpers -----------------------------------------------------------
+
+    def _metadata_items(self, src, entities, db) -> list:
+        """The metadata channel items of a Spine source's ``metadata``,
+        ``entity_metadata`` and ``parameter_value_metadata`` (A6):
+
+        1. entries the profile names as tool markers become tool database
+           properties (``set_property``) and are left out of 2 and 5;
+        2. every other entry becomes a pair (``source`` / ``license``
+           entries too: Spine's are free text), deduped by (folded key,
+           value); a key spelled two ways is stored in its first spelling
+           and the merge is residue;
+        3. entity links (deduped by edge);
+        4. value links, only for values that landed (read back from the
+           written file); the rest are residue. Each link belongs to the
+           value version this import wrote;
+        5. pairs nothing links to are linked to the dataset.
+        Spine has no roles; none are created."""
+        rep, prof = self.report, self.profile
+        try:
+            entries = [i.extended() for i in src.find_metadata_items()]
+            ent_md = [i.extended() for i in src.find_entity_metadata_items()]
+            val_md = [i.extended() for i in src.find_parameter_value_metadata_items()]
+        except Exception as e:  # an older spinedb_api: nothing to carry
+            rep.residue.append(f"metadata not readable from the source ({e})")
+            return []
+        if not entries:
+            return []
+        items: list = []
+        routed: dict[tuple, str] = {}
+        prop_seen: dict[str, str] = {}
+        spelling: dict[str, str] = {}
+        pairs: dict[tuple, tuple] = {}
+        for m in entries:
+            name, value = _trim(m["name"]), m["value"]
+            if not name:
+                rep.residue.append(f"metadata entry {m['name']!r}: empty name, not imported")
+                continue
+            key = prof.tool_property(name)
+            if key is not None:
+                routed[(name, value)] = key
+                if key in prop_seen:
+                    rep.residue.append(
+                        f"metadata entry {name!r} = {value!r}: a second value for the tool "
+                        f"property {key!r} (kept {prop_seen[key]!r})")
+                    continue
+                prop_seen[key] = value
+                items.append({"op": "set_property", "key": key, "value": value})
+                continue
+            fk = _name_key(name)
+            stored = spelling.setdefault(fk, name)
+            if stored != name:
+                rep.residue.append(
+                    f"metadata key {name!r} merged into {stored!r} (one key, "
+                    "case-insensitively)")
+            pk = (fk, value)
+            if pk not in pairs:
+                pairs[pk] = (stored, value)
+                items.append({"op": "create_pair", "name": stored, "value": value})
+        linked: set = set()
+
+        def pair_of(name, value):
+            name = _trim(name)
+            if (name, value) in routed:
+                return None
+            return pairs.get((_name_key(name), value))
+
+        # Spine addresses an entity by its byname: (name,) for 0-D, the
+        # element names for N-D.
+        ent_name: dict[tuple, str] = {}
+        for e in entities:
+            ent_name[(e["entity_class_name"], (e["name"],))] = e["name"]
+            flat: list = []
+            for b in e.get("element_byname_list") or ():
+                flat.extend(b if isinstance(b, (tuple, list)) else (b,))
+            if not flat:
+                flat = list(e.get("element_name_list") or ())
+            if flat:
+                ent_name[(e["entity_class_name"], tuple(_trim(x) for x in flat))] = e["name"]
+        edges: set = set()
+        for em in ent_md:
+            p = pair_of(em["metadata_name"], em["metadata_value"])
+            cls = _trim(em["entity_class_name"])
+            name = ent_name.get((cls, tuple(_trim(x) for x in em["entity_byname"])))
+            if p is None or name is None:
+                rep.residue.append(
+                    f"entity metadata {cls}.{'__'.join(em['entity_byname'])}: "
+                    f"{em['metadata_name']!r} not linked")
+                continue
+            edge = (_name_key(cls), _name_key(name), _name_key(p[0]), p[1])
+            if edge in edges:
+                continue
+            edges.add(edge)
+            linked.add((_name_key(p[0]), p[1]))
+            items.append({"op": "link", "subject": {"entity": [cls, name]},
+                          "target": {"pair": list(p)}})
+        if val_md:
+            live = {
+                (_name_key(r["class"]), _name_key(r["entity"]), _name_key(r["parameter"]),
+                 _name_key(r["alternative"]))
+                for r in db.query(
+                    "SELECT ec.name AS class, e.name AS entity, pd.name AS parameter, "
+                    "a.name AS alternative FROM value_keys v "
+                    "JOIN entity e ON e.id = v.entity_id AND e.valid_to_commit IS NULL "
+                    "JOIN entity_class ec ON ec.id = e.entity_class_id "
+                    "AND ec.valid_to_commit IS NULL "
+                    "JOIN parameter_definition pd ON pd.id = v.parameter_definition_id "
+                    "AND pd.valid_to_commit IS NULL "
+                    "JOIN alternative a ON a.id = v.alternative_id "
+                    "AND a.valid_to_commit IS NULL"
+                ).read_all().to_pylist()
+            }
+            for vm in val_md:
+                p = pair_of(vm["metadata_name"], vm["metadata_value"])
+                cls, par, alt = (_trim(vm["entity_class_name"]),
+                                 _trim(vm["parameter_definition_name"]),
+                                 _trim(vm["alternative_name"]))
+                name = ent_name.get((cls, tuple(_trim(x) for x in vm["entity_byname"])))
+                where = f"{cls}.{par}[{'__'.join(vm['entity_byname'])}@{alt}]"
+                if p is None or name is None:
+                    rep.residue.append(f"value metadata {where}: {vm['metadata_name']!r} "
+                                       "not linked")
+                    continue
+                vkey = (_name_key(cls), _name_key(name), _name_key(par), _name_key(alt))
+                if vkey not in live:
+                    rep.residue.append(f"value metadata {where}: the value was not "
+                                       "imported; its metadata link is dropped")
+                    continue
+                edge = vkey + (_name_key(p[0]), p[1])
+                if edge in edges:
+                    continue
+                edges.add(edge)
+                linked.add((_name_key(p[0]), p[1]))
+                items.append({
+                    "op": "link_value",
+                    "value": {"class": cls, "parameter": par, "alternative": alt,
+                              "entity": name},
+                    "target": {"pair": list(p)},
+                })
+        for pk, p in pairs.items():
+            if pk not in linked:
+                items.append({"op": "link", "subject": {"dataset": True},
+                              "target": {"pair": list(p)}})
+        rep.counts["metadata pairs"] = len(pairs)
+        if prop_seen:
+            rep.counts["tool properties"] = len(prop_seen)
+        return items
 
     @staticmethod
     def _drifted(decl: set, obs: dict) -> bool:

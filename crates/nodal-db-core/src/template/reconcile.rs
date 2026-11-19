@@ -4285,7 +4285,7 @@ fn execute_step(
                     // The D11 member binding is REMAPPED to the target's own
                     // rank-0 member of the same kind (a binding must reference
                     // a parameter_type of its own definition), NULL when none.
-                    let copied = conn.execute(
+                    let mut stmt = conn.prepare(
                         "INSERT INTO value_scalar \
                            (entity_id, parameter_definition_id, alternative_id, \
                             parameter_type_id, valid_from_commit, version, \
@@ -4320,9 +4320,14 @@ fn execute_step(
                            AND NOT EXISTS (SELECT 1 FROM value_array t \
                                  WHERE t.entity_id = s.entity_id \
                                    AND t.parameter_definition_id = ?1 \
-                                   AND t.alternative_id = s.alternative_id)",
-                        params![tgt_id, c, src_id],
+                                   AND t.alternative_id = s.alternative_id) \
+                         RETURNING entity_id, alternative_id",
+
                     )?;
+                    let filled: Vec<(i64, i64)> = stmt
+                        .query_map(params![tgt_id, c, src_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<Result<_, _>>()?;
+                    let copied = filled.len();
                     fx.notes.push(format!(
                         "{step_name}: carried {copied} value(s) into empty target slots"
                     ));
@@ -4330,7 +4335,7 @@ fn execute_step(
                     // source definition's own links move to the target,
                     // before the source cascade closes them.
                     let carried =
-                        crate::metadata::carry_merged_links(conn, c, src_id, tgt_id)?;
+                        crate::metadata::carry_merged_links(conn, c, src_id, tgt_id, &filled)?;
                     if carried.value_links + carried.object_links > 0 {
                         fx.notes.push(format!(
                             "{step_name}: carried {} value metadata link(s) and {} \

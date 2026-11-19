@@ -504,12 +504,24 @@ pub fn commit_change_set(
             crate::metadata::linked_targets(conn)?
         };
         let had_links = !linked.is_empty() || crate::metadata::has_value_links(conn)?;
-        buffers.track = if bulk_set {
-            Track::All
-        } else if linked.is_empty() {
-            Track::Off
+        // A save-scope set (or a target-scope set on a target this call
+        // creates) annotates every new value; a target-scope set only its
+        // target's.
+        let set_targets = if bulk_set && !prepared.is_empty() {
+            crate::metadata::set_targets(conn, &metadata)?
         } else {
-            Track::Targets(linked)
+            Some(HashSet::new())
+        };
+        buffers.track = match set_targets {
+            None => Track::All,
+            Some(t) => {
+                let all: HashSet<(i64, i64)> = linked.into_iter().chain(t).collect();
+                if all.is_empty() {
+                    Track::Off
+                } else {
+                    Track::Targets(all)
+                }
+            }
         };
         let mut entities = EntityCache::new();
         // The class / parameter / alternative resolutions of this attempt,
@@ -606,6 +618,7 @@ pub fn commit_change_set(
                 &prepared,
                 &prepared_deletes,
                 &prepared_object_deletes,
+                &metadata,
             )?;
         }
         // `DeleteWins`: what the deletes cover, resolved after the
@@ -952,6 +965,7 @@ fn refuse_renamed_away_references(
     segments: &[PreparedSegment],
     deletes: &[(usize, DeleteKey)],
     object_deletes: &[PreparedObjectDelete],
+    metadata: &[MetadataChange],
 ) -> Result<(), DbError> {
     let refuse = |what: String, kind: &str, old: &str, to: &str| {
         DbError::Api(format!(
@@ -1007,6 +1021,58 @@ fn refuse_renamed_away_references(
         };
         if let Some(to) = renamed {
             return Err(refuse(what, p.key.kind.tag(), name, &to));
+        }
+    }
+    // Metadata items: subjects, values and target scopes (R-3).
+    use crate::types::{Scope, Subject};
+    for (i, it) in metadata.iter().enumerate() {
+        let what = format!("metadata item {i}");
+        let mut values: Vec<(&str, &str, &str)> = Vec::new();
+        let subject = match it {
+            MetadataChange::Link { subject, .. } | MetadataChange::Unlink { subject, .. } => {
+                Some(subject)
+            }
+            MetadataChange::LinkValue { value, .. } | MetadataChange::UnlinkValue { value, .. } => {
+                values.push((&value.class, &value.parameter, &value.alternative));
+                None
+            }
+            MetadataChange::ValueMetadata { scope, .. } => {
+                match scope {
+                    Scope::Save => {}
+                    Scope::Target {
+                        class,
+                        parameter,
+                        alternative,
+                    } => values.push((class, parameter, alternative)),
+                    Scope::Value(v) => values.push((&v.class, &v.parameter, &v.alternative)),
+                }
+                None
+            }
+            _ => None,
+        };
+        for (c, p, a) in values {
+            check_value_key(what.clone(), c, p, a)?;
+        }
+        let Some(s) = subject else { continue };
+        let hit = match s {
+            Subject::Class(n) => calls.renamed_class(conn, n)?.map(|t| ("class", n, t)),
+            Subject::Alternative(n) => {
+                calls.renamed_alternative(conn, n)?.map(|t| ("alternative", n, t))
+            }
+            Subject::Scenario(n) => calls.renamed_scenario(conn, n)?.map(|t| ("scenario", n, t)),
+            Subject::Entity { class, .. } => {
+                calls.renamed_class(conn, class)?.map(|t| ("class", class, t))
+            }
+            Subject::Parameter { class, name } => match calls.renamed_class(conn, class)? {
+                Some(t) => Some(("class", class, t)),
+                None => calls
+                    .renamed_parameter(conn, class, name)?
+                    .map(|t| ("parameter", name, t)),
+            },
+            _ => None,
+        };
+        if let Some((kind, old, to)) = hit {
+            return Err(refuse(what, kind, old, &to));
         }
     }
     Ok(())

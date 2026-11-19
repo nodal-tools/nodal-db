@@ -310,8 +310,11 @@ fn the_raw_value_writer_refuses_an_annotated_value() {
             None,
         )
     });
-    let err = r.expect_err("refused").to_string();
-    assert!(err.contains("keep, set or clear"), "{err}");
+    let err = r.expect_err("refused");
+    assert!(
+        matches!(err, nodal_db_core::error::DbError::ValueMetadataUnstated { count: 1, .. }),
+        "{err}"
+    );
 }
 
 /// Every statement that closes or inserts value-tier rows lives in the
@@ -354,10 +357,18 @@ fn value_table_closers_are_in_the_reviewed_files() {
         }
     }
     found.sort();
-    let files: Vec<&str> = found.iter().map(|(f, _)| f.as_str()).collect();
+    let want: Vec<(String, usize)> = [
+        ("history.rs", 25),
+        ("object_delete.rs", 1),
+        ("purge.rs", 1),
+        ("template/reconcile.rs", 1),
+    ]
+    .iter()
+    .map(|(f, n)| (f.to_string(), *n))
+    .collect();
     assert_eq!(
-        files,
-        ["history.rs", "object_delete.rs", "purge.rs", "template/reconcile.rs"],
-        "value-table closers outside the reviewed files: {found:?}"
+        found, want,
+        "value-table closers changed: review that each new one closes or keeps the values' \
+         metadata links, then update the pinned counts"
     );
 }

@@ -182,9 +182,9 @@ pub(crate) struct Carried {
 }
 
 /// `merge_parameter` (template reconcile): before the source definition
-/// closes, copy (a) the value links of every source value carried into an
-/// empty target slot at `c` (a target value with `valid_from_commit = c`)
-/// onto that target value, and (b) the source definition's own object links
+/// closes, copy (a) the value links of every source value the merge carried
+/// into an empty target slot (`filled`: the `(entity, alternative)` pairs
+/// the merge's INSERT returned) onto that target value, and (b) the source definition's own object links
 /// onto the target definition, anti-joined on the target's live edges. The
 /// source's links then close with its cascade. "Copy carries" (owner ruling
 /// 2026-11-17).
@@ -193,8 +193,14 @@ pub(crate) fn carry_merged_links(
     c: i64,
     src: i64,
     tgt: i64,
+    filled: &[(i64, i64)],
 ) -> Result<Carried, DbError> {
-    let value_links = conn.execute(
+    use duckdb::types::Value;
+    let list = |f: fn(&(i64, i64)) -> i64| {
+        Value::List(filled.iter().map(|p| Value::BigInt(f(p))).collect())
+    };
+    let (es, alts) = (list(|p| p.0), list(|p| p.1));
+    let value_links = if filled.is_empty() { 0 } else { conn.execute(
         "INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id, \
            target_kind, target_id, role_id, valid_from_commit, version) \
          SELECT l.entity_id, ?1, l.alternative_id, l.target_kind, l.target_id, l.role_id, ?2, \
@@ -205,16 +211,15 @@ pub(crate) fn carry_merged_links(
                      AND coalesce(x.role_id, 0) = coalesce(l.role_id, 0)), 0) + 1 \
          FROM value_metadata_link l \
          WHERE l.valid_to_commit IS NULL AND l.parameter_definition_id = ?3 \
-           AND EXISTS (SELECT 1 FROM value_scalar s WHERE s.entity_id = l.entity_id \
-                 AND s.parameter_definition_id = ?1 AND s.alternative_id = l.alternative_id \
-                 AND s.valid_from_commit = ?2 AND s.valid_to_commit IS NULL) \
+           AND (l.entity_id, l.alternative_id) IN \
+                 (SELECT unnest(?4::BIGINT[]), unnest(?5::BIGINT[])) \
            AND NOT EXISTS (SELECT 1 FROM value_metadata_link t \
                  WHERE t.valid_to_commit IS NULL AND t.entity_id = l.entity_id \
                    AND t.parameter_definition_id = ?1 AND t.alternative_id = l.alternative_id \
                    AND t.target_kind = l.target_kind AND t.target_id = l.target_id \
                    AND coalesce(t.role_id, 0) = coalesce(l.role_id, 0))",
-        params![tgt, c, src],
-    )?;
+        params![tgt, c, src, es, alts],
+    )? };
     let object_links = conn.execute(
         "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id, \
            role_id, valid_from_commit, version) \
@@ -266,21 +271,19 @@ pub(crate) fn refuse_linked(conn: &Connection, keys: &[Triple]) -> Result<(), Db
     if keys.is_empty() || !has_value_links(conn)? {
         return Ok(());
     }
-    let set = TripleSet::Lists(keys);
-    let n: i64 = conn.query_row(
-        &format!(
-            "SELECT count(*) FROM value_metadata_link, {} \
-             WHERE {K_MATCH} AND value_metadata_link.valid_to_commit IS NULL",
-            set.source_sql()
-        ),
-        duckdb::params_from_iter(set.binds().iter()),
-        |r| r.get(0),
-    )?;
-    if n > 0 {
-        return Err(DbError::Api(format!(
-            "this value has {n} metadata link(s): a new version must state keep, set or clear \
-             — write it through commit_change_set with a value_metadata statement"
-        )));
+    let linked: Vec<Triple> = live_value_links(conn, keys)?.into_keys().collect();
+    if !linked.is_empty() {
+        let count = linked.len();
+        let sample = triple_names(conn, &linked).unwrap_or_default();
+        return Err(DbError::ValueMetadataUnstated {
+            message: format!(
+                "{count} value(s) carry metadata links: a new version must state keep, set or \
+                 clear — write through commit_change_set with a value_metadata statement \
+                 (the raw per-key writers cannot state one)"
+            ),
+            count,
+            sample,
+        });
     }
     Ok(())
 }
@@ -874,6 +877,46 @@ pub(crate) fn has_bulk_set(items: &[MetadataChange]) -> bool {
     })
 }
 
+/// The `(parameter definition, alternative)` targets a target-scope `Set`
+/// names, resolved lookup-only; `None` when every target must be tracked
+/// (a save-scope `Set`, or a target this call has yet to create).
+pub(crate) fn set_targets(
+    conn: &Connection,
+    items: &[MetadataChange],
+) -> Result<Option<HashSet<(i64, i64)>>, DbError> {
+    let mut out = HashSet::new();
+    for it in items {
+        let MetadataChange::ValueMetadata {
+            scope,
+            action: Action::Set(_),
+        } = it
+        else {
+            continue;
+        };
+        match scope {
+            Scope::Save => return Ok(None),
+            Scope::Target {
+                class,
+                parameter,
+                alternative,
+            } => {
+                let Some(c) = find_entity_class(conn, class)? else {
+                    return Ok(None);
+                };
+                let Some(p) = find_parameter(conn, c.id, parameter)? else {
+                    return Ok(None);
+                };
+                let Some(a) = find_alternative(conn, alternative)? else {
+                    return Ok(None);
+                };
+                out.insert((p.id, a.id));
+            }
+            Scope::Value(_) => {}
+        }
+    }
+    Ok(Some(out))
+}
+
 /// The `(parameter definition, alternative)` pairs of the live value links,
 /// read once per write attempt: the write path records the changed values
 /// of only these targets (or of every target when a bulk `Set` asks).
@@ -1021,11 +1064,14 @@ fn resolve_edge(cx: &mut Ctx<'_>, t: &Target, r: &RoleSel) -> Result<Edge, DbErr
 }
 
 /// Was a live row of `table` matching `pred` (one `?` bound to `name`)
-/// closed by this call (`valid_to_commit = c`)?
+/// closed by this call (`valid_to_commit = c`) with no successor (a rename
+/// or revision leaves a live row of the id: not a delete)?
 fn closed_here(cx: &Ctx<'_>, table: &str, pred: &str, name: &str) -> Result<bool, DbError> {
     Ok(cx.conn.query_row(
         &format!(
-            "SELECT EXISTS (SELECT 1 FROM {table} WHERE valid_to_commit = ? AND {pred})"
+            "SELECT EXISTS (SELECT 1 FROM {table} WHERE valid_to_commit = ? AND {pred} \
+               AND NOT EXISTS (SELECT 1 FROM {table} x WHERE x.id = {table}.id \
+                 AND x.valid_to_commit IS NULL))"
         ),
         params![cx.c, name],
         |r| r.get(0),
@@ -1869,6 +1915,8 @@ pub(crate) fn apply_channel(
     // Objects revised / renamed / deleted (kind, id) by item, and objects
     // created by this call (which links may name).
     let mut touched: HashMap<(MetadataKind, i64), usize> = HashMap::new();
+    // Sources and licenses a SetSourceLicenses item writes rows for.
+    let mut licensed: HashMap<(MetadataKind, i64), usize> = HashMap::new();
     // ---- M1: pool creates and revisions, in item order.
     for (i, it) in items.iter().enumerate() {
         let o = match it {
@@ -1943,6 +1991,13 @@ pub(crate) fn apply_channel(
                 for l in licenses {
                     lids.push(require_named(&mut cx, "license", "license", l)?);
                 }
+                // A delete of this source or of a listed license in the
+                // same call (by an aliasing id / name) would leave the new
+                // rows live and dangling: refused below.
+                licensed.insert((MetadataKind::Source, sid), i);
+                for l in &lids {
+                    licensed.insert((MetadataKind::License, *l), i);
+                }
                 let e = set_source_licenses(&mut cx, sid, &lids)?;
                 outcome(i, MetadataKind::SourceLicenses, sid, e)
             }
@@ -1975,6 +2030,12 @@ pub(crate) fn apply_channel(
             ),
             _ => continue,
         };
+        if let Some(j) = licensed.get(&(kind, id)) {
+            return Err(DbError::Api(format!(
+                "metadata items {j} and {i}: item {i} deletes a source or license that item \
+                 {j} sets licenses for (resolved by id); one item per object per call"
+            )));
+        }
         if let Some(j) = touched.insert((kind, id), i) {
             return Err(DbError::Api(format!(
                 "metadata items {j} and {i} both revise, rename or delete the same object \
@@ -2447,7 +2508,7 @@ mod tests {
                VALUES (1, 20, 1, 3, 1, TRUE, 'string', 'old');",
         )
         .unwrap();
-        let c = carry_merged_links(&conn, 3, 10, 20).unwrap();
+        let c = carry_merged_links(&conn, 3, 10, 20, &[(1, 1)]).unwrap();
         assert_eq!(
             c,
             Carried {
@@ -2456,7 +2517,21 @@ mod tests {
             }
         );
         // Carrying again adds no second parameter link.
-        assert_eq!(carry_merged_links(&conn, 3, 10, 20).unwrap().object_links, 0);
+        assert_eq!(carry_merged_links(&conn, 3, 10, 20, &[(1, 1)]).unwrap().object_links, 0);
+        // A target value written at 3 by another step (not carried by the
+        // merge) gets no copied links.
+        conn.execute_batch(
+            "INSERT INTO value_scalar (entity_id, parameter_definition_id, alternative_id,
+                 valid_from_commit, version, content_retained, value_kind, v_str)
+               VALUES (2, 20, 1, 3, 1, TRUE, 'string', 'other');",
+        )
+        .unwrap();
+        carry_merged_links(&conn, 3, 10, 20, &[(1, 1)]).unwrap();
+        assert_eq!(
+            n(&conn, "SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id = 20 \
+                      AND entity_id = 2"),
+            0
+        );
         assert_eq!(
             n(&conn, "SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id = 20"),
             1

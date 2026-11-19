@@ -1027,3 +1027,216 @@ fn the_stable_views_name_the_links() {
     assert_eq!(q(&db, "SELECT count(*) FROM audit_license_non_spdx"), 0);
     clean(&db);
 }
+
+/// A metadata item that names a name a rename of the same call freed is
+/// refused (R-3), under either delete policy: for every subject kind, a
+/// value address and a target scope.
+#[test]
+fn renamed_away_names_are_refused_in_metadata_items() {
+    use nodal_db_core::types::StructuralChange as SC;
+    let dir = tempfile::tempdir().unwrap();
+    let db = annotated(dir.path());
+    run(
+        &db,
+        ChangeSet {
+            structural: vec![SC::CreateScenario {
+                name: "s".into(),
+                description: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let link = LinkSpec {
+        target: Target::Source(src("IEA")),
+        role: RoleSel::NoRole,
+    };
+    let alt = SC::RenameAlternative {
+        current: "Base".into(),
+        new_name: "Main".into(),
+        description: None,
+    };
+    let class = SC::RenameEntityClass {
+        current: "node".into(),
+        new_name: "bus".into(),
+        description: None,
+        allow_on_template: false,
+    };
+    let par = SC::RenameParameter {
+        class: "node".into(),
+        current: "p".into(),
+        new_name: "p2".into(),
+        description: None,
+        allow_on_template: false,
+    };
+    let cases: Vec<(SC, M)> = vec![
+        (
+            alt.clone(),
+            M::Link {
+                subject: Subject::Alternative("Base".into()),
+                link: link.clone(),
+            },
+        ),
+        (
+            SC::RenameScenario {
+                current: "s".into(),
+                new_name: "s2".into(),
+                description: None,
+            },
+            M::Link {
+                subject: Subject::Scenario("s".into()),
+                link: link.clone(),
+            },
+        ),
+        (
+            class.clone(),
+            M::Link {
+                subject: Subject::Class("node".into()),
+                link: link.clone(),
+            },
+        ),
+        (
+            class,
+            M::Link {
+                subject: Subject::Entity {
+                    class: "node".into(),
+                    name: "a".into(),
+                },
+                link: link.clone(),
+            },
+        ),
+        (
+            par.clone(),
+            M::Link {
+                subject: Subject::Parameter {
+                    class: "node".into(),
+                    name: "p".into(),
+                },
+                link: link.clone(),
+            },
+        ),
+        (
+            par,
+            M::LinkValue {
+                value: vaddr("a"),
+                link: link.clone(),
+            },
+        ),
+        (
+            alt,
+            stmt(
+                Scope::Target {
+                    class: "node".into(),
+                    parameter: "p".into(),
+                    alternative: "Base".into(),
+                },
+                Action::Keep,
+            ),
+        ),
+    ];
+    for (rename, item) in cases {
+        for covered in [CoveredWrites::Refuse, CoveredWrites::DeleteWins] {
+            let e = commit_change_set(
+                &db,
+                ChangeSet {
+                    structural: vec![rename.clone()],
+                    metadata: vec![item.clone()],
+                    ..Default::default()
+                },
+                "t",
+                "m",
+                WriteOptions {
+                    covered_writes: covered,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(e.to_string().contains("renamed to"), "{item:?}: {e}");
+        }
+    }
+    clean(&db);
+}
+
+/// A SetSourceLicenses item and a delete of its source or one of its
+/// licenses in one call, aliased by id and name, are refused (no live
+/// source_license row may dangle).
+#[test]
+fn set_source_licenses_and_an_aliased_delete_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(dir.path());
+    meta(
+        &db,
+        vec![
+            put_source("S"),
+            M::PutLicense {
+                license: src("L"),
+                rename: None,
+                fields: LicenseFields::default(),
+            },
+        ],
+    )
+    .unwrap();
+    let sid = q(&db, "SELECT id FROM source");
+    let lid = q(&db, "SELECT id FROM license");
+    for del in [
+        M::DeleteSource {
+            source: src("S"),
+            cascade: true,
+        },
+        M::DeleteLicense {
+            license: src("L"),
+            cascade: true,
+        },
+    ] {
+        let e = meta(
+            &db,
+            vec![
+                M::SetSourceLicenses {
+                    source: Ref::Id(sid),
+                    licenses: vec![Ref::Id(lid)],
+                },
+                del,
+            ],
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("sets licenses"), "{e}");
+    }
+    assert_eq!(q(&db, "SELECT count(*) FROM source_license"), 0);
+    clean(&db);
+}
+
+/// A target-scope set tracks only its target (plus the linked ones): a
+/// write of another, link-free target in the same call is not annotated.
+#[test]
+fn a_target_scope_set_annotates_only_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = annotated(dir.path());
+    write(
+        &db,
+        vec![
+            seg("p", scalar(&["c"], &[1.0])),
+            seg("q", scalar(&["c"], &[1.0])),
+        ],
+        vec![stmt(
+            Scope::Target {
+                class: "node".into(),
+                parameter: "p".into(),
+                alternative: "Base".into(),
+            },
+            Action::Set(vec![to_source("IEA")]),
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM value_metadata_named WHERE entity = 'c' AND parameter = 'p'"
+        ),
+        1
+    );
+    assert_eq!(
+        q(&db, "SELECT count(*) FROM value_metadata_named WHERE parameter = 'q'"),
+        0
+    );
+    clean(&db);
+}

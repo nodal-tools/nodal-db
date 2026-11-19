@@ -253,13 +253,7 @@ pub fn is_missing_object(e: &DbError) -> bool {
 /// The file's current `schema_version` metadata value; `None` when it cannot
 /// be read (not a nodal-db file).
 fn schema_version_on(conn: &Connection) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM metadata \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
-        [],
-        |r| r.get(0),
-    )
-    .ok()
+    crate::property::schema_version_any(conn).ok().flatten()
 }
 
 // ---------------------------------------------------------------------------

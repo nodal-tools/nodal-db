@@ -533,7 +533,7 @@ def write_template(tmp_path, name, text):
 
 def meta(db, key):
     t = db.query(
-        f"SELECT value FROM metadata WHERE lower(name) = '{key}' AND valid_to_commit IS NULL"
+        f"SELECT value FROM database_property WHERE lower(key) = '{key}' AND valid_to_commit IS NULL"
     ).read_all()
     vals = t.column("value").to_pylist()
     return vals[0] if vals else None
@@ -660,12 +660,12 @@ def test_other_schema_version_is_schema_mismatch(db):
     con = duckdb.connect(db.path)
     try:
         (expected,) = con.execute(
-            "SELECT value FROM metadata "
-            "WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL"
+            "SELECT value FROM database_property "
+            "WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL"
         ).fetchone()
         con.execute(
-            "UPDATE metadata SET value = '0.3-test' "
-            "WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL"
+            "UPDATE database_property SET value = '0.3-test' "
+            "WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL"
         )
     finally:
         con.close()
@@ -1003,7 +1003,7 @@ def test_verb_vocabulary_creation(db):
 def test_verb_stamp_template_identity(db):
     db.stamp_template_identity("flextool", "40", user="t")
     assert (
-        one_value(db, "SELECT value FROM metadata WHERE cur_name = 'template_name'")
+        one_value(db, "SELECT value FROM database_property WHERE cur_key = 'template_name'")
         == "flextool"
     )
     n = commit_count(db)
@@ -1013,7 +1013,7 @@ def test_verb_stamp_template_identity(db):
         db.stamp_template_identity("flextool", "41", user="t")
     db.stamp_template_identity("flextool", "41", overwrite=True, user="t")
     assert (
-        one_value(db, "SELECT value FROM metadata WHERE cur_name = 'template_version'")
+        one_value(db, "SELECT value FROM database_property WHERE cur_key = 'template_version'")
         == "41"
     )
 

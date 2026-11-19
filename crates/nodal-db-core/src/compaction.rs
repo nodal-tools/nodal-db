@@ -273,11 +273,14 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// data — no bump; the `erasure_marker` base table (0.3) changed the table set
 /// — bump; the `array_id` surrogate key on `value_array` / `value_array_hist`
 /// (0.4) changed two tables' insertable columns — bump; the `content_hash`
-/// column on the same two tables (this version, skip-unchanged P3) — bump.
+/// column on the same two tables (0.5, skip-unchanged P3) — bump; the
+/// metadata tables replacing `metadata` / `entity_metadata` /
+/// `parameter_value_metadata` and the `database_property` table (this
+/// version) — bump.
 /// Consequence of a bump (erasure_compaction_plan §9 step
 /// 1): existing dev DBs refuse compaction until re-inited/re-imported —
 /// pre-freeze, re-init IS the migration story.
-pub const SCHEMA_VERSION: &str = "0.5-array-hash";
+pub const SCHEMA_VERSION: &str = "0.6-metadata";
 
 /// Default byte-growth watermark for [`compact_if_needed`]: repack once the DB
 /// file has grown to at least this multiple of its size right after the last
@@ -525,12 +528,8 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         // The source's read-surface version: the rebuild re-creates the
         // catalog from THIS build's DDL, which downgrades a newer surface.
         let surface = crate::read_surface::check_on(&conn).ok();
-        let version: String = conn.query_row(
-            "SELECT value FROM metadata \
-             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
-            [],
-            |r| r.get(0),
-        )?;
+        // Either layout (an older file is named by its own version).
+        let version: String = crate::property::schema_version_any(&conn)?.unwrap_or_default();
         let total: i64 =
             conn.query_row("SELECT total_blocks FROM pragma_database_size()", [], |r| {
                 r.get(0)
@@ -844,12 +843,12 @@ fn repack_into(conn: &Connection, src_path: &Path, temp_path: &Path) -> Result<R
     // column still exists. Hard-error on drift so a schema edit fails loudly.
     check_catalog(conn, &real_cols)?;
 
-    // B1: init_schema replays 900_bootstrap.sql, which seeds commit(id=1) + a
-    // metadata schema_version row. Both collide with the copy (PK on commit.id;
-    // one_current_/uq_ indexes on metadata). Clear them first. metadata BEFORE
-    // commit: metadata.valid_from_commit REFERENCES commit(id), so deleting
-    // commit first would trip that engine FK.
-    conn.execute_batch("DELETE FROM metadata; DELETE FROM \"commit\";")?;
+    // B1: init_schema replays 900_bootstrap.sql, which seeds commit(id=1) +
+    // the schema_version / db_identity property rows. Both collide with the
+    // copy (PK on commit.id; the unique key index on database_property). Clear
+    // them first. database_property BEFORE commit: its valid_from_commit
+    // REFERENCES commit(id), so deleting commit first would trip that engine FK.
+    conn.execute_batch("DELETE FROM database_property; DELETE FROM \"commit\";")?;
 
     // ATTACH the source read-only — this acquires and HOLDS the source's file
     // lock for the whole copy (cross-process exclusion, §4). A busy source
@@ -1239,7 +1238,7 @@ mod tests {
         // temp: empty (fresh schema, then wipe bootstrap like the real path).
         let temp = fresh(&dir, "temp.duckdb");
         let conn = open_with_retry(&temp, AccessMode::ReadWrite).unwrap();
-        conn.execute_batch("DELETE FROM metadata; DELETE FROM \"commit\";")
+        conn.execute_batch("DELETE FROM database_property; DELETE FROM \"commit\";")
             .unwrap();
         attach_source_ro(&conn, &src).unwrap();
 

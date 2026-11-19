@@ -142,7 +142,7 @@ const SCOPE_TABLES: &[&str] = &[
     "entity_alternative",
     "membership",
     "scenario_alternative",
-    "parameter_value_metadata",
+    "value_metadata_link",
 ];
 
 /// Rows keyed on `alt_id` (any validity) in one scope table.
@@ -214,12 +214,12 @@ fn seed_two_runs(dir: &Path, array_cells: usize) -> (PathBuf, i64, i64) {
            SELECT e1.id, e2.id, a.id, FALSE, currval('seq_commit')
            FROM entity e1, entity e2, alternative a
            WHERE e1.cur_name = 'n1' AND e2.cur_name = 'n2' AND a.cur_name = 'runa';
-         INSERT INTO metadata (name, value, valid_from_commit)
+         INSERT INTO metadata_pair (name, value, valid_from_commit)
            VALUES ('note_key', 'note_val', currval('seq_commit'));
-         INSERT INTO parameter_value_metadata
-             (entity_id, parameter_definition_id, alternative_id, metadata_id, valid_from_commit)
-           SELECT e.id, pd.id, a.id, m.id, currval('seq_commit')
-           FROM entity e, parameter_definition pd, alternative a, metadata m
+         INSERT INTO value_metadata_link
+             (entity_id, parameter_definition_id, alternative_id, target_kind, target_id, valid_from_commit)
+           SELECT e.id, pd.id, a.id, 'pair', m.id, currval('seq_commit')
+           FROM entity e, parameter_definition pd, alternative a, metadata_pair m
            WHERE e.cur_name = 'n1' AND pd.cur_name = 'demand'
              AND a.cur_name = 'runa' AND m.cur_name = 'note_key';
          INSERT INTO run (id, tool_entity_id, result_alternative_id, input_commit_id, status)
@@ -665,12 +665,17 @@ fn erase_transaction_is_atomic_under_mid_txn_failure() {
 
 // --- (3) the consumer-shape guard sweep (acceptance 3) ------------------------
 
-/// All 31 as-of macros in 110_views_history.sql — keep in sync with the file
+/// All 36 as-of macros in 110_views_history.sql — keep in sync with the file
 /// (the sweep hard-fails if a macro vanishes, which is the point).
 const ASOF_MACROS: &[&str] = &[
-    "metadata_asof",
-    "entity_metadata_asof",
-    "parameter_value_metadata_asof",
+    "database_property_asof",
+    "metadata_pair_asof",
+    "source_asof",
+    "license_asof",
+    "source_license_asof",
+    "metadata_role_asof",
+    "object_metadata_link_asof",
+    "value_metadata_link_asof",
     "entity_class_asof",
     "class_set_asof",
     "class_set_member_asof",
@@ -1202,7 +1207,7 @@ fn erase_refuses_schema_version_mismatch_cleanly() {
     {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
-            "UPDATE metadata SET value = '9.9-bogus' WHERE lower(name) = 'schema_version'",
+            "UPDATE database_property SET value = '9.9-bogus' WHERE lower(key) = 'schema_version'",
         )
         .unwrap();
         conn.close().unwrap();
@@ -1229,7 +1234,7 @@ fn erase_refuses_schema_version_mismatch_cleanly() {
 
 // --- review 7: sweep list == catalog census ----------------------------------
 
-/// The hardcoded sweep lists (the 31 one-argument macros and the point
+/// The hardcoded sweep lists (the 36 one-argument macros and the point
 /// macros) must equal the live catalog's census of table macros with `_asof`
 /// anywhere in the name — a new as-of macro that never enters the guard
 /// sweep fails HERE, not never. (`value_timeline` / `history_untrusted_span`
@@ -1279,7 +1284,7 @@ const VIEW_SWEEP_EXCLUSIONS: &[(&str, &str)] = &[
         "reports the physical file (size note differs by layout)",
     ),
     (
-        "metadata_current",
+        "database_property_current",
         "carries db_identity, a per-init UUID unique by construction",
     ),
 ];

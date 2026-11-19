@@ -162,7 +162,7 @@ pub(crate) enum Grain {
     /// `scenario_alternative`: every ranking row of a scenario the call
     /// ranks.
     Ranking,
-    /// `parameter_value_metadata`: the value keys the call writes.
+    /// `value_metadata_link`: the value keys the call writes.
     ValueMeta,
     /// Describes or is attached to an object and no op of a call re-states
     /// it: kept for a spared object, closed with a closing one (runs over
@@ -330,7 +330,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     grain: Grain::Ranking,
                 },
                 DepLeg {
-                    table: "parameter_value_metadata",
+                    table: "value_metadata_link",
                     column: "alternative_id",
                     key: LegKey::col("alternative_id"),
                     array: false,
@@ -456,7 +456,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     grain: Grain::Attached,
                 },
                 DepLeg {
-                    table: "parameter_value_metadata",
+                    table: "value_metadata_link",
                     column: "parameter_definition_id",
                     key: LegKey::col("parameter_definition_id"),
                     array: false,
@@ -573,16 +573,16 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     grain: Grain::Attached,
                 },
                 DepLeg {
-                    table: "entity_metadata",
-                    column: "entity_id",
-                    key: LegKey::col("entity_id"),
+                    table: "object_metadata_link",
+                    column: "object_id",
+                    key: LegKey::filtered("object_id", "object_type = 'entity'"),
                     array: false,
-                    sample_expr: "'metadata=' || metadata_id",
+                    sample_expr: "target_kind || '=' || target_id",
                     erase: false,
                     grain: Grain::Attached,
                 },
                 DepLeg {
-                    table: "parameter_value_metadata",
+                    table: "value_metadata_link",
                     column: "entity_id",
                     key: LegKey::col("entity_id"),
                     array: false,

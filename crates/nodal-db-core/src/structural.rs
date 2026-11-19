@@ -32,14 +32,14 @@ use crate::api::{
 };
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
-use crate::template::dbvocab::read_metadata_key;
+use crate::property;
 use crate::template::ir::{normalize_audit_rules, AuditRules};
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    clear_metadata, insert_class_dim_row, insert_class_row, insert_definition_row,
+    insert_class_dim_row, insert_class_row, insert_definition_row,
     insert_entity_element_row, insert_entity_row, insert_membership_row, insert_scenario_row,
     insert_type_member, read_ec_row, read_pd_row, revise_alternative_row, revise_ec_row,
-    revise_pd_row, revise_scenario_row, set_metadata,
+    revise_pd_row, revise_scenario_row,
 };
 use crate::text::NameFolds;
 use crate::types::{
@@ -656,7 +656,7 @@ impl RemovedNames {
 /// `presentation` document's `parameter_group_membership` keys
 /// (`"{class}.{parameter}"`) and the `audit_rules` document's `class`,
 /// `selector` and `require[]` names. Runs ONCE per call, after every
-/// channel (B1: `set_metadata` closes the current row, so a second write of
+/// channel (B1: `property::set_core` closes the current row, so a second write of
 /// one document in one commit would trip the span CHECK), and writes a
 /// document only when it changed. Removals (`removals`: the call closed or
 /// unbound vocabulary) apply first, on the pre-call names the documents
@@ -684,8 +684,8 @@ pub(crate) fn rewrite_name_documents(
     if !calls.renamed_vocabulary() && !removals {
         return Ok(());
     }
-    let presentation = read_metadata_key(conn, "presentation")?;
-    let audit_rules = read_metadata_key(conn, "audit_rules")?;
+    let presentation = property::read(conn, "presentation")?;
+    let audit_rules = property::read(conn, "audit_rules")?;
     if presentation.is_none() && audit_rules.is_none() {
         return Ok(());
     }
@@ -747,7 +747,7 @@ pub(crate) fn rewrite_name_documents(
                     );
                     let text = serde_json::to_string(&serde_json::Value::Object(root))
                         .expect("a JSON value serializes");
-                    set_metadata(conn, c, "presentation", &text)?;
+                    property::set_core(conn, c, "presentation", &text)?;
                 }
             }
         }
@@ -817,11 +817,11 @@ pub(crate) fn rewrite_name_documents(
                 match normalize_audit_rules(&rules) {
                     Some(v) => {
                         let text = serde_json::to_string(&v).expect("a JSON value serializes");
-                        set_metadata(conn, c, "audit_rules", &text)?;
+                        property::set_core(conn, c, "audit_rules", &text)?;
                     }
                     // Every rule dropped: the document goes, as reconcile
                     // clears it (V-S2), never left stale.
-                    None => clear_metadata(conn, c, "audit_rules")?,
+                    None => property::clear_core(conn, c, "audit_rules")?,
                 }
             }
         }
@@ -864,10 +864,10 @@ pub(crate) fn refuse_template_stamped_renames(
     if renames.is_empty() {
         return Ok(());
     }
-    let Some(template_name) = read_metadata_key(conn, "template_name")? else {
+    let Some(template_name) = property::read(conn, "template_name")? else {
         return Ok(());
     };
-    let template_version = read_metadata_key(conn, "template_version")?;
+    let template_version = property::read(conn, "template_version")?;
     let items: Vec<String> = renames
         .iter()
         .map(|r| match &r.class {

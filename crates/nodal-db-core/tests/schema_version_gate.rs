@@ -138,8 +138,8 @@ fn old_file(dir: &Path) -> PathBuf {
     .expect("seed");
     let conn = Connection::open(&db).unwrap();
     conn.execute(
-        "UPDATE metadata SET value = ? \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+        "UPDATE database_property SET value = ? \
+         WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
         [OLD],
     )
     .unwrap();
@@ -231,4 +231,64 @@ fn every_write_to_an_older_file_is_refused_and_writes_nothing() {
         with_write_txn(&db, "t", "m", |_c, _id| Ok(())),
     );
     assert_eq!(census(&db), before, "nothing written");
+}
+
+/// A file in the pre-0.6 layout (its schema version in the `metadata` table,
+/// no `database_property`) is named by its own version on every path that
+/// gates on it — a write, compaction, extract and erase — never refused with
+/// a raw "table does not exist" catalog error.
+#[test]
+fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
+    const PRE: &str = "0.5-array-hash";
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("pre.duckdb");
+    init_schema_with_default(&db, Some("Base")).expect("init");
+    commit(&db, vec![scalar("a", 1.0)], WriteOptions::default()).expect("seed");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE metadata (id BIGINT, name VARCHAR, value VARCHAR, \
+           valid_from_commit BIGINT, valid_to_commit BIGINT, version SMALLINT); \
+         INSERT INTO metadata SELECT 1, key, value, valid_from_commit, NULL, 1 \
+           FROM database_property WHERE valid_to_commit IS NULL; \
+         UPDATE metadata SET value = '{PRE}' WHERE name = 'schema_version'; \
+         DROP TABLE database_property;"
+    ))
+    .unwrap();
+    conn.close().unwrap();
+    let named = |what: &str, r: Result<(), DbError>| match r {
+        Err(DbError::SchemaMismatch { found, .. }) => assert_eq!(found, PRE, "{what}"),
+        other => panic!("{what}: expected SchemaMismatch, got {other:?}"),
+    };
+    named(
+        "write",
+        commit(&db, vec![scalar("b", 2.0)], WriteOptions::default()).map(|_| ()),
+    );
+    named("compact", nodal_db_core::compaction::compact(&db).map(|_| ()));
+    named(
+        "extract",
+        nodal_db_core::extract::extract(
+            &db,
+            &dir.path().join("x.duckdb"),
+            &nodal_db_core::extract::ExtractOpts {
+                as_of: None,
+                user: "t",
+                note: None,
+            },
+        )
+        .map(|_| ()),
+    );
+    named(
+        "erase",
+        nodal_db_core::erasure::erase_alternative(
+            &db,
+            &nodal_db_core::types::ObjectDeleteKey {
+                kind: nodal_db_core::types::ObjectKind::Alternative,
+                class: None,
+                target: nodal_db_core::types::ObjectRef::Name("Base".into()),
+            },
+            &nodal_db_core::erasure::EraseOpts::default(),
+            "t",
+        )
+        .map(|_| ()),
+    );
 }

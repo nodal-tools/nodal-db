@@ -1322,7 +1322,7 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("1")
@@ -1330,7 +1330,7 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_migration_step'"
         ),
         None,
         "a skipped step must not substamp"
@@ -1338,7 +1338,7 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'"
         ),
         None,
         "no certification behind a paused chain"
@@ -1355,7 +1355,7 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("1"),
@@ -1364,7 +1364,7 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'"
         ),
         None,
         "apply#2 must NOT certify while the drop stays blocked"
@@ -1395,14 +1395,14 @@ fn drop_list_member_stranded_pauses_chain_then_retry_converges() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("2")
     );
     assert!(qs(
         &db,
-        "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+        "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'"
     )
     .is_some());
 }
@@ -1421,7 +1421,7 @@ fn drop_list_member_clean_case_closes_the_member() {
     assert_eq!(live(&db, "list_value", "v_str = 'keepme'"), 1);
     assert!(qs(
         &db,
-        "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+        "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'"
     )
     .is_some());
 }
@@ -1753,7 +1753,7 @@ migrations:
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("52")

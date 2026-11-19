@@ -1598,7 +1598,7 @@ fn metadata(db: &Path, key: &str) -> serde_json::Value {
     serde_json::from_str(
         &qopt(
             db,
-            &format!("SELECT value FROM metadata WHERE cur_name = '{key}'"),
+            &format!("SELECT value FROM database_property WHERE cur_key = '{key}'"),
         )
         .unwrap(),
     )
@@ -1610,13 +1610,13 @@ fn metadata_versions(db: &Path, key: &str) -> (i64, i64) {
         q1(
             db,
             &format!(
-                "SELECT count(*) FROM metadata WHERE lower(name) = '{key}' \
+                "SELECT count(*) FROM database_property WHERE lower(key) = '{key}' \
                  AND valid_to_commit IS NOT NULL"
             ),
         ),
         q1(
             db,
-            &format!("SELECT count(*) FROM metadata WHERE cur_name = '{key}'"),
+            &format!("SELECT count(*) FROM database_property WHERE cur_key = '{key}'"),
         ),
     )
 }
@@ -1756,7 +1756,7 @@ fn object_deletes_drop_their_names_from_the_documents() {
     assert_eq!(
         q1(
             &db,
-            "SELECT count(*) FROM metadata WHERE cur_name = 'audit_rules'"
+            "SELECT count(*) FROM database_property WHERE cur_key = 'audit_rules'"
         ),
         0
     );
@@ -1781,7 +1781,7 @@ fn export_drops_stale_audit_rule_names_with_a_warning() {
     let db = docs_db(&dir);
     let conn = Connection::open(&db).unwrap();
     conn.execute(
-        "UPDATE metadata SET value = ? WHERE cur_name = 'audit_rules'",
+        "UPDATE database_property SET value = ? WHERE cur_key = 'audit_rules'",
         [r#"{"conditional_requirements": [
               {"class": "unit", "selector": "method",
                "when": {"a": {"require": ["eff", "rate_gone"]}}},

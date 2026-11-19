@@ -408,7 +408,7 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("4")
@@ -531,7 +531,7 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
     assert!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'"
         )
         .is_none(),
         "content hash must be withheld on a partial apply"
@@ -539,7 +539,7 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("3n"),
@@ -913,7 +913,7 @@ fn retarget_refuses_by_default_and_needs_the_explicit_opt_in() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_name'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_name'"
         )
         .as_deref(),
         Some("other")
@@ -1000,7 +1000,7 @@ migrations:
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("5")
@@ -1025,7 +1025,7 @@ fn interrupted_chain_resumes_from_the_progress_substamp() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("3")
@@ -1033,7 +1033,7 @@ fn interrupted_chain_resumes_from_the_progress_substamp() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_migration_step'"
         )
         .as_deref(),
         Some("3->4:1"),
@@ -1054,7 +1054,7 @@ fn interrupted_chain_resumes_from_the_progress_substamp() {
     assert_eq!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_version'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_version'"
         )
         .as_deref(),
         Some("4")
@@ -1062,7 +1062,7 @@ fn interrupted_chain_resumes_from_the_progress_substamp() {
     assert!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_migration_step'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_migration_step'"
         )
         .is_none(),
         "span stamp clears the substamp"
@@ -1132,7 +1132,7 @@ fn excluded_membership_is_respected_and_withholds_convergence() {
     assert!(
         qs(
             &db,
-            "SELECT value FROM metadata WHERE cur_name = 'template_content_hash'"
+            "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'"
         )
         .is_none(),
         "hash withheld while the exclusion diverges from the template"

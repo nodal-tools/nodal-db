@@ -19,7 +19,7 @@ use nodal_db_core::verbs::stamp_template_identity;
 fn meta(db: &Path, key: &str) -> Option<String> {
     let conn = Connection::open(db).unwrap();
     conn.query_row(
-        "SELECT value FROM metadata WHERE cur_name = lower(?) ",
+        "SELECT value FROM database_property WHERE cur_key = lower(?) ",
         [key],
         |r| r.get::<_, String>(0),
     )

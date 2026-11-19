@@ -192,12 +192,12 @@ def compare_logical(old, new):
 
 
 def drop_differing_schema_version(old, new):
-    """The dump's `schema_version` metadata row, removed from both outputs
+    """The dump's `schema_version` row (metadata or database_property), removed from both outputs
     only when the arms' rows differ (a schema-version bump between the
     revisions); otherwise kept and compared like any row. Returns the two
     outputs and a note (None when nothing was dropped)."""
     def rows(text):
-        return [line for line in text.splitlines() if '|"schema_version"|' in line]
+        return [line for line in text.splitlines() if '|"schema_version"|' in line or line.startswith('"schema_version"|')]
     ro, rn = rows(old), rows(new)
     if ro == rn:
         return old, new, None

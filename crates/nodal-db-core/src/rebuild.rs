@@ -32,9 +32,14 @@ pub(crate) const TABLE_ORDER: &[&str] = &[
     // stays copy-verbatim-and-self-check).
     "erasure_marker",
     // The rest — no remaining engine FKs to order among.
-    "metadata",
-    "entity_metadata",
-    "parameter_value_metadata",
+    "database_property",
+    "metadata_pair",
+    "source",
+    "license",
+    "source_license",
+    "metadata_role",
+    "object_metadata_link",
+    "value_metadata_link",
     "run",
     "alternative",
     "scenario",
@@ -104,9 +109,14 @@ pub(crate) const SELECTION: &[(&str, Selection)] = &[
     ("commit", Selection::CommitLog),
     ("axis", Selection::Axis),
     ("erasure_marker", Selection::Trace),
-    ("metadata", Selection::Versioned),
-    ("entity_metadata", Selection::Versioned),
-    ("parameter_value_metadata", Selection::Versioned),
+    ("database_property", Selection::Versioned),
+    ("metadata_pair", Selection::Versioned),
+    ("source", Selection::Versioned),
+    ("license", Selection::Versioned),
+    ("source_license", Selection::Versioned),
+    ("metadata_role", Selection::Versioned),
+    ("object_metadata_link", Selection::Versioned),
+    ("value_metadata_link", Selection::Versioned),
     ("run", Selection::Trace),
     ("alternative", Selection::Versioned),
     ("scenario", Selection::Versioned),
@@ -209,11 +219,19 @@ pub(crate) fn check_selection(real_cols: &[(String, Vec<String>)]) -> Result<(),
 /// table. Keyed to [`SCHEMA_VERSION`]; retire this map once a bundled DuckDB
 /// reliably populates the standard flag.
 pub(crate) const GENERATED_COLUMNS: &[(&str, &[&str])] = &[
-    ("metadata", &["cur_id", "cur_name", "cur_val"]),
-    ("entity_metadata", &["cur_e", "cur_m"]),
+    ("database_property", &["cur_key"]),
+    ("metadata_pair", &["cur_id", "cur_name", "cur_val"]),
+    ("source", &["cur_id", "cur_name"]),
+    ("license", &["cur_id", "cur_name"]),
+    ("source_license", &["cur_s", "cur_l"]),
+    ("metadata_role", &["cur_id", "cur_name"]),
     (
-        "parameter_value_metadata",
-        &["cur_e", "cur_p", "cur_a", "cur_m"],
+        "object_metadata_link",
+        &["cur_ot", "cur_o", "cur_tk", "cur_t", "cur_r"],
+    ),
+    (
+        "value_metadata_link",
+        &["cur_tk", "cur_t", "cur_r", "cur_a", "cur_p", "cur_e"],
     ),
     ("display_mode", &["cur_id", "cur_name"]),
     ("entity_class_display_mode", &["cur_dm", "cur_ec"]),
@@ -360,15 +378,24 @@ pub(crate) const CLUSTER_KEYS: &[(&str, &[&str])] = &[
         &["parameter_definition_id", "slot"],
     ),
     // Narrow versioned tables: their identity/key columns.
-    ("metadata", &["id"]),
-    ("entity_metadata", &["entity_id", "metadata_id"]),
+    ("database_property", &["key"]),
+    ("metadata_pair", &["id"]),
+    ("source", &["id"]),
+    ("license", &["id"]),
+    ("source_license", &["source_id", "license_id"]),
+    ("metadata_role", &["id"]),
     (
-        "parameter_value_metadata",
+        "object_metadata_link",
+        &["object_type", "object_id", "target_kind", "target_id"],
+    ),
+    (
+        "value_metadata_link",
         &[
             "entity_id",
             "parameter_definition_id",
             "alternative_id",
-            "metadata_id",
+            "target_kind",
+            "target_id",
         ],
     ),
     ("alternative", &["id"]),
@@ -460,14 +487,9 @@ pub(crate) fn q(ident: &str) -> String {
 }
 
 /// Confirm the freshly-init'd temp seeded [`SCHEMA_VERSION`] (guards the const
-/// against DDL drift). Read before B1 wipes `metadata`.
+/// against DDL drift). Read before B1 wipes `database_property`.
 pub(crate) fn assert_temp_schema_version(conn: &Connection) -> Result<(), DbError> {
-    let v: String = conn.query_row(
-        "SELECT value FROM metadata \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
-        [],
-        |r| r.get(0),
-    )?;
+    let v: String = crate::property::read(conn, "schema_version")?.unwrap_or_default();
     if v != SCHEMA_VERSION {
         return Err(DbError::Api(format!(
             "internal: fresh temp seeded schema_version {v:?} != compaction::SCHEMA_VERSION \

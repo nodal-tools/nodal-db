@@ -712,7 +712,7 @@ pub fn commit_change_set(
         let deleted_vocabulary = !prepared_object_deletes.is_empty()
             && crate::purge::closed_vocabulary(conn, commit_id)?;
         if deleted_vocabulary {
-            crate::template::reconcile::clear_metadata(conn, commit_id, "template_content_hash")?;
+            crate::property::clear_core(conn, commit_id, "template_content_hash")?;
         }
         // `DeleteWins`: a write is dropped only for a delete that took
         // effect; otherwise the whole call is refused (rolled back). Each
@@ -747,7 +747,7 @@ pub fn commit_change_set(
         // A purge that closed (or unbound) vocabulary leaves a stamped
         // database unconverged, as an object delete does (V-B2).
         if purged_vocabulary {
-            crate::template::reconcile::clear_metadata(conn, commit_id, "template_content_hash")?;
+            crate::property::clear_core(conn, commit_id, "template_content_hash")?;
         }
         // The name-keyed metadata documents follow the renames and drop
         // what this call closed or unbound, once per document per call
@@ -3235,19 +3235,43 @@ pub fn head_commit(db: &Path) -> Result<i64, DbError> {
 /// key, minted once by `900_bootstrap.sql` at init and never changed thereafter
 /// (specs/schema_interop.md §9: the anchor output DBs stamp their
 /// "produced from input DB <identity> at commit C under scenario S" provenance
-/// against). It survives reopen and compaction (the repack copies `metadata`
-/// rows as data). One fresh RO connection per call (CLAUDE.md invariant 1).
-/// Plain-SQL equivalent:
-/// `SELECT value FROM metadata WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL`.
+/// against). It survives reopen and compaction (the repack copies
+/// `database_property` rows as data). One fresh RO connection per call
+/// (CLAUDE.md invariant 1). Plain-SQL equivalent:
+/// `SELECT value FROM database_property WHERE lower(key) = 'db_identity' AND valid_to_commit IS NULL`.
 pub fn db_identity(db: &Path) -> Result<String, DbError> {
     with_read_plain(db, |conn| {
-        Ok(conn.query_row(
-            "SELECT value FROM metadata \
-             WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",
-            [],
-            |r| r.get(0),
-        )?)
+        crate::property::read(conn, "db_identity")?
+            .ok_or_else(|| DbError::Api("the database has no db_identity property".into()))
     })
+}
+
+/// One database property's current value (`None` when the key is unset).
+/// Keys are case-insensitive. One fresh RO connection per call.
+pub fn database_property(db: &Path, key: &str) -> Result<Option<String>, DbError> {
+    let key = crate::text::nfc(key);
+    with_read_plain(db, |conn| crate::property::read(conn, &key))
+}
+
+/// Every current database property, ordered by key, as
+/// [`DatabaseProperty`] rows (core, user and tool keys). One fresh RO
+/// connection per call.
+pub fn database_properties(db: &Path) -> Result<Vec<DatabaseProperty>, DbError> {
+    with_read_plain(db, |conn| {
+        Ok(crate::property::read_all(conn)?
+            .into_iter()
+            .map(|(key, value, owner)| DatabaseProperty { key, value, owner })
+            .collect())
+    })
+}
+
+/// One current database property ([`database_properties`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseProperty {
+    pub key: String,
+    pub value: String,
+    /// `"core"`, `"user"` or `"tool"`.
+    pub owner: String,
 }
 
 // ---------------------------------------------------------------------------

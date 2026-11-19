@@ -143,7 +143,8 @@ keeps them. `nodal_read_surface()` says which:
   on. It changes only for a breaking change: a stable object, column or
   parameter removed or renamed, a stable column's type or position
   changed, a documented semantics changed (case sensitivity, the NULL
-  conventions, the alternative default), or a mirror removed or renamed.
+  conventions, the alternative default). A mirror is removed or renamed
+  only with its table, i.e. with a schema version change.
 - `revision` increases with every change to the surface DDL, breaking or
   not: appended columns, new objects, faster bodies, bug fixes, any
   change to an advisory or internal object.

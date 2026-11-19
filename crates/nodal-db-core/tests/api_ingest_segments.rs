@@ -358,8 +358,8 @@ fn write_error_on_other_schema_version_names_the_version() {
     {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
-            "UPDATE metadata SET value = '0.3-test' \
-             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+            "UPDATE database_property SET value = '0.3-test' \
+             WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
         )
         .unwrap();
         conn.close().unwrap();
@@ -394,8 +394,8 @@ fn write_error_on_other_schema_version_names_the_version() {
     {
         let conn = Connection::open(&db).unwrap();
         conn.execute(
-            "UPDATE metadata SET value = ? \
-             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+            "UPDATE database_property SET value = ? \
+             WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
             [nodal_db_core::compaction::SCHEMA_VERSION],
         )
         .unwrap();

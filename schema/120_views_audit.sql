@@ -113,43 +113,108 @@ SELECT 'entity_parameter_unit', 'entity=' || entity_id, 'units_of_measure', unit
 FROM entity_parameter_unit WHERE valid_to_commit IS NULL
   AND unit_id NOT IN (SELECT id FROM units_of_measure WHERE valid_to_commit IS NULL)
 UNION ALL
-SELECT 'entity_metadata', 'entity=' || entity_id, 'entity', entity_id
-FROM entity_metadata WHERE valid_to_commit IS NULL
+-- metadata links: the subject per object type, the target per kind, the
+-- role, and (value links) the key triple itself
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'entity', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'entity'
+  AND object_id NOT IN (SELECT id FROM entity WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'entity_class', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'entity_class'
+  AND object_id NOT IN (SELECT id FROM entity_class WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'parameter_definition', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'parameter_definition'
+  AND object_id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'alternative', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'alternative'
+  AND object_id NOT IN (SELECT id FROM alternative WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'scenario', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'scenario'
+  AND object_id NOT IN (SELECT id FROM scenario WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'source', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'source'
+  AND object_id NOT IN (SELECT id FROM source WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'license', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'license'
+  AND object_id NOT IN (SELECT id FROM license WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'parameter_value_list', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'parameter_value_list'
+  AND object_id NOT IN (SELECT id FROM parameter_value_list WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'units_of_measure', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'units_of_measure'
+  AND object_id NOT IN (SELECT id FROM units_of_measure WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'run', object_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND object_type = 'run'
+  AND object_id NOT IN (SELECT id FROM run)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'source', target_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND target_kind = 'source'
+  AND target_id NOT IN (SELECT id FROM source WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'license', target_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND target_kind = 'license'
+  AND target_id NOT IN (SELECT id FROM license WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'metadata_pair', target_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND target_kind = 'pair'
+  AND target_id NOT IN (SELECT id FROM metadata_pair WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'object_metadata_link', object_type || '=' || object_id || ',' || target_kind || '=' || target_id, 'metadata_role', role_id
+FROM object_metadata_link WHERE valid_to_commit IS NULL AND role_id IS NOT NULL
+  AND role_id NOT IN (SELECT id FROM metadata_role WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'value_metadata_link', 'entity=' || entity_id || ',pd=' || parameter_definition_id || ',alt=' || alternative_id || ',' || target_kind || '=' || target_id, 'entity', entity_id
+FROM value_metadata_link WHERE valid_to_commit IS NULL
   AND entity_id NOT IN (SELECT id FROM entity WHERE valid_to_commit IS NULL)
 UNION ALL
-SELECT 'entity_metadata', 'entity=' || entity_id, 'metadata', metadata_id
-FROM entity_metadata WHERE valid_to_commit IS NULL
-  AND metadata_id NOT IN (SELECT id FROM metadata WHERE valid_to_commit IS NULL)
-UNION ALL
-SELECT 'parameter_value_metadata', 'entity=' || entity_id, 'metadata', metadata_id
-FROM parameter_value_metadata WHERE valid_to_commit IS NULL
-  AND metadata_id NOT IN (SELECT id FROM metadata WHERE valid_to_commit IS NULL)
-UNION ALL
--- the value link's other legs (critique M1): entity, definition,
--- alternative, and the key triple itself (a link whose triple matches no
--- current value in any tier is dangling — the tiered model has no value id)
-SELECT 'parameter_value_metadata', 'entity=' || entity_id, 'entity', entity_id
-FROM parameter_value_metadata WHERE valid_to_commit IS NULL
-  AND entity_id NOT IN (SELECT id FROM entity WHERE valid_to_commit IS NULL)
-UNION ALL
-SELECT 'parameter_value_metadata', 'entity=' || entity_id, 'parameter_definition', parameter_definition_id
-FROM parameter_value_metadata WHERE valid_to_commit IS NULL
+SELECT 'value_metadata_link', 'entity=' || entity_id || ',pd=' || parameter_definition_id || ',alt=' || alternative_id || ',' || target_kind || '=' || target_id, 'parameter_definition', parameter_definition_id
+FROM value_metadata_link WHERE valid_to_commit IS NULL
   AND parameter_definition_id NOT IN (SELECT id FROM parameter_definition WHERE valid_to_commit IS NULL)
 UNION ALL
-SELECT 'parameter_value_metadata', 'entity=' || entity_id, 'alternative', alternative_id
-FROM parameter_value_metadata WHERE valid_to_commit IS NULL
+SELECT 'value_metadata_link', 'entity=' || entity_id || ',pd=' || parameter_definition_id || ',alt=' || alternative_id || ',' || target_kind || '=' || target_id, 'alternative', alternative_id
+FROM value_metadata_link WHERE valid_to_commit IS NULL
   AND alternative_id NOT IN (SELECT id FROM alternative WHERE valid_to_commit IS NULL)
 UNION ALL
-SELECT 'parameter_value_metadata',
-       'entity=' || pvm.entity_id || ',pd=' || pvm.parameter_definition_id
-         || ',alt=' || pvm.alternative_id,
-       'value_keys (triple)', pvm.entity_id
-FROM parameter_value_metadata pvm
-WHERE pvm.valid_to_commit IS NULL
+SELECT 'value_metadata_link', 'entity=' || entity_id || ',pd=' || parameter_definition_id || ',alt=' || alternative_id || ',' || target_kind || '=' || target_id, 'source', target_id
+FROM value_metadata_link WHERE valid_to_commit IS NULL AND target_kind = 'source'
+  AND target_id NOT IN (SELECT id FROM source WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'value_metadata_link', 'entity=' || entity_id || ',pd=' || parameter_definition_id || ',alt=' || alternative_id || ',' || target_kind || '=' || target_id, 'metadata_pair', target_id
+FROM value_metadata_link WHERE valid_to_commit IS NULL AND target_kind = 'pair'
+  AND target_id NOT IN (SELECT id FROM metadata_pair WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'value_metadata_link', 'entity=' || entity_id || ',pd=' || parameter_definition_id || ',alt=' || alternative_id || ',' || target_kind || '=' || target_id, 'metadata_role', role_id
+FROM value_metadata_link WHERE valid_to_commit IS NULL AND role_id IS NOT NULL
+  AND role_id NOT IN (SELECT id FROM metadata_role WHERE valid_to_commit IS NULL)
+UNION ALL
+-- a link whose triple matches no current value in any tier is dangling (the
+-- tiered model has no value id)
+SELECT 'value_metadata_link',
+       'entity=' || vml.entity_id || ',pd=' || vml.parameter_definition_id
+         || ',alt=' || vml.alternative_id,
+       'value_keys (triple)', vml.entity_id
+FROM value_metadata_link vml
+WHERE vml.valid_to_commit IS NULL
   AND NOT EXISTS (SELECT 1 FROM value_keys vk
-                  WHERE vk.entity_id = pvm.entity_id
-                    AND vk.parameter_definition_id = pvm.parameter_definition_id
-                    AND vk.alternative_id = pvm.alternative_id)
+                  WHERE vk.entity_id = vml.entity_id
+                    AND vk.parameter_definition_id = vml.parameter_definition_id
+                    AND vk.alternative_id = vml.alternative_id)
+UNION ALL
+SELECT 'source_license', 'source=' || source_id || ',license=' || license_id, 'source', source_id
+FROM source_license WHERE valid_to_commit IS NULL
+  AND source_id NOT IN (SELECT id FROM source WHERE valid_to_commit IS NULL)
+UNION ALL
+SELECT 'source_license', 'source=' || source_id || ',license=' || license_id, 'license', license_id
+FROM source_license WHERE valid_to_commit IS NULL
+  AND license_id NOT IN (SELECT id FROM license WHERE valid_to_commit IS NULL)
 UNION ALL
 -- value tiers via value_keys (covers all three current surfaces)
 SELECT 'value_' || tier, 'entity=' || entity_id || ',pd=' || parameter_definition_id, 'entity', entity_id
@@ -706,29 +771,6 @@ WHERE dv.valid_to_commit IS NULL AND dv.content_retained
         OR (dv.value_kind = 'duration' AND lv.v_dur_months = dv.v_dur_months
                                        AND lv.v_dur_micros = dv.v_dur_micros)));
 
--- Reserved single-valued metadata keys must not fork: the
--- carried Spine (lower(name), value) uniqueness constrains duplicates of a
--- pair, never per-key multiplicity — right for tag-like keys, wrong for the
--- reserved keys the plans read singly (schema_version drives migration
--- dispatch; template identity drives Decision 6 diff/apply; the Decision 7
--- presentation document is one slot). Writer rule: close-out-then-insert on
--- reserved keys, never a second current row.
--- @surface: advisory
-CREATE VIEW audit_metadata_reserved_dup AS
-SELECT lower(name) AS name, count(*) AS n, list(value) AS conflicting_values
-FROM metadata
-WHERE valid_to_commit IS NULL
-  AND lower(name) IN ('schema_version', 'db_identity',
-                      'template_name', 'template_version',
-                      'template_content_hash', 'presentation',
-                      'semantic_context', 'conforms_to',
-                      'audit_rules')  -- single-valued reserved keys (fitness 2b + interop §9;
-                                      -- audit_rules: the D4 conditional-rules document,
-                                      -- template_ir_plan §5.2 — the one-string additive edit
-                                      -- named in its Appendix)
-GROUP BY lower(name)
-HAVING count(*) > 1;
-
 -- Redundant activation rows (#3010): rows restating the class default.
 -- Advisory only — under propagation semantics an own row equal to the
 -- default can still act as a propagation barrier.
@@ -912,8 +954,11 @@ FROM (
   SELECT count(*) FILTER (WHERE valid_to_commit IS NULL) AS live_rows,
          count(*) FILTER (WHERE valid_to_commit IS NOT NULL) AS dead_rows
   FROM (
-    SELECT valid_to_commit FROM metadata UNION ALL SELECT valid_to_commit FROM entity_metadata
-    UNION ALL SELECT valid_to_commit FROM parameter_value_metadata
+    SELECT valid_to_commit FROM database_property UNION ALL SELECT valid_to_commit FROM metadata_pair
+    UNION ALL SELECT valid_to_commit FROM source UNION ALL SELECT valid_to_commit FROM license
+    UNION ALL SELECT valid_to_commit FROM source_license UNION ALL SELECT valid_to_commit FROM metadata_role
+    UNION ALL SELECT valid_to_commit FROM object_metadata_link
+    UNION ALL SELECT valid_to_commit FROM value_metadata_link
     UNION ALL SELECT valid_to_commit FROM entity_class UNION ALL SELECT valid_to_commit FROM class_set
     UNION ALL SELECT valid_to_commit FROM class_set_member UNION ALL SELECT valid_to_commit FROM entity_class_dimension
     UNION ALL SELECT valid_to_commit FROM entity UNION ALL SELECT valid_to_commit FROM entity_element
@@ -935,6 +980,53 @@ FROM (
 UNION ALL
 SELECT 'database file', NULL, NULL, NULL, NULL, 'size: ' || database_size
 FROM pragma_database_size();
+
+-- A live value link older than its value's current version: every new value
+-- version closes the value's links and reopens the kept ones at the same
+-- commit, so a link that starts before the current version began means a
+-- writer bypassed the keep / set / clear rule. Scoped to linked triples
+-- before any span work. Both sides are clipped to the file's horizon (a
+-- history-free extract's commit E: `value_timeline` clips long boundaries to
+-- E while link rows keep their original valid_from), so extracts do not
+-- fire it.
+-- @surface: advisory
+CREATE VIEW audit_value_link_version AS
+WITH horizon AS (
+  SELECT coalesce(max(at_commit), 0) AS e FROM erasure_marker WHERE kind = 'horizon'
+), linked AS (
+  SELECT entity_id, parameter_definition_id, alternative_id,
+         min(valid_from_commit) AS link_from
+  FROM value_metadata_link WHERE valid_to_commit IS NULL
+  GROUP BY ALL
+), version_start AS (
+  SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, l.link_from,
+         coalesce(
+           (SELECT max(s.valid_from_commit) FROM value_scalar s
+             WHERE s.valid_to_commit IS NULL AND s.entity_id = l.entity_id
+               AND s.parameter_definition_id = l.parameter_definition_id
+               AND s.alternative_id = l.alternative_id),
+           (SELECT max(g.valid_from_commit) FROM value_long g
+             WHERE g.valid_to_commit IS NULL AND g.entity_id = l.entity_id
+               AND g.parameter_definition_id = l.parameter_definition_id
+               AND g.alternative_id = l.alternative_id),
+           (SELECT max(a.valid_from_commit) FROM value_array a
+             WHERE a.entity_id = l.entity_id
+               AND a.parameter_definition_id = l.parameter_definition_id
+               AND a.alternative_id = l.alternative_id)) AS value_from
+  FROM linked l
+)
+SELECT v.entity_id, v.parameter_definition_id, v.alternative_id,
+       v.link_from AS link_from_commit, v.value_from AS value_from_commit
+FROM version_start v, horizon h
+WHERE v.value_from IS NOT NULL
+  AND greatest(v.link_from, h.e) < greatest(v.value_from, h.e);
+
+-- Licenses not flagged as SPDX identifiers (free license names are allowed;
+-- this lists them for review).
+-- @surface: advisory
+CREATE VIEW audit_license_non_spdx AS
+SELECT id, name, title, path
+FROM license WHERE valid_to_commit IS NULL AND NOT spdx;
 
 -- ---------------------------------------------------------------------------
 -- Erasure inventory (reporting, NOT blocking —

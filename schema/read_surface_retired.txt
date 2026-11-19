@@ -8,4 +8,11 @@
 # body. Names stay reserved: a user object with a listed name is dropped by
 # the refresh too. Never remove a line.
 #
-# (none yet)
+# Retired with the metadata tables (schema 0.6-metadata):
+metadata_current
+entity_metadata_current
+parameter_value_metadata_current
+metadata_asof
+entity_metadata_asof
+parameter_value_metadata_asof
+audit_metadata_reserved_dup

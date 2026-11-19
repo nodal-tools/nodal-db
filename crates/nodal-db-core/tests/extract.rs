@@ -199,7 +199,7 @@ fn opts(user: &str) -> ExtractOpts<'_> {
 const ALL_TABLES_SQL: &str = "SELECT table_name FROM information_schema.tables \
      WHERE table_type = 'BASE TABLE' AND table_catalog = current_database() ORDER BY 1";
 
-/// The 31 as-of table macros (the same census the erasure sweep uses).
+/// The 36 as-of table macros (the same census the erasure sweep uses).
 fn asof_macros(db: &Path) -> Vec<String> {
     strings(
         db,
@@ -303,7 +303,7 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
          INSERT INTO membership (group_entity_id, member_entity_id, included, valid_from_commit)
            SELECT e1.id, e2.id, TRUE, currval('seq_commit')
            FROM entity e1, entity e2 WHERE e1.cur_name = 'n1' AND e2.cur_name = 'n2';
-         INSERT INTO metadata (name, value, valid_from_commit)
+         INSERT INTO metadata_pair (name, value, valid_from_commit)
            VALUES ('note_key', 'note_val', currval('seq_commit'));
          INSERT INTO run (id, tool_entity_id, result_alternative_id, input_commit_id, status)
            SELECT nextval('seq_run'), e.id, a.id, 1, 'optimal'
@@ -452,7 +452,7 @@ const T1_EXCLUDED_VIEWS: &[&str] = &[
     "axis_parametric",        // rendering helper over every axis: the same (asserted)
     "axis_position_stored",   // rendering helper over every axis: the same (asserted)
     "dataset_version",        // E (asserted)
-    "metadata_current",       // the identity row differs (asserted)
+    "database_property_current", // the identity row differs (asserted)
     "value_timeline",         // history view: only the surviving versions (asserted)
     "history_untrusted_span", // history view (asserted)
 ];
@@ -559,7 +559,7 @@ fn t1_head_extract_reads_identically() {
         scalar(&dest, "SELECT version FROM dataset_version"),
         report.extract_commit
     );
-    let md = "SELECT * FROM metadata_current WHERE lower(name) <> 'db_identity'";
+    let md = "SELECT * FROM database_property_current WHERE lower(key) <> 'db_identity'";
     assert_eq!(fingerprint(&fx.db, md), fingerprint(&dest, md));
     // value_timeline: the scalar and array legs carry the surviving
     // versions verbatim. The long leg is value-level change spans derived
@@ -617,7 +617,7 @@ fn t3_asof_before_e_fails_loudly_and_is_exact_at_e() {
     let r = extract(&fx.db, &dest, &opts("tester")).expect("extract");
     let e = r.extract_commit;
     let macros = asof_macros(&dest);
-    assert_eq!(macros.len(), 31);
+    assert_eq!(macros.len(), 36);
 
     let conn = Connection::open(&dest).unwrap();
     for m in &macros {
@@ -691,10 +691,6 @@ fn t4_t5_marker_identity_and_log() {
     assert_ne!(new_id, src_id);
     assert_eq!(new_id, r.extract_identity);
     assert_eq!(src_id, r.source_identity);
-    assert_eq!(
-        scalar(&dest, "SELECT count(*) FROM audit_metadata_reserved_dup"),
-        0
-    );
     assert_eq!(r.horizon_commit, src_max);
     assert!(r.extract_commit > src_max);
     let log = format!("SELECT * FROM \"commit\" WHERE id <= {src_max}");
@@ -712,7 +708,7 @@ fn t4_t5_marker_identity_and_log() {
     assert_eq!(
         scalar(
             &dest,
-            "SELECT valid_from_commit FROM metadata WHERE lower(name) = 'db_identity' \
+            "SELECT valid_from_commit FROM database_property WHERE lower(key) = 'db_identity' \
              AND valid_to_commit IS NULL"
         ),
         r.extract_commit
@@ -1059,8 +1055,8 @@ fn t9_refusals_leave_no_dest_and_no_temp() {
     std::fs::copy(src, &bad_schema).unwrap();
     let conn = Connection::open(&bad_schema).unwrap();
     conn.execute_batch(
-        "UPDATE metadata SET value = '0.0-old' \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
+        "UPDATE database_property SET value = '0.0-old' \
+         WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
     )
     .unwrap();
     conn.close().unwrap();
@@ -1074,24 +1070,14 @@ fn t9_refusals_leave_no_dest_and_no_temp() {
     let no_id = dir.path().join("no_id.duckdb");
     std::fs::copy(src, &no_id).unwrap();
     let conn = Connection::open(&no_id).unwrap();
-    conn.execute_batch("DELETE FROM metadata WHERE lower(name) = 'db_identity'")
+    conn.execute_batch("DELETE FROM database_property WHERE lower(key) = 'db_identity'")
         .unwrap();
     conn.close().unwrap();
     assert_refused(extract(&no_id, &dest, &opts("t")), "0 current db_identity");
 
-    let two_ids = dir.path().join("two_ids.duckdb");
-    std::fs::copy(src, &two_ids).unwrap();
-    let conn = Connection::open(&two_ids).unwrap();
-    conn.execute_batch(
-        "INSERT INTO metadata (name, value, valid_from_commit) \
-         VALUES ('db_identity', 'second', (SELECT max(id) FROM \"commit\"))",
-    )
-    .unwrap();
-    conn.close().unwrap();
-    assert_refused(
-        extract(&two_ids, &dest, &opts("t")),
-        "2 current db_identity",
-    );
+    // Two current db_identity rows are unrepresentable since 0.6 (the
+    // unique key index on database_property), so only the missing case is
+    // tested.
 
     // Nothing anywhere.
     assert!(!dest.exists());
@@ -1180,7 +1166,7 @@ fn t9_in_process_writer_serializes_with_extract() {
             s2.wait();
             std::thread::sleep(std::time::Duration::from_millis(800));
             conn.execute(
-                "INSERT INTO metadata (name, value, valid_from_commit) VALUES ('slow', 'x', ?)",
+                "INSERT INTO metadata_pair (name, value, valid_from_commit) VALUES ('slow', 'x', ?)",
                 [c],
             )?;
             Ok(c)
@@ -1198,7 +1184,7 @@ fn t9_in_process_writer_serializes_with_extract() {
     assert_eq!(
         scalar(
             &dest,
-            "SELECT count(*) FROM metadata WHERE name = 'slow' AND valid_to_commit IS NULL"
+            "SELECT count(*) FROM metadata_pair WHERE name = 'slow' AND valid_to_commit IS NULL"
         ),
         1
     );
@@ -1296,14 +1282,14 @@ fn assert_asof_equal(src: &Path, dest: &Path, n: i64) {
                 format!("SELECT * EXCLUDE (valid_to_commit, content_retained) FROM {m}({n})"),
                 "SELECT * FROM value_array_current".to_string(),
             )
-        } else if base == "metadata" {
+        } else if base == "database_property" {
             (
                 format!(
                     "SELECT * EXCLUDE (valid_to_commit) FROM {m}({n}) \
-                     WHERE lower(name) <> 'db_identity'"
+                     WHERE lower(key) <> 'db_identity'"
                 ),
-                "SELECT * EXCLUDE (valid_to_commit) FROM metadata_current \
-                 WHERE lower(name) <> 'db_identity'"
+                "SELECT * EXCLUDE (valid_to_commit) FROM database_property_current \
+                 WHERE lower(key) <> 'db_identity'"
                     .to_string(),
             )
         } else {
@@ -1398,10 +1384,6 @@ fn t2_asof_extract_equals_source_asof_macros() {
             scalar(&dest, "SELECT count(*) FROM audit_array_id_coherence"),
             0
         );
-        assert_eq!(
-            scalar(&dest, "SELECT count(*) FROM audit_metadata_reserved_dup"),
-            0
-        );
         // Loud before E, exact at E.
         let e = r.extract_commit;
         let conn = Connection::open(&dest).unwrap();
@@ -1435,7 +1417,7 @@ fn t2_asof_extract_equals_source_asof_macros() {
     extract(src, &head, &opts("tester")).unwrap();
     extract(src, &at_head, &asof("tester", h)).unwrap();
     for t in strings(src, ALL_TABLES_SQL) {
-        if t == "commit" || t == "metadata" || t == "erasure_marker" {
+        if t == "commit" || t == "database_property" || t == "erasure_marker" {
             continue;
         }
         let q = format!("SELECT * FROM \"{t}\"");
@@ -1527,13 +1509,13 @@ fn t9_asof_refusals() {
     let conn = Connection::open(&old_schema).unwrap();
     for sql in [
         "INSERT INTO \"commit\" (user, message) VALUES ('t', 'schema row history')",
-        "UPDATE metadata SET valid_to_commit = (SELECT max(id) FROM \"commit\") \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
-        "INSERT INTO metadata (id, name, value, valid_from_commit, version) \
-         SELECT id, name, value, valid_to_commit, 2 FROM metadata \
-         WHERE lower(name) = 'schema_version'",
-        "UPDATE metadata SET value = '0.3-old' \
-         WHERE lower(name) = 'schema_version' AND valid_to_commit IS NOT NULL",
+        "UPDATE database_property SET valid_to_commit = (SELECT max(id) FROM \"commit\") \
+         WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit, version) \
+         SELECT key, value, owner, valid_to_commit, 2 FROM database_property \
+         WHERE lower(key) = 'schema_version'",
+        "UPDATE database_property SET value = '0.3-old' \
+         WHERE lower(key) = 'schema_version' AND valid_to_commit IS NOT NULL",
     ] {
         conn.execute_batch(sql).unwrap();
     }

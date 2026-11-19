@@ -1,6 +1,6 @@
--- 001_meta.sql — sequences, commit log, metadata.
+-- 001_meta.sql — sequences, commit log, database properties, metadata.
 -- Plan citations: SDP = specs/schema_draft_plan.md, VMP = specs/value_model_plan.md.
--- SDP Part 1 rows `commit`, `metadata`; SDP Part 2 "History, commits, and
+-- SDP Part 1 row `commit`; SDP Part 2 "History, commits, and
 -- change detection"; VMP Part 5 (commit ids as validity edges).
 
 -- Stable-id contract (SDP Part 2, #3218): ids are durable across sessions.
@@ -8,7 +8,10 @@
 -- versions, so id is NOT a primary key on versioned tables (see ddl_sketch.md
 -- deviation D1: FK intent to versioned tables falls back to validation views).
 CREATE SEQUENCE seq_commit;
-CREATE SEQUENCE seq_metadata;
+CREATE SEQUENCE seq_metadata_pair;
+CREATE SEQUENCE seq_source;
+CREATE SEQUENCE seq_license;
+CREATE SEQUENCE seq_metadata_role;
 CREATE SEQUENCE seq_entity_class;
 CREATE SEQUENCE seq_class_set;
 CREATE SEQUENCE seq_entity;
@@ -57,7 +60,7 @@ CREATE TABLE commit (
 -- continuation_db = the source's identity: the untouched source is the
 -- archive); kind='entity' is not written yet. The as-of guard in
 -- 110_views_history.sql consults this table relationally on every as-of read —
--- which is why it is a base table, not a `metadata` reserved key.
+-- which is why it is a base table, not a `database_property` key.
 -- Scope columns are ids, not names; the identity rows they point to are
 -- RETAINED (closed, never removed — D-E2), so a marker always resolves to a
 -- name. They carry no engine FKs (versioned targets — deviation D1);
@@ -95,77 +98,199 @@ CREATE TABLE erasure_marker (
   CHECK (kind IN ('alternative', 'entity', 'horizon'))
 );
 
--- One key/value metadata table (SDP Part 1 `metadata`): dataset-level facts
--- (#645: author, sources, licenses), template identity keys (Decision 6:
--- template name/version/content hash), the shared authored presentation slot
--- (Decision 7: one JSON document under one reserved key), schema_version
--- (replaces alembic_version), and db_identity (the stable DB-identity UUID,
--- minted once by 900_bootstrap.sql and never changed — the anchor for
--- output→input provenance stamps, schema_interop.md §9; read with
---   SELECT value FROM metadata
---   WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL)
--- are reserved keys with no link row.
--- Fitness round 2b adds semantic/interop reserved keys (convention only, no
--- new table): `semantic_context` (JSON-LD @context / CURIE-prefix map that
--- expands the IRIs stored in semantic_link / quantity_kind_link / term_iri),
--- `conforms_to` (DCTERMS profile IRI the dataset claims), plus the agreed
--- Frictionless/oemetadata `licenses` / per-source `sourceLicenses`,
--- role-typed `contributors`, and dataset `version` keys. JSON-valued keys
--- ride the single `value` VARCHAR as a JSON document, like `presentation`.
--- Full catalogue: ddl_sketch.md §4.1.
--- Mutable table -> from/to-commit pattern (VMP Part 5 "Scope of
--- record-per-commit"); one-current per id via generated-column unique index
--- (specs/versioning_from_to_date_research.md trick — partial indexes are
--- unsupported in DuckDB, verified 1.4.4).
-CREATE TABLE metadata (
-  id                BIGINT NOT NULL DEFAULT nextval('seq_metadata'),
-  name              VARCHAR NOT NULL,          -- key; reserved keys documented in ddl_sketch.md
-  value             VARCHAR NOT NULL,          -- scalar or JSON document (presentation slot)
+-- ---------------------------------------------------------------------------
+-- Database properties and metadata.
+-- Every table: from/to-commit pattern, `version` 1..n per key, the span CHECK,
+-- `cur_*` generated columns and current-scoped unique indexes (partial
+-- indexes are unsupported in DuckDB). No engine FKs to versioned tables
+-- (deviation D1); FK intent is checked by `audit_dangling_ref` (120).
+-- Unique-index key order follows engine rule 4 (few-distinct columns first,
+-- the most-varying last); no index here is an access path (engine rule 3).
+-- The core's `property` module owns `database_property`; its `metadata`
+-- module owns the other seven tables (one writer per table).
+-- ---------------------------------------------------------------------------
+
+-- Single-valued database properties: one current row per key (case-folded).
+-- `owner` classifies the key and is CHECKed against its namespace, so the DDL
+-- is the one classifier:
+--   'core' — written only by the core: schema_version (replaces
+--            alembic_version), db_identity (the stable DB-identity UUID
+--            minted by 900_bootstrap.sql and never changed), the template
+--            stamp keys, the shared `presentation` document and
+--            `audit_rules`. Adding a core key edits the CHECK list below, i.e.
+--            it is a schema change with a SCHEMA_VERSION bump (core keys come
+--            only with core changes, like erasure_marker.kind);
+--   'tool' — `<tool>:<name>` keys a tool owns (e.g. `flextool:frozen`);
+--   'user' — every other key (documented well-known keys: identifier,
+--            base_iri, title, description, version, created, homepage,
+--            language, semantic_context, conforms_to).
+-- JSON-valued keys ride the single `value` VARCHAR as a JSON document.
+-- Read the identity with plain SQL:
+--   SELECT value FROM database_property
+--   WHERE lower(key) = 'db_identity' AND valid_to_commit IS NULL
+CREATE TABLE database_property (
+  key               VARCHAR NOT NULL,
+  value             VARCHAR NOT NULL,
+  owner             VARCHAR NOT NULL CHECK (owner IN ('core', 'user', 'tool')),
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),  -- NULL = current
-  version           SMALLINT NOT NULL DEFAULT 1,   -- 1..n per id (VMP Part 5, critique #1)
-  -- span coherence (critique F2): a closed span must close after it opened;
-  -- the same CHECK appears on every from/to table
+  version           SMALLINT NOT NULL DEFAULT 1,   -- 1..n per key
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
-  cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
-  -- case-insensitive uniqueness on (name, value) among current rows (SDP
-  -- Decision 11 applied to metadata keys; same (name, value) uniqueness as
-  -- the carried Spine table):
-  cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL,
-  cur_val  VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN value END) VIRTUAL
+  -- tool keys: '<tool>:<name>' (the writer checks both parts; this is the
+  -- coarse backstop)
+  CHECK ((owner = 'tool') = (strpos(key, ':') > 1)),
+  CHECK ((owner = 'core') = (lower(key) IN ('schema_version', 'db_identity',
+     'template_name', 'template_version', 'template_content_hash',
+     'template_migration_step', 'template_applied_commit',
+     'presentation', 'audit_rules'))),
+  cur_key VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(key) END) VIRTUAL
 );
-CREATE UNIQUE INDEX one_current_metadata ON metadata (cur_id);
-CREATE UNIQUE INDEX uq_metadata_name_value ON metadata (cur_name, cur_val);
+CREATE UNIQUE INDEX uq_database_property ON database_property (cur_key);
 
--- The two cheap FK-clean link tables (SDP Part 1 `entity_metadata`,
--- `parameter_value_metadata`). Values are keyed by the key triple across
--- tiers (VMP Part 2), so the value link carries the triple, not a value id.
--- FK intent to entity/metadata is view-validated (deviation D1).
-CREATE TABLE entity_metadata (
-  entity_id         BIGINT NOT NULL,
-  metadata_id       BIGINT NOT NULL,
+-- The pair pool: name/value annotations (Spine's `metadata` rows land here).
+-- A pair lives once; entities, values, schema objects and the dataset link to
+-- it. Case-insensitive uniqueness on (name, value) among current rows.
+CREATE TABLE metadata_pair (
+  id                BIGINT NOT NULL DEFAULT nextval('seq_metadata_pair'),
+  name              VARCHAR NOT NULL,          -- the key: an identifier (NFC)
+  value             VARCHAR NOT NULL,          -- data: verbatim
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
   version           SMALLINT NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
-  cur_e BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL,
-  cur_m BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN metadata_id END) VIRTUAL
+  cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
+  cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL,
+  cur_val  VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN value END) VIRTUAL
 );
-CREATE UNIQUE INDEX one_current_entity_metadata ON entity_metadata (cur_e, cur_m);
+CREATE UNIQUE INDEX one_current_metadata_pair ON metadata_pair (cur_id);
+CREATE UNIQUE INDEX uq_metadata_pair_name_value ON metadata_pair (cur_name, cur_val);
 
-CREATE TABLE parameter_value_metadata (
+-- A typed source record (a publication, a dataset, a measurement campaign).
+-- `name` is the short, unique label; the rest is descriptive data.
+CREATE TABLE source (
+  id                BIGINT NOT NULL DEFAULT nextval('seq_source'),
+  name              VARCHAR NOT NULL,
+  title             VARCHAR,
+  path              VARCHAR,                   -- URL, DOI link or file path
+  edition           VARCHAR,
+  publisher         VARCHAR,
+  issued            DATE,
+  retrieved         DATE,
+  citation          VARCHAR,
+  description       VARCHAR,
+  valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
+  valid_to_commit   BIGINT REFERENCES commit(id),
+  version           SMALLINT NOT NULL DEFAULT 1,
+  CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
+  cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
+  cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
+);
+CREATE UNIQUE INDEX one_current_source ON source (cur_id);
+CREATE UNIQUE INDEX uq_source_name ON source (cur_name);
+
+-- A license: free, unique name; `spdx` marks a name that is an SPDX license
+-- identifier; `policy` is an optional ODRL policy (JSON-LD: stored, never
+-- interpreted).
+CREATE TABLE license (
+  id                BIGINT NOT NULL DEFAULT nextval('seq_license'),
+  name              VARCHAR NOT NULL,
+  title             VARCHAR,
+  path              VARCHAR,
+  spdx              BOOLEAN NOT NULL DEFAULT FALSE,
+  policy            VARCHAR,
+  valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
+  valid_to_commit   BIGINT REFERENCES commit(id),
+  version           SMALLINT NOT NULL DEFAULT 1,
+  CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
+  cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
+  cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
+);
+CREATE UNIQUE INDEX one_current_license ON license (cur_id);
+CREATE UNIQUE INDEX uq_license_name ON license (cur_name);
+
+-- The licenses a source is published under (many-to-many).
+CREATE TABLE source_license (
+  source_id         BIGINT NOT NULL,
+  license_id        BIGINT NOT NULL,
+  valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
+  valid_to_commit   BIGINT REFERENCES commit(id),
+  version           SMALLINT NOT NULL DEFAULT 1,
+  CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
+  cur_s BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN source_id END) VIRTUAL,
+  cur_l BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN license_id END) VIRTUAL
+);
+CREATE UNIQUE INDEX uq_source_license ON source_license (cur_l, cur_s);
+
+-- The role vocabulary of links, created on purpose (a fresh file has none).
+-- `iri`: the PROV / DataCite / Frictionless term the role stands for.
+CREATE TABLE metadata_role (
+  id                BIGINT NOT NULL DEFAULT nextval('seq_metadata_role'),
+  name              VARCHAR NOT NULL,
+  description       VARCHAR,
+  iri               VARCHAR,
+  valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
+  valid_to_commit   BIGINT REFERENCES commit(id),
+  version           SMALLINT NOT NULL DEFAULT 1,
+  CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
+  cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
+  cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
+);
+CREATE UNIQUE INDEX one_current_metadata_role ON metadata_role (cur_id);
+CREATE UNIQUE INDEX uq_metadata_role_name ON metadata_role (cur_name);
+
+-- Links from a subject (the dataset, an entity, a schema object, a source or
+-- a license) to a target (a source, a license or a pair), with an optional
+-- role. Target = kind tag + id, not three nullable id columns: a unique index
+-- does not enforce rows with a NULL key column. For the same reason the role
+-- enters the key as coalesce(role_id, 0): "no role" is one key value. Object
+-- types are a CHECK list (each type has a close-out leg when its object
+-- dies), not an open tag.
+CREATE TABLE object_metadata_link (
+  object_type       VARCHAR NOT NULL CHECK (object_type IN ('dataset', 'entity',
+     'entity_class', 'parameter_definition', 'alternative', 'scenario', 'run',
+     'source', 'license', 'parameter_value_list', 'units_of_measure')),
+  object_id         BIGINT NOT NULL,           -- 0 for 'dataset'
+  target_kind       VARCHAR NOT NULL CHECK (target_kind IN ('source', 'license', 'pair')),
+  target_id         BIGINT NOT NULL,
+  role_id           BIGINT,                    -- NULL = no role
+  valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
+  valid_to_commit   BIGINT REFERENCES commit(id),
+  version           SMALLINT NOT NULL DEFAULT 1,
+  CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
+  CHECK ((object_type = 'dataset') = (object_id = 0)),
+  CHECK (NOT (object_type = target_kind AND object_id = target_id)),  -- no self-link
+  cur_ot VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN object_type END) VIRTUAL,
+  cur_o  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN object_id END) VIRTUAL,
+  cur_tk VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN target_kind END) VIRTUAL,
+  cur_t  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN target_id END) VIRTUAL,
+  cur_r  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN coalesce(role_id, 0) END) VIRTUAL
+);
+CREATE UNIQUE INDEX uq_object_metadata_link
+  ON object_metadata_link (cur_ot, cur_tk, cur_r, cur_t, cur_o);
+
+-- Links from a value (its key triple, across tiers) to a source or a pair.
+-- A link row belongs to the value version current at its valid_from_commit:
+-- every new value version closes the row and (keep) reopens it at the same
+-- commit, so link spans tile with value versions (a link may start later
+-- than its version, never earlier: audit_value_link_version). Values reach
+-- licenses through their sources.
+CREATE TABLE value_metadata_link (
   entity_id               BIGINT NOT NULL,
   parameter_definition_id BIGINT NOT NULL,
   alternative_id          BIGINT NOT NULL,
-  metadata_id             BIGINT NOT NULL,
+  target_kind             VARCHAR NOT NULL CHECK (target_kind IN ('source', 'pair')),
+  target_id               BIGINT NOT NULL,
+  role_id                 BIGINT,              -- NULL = no role
   valid_from_commit       BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit         BIGINT REFERENCES commit(id),
   version                 SMALLINT NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
-  cur_e BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL,
-  cur_p BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_definition_id END) VIRTUAL,
-  cur_a BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL,
-  cur_m BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN metadata_id END) VIRTUAL
+  cur_tk VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN target_kind END) VIRTUAL,
+  cur_t  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN target_id END) VIRTUAL,
+  cur_r  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN coalesce(role_id, 0) END) VIRTUAL,
+  cur_a  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL,
+  cur_p  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_definition_id END) VIRTUAL,
+  cur_e  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL
 );
-CREATE UNIQUE INDEX one_current_pv_metadata
-  ON parameter_value_metadata (cur_e, cur_p, cur_a, cur_m);
+CREATE UNIQUE INDEX uq_value_metadata_link
+  ON value_metadata_link (cur_tk, cur_t, cur_r, cur_a, cur_p, cur_e);

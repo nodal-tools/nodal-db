@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use duckdb::{AccessMode, Config, Connection, OptionalExt};
+use duckdb::{AccessMode, Config, Connection};
 
 use crate::error::DbError;
 use crate::MINIMUM_DUCKDB;
@@ -569,7 +569,7 @@ where
         // The schema-version gate: a file of another `SCHEMA_VERSION` is
         // refused before anything is written, whatever the write (tier,
         // retention mode, structural or a caller's own SQL), so no core write
-        // ever touches it. A failing probe (no `metadata` table) marks the
+        // ever touches it. A failing probe (not a nodal-db file) marks the
         // commit-table check: the file may not be a nodal-db database.
         if let Some(found) =
             foreign_schema_version(&conn).inspect_err(|_| commit_insert_failed = true)?
@@ -672,15 +672,16 @@ fn has_commit_table(conn: &Connection) -> bool {
 /// the row is missing); `None` when it matches. Run by every write cycle
 /// inside its transaction, before the `commit` row (one single-row read).
 fn foreign_schema_version(conn: &Connection) -> Result<Option<String>, DbError> {
-    let found: Option<String> = conn
-        .query_row(
-            "SELECT value FROM metadata \
-             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let found = found.unwrap_or_default();
+    // Either layout: a pre-0.6 file keeps its schema_version in `metadata`.
+    // A file with neither layout and no `commit` table is not a nodal-db
+    // database: fail the probe, so the caller names that cause.
+    let found = match crate::property::schema_version_any(conn)? {
+        Some(v) => v,
+        None if !has_commit_table(conn) => {
+            return Err(DbError::Api("no schema_version (not a nodal-db database)".into()))
+        }
+        None => String::new(),
+    };
     Ok((found != crate::compaction::SCHEMA_VERSION).then_some(found))
 }
 

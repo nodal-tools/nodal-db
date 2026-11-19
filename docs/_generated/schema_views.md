@@ -9,6 +9,7 @@ From `schema/070_views_current.sql`.
 | `alternative_current` | view | Current rows of `alternative` |
 | `class_set_current` | view | Current rows of `class_set` |
 | `class_set_member_current` | view | Current rows of `class_set_member` |
+| `database_property_current` | view | Current rows of `database_property` |
 | `dataset_version` | view | Change-detection cookie (#2252) |
 | `definition_value_array_current` | view | Current rows of `definition_value_array` |
 | `definition_value_long_current` | view | Current rows of `definition_value_long` |
@@ -21,22 +22,26 @@ From `schema/070_views_current.sql`.
 | `entity_current` | view | Current rows of `entity` |
 | `entity_element_current` | view | Current rows of `entity_element` |
 | `entity_location_current` | view | Current rows of `entity_location` |
-| `entity_metadata_current` | view | Current rows of `entity_metadata` |
 | `entity_parameter_unit_current` | view | Current rows of `entity_parameter_unit` |
+| `license_current` | view | Current rows of `license` |
 | `list_value_current` | view | Current rows of `list_value` |
 | `membership_current` | view | Current rows of `membership` |
-| `metadata_current` | view | Current rows of `metadata` |
+| `metadata_pair_current` | view | Current rows of `metadata_pair` |
+| `metadata_role_current` | view | Current rows of `metadata_role` |
+| `object_metadata_link_current` | view | Current rows of `object_metadata_link` |
 | `parameter_definition_current` | view | Current rows of `parameter_definition` |
 | `parameter_type_current` | view | Current rows of `parameter_type` |
 | `parameter_type_dimension_current` | view | Current rows of `parameter_type_dimension` |
 | `parameter_value_list_current` | view | Current rows of `parameter_value_list` |
-| `parameter_value_metadata_current` | view | Current rows of `parameter_value_metadata` |
 | `scenario_alternative_current` | view | Current rows of `scenario_alternative` |
 | `scenario_current` | view | Current rows of `scenario` |
 | `semantic_annotation_current` | view | Current rows of `semantic_annotation` |
+| `source_current` | view | Current rows of `source` |
+| `source_license_current` | view | Current rows of `source_license` |
 | `units_of_measure_current` | view | Current rows of `units_of_measure` |
 | `value_array_current` | view | Current rows of `value_array` |
 | `value_long_current` | view | Current rows of `value_long` |
+| `value_metadata_link_current` | view | Current rows of `value_metadata_link` |
 | `value_scalar_current` | view | Current rows of `value_scalar` |
 
 ### The unified read surface
@@ -101,6 +106,7 @@ From `schema/110_views_history.sql`.
 | `alternative_asof(c)` | macro | Rows of `alternative` as of commit `c` |
 | `class_set_asof(c)` | macro | Rows of `class_set` as of commit `c` |
 | `class_set_member_asof(c)` | macro | Rows of `class_set_member` as of commit `c` |
+| `database_property_asof(c)` | macro | Rows of `database_property` as of commit `c` |
 | `definition_value_array_asof(c)` | macro | Rows of `definition_value_array` as of commit `c` |
 | `definition_value_long_asof(c)` | macro | Rows of `definition_value_long` as of commit `c` |
 | `definition_value_scalar_asof(c)` | macro | Rows of `definition_value_scalar` as of commit `c` |
@@ -112,24 +118,28 @@ From `schema/110_views_history.sql`.
 | `entity_class_display_mode_asof(c)` | macro | Rows of `entity_class_display_mode` as of commit `c` |
 | `entity_element_asof(c)` | macro | Rows of `entity_element` as of commit `c` |
 | `entity_location_asof(c)` | macro | Rows of `entity_location` as of commit `c` |
-| `entity_metadata_asof(c)` | macro | Rows of `entity_metadata` as of commit `c` |
 | `entity_parameter_unit_asof(c)` | macro | Rows of `entity_parameter_unit` as of commit `c` |
 | `history_untrusted_span` | view | Untrusted/stubbed history spans (left by the recovery protocol or the retention policy) |
+| `license_asof(c)` | macro | Rows of `license` as of commit `c` |
 | `list_value_asof(c)` | macro | Rows of `list_value` as of commit `c` |
 | `membership_asof(c)` | macro | Rows of `membership` as of commit `c` |
-| `metadata_asof(c)` | macro | Rows of `metadata` as of commit `c` |
+| `metadata_pair_asof(c)` | macro | Rows of `metadata_pair` as of commit `c` |
+| `metadata_role_asof(c)` | macro | Rows of `metadata_role` as of commit `c` |
+| `object_metadata_link_asof(c)` | macro | Rows of `object_metadata_link` as of commit `c` |
 | `parameter_definition_asof(c)` | macro | Rows of `parameter_definition` as of commit `c` |
 | `parameter_type_asof(c)` | macro | Rows of `parameter_type` as of commit `c` |
 | `parameter_type_dimension_asof(c)` | macro | Rows of `parameter_type_dimension` as of commit `c` |
 | `parameter_value_list_asof(c)` | macro | Rows of `parameter_value_list` as of commit `c` |
-| `parameter_value_metadata_asof(c)` | macro | Rows of `parameter_value_metadata` as of commit `c` |
 | `scenario_alternative_asof(c)` | macro | Rows of `scenario_alternative` as of commit `c` |
 | `scenario_asof(c)` | macro | Rows of `scenario` as of commit `c` |
 | `semantic_annotation_asof(c)` | macro | Rows of `semantic_annotation` as of commit `c` |
+| `source_asof(c)` | macro | Rows of `source` as of commit `c` |
+| `source_license_asof(c)` | macro | Rows of `source_license` as of commit `c` |
 | `units_of_measure_asof(c)` | macro | Rows of `units_of_measure` as of commit `c` |
 | `value_array_asof(c)` | macro | Rows of `value_array` as of commit `c` |
 | `value_array_asof_for(c, pd_id, e_id, al_id)` | macro | One array value as of commit c |
 | `value_long_asof(c)` | macro | Rows of `value_long` as of commit `c` |
+| `value_metadata_link_asof(c)` | macro | Rows of `value_metadata_link` as of commit `c` |
 | `value_scalar_asof(c)` | macro | Rows of `value_scalar` as of commit `c` |
 | `value_timeline` | view | The long leg is VALUE-level |
 
@@ -154,14 +164,15 @@ From `schema/120_views_audit.sql`.
 | `audit_health` | view | Maintenance-health audit |
 | `audit_history_tiling` | view | Version-tiling + span coherence |
 | `audit_index_accelerator` | view | Index-accelerator audit |
+| `audit_license_non_spdx` | view | Licenses not flagged as SPDX identifiers (free license names are allowed; this lists them for review) |
 | `audit_long_value_coherence` | view | Long-value coherence audit |
 | `audit_membership_cycle` | view | Membership cycles (an accepted residual risk, surfaced) |
-| `audit_metadata_reserved_dup` | view | Reserved single-valued metadata keys must not fork |
 | `audit_position_range` | view | Long-tier positions must fall inside the bound axis (otherwise an out-of-range iN_pos would escape every audit and render a NULL index) |
 | `audit_realizes_cycle` | view | Refinement (realizes) cycles (sibling of the membership-cycle audit) |
 | `audit_tier_intent` | view | Tier-intent audit |
 | `audit_type_conformance` | view | Type-conformance |
 | `audit_value_class_mismatch` | view | Values whose definition belongs to a different class than the entity |
+| `audit_value_link_version` | view | A live value link older than its value's current version |
 | `audit_value_list_membership` | view | Value-list membership (writer-checked at entry, audited here) |
 
 ### The version of the read surface this file carries

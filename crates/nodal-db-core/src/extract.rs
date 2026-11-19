@@ -291,17 +291,14 @@ enum Mode {
 /// error aborts (the caller removes the temp; the source was only read).
 fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<ExtractReport, DbError> {
     assert_temp_schema_version(conn)?;
-    let extract_identity: String = conn.query_row(
-        "SELECT value FROM metadata \
-         WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL",
-        [],
-        |r| r.get(0),
-    )?;
+    let extract_identity: String = crate::property::read(conn, "db_identity")?
+        .ok_or_else(|| DbError::Internal("the fresh temp has no db_identity".into()))?;
     let real_cols = discover_real_columns(conn)?;
     check_catalog(conn, &real_cols)?;
     check_selection(&real_cols)?;
-    // Wipe the temp's bootstrap rows (metadata before commit: FK order).
-    conn.execute_batch("DELETE FROM metadata; DELETE FROM \"commit\";")?;
+    // Wipe the temp's bootstrap rows (database_property before commit: FK
+    // order).
+    conn.execute_batch("DELETE FROM database_property; DELETE FROM \"commit\";")?;
 
     attach_source_ro(conn, src)?;
 
@@ -411,11 +408,7 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
                  {src_max} (sequence restore failed)"
             )));
         }
-        conn.execute(
-            "INSERT INTO metadata (id, name, value, valid_from_commit) \
-             VALUES (nextval('seq_metadata'), 'db_identity', ?, ?)",
-            params![extract_identity, e],
-        )?;
+        crate::property::insert_core(conn, e, "db_identity", &extract_identity)?;
         let marker: i64 = conn.query_row(
             "INSERT INTO erasure_marker \
                (kind, horizon_commit, at_commit, continuation_db, rows_removed, \
@@ -469,13 +462,8 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
 /// marker's `continuation_db` would be NULL, which reads as "truncated", or
 /// ambiguous). Returns the source identity.
 fn preflight_source(conn: &Connection) -> Result<String, DbError> {
-    let versions: Vec<String> = strings(
-        conn,
-        &format!(
-            "SELECT value FROM {SRC}.metadata \
-             WHERE lower(name) = 'schema_version' AND valid_to_commit IS NULL"
-        ),
-    )
+    // Either layout: a pre-0.6 source is named by its own version.
+    let versions: Vec<String> = crate::property::schema_versions_any(conn, Some(SRC), None)
     .map_err(|e| {
         DbError::Api(format!(
             "extract refused: the source does not look like a nodal-db database ({e})"
@@ -494,8 +482,8 @@ fn preflight_source(conn: &Connection) -> Result<String, DbError> {
     let ids = strings(
         conn,
         &format!(
-            "SELECT value FROM {SRC}.metadata \
-             WHERE lower(name) = 'db_identity' AND valid_to_commit IS NULL"
+            "SELECT value FROM {SRC}.database_property \
+             WHERE lower(key) = 'db_identity' AND valid_to_commit IS NULL"
         ),
     )?;
     if ids.len() != 1 {
@@ -542,13 +530,7 @@ fn preflight_as_of(
             "as-of extract refused: {n} is not a commit id of the source"
         )));
     }
-    let versions = strings(
-        conn,
-        &format!(
-            "SELECT value FROM {SRC}.metadata WHERE lower(name) = 'schema_version' \
-             AND valid_from_commit <= {n} AND (valid_to_commit IS NULL OR valid_to_commit > {n})"
-        ),
-    )?;
+    let versions = crate::property::schema_versions_any(conn, Some(SRC), Some(n))?;
     if versions.len() != 1 || versions[0] != SCHEMA_VERSION {
         return Err(DbError::SchemaMismatch {
             message: format!(
@@ -692,8 +674,8 @@ impl Sel<'_> {
                 let main_list = self.versioned_list(table);
                 let live = self.live("t");
                 // The source identity is replaced by the extract's own at E.
-                let extra = if table == "metadata" {
-                    " AND lower(t.\"name\") <> 'db_identity'"
+                let extra = if table == "database_property" {
+                    " AND lower(t.\"key\") <> 'db_identity'"
                 } else {
                     ""
                 };

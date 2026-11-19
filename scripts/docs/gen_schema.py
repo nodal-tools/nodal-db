@@ -443,7 +443,8 @@ SURFACE_VERSION_FILE = SCHEMA_DIR / "130_read_surface.sql"
 # BIGINT[] id lists). Defaulted named parameters are omitted. Every stable,
 # mirror and advisory table macro needs an entry; a stale entry fails too.
 _ASOF_MIRRORS = (
-    "metadata", "entity_metadata", "parameter_value_metadata", "entity_class",
+    "database_property", "metadata_pair", "source", "license", "source_license",
+    "metadata_role", "object_metadata_link", "value_metadata_link", "entity_class",
     "class_set", "class_set_member", "entity_class_dimension", "entity",
     "entity_location", "entity_element", "alternative", "scenario",
     "scenario_alternative", "entity_alternative", "membership",
@@ -625,7 +626,9 @@ def classify_change(old, new) -> tuple[list[str], list[str]]:
                 major.append(f"stable object {name}: existing columns changed ({diff})")
         elif cls == "mirror":
             if n is None:
-                major.append(f"table mirror {name} removed or renamed")
+                # A mirror follows its table: it goes when its table leaves
+                # the schema, which is a SCHEMA_VERSION change.
+                schema.append(f"table mirror {name} removed (its table left the schema)")
             elif (n[1], n[2], n[3]) != (kind, ps, cols):
                 schema.append(f"table mirror {name}: columns or parameters changed")
     return major, schema

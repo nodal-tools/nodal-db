@@ -1334,6 +1334,9 @@ fn dump(db: &Path, out: &mut String) {
             "metadata" => "SELECT * FROM metadata WHERE lower(name) <> 'db_identity' \
                            ORDER BY ALL"
                 .to_string(),
+            "database_property" => "SELECT * FROM database_property \
+                                    WHERE lower(key) <> 'db_identity' ORDER BY ALL"
+                .to_string(),
             _ if hashed.contains(t) => {
                 format!("SELECT * EXCLUDE (content_hash) FROM \"{t}\" ORDER BY ALL")
             }

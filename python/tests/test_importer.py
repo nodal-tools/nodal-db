@@ -171,7 +171,7 @@ def _rows(db, sql):
 def _meta(db):
     return {
         r["name"]: r["value"]
-        for r in _rows(db, "SELECT name, value FROM metadata WHERE valid_to_commit IS NULL")
+        for r in _rows(db, "SELECT key AS name, value FROM database_property WHERE valid_to_commit IS NULL")
     }
 
 

@@ -105,7 +105,7 @@ fn dump(db: &Path) -> String {
     for t in tables {
         let src = match t.as_str() {
             "commit" => "(SELECT * EXCLUDE (timestamp) FROM commit)".to_string(),
-            "metadata" => "(SELECT * FROM metadata WHERE lower(name) <> 'db_identity')".to_string(),
+            "database_property" => "(SELECT * FROM database_property WHERE lower(key) <> 'db_identity')".to_string(),
             _ => format!("\"{t}\""),
         };
         let rows: Option<String> = conn

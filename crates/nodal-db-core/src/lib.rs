@@ -113,6 +113,10 @@ pub mod erasure;
 /// template-identity writes (`specs/flextool_port_finale_plan.md` §1, D-F4).
 pub mod verbs;
 
+/// Database properties: the single-valued `database_property` table (core,
+/// user and tool keys) and its one writer.
+pub mod property;
+
 /// The sanctioned structural (non-value) write path — the fourth
 /// `commit_changes` channel: create/rename alternatives + scenarios, declarative
 /// scenario ranking (A-min), per-edge activation + membership, and the D-S9

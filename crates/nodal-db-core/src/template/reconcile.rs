@@ -104,7 +104,8 @@ use crate::types::{
     ScalarValue, ValueKind, WriteReport,
 };
 
-use super::dbvocab::{read_metadata_key, read_vocab, DbParam, DbVocab};
+use super::dbvocab::{read_vocab, DbParam, DbVocab};
+use crate::property;
 use super::ir::{
     self, effective_member_kind, Checked, Class, ListMember, Migration, MigrationStep,
     MissingSource, OnCollision, Parameter, Template, TypeDecl, UnmappedValues,
@@ -848,11 +849,11 @@ pub fn apply(
     }
     let pre = with_read_plain(db, |conn| {
         Ok(Pre {
-            name: read_metadata_key(conn, "template_name")?,
-            version: read_metadata_key(conn, "template_version")?,
-            hash: read_metadata_key(conn, "template_content_hash")?,
-            schema_version: read_metadata_key(conn, "schema_version")?,
-            substamp: read_metadata_key(conn, "template_migration_step")?,
+            name: property::read(conn, "template_name")?,
+            version: property::read(conn, "template_version")?,
+            hash: property::read(conn, "template_content_hash")?,
+            schema_version: property::read(conn, "schema_version")?,
+            substamp: property::read(conn, "template_migration_step")?,
             commit: max_commit(conn)?,
         })
     })?;
@@ -1017,10 +1018,10 @@ pub fn apply(
                             .max()
                             .unwrap_or(cursor + 1)
                             .min(cursor + 1);
-                        set_metadata(conn, c, "template_migration_step", &substamp)?;
+                        property::set_core(conn, c, "template_migration_step", &substamp)?;
                         // The program's commits through this one are
                         // template-owned (V-S1): the range.
-                        set_metadata(
+                        property::set_core(
                             conn,
                             c,
                             "template_applied_commit",
@@ -1029,7 +1030,7 @@ pub fn apply(
                         // The chain moved the content past any certified
                         // hash: close it so a stale certification can never
                         // outlive a partially-walked chain.
-                        clear_metadata(conn, c, "template_content_hash")?;
+                        property::clear_core(conn, c, "template_content_hash")?;
                         Ok(c)
                     })?;
                     out.commits.push(c);
@@ -1044,16 +1045,16 @@ pub fn apply(
                     let effects = core_write_txn_retrying(db, user, &msg, |conn, c| {
                         let mut fx = StepEffects::default();
                         execute_step(conn, c, declarative, &mut fx)?;
-                        set_metadata(conn, c, "template_applied_commit", &c.to_string())?;
+                        property::set_core(conn, c, "template_applied_commit", &c.to_string())?;
                         // Same-commit progress substamp: atomic with the
                         // step — but a SKIPPED step does NOT substamp (D14
                         // pause semantics): re-apply must retry it.
                         if fx.skips.is_empty() {
-                            set_metadata(conn, c, "template_migration_step", &substamp)?;
+                            property::set_core(conn, c, "template_migration_step", &substamp)?;
                         }
                         // Never leave a stale certified hash behind a
                         // partially-walked chain (also atomic with the step).
-                        clear_metadata(conn, c, "template_content_hash")?;
+                        property::clear_core(conn, c, "template_content_hash")?;
                         Ok((c, fx))
                     })?;
                     out.commits.push(effects.0);
@@ -1085,9 +1086,9 @@ pub fn apply(
             t.template.name, span.from, span.to
         );
         let c = core_write_txn_retrying(db, user, &msg, |conn, c| {
-            set_metadata(conn, c, "template_version", &span.to)?;
-            clear_metadata(conn, c, "template_migration_step")?;
-            set_metadata(conn, c, "template_applied_commit", &c.to_string())?;
+            property::set_core(conn, c, "template_version", &span.to)?;
+            property::clear_core(conn, c, "template_migration_step")?;
+            property::set_core(conn, c, "template_applied_commit", &c.to_string())?;
             Ok(c)
         })?;
         out.commits.push(c);
@@ -1169,7 +1170,7 @@ pub fn apply(
         }
         // Every template-apply commit is template-owned (purge plan §3.8,
         // V-S1): what it closes is never "removed locally".
-        set_metadata(conn, c, "template_applied_commit", &c.to_string())?;
+        property::set_core(conn, c, "template_applied_commit", &c.to_string())?;
         p.skipped = ctx.skipped;
         p.warnings.extend(ctx.warnings);
         p.warnings.splice(0..0, w);
@@ -3527,26 +3528,26 @@ fn execute_action(conn: &Connection, c: i64, a: &Action, ctx: &mut ExecCtx) -> R
             }
         }
         Action::SetPresentation { doc } => {
-            set_metadata(conn, c, "presentation", doc)?;
+            property::set_core(conn, c, "presentation", doc)?;
         }
         Action::SetAuditRules { doc } => match doc {
-            Some(d) => set_metadata(conn, c, "audit_rules", d)?,
-            None => clear_metadata(conn, c, "audit_rules")?,
+            Some(d) => property::set_core(conn, c, "audit_rules", d)?,
+            None => property::clear_core(conn, c, "audit_rules")?,
         },
         Action::StampIdentity {
             name,
             version,
             content_hash,
         } => {
-            set_metadata(conn, c, "template_name", name)?;
-            set_metadata(conn, c, "template_version", version)?;
+            property::set_core(conn, c, "template_name", name)?;
+            property::set_core(conn, c, "template_version", version)?;
             if ctx.skipped.is_empty() {
-                set_metadata(conn, c, "template_content_hash", content_hash)?;
+                property::set_core(conn, c, "template_content_hash", content_hash)?;
             } else {
                 // Partial apply: withhold certification (module docs). A
                 // stale hash from an earlier converged apply is closed so the
                 // short-circuit cannot believe it.
-                clear_metadata(conn, c, "template_content_hash")?;
+                property::clear_core(conn, c, "template_content_hash")?;
                 ctx.warnings.push(format!(
                     "identity stamped WITHOUT template_content_hash ({} skip(s)); the \
                      template will replan until it converges",
@@ -3607,63 +3608,6 @@ pub(crate) fn insert_type_member(
         _ => ValueKind::Float,
     };
     create_parameter_type(conn, c, pd_id, &dims, vk)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Reserved-key metadata writes (close-out-then-insert; audit_metadata_reserved_dup)
-// ---------------------------------------------------------------------------
-
-/// Set a reserved single-valued metadata key: no-op when the current value is
-/// already equal, else close-out-then-insert under the same id (the writer
-/// rule the reserved-dup audit documents).
-pub(crate) fn set_metadata(
-    conn: &Connection,
-    c: i64,
-    key: &str,
-    value: &str,
-) -> Result<(), DbError> {
-    let existing = conn.query_row(
-        "SELECT id, value, version FROM metadata WHERE cur_name = lower(?)",
-        params![key],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        },
-    );
-    match existing {
-        Ok((_, v, _)) if v == value => Ok(()),
-        Ok((id, _, version)) => {
-            conn.execute(
-                "UPDATE metadata SET valid_to_commit = ? WHERE id = ? AND valid_to_commit IS NULL",
-                params![c, id],
-            )?;
-            conn.execute(
-                "INSERT INTO metadata (id, name, value, valid_from_commit, version) \
-                 VALUES (?, ?, ?, ?, ?)",
-                params![id, key, value, c, version + 1],
-            )?;
-            Ok(())
-        }
-        Err(duckdb::Error::QueryReturnedNoRows) => {
-            conn.execute(
-                "INSERT INTO metadata (name, value, valid_from_commit) VALUES (?, ?, ?)",
-                params![key, value, c],
-            )?;
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub(crate) fn clear_metadata(conn: &Connection, c: i64, key: &str) -> Result<(), DbError> {
-    conn.execute(
-        "UPDATE metadata SET valid_to_commit = ? WHERE cur_name = lower(?)",
-        params![c, key],
-    )?;
     Ok(())
 }
 

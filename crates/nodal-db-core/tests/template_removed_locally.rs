@@ -64,7 +64,7 @@ fn q(db: &Path, sql: &str) -> i64 {
 fn has_hash(db: &Path) -> bool {
     q(
         db,
-        "SELECT count(*) FROM metadata WHERE cur_name = 'template_content_hash'",
+        "SELECT count(*) FROM database_property WHERE cur_key = 'template_content_hash'",
     ) == 1
 }
 
@@ -94,8 +94,8 @@ fn every_template_commit_is_stamped_applied() {
     assert_eq!(
         q(
             &db,
-            "SELECT CAST(value AS BIGINT) FROM metadata \
-             WHERE cur_name = 'template_applied_commit'"
+            "SELECT CAST(value AS BIGINT) FROM database_property \
+             WHERE cur_key = 'template_applied_commit'"
         ),
         head
     );

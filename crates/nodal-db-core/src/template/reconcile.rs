@@ -3289,7 +3289,9 @@ pub(crate) fn insert_entity_row(
 /// current-row filter; never through the name index (an `UPDATE` cannot be
 /// fenced). P0 spike (10^6 entities, 10^5 prior revisions): ~2.6 ms per
 /// close vs ~4.5 ms by `id`, whose zone maps widen as successors land at
-/// the table's tail with old ids.
+/// the table's tail with old ids. Guard: `tests/entity_name_index_scan.rs`
+/// (`the_rename_close_by_rowid_reads_few_row_groups`; keep its copy of the
+/// statement in step).
 /// Every entity revision goes through here, or through the batch writes of
 /// `entity_rename_set::apply_rename_run` (invariant 2).
 pub(crate) fn revise_entity_row(

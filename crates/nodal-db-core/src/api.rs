@@ -965,13 +965,15 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
     }
 }
 
-/// Refuse every segment, value-delete key and object-delete key of the call
-/// that addresses a class, parameter, alternative or scenario by a name a
-/// rename earlier in the call freed and that does not resolve now
-/// (class_param_rename_PLAN §4.5 f, OD5). A same-call create of the old name
-/// makes it resolve again (to the new object), and a case-only rename frees
-/// no name, so neither is refused. Runs after the structural changes and
-/// before the first value write.
+/// Refuse every segment, value-delete key, object-delete key and metadata
+/// item of the call that addresses a class, parameter, alternative,
+/// scenario or entity by a name a rename earlier in the call freed and that
+/// does not resolve now (class_param_rename_PLAN §4.5 f, OD5;
+/// entity_rename_PLAN §4). A same-call create of the old name makes it
+/// resolve again (to the new object), and a case-only rename frees no
+/// name, so neither is refused. Runs after the structural changes and
+/// before the first value write. Segment entity labels are checked only
+/// for the classes with an entity renamed in the call.
 fn refuse_renamed_away_references(
     conn: &Connection,
     calls: &CallRenames,
@@ -999,21 +1001,36 @@ fn refuse_renamed_away_references(
         }
         Ok::<(), DbError>(())
     };
+    // An entity of `class` (as it resolves now) by a renamed-away name.
+    let renamed_classes = calls.entity_rename_classes();
+    let check_entity = |what: &str, class: &str, name: &str| {
+        if let Some(to) = calls.renamed_entity(conn, class, name)? {
+            return Err(refuse(what.to_string(), "entity", name, &to));
+        }
+        Ok::<(), DbError>(())
+    };
     for (i, s) in segments.iter().enumerate() {
-        check_value_key(
-            format!("segment {} ({}:{})", i + 1, s.class, s.parameter),
-            &s.class,
-            &s.parameter,
-            &s.alternative,
-        )?;
+        let what = format!("segment {} ({}:{})", i + 1, s.class, s.parameter);
+        check_value_key(what.clone(), &s.class, &s.parameter, &s.alternative)?;
+        if renamed_classes.is_empty() {
+            continue;
+        }
+        let Some(cid) = lookup_entity_class(conn, &s.class)? else {
+            continue;
+        };
+        if !renamed_classes.contains(&cid) {
+            continue;
+        }
+        for name in &s.names {
+            if let Some(to) = calls.renamed_entity_of(conn, cid, name)? {
+                return Err(refuse(what, "entity", name, &to));
+            }
+        }
     }
     for (i, k) in deletes {
-        check_value_key(
-            format!("delete key {i}"),
-            &k.class,
-            &k.parameter,
-            &k.alternative,
-        )?;
+        let what = format!("delete key {i}");
+        check_value_key(what.clone(), &k.class, &k.parameter, &k.alternative)?;
+        check_entity(&what, &k.class, &k.entity)?;
     }
     for p in object_deletes {
         let what = format!("object-delete key {}", p.key_index);
@@ -1036,17 +1053,48 @@ fn refuse_renamed_away_references(
             return Err(refuse(what, p.key.kind.tag(), name, &to));
         }
     }
+    // Entity object deletes: by name, and every element of a tuple address
+    // (of the dimension's class, or of any member class of a class-set
+    // dimension).
+    if !calls.entities.is_empty() {
+        for p in object_deletes {
+            let (ObjectKind::Entity, Some(class)) = (p.key.kind, &p.key.class) else {
+                continue;
+            };
+            let what = format!("object-delete key {}", p.key_index);
+            match &p.key.target {
+                ObjectRef::Name(name) => check_entity(&what, class, name)?,
+                ObjectRef::Elements(els) => {
+                    let Ok(shape) = crate::structural::entity_class_shape(conn, class) else {
+                        continue;
+                    };
+                    for ((_, dc, ds), el) in shape.dims.iter().zip(els) {
+                        let classes: Vec<i64> = match (dc, ds) {
+                            (Some(c), _) => vec![*c],
+                            (None, Some(set)) => crate::structural::class_set_members(conn, *set)?,
+                            (None, None) => Vec::new(),
+                        };
+                        for c in classes {
+                            if let Some(to) = calls.renamed_entity_of(conn, c, el)? {
+                                return Err(refuse(what, "entity", el, &to));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Metadata items: subjects, values and target scopes (R-3).
     use crate::types::{Scope, Subject};
     for (i, it) in metadata.iter().enumerate() {
         let what = format!("metadata item {i}");
-        let mut values: Vec<(&str, &str, &str)> = Vec::new();
+        let mut values: Vec<(&str, &str, &str, &str)> = Vec::new();
         let subject = match it {
             MetadataChange::Link { subject, .. } | MetadataChange::Unlink { subject, .. } => {
                 Some(subject)
             }
             MetadataChange::LinkValue { value, .. } | MetadataChange::UnlinkValue { value, .. } => {
-                values.push((&value.class, &value.parameter, &value.alternative));
+                values.push((&value.class, &value.parameter, &value.alternative, &value.entity));
                 None
             }
             MetadataChange::ValueMetadata { scope, .. } => {
@@ -1056,15 +1104,20 @@ fn refuse_renamed_away_references(
                         class,
                         parameter,
                         alternative,
-                    } => values.push((class, parameter, alternative)),
-                    Scope::Value(v) => values.push((&v.class, &v.parameter, &v.alternative)),
+                    } => values.push((class, parameter, alternative, "")),
+                    Scope::Value(v) => {
+                        values.push((&v.class, &v.parameter, &v.alternative, &v.entity))
+                    }
                 }
                 None
             }
             _ => None,
         };
-        for (c, p, a) in values {
+        for (c, p, a, e) in values {
             check_value_key(what.clone(), c, p, a)?;
+            if !e.is_empty() {
+                check_entity(&what, c, e)?;
+            }
         }
         let Some(s) = subject else { continue };
         let hit = match s {
@@ -1073,9 +1126,12 @@ fn refuse_renamed_away_references(
                 calls.renamed_alternative(conn, n)?.map(|t| ("alternative", n, t))
             }
             Subject::Scenario(n) => calls.renamed_scenario(conn, n)?.map(|t| ("scenario", n, t)),
-            Subject::Entity { class, .. } => {
-                calls.renamed_class(conn, class)?.map(|t| ("class", class, t))
-            }
+            Subject::Entity { class, name } => match calls.renamed_class(conn, class)? {
+                Some(t) => Some(("class", class, t)),
+                None => calls
+                    .renamed_entity(conn, class, name)?
+                    .map(|t| ("entity", name, t)),
+            },
             Subject::Parameter { class, name } => match calls.renamed_class(conn, class)? {
                 Some(t) => Some(("class", class, t)),
                 None => calls

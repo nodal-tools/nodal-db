@@ -12,13 +12,14 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, ChangeSet, Segment};
+use nodal_db_core::api::{commit_change_set, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::ir::TypeDecl;
 use nodal_db_core::types::{
-    EntityAddr, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, PurgeRequest,
-    PurgeScope, StructuralChange as SC, StructuralEffect as SE, StructuralKind, WriteOptions,
+    EntityAddr, LinkSpec, MetadataChange, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind,
+    ObjectRef, PairRef, PurgeRequest, PurgeScope, RoleSel, StructuralChange as SC,
+    StructuralEffect as SE, StructuralKind, Subject, Target, ValueAddr, WriteOptions,
     WriteReport,
 };
 
@@ -429,6 +430,12 @@ fn chains_swaps_and_contradictions() {
     // Two renames of one entity to different names: refused up front.
     let m = api_err(st(&db, vec![ren("node", "b", "x"), ren("node", "B", "y")]));
     assert!(m.contains("contradictory renames"), "{m}");
+    // A later revision by a name renamed away earlier in the call.
+    let m = api_err(st(&db, vec![ren("node", "b", "x"), desc("node", "b", "d")]));
+    assert!(
+        m.contains("not found (entity \"b\" was renamed to \"x\" earlier in this call"),
+        "{m}"
+    );
 }
 
 #[test]
@@ -460,6 +467,190 @@ fn class_and_entity_renames_in_one_call() {
         ],
     );
     assert_eq!(id_of(&db, "b1"), n1);
+}
+
+// ---------------------------------------------------------------------------
+// The old name in every channel (test 5, OD5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_old_name_is_refused_in_every_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let renamed = || vec![ren("node", "n1", "bus")];
+    let check = |what: &str, s: ChangeSet| {
+        let m = api_err(set(&db, s));
+        assert!(
+            m.contains("\"n1\" was renamed to \"bus\" earlier in this call"),
+            "{what}: {m}"
+        );
+    };
+    // A 0-D segment label: no auto-create of an empty `n1`.
+    check(
+        "segment",
+        ChangeSet {
+            structural: renamed(),
+            segments: vec![seg("node", "demand", "n1", 6.0)],
+            ..Default::default()
+        },
+    );
+    check(
+        "value delete",
+        ChangeSet {
+            structural: renamed(),
+            deletes: vec![DeleteKey {
+                class: "node".into(),
+                parameter: "demand".into(),
+                alternative: "Base".into(),
+                entity: "n1".into(),
+            }],
+            ..Default::default()
+        },
+    );
+    // An object delete by the old name: the name-level guard (M2) refuses
+    // it before the transaction.
+    let m = api_err(set(
+        &db,
+        ChangeSet {
+            structural: renamed(),
+            object_deletes: vec![by_name("node", "n1")],
+            ..Default::default()
+        },
+    ));
+    assert!(m.contains("both structurally referenced and object-deleted"), "{m}");
+    check(
+        "object delete by elements",
+        ChangeSet {
+            structural: renamed(),
+            object_deletes: vec![entity_key(
+                "unit__node",
+                ObjectRef::Elements(vec!["u1".into(), "n1".into()]),
+            )],
+            ..Default::default()
+        },
+    );
+    let mut s = renamed();
+    s.push(SC::SetEntityActivation {
+        class: "node".into(),
+        entity: "n1".into(),
+        alternative: "Base".into(),
+        active: Some(false),
+    });
+    check(
+        "activation",
+        ChangeSet {
+            structural: s,
+            ..Default::default()
+        },
+    );
+    let mut s = renamed();
+    s.push(SC::SetMembership {
+        group: EntityAddr {
+            class: "node".into(),
+            name: "n1".into(),
+        },
+        member: EntityAddr {
+            class: "unit".into(),
+            name: "u1".into(),
+        },
+        alternative: None,
+        included: Some(true),
+    });
+    check(
+        "membership",
+        ChangeSet {
+            structural: s,
+            ..Default::default()
+        },
+    );
+    let mut s = renamed();
+    s.push(nd("unit__node", Some("x"), &["u1", "n1"]));
+    check(
+        "element",
+        ChangeSet {
+            structural: s,
+            ..Default::default()
+        },
+    );
+    check(
+        "metadata subject",
+        ChangeSet {
+            structural: renamed(),
+            metadata: vec![
+                MetadataChange::CreatePair {
+                    name: "k".into(),
+                    value: "v".into(),
+                },
+                MetadataChange::Link {
+                    subject: Subject::Entity {
+                        class: "node".into(),
+                        name: "n1".into(),
+                    },
+                    link: LinkSpec {
+                        target: Target::Pair(PairRef::Pair {
+                            name: "k".into(),
+                            value: "v".into(),
+                        }),
+                        role: RoleSel::NoRole,
+                    },
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    check(
+        "metadata value address",
+        ChangeSet {
+            structural: renamed(),
+            metadata: vec![
+                MetadataChange::CreatePair {
+                    name: "k".into(),
+                    value: "v".into(),
+                },
+                MetadataChange::LinkValue {
+                    value: ValueAddr {
+                        class: "node".into(),
+                        parameter: "demand".into(),
+                        alternative: "Base".into(),
+                        entity: "n1".into(),
+                    },
+                    link: LinkSpec {
+                        target: Target::Pair(PairRef::Pair {
+                            name: "k".into(),
+                            value: "v".into(),
+                        }),
+                        role: RoleSel::NoRole,
+                    },
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    // After a same-call re-create the old name resolves again (allowed).
+    let mut s = renamed();
+    s.push(ent("node", "n1"));
+    set(
+        &db,
+        ChangeSet {
+            structural: s,
+            segments: vec![seg("node", "demand", "n1", 6.0)],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(demand(&db, "n1"), vec!["n1=6.0"]);
+    assert_eq!(demand(&db, "bus"), vec!["bus=5.0"]);
+    // A case-only rename frees no name.
+    set(
+        &db,
+        ChangeSet {
+            structural: vec![ren("node", "bus", "BUS")],
+            segments: vec![seg("node", "demand", "bus", 7.0)],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(demand(&db, "BUS"), vec!["BUS=7.0"]);
 }
 
 // ---------------------------------------------------------------------------

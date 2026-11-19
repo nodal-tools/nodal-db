@@ -340,7 +340,7 @@ impl CallTouches {
     /// Names resolve by lookup in the open transaction, right after the
     /// item applied, so they find the rows the item resolved (nothing
     /// renames between the two).
-    fn note(
+    pub(crate) fn note(
         &mut self,
         conn: &Connection,
         change: &StructuralChange,
@@ -1059,7 +1059,7 @@ pub(crate) fn refuse_template_stamped_renames(
 /// (keyed by `key(fold(old))`), keeping every earlier entry of the same id
 /// pointing at its newest name (a chain `a -> b -> c` leaves `a` and `b`
 /// both renamed to `c`). A case-only rename frees no name.
-fn note_renamed_away<K: std::hash::Hash + Eq>(
+pub(crate) fn note_renamed_away<K: std::hash::Hash + Eq>(
     away: &mut HashMap<K, (i64, String)>,
     key: K,
     id: i64,
@@ -1080,7 +1080,7 @@ fn note_renamed_away<K: std::hash::Hash + Eq>(
 /// rename of the same call freed. Otherwise `a -> t`, `b -> a`, `t -> b`
 /// would make both old names resolve again, to each other's objects, and a
 /// later reference by an old name would silently address the other object.
-fn refuse_freed_name(
+pub(crate) fn refuse_freed_name(
     what: &str,
     current: &str,
     new_name: &str,

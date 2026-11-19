@@ -552,18 +552,38 @@ pub fn commit_change_set(
         // in, loaded per class on first use (entity_rename_PLAN §5.3; a
         // closure local, like `calls`).
         let mut tuples = TupleIndex::for_changes(&structural);
-        for (i, ch) in structural.iter().enumerate() {
+        let mut i = 0;
+        while i < structural.len() {
+            // A run of RenameEntity items long enough for the set path
+            // (entity_rename_PLAN §3.2) is applied as one batch.
+            if crate::entity_rename_set::takes_set_path(&structural[i..]) {
+                let n = crate::entity_rename_set::rename_run_len(&structural[i..]);
+                crate::entity_rename_set::apply_rename_run(
+                    conn,
+                    commit_id,
+                    i,
+                    &structural[i..i + n],
+                    &mut report,
+                    &mut structural_folds,
+                    &mut calls,
+                    &mut touches,
+                    &mut tuples,
+                )?;
+                i += n;
+                continue;
+            }
             apply_structural(
                 conn,
                 commit_id,
                 i,
-                ch,
+                &structural[i],
                 &mut report,
                 &mut structural_folds,
                 &mut calls,
                 &mut touches,
                 &mut tuples,
             )?;
+            i += 1;
         }
         report
             .warnings

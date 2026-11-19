@@ -17,10 +17,9 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::ir::TypeDecl;
 use nodal_db_core::types::{
-    EntityAddr, LinkSpec, MetadataChange, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind,
-    ObjectRef, PairRef, PurgeRequest, PurgeScope, RoleSel, StructuralChange as SC,
-    StructuralEffect as SE, StructuralKind, Subject, Target, ValueAddr, WriteOptions,
-    WriteReport,
+    EntityAddr, LinkSpec, MetadataChange, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef,
+    PairRef, PurgeRequest, PurgeScope, RoleSel, StructuralChange as SC, StructuralEffect as SE,
+    StructuralKind, Subject, Target, ValueAddr, WriteOptions, WriteReport,
 };
 
 fn q1(db: &Path, sql: &str) -> i64 {
@@ -238,7 +237,10 @@ fn a_rename_keeps_the_id_and_everything_follows() {
     let n1 = id_of(&db, "n1");
     let u1 = id_of(&db, "u1");
     let before = q1(&db, "SELECT max(id) FROM commit");
-    let r = ok(&db, vec![ren("node", "n1", "bus"), ren("unit", "u1", "gen")]);
+    let r = ok(
+        &db,
+        vec![ren("node", "n1", "bus"), ren("unit", "u1", "gen")],
+    );
     assert_eq!(r.structural[0].kind, StructuralKind::Entity);
     assert_eq!(r.structural[0].effect, SE::Renamed);
     assert_eq!(r.structural[0].object_id, n1);
@@ -306,7 +308,10 @@ fn case_and_form_renames_and_description_edits() {
     // Case-only: a real rename (R4).
     let r = ok(&db, vec![ren("node", "n1", "N1")]);
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(qs(&db, "SELECT name FROM entity WHERE cur_name = 'n1'"), vec!["N1"]);
+    assert_eq!(
+        qs(&db, "SELECT name FROM entity WHERE cur_name = 'n1'"),
+        vec!["N1"]
+    );
     // An NFD spelling of the stored NFC bytes is the same name: NoOp.
     ok(&db, vec![ren("node", "n2", "caf\u{e9}")]);
     let r = ok(&db, vec![ren("node", "caf\u{e9}", "cafe\u{301}")]);
@@ -350,7 +355,10 @@ fn uniqueness_per_class_and_across_class_sets() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(&dir);
     let m = api_err(st(&db, vec![ren("node", "n1", "N2")]));
-    assert!(m.contains("already names a different entity of class \"node\""), "{m}");
+    assert!(
+        m.contains("already names a different entity of class \"node\""),
+        "{m}"
+    );
     // The same name in another class is allowed (no class set joins them).
     let r = ok(&db, vec![ren("unit", "u1", "n1")]);
     assert_eq!(r.structural[0].effect, SE::Renamed);
@@ -396,7 +404,10 @@ fn create_then_rename_in_one_call_edits_in_place() {
         1
     );
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity WHERE lower(name) IN ('n3', 'n4')"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity WHERE lower(name) IN ('n3', 'n4')"
+        ),
         1
     );
 }
@@ -408,7 +419,10 @@ fn chains_swaps_and_contradictions() {
     // A chain is one version bump.
     let r = ok(&db, vec![ren("node", "n1", "a"), ren("node", "a", "b")]);
     assert_eq!(r.structural[1].effect, SE::Renamed);
-    assert_eq!(q1(&db, "SELECT version FROM entity WHERE cur_name = 'b'"), 2);
+    assert_eq!(
+        q1(&db, "SELECT version FROM entity WHERE cur_name = 'b'"),
+        2
+    );
     // A swap and a round trip in one call are refused.
     let m = api_err(st(
         &db,
@@ -425,8 +439,14 @@ fn chains_swaps_and_contradictions() {
     ok(&db, vec![ren("node", "b", "t")]);
     ok(&db, vec![ren("node", "n2", "b")]);
     ok(&db, vec![ren("node", "t", "n2")]);
-    assert_eq!(qs(&db, "SELECT name FROM entity_current WHERE entity_class_id = \
-        (SELECT id FROM entity_class WHERE name = 'node') ORDER BY id"), vec!["n2", "b"]);
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT name FROM entity_current WHERE entity_class_id = \
+        (SELECT id FROM entity_class WHERE name = 'node') ORDER BY id"
+        ),
+        vec!["n2", "b"]
+    );
     // Two renames of one entity to different names: refused up front.
     let m = api_err(st(&db, vec![ren("node", "b", "x"), ren("node", "B", "y")]));
     assert!(m.contains("contradictory renames"), "{m}");
@@ -517,7 +537,10 @@ fn the_old_name_is_refused_in_every_channel() {
             ..Default::default()
         },
     ));
-    assert!(m.contains("both structurally referenced and object-deleted"), "{m}");
+    assert!(
+        m.contains("both structurally referenced and object-deleted"),
+        "{m}"
+    );
     check(
         "object delete by elements",
         ChangeSet {
@@ -798,7 +821,10 @@ fn an_element_rename_keeps_n_d_names_and_tuples() {
         m.contains("the derived name \"u1__n1\" is taken by an entity with elements [u1, bus]"),
         "{m}"
     );
-    let r = ok(&db, vec![nd("unit__node", Some("u1__n1_new"), &["u1", "n1"])]);
+    let r = ok(
+        &db,
+        vec![nd("unit__node", Some("u1__n1_new"), &["u1", "n1"])],
+    );
     assert_eq!(r.structural[0].effect, SE::Created);
     assert_eq!(id_of(&db, "u1__n1"), link);
     // A renamed N-D entity is found by its new name; its tuple stays.
@@ -847,4 +873,199 @@ fn compaction_keeps_the_version_and_the_closed_row() {
     nodal_db_core::compaction::compact(&db).unwrap();
     assert_eq!(rows(&db), before);
     assert_eq!(id_of(&db, "bus"), n1);
+}
+
+// ---------------------------------------------------------------------------
+// The set path for runs of renames (§3.2, test 11)
+// ---------------------------------------------------------------------------
+
+use nodal_db_core::entity_rename_set::{test_hooks as set_hooks, RENAME_SET_MIN};
+
+/// A file with `n` node entities `e0..` (auto-created by one segment).
+fn many(dir: &tempfile::TempDir, n: usize) -> PathBuf {
+    let db = dir.path().join(format!("m{n}.duckdb"));
+    init_schema(&db).unwrap();
+    ok(&db, vec![class("node", &[]), float_param("node", "demand")]);
+    let names: Vec<String> = (0..n).map(|i| format!("e{i}")).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity", DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(names)) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0; n])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    set(
+        &db,
+        ChangeSet {
+            segments: vec![Segment {
+                class: "node".into(),
+                parameter: "demand".into(),
+                alternative: "Base".into(),
+                batches: vec![batch],
+                domains: vec![],
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db
+}
+
+/// Every entity row, history included, without commit ids' absolute values.
+fn entity_rows(db: &Path) -> Vec<String> {
+    qs(
+        db,
+        "SELECT id || '|' || entity_class_id || '|' || name || '|' || \
+                coalesce(description, '<null>') || '|' || version || '|' || \
+                valid_from_commit || '|' || coalesce(CAST(valid_to_commit AS VARCHAR), '-') \
+         FROM entity ORDER BY id, version",
+    )
+}
+
+/// A mixed run: chains, a case-only rename, description edits (one that
+/// returns to the original), a create-then-rename of an entity of this
+/// call, and a rename after a per-item rename of the same entity.
+fn mixed_call() -> Vec<SC> {
+    // A per-item rename (a run of one), then the set run.
+    let mut v = vec![
+        ent("node", "fresh"),
+        ren("node", "e0", "first"),
+        ent("node", "sep"),
+    ];
+    v.push(ren("node", "first", "second"));
+    v.push(ren("node", "fresh", "fresh2"));
+    v.push(ren("node", "e1", "E1"));
+    v.push(desc("node", "e2", "x"));
+    v.push(desc("node", "e2", ""));
+    v.push(ren("node", "e3", "a"));
+    v.push(ren("node", "a", "b"));
+    v.push(desc("node", "b", "d"));
+    for i in 4..30 {
+        v.push(ren("node", &format!("e{i}"), &format!("r{i}")));
+    }
+    v.push(ent("node", "e4")); // the old name, re-created after the run
+    v
+}
+
+#[test]
+fn the_set_path_and_the_per_item_path_write_the_same_rows() {
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let a = many(&d1, 40);
+    let b = many(&d2, 40);
+    let s0 = set_hooks::statements();
+    let ra = ok(&a, mixed_call());
+    assert!(set_hooks::statements() > s0, "the run took the set path");
+    let rb = set_hooks::without_set_path(|| ok(&b, mixed_call()));
+    assert_eq!(ra.structural, rb.structural);
+    assert_eq!(ra.warnings, rb.warnings);
+    assert_eq!(entity_rows(&a), entity_rows(&b));
+    // Both NoOp-only and real outcomes are present.
+    assert!(ra.structural.iter().any(|o| o.effect == SE::Updated));
+    assert!(ra.structural.iter().any(|o| o.effect == SE::Renamed));
+}
+
+#[test]
+fn the_set_path_reports_the_first_offending_item_as_the_per_item_path() {
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let a = many(&d1, 40);
+    let b = many(&d2, 40);
+    let call = |bad: SC| {
+        let mut v: Vec<SC> = (0..30)
+            .map(|i| ren("node", &format!("e{i}"), &format!("r{i}")))
+            .collect();
+        v[17] = bad;
+        v
+    };
+    for bad in [
+        ren("node", "e17", "E35"),      // taken by another entity
+        ren("node", "nope", "x"),       // not found
+        ren("node", "e5", "y"),         // renamed earlier in the run
+        ren("node", "e17", "e3"),       // a name freed earlier in the run
+        ren("ghost_class", "e17", "y"), // unknown class
+    ] {
+        let ma = api_err(st(&a, call(bad.clone())));
+        let mb = set_hooks::without_set_path(|| api_err(st(&b, call(bad.clone()))));
+        assert_eq!(ma, mb, "{bad:?}");
+    }
+    assert_eq!(entity_rows(&a), entity_rows(&b));
+}
+
+#[test]
+fn set_path_statements_do_not_depend_on_the_number_of_renames() {
+    let count = |n: usize| -> u64 {
+        let dir = tempfile::tempdir().unwrap();
+        let db = many(&dir, n);
+        let renames: Vec<SC> = (0..n)
+            .map(|i| ren("node", &format!("e{i}"), &format!("n{i}")))
+            .collect();
+        let s0 = set_hooks::statements();
+        let r = ok(&db, renames);
+        assert!(r.structural.iter().all(|o| o.effect == SE::Renamed));
+        assert_eq!(
+            q1(
+                &db,
+                "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL AND name LIKE 'n%'"
+            ),
+            n as i64
+        );
+        assert_eq!(
+            demand(&db, &format!("n{}", n - 1)),
+            vec![format!("n{}=1.0", n - 1)]
+        );
+        set_hooks::statements() - s0
+    };
+    assert_eq!(count(RENAME_SET_MIN), count(10_000));
+}
+
+#[test]
+fn the_set_path_checks_class_sets_as_the_per_item_path() {
+    let setup = |dir: &tempfile::TempDir| {
+        let db = many(dir, 30);
+        ok(&db, vec![class("unit", &[]), ent("unit", "u7")]);
+        let conn = Connection::open(&db).unwrap();
+        let c: i64 = conn
+            .query_row(
+                "INSERT INTO commit (user, message) VALUES ('sql', 'set') RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO class_set (name, valid_from_commit) VALUES ('site', ?)",
+            [c],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO class_set_member (class_set_id, member_class_id, valid_from_commit) \
+             SELECT s.id, ec.id, ? FROM class_set s, entity_class ec \
+             WHERE s.name = 'site' AND ec.name IN ('node', 'unit')",
+            [c],
+        )
+        .unwrap();
+        db
+    };
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let (a, b) = (setup(&d1), setup(&d2));
+    let call = || {
+        let mut v: Vec<SC> = (0..25)
+            .map(|i| ren("node", &format!("e{i}"), &format!("r{i}")))
+            .collect();
+        v[20] = ren("node", "e20", "U7");
+        v
+    };
+    let ma = api_err(st(&a, call()));
+    let mb = set_hooks::without_set_path(|| api_err(st(&b, call())));
+    assert_eq!(ma, mb);
+    assert!(
+        ma.contains("ambiguous across class set \"site\", where unit:u7 exists"),
+        "{ma}"
+    );
 }

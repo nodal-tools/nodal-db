@@ -86,6 +86,11 @@ pub mod object_delete;
 #[doc(hidden)]
 pub mod entity_tuple;
 
+/// The set path of entity renames: a long run of `RenameEntity` items of a
+/// call applied as one batch.
+#[doc(hidden)]
+pub mod entity_rename_set;
+
 /// Purge (entity_descriptions_purge plan §3): a bulk, versioned close-out of
 /// every item in a named scope, in one commit, through the object delete's
 /// leg registry in set form.

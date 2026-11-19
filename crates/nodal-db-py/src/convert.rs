@@ -983,6 +983,22 @@ fn md_err(msg: String) -> PyErr {
     ApiError::new_err(format!("metadata: {msg}"))
 }
 
+/// Refuse a key `what` does not take: ignoring a misspelled key would
+/// silently change the meaning (a misspelled "fields" revises to empty, a
+/// misspelled "role" links without one).
+fn md_keys(obj: &Bound<'_, PyAny>, what: &str, allowed: &[&str]) -> PyResult<()> {
+    let dict = obj
+        .cast::<PyDict>()
+        .map_err(|_| md_err(format!("{what} is a dict, got {obj}")))?;
+    for k in dict.keys() {
+        let k: String = k.extract()?;
+        if !allowed.contains(&k.as_str()) {
+            return Err(md_err(format!("{what} does not take {k:?} (it takes {allowed:?})")));
+        }
+    }
+    Ok(())
+}
+
 /// A source / license / role: a name (str) or an id (int).
 fn md_ref(obj: &Bound<'_, PyAny>) -> PyResult<Ref> {
     if let Ok(i) = obj.extract::<i64>() {
@@ -1029,6 +1045,14 @@ fn md_pair(obj: &Bound<'_, PyAny>) -> PyResult<PairRef> {
 /// A target dict: `{"source": ref}`, `{"license": ref}`, `{"pair": [name,
 /// value]}` or `{"id": n, "kind": "source"|"license"|"pair"}`.
 fn md_target(obj: &Bound<'_, PyAny>) -> PyResult<Target> {
+    md_target_in(obj, false)
+}
+
+/// A target dict; `with_role`: it may also carry `"role"` (a set list's
+/// entries).
+fn md_target_in(obj: &Bound<'_, PyAny>, with_role: bool) -> PyResult<Target> {
+    let base: &[&str] = &["source", "license", "pair", "id", "kind", "role"];
+    md_keys(obj, "a target", if with_role { base } else { &base[..5] })?;
     if let Some(v) = md_opt(obj, "source") {
         return Ok(Target::Source(md_ref(&v)?));
     }
@@ -1071,6 +1095,7 @@ fn md_link(target: &Bound<'_, PyAny>, role_from: &Bound<'_, PyAny>) -> PyResult<
 }
 
 fn md_value(obj: &Bound<'_, PyAny>, op: &str) -> PyResult<ValueAddr> {
+    md_keys(obj, "a value address", &["class", "parameter", "alternative", "entity"])?;
     Ok(ValueAddr {
         class: md_req(obj, op, "class")?.extract()?,
         parameter: md_req(obj, op, "parameter")?.extract()?,
@@ -1084,6 +1109,11 @@ fn md_value(obj: &Bound<'_, PyAny>, op: &str) -> PyResult<ValueAddr> {
 /// `{"scenario": ..}`, `{"run": id}`, `{"source": ref}`, `{"license": ref}`,
 /// `{"value_list": ..}`, `{"unit": ..}`.
 fn md_subject(obj: &Bound<'_, PyAny>) -> PyResult<Subject> {
+    md_keys(obj, "a subject", &["dataset", "entity", "class", "parameter", "alternative",
+        "scenario", "run", "source", "license", "value_list", "unit"])?;
+    if obj.cast::<PyDict>().map(|d| d.len()).unwrap_or(0) != 1 {
+        return Err(md_err(format!("a subject has exactly one key, got {obj}")));
+    }
     if md_opt(obj, "dataset").is_some() {
         return Ok(Subject::Dataset);
     }
@@ -1138,7 +1168,10 @@ pub(crate) fn md_action(obj: &Bound<'_, PyAny>) -> PyResult<Action> {
     let mut links = Vec::new();
     for t in list.try_iter()? {
         let t = t?;
-        links.push(md_link(&t, &t)?);
+        links.push(LinkSpec {
+            target: md_target_in(&t, true)?,
+            role: md_role(&t)?,
+        });
     }
     Ok(Action::Set(links))
 }
@@ -1155,6 +1188,7 @@ fn md_scope(obj: &Bound<'_, PyAny>) -> PyResult<Scope> {
     if md_opt(obj, "entity").is_some() {
         return Ok(Scope::Value(md_value(obj, "value_metadata")?));
     }
+    md_keys(obj, "a target scope", &["class", "parameter", "alternative"])?;
     Ok(Scope::Target {
         class: md_req(obj, "value_metadata", "class")?.extract()?,
         parameter: md_req(obj, "value_metadata", "parameter")?.extract()?,
@@ -1166,6 +1200,8 @@ fn md_fields_source(obj: &Bound<'_, PyAny>) -> PyResult<SourceFields> {
     let Some(f) = md_opt(obj, "fields") else {
         return Ok(SourceFields::default());
     };
+    md_keys(&f, "source fields", &["title", "path", "edition", "publisher", "issued",
+        "retrieved", "citation", "description"])?;
     Ok(SourceFields {
         title: opt_str(&f, "title")?,
         path: opt_str(&f, "path")?,
@@ -1182,6 +1218,7 @@ fn md_fields_license(obj: &Bound<'_, PyAny>) -> PyResult<LicenseFields> {
     let Some(f) = md_opt(obj, "fields") else {
         return Ok(LicenseFields::default());
     };
+    md_keys(&f, "license fields", &["title", "path", "spdx", "policy"])?;
     Ok(LicenseFields {
         title: opt_str(&f, "title")?,
         path: opt_str(&f, "path")?,
@@ -1197,6 +1234,27 @@ fn md_cascade(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
 pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<MetadataChange> {
     let op: String = md_req(obj, "metadata item", "op")?.extract()?;
     let o = op.as_str();
+    let keys: &[&str] = match o {
+        "put_source" => &["source", "rename", "fields"],
+        "put_license" => &["license", "rename", "fields"],
+        "set_source_licenses" => &["source", "licenses"],
+        "create_pair" => &["name", "value"],
+        "revise_pair" => &["pair", "value"],
+        "rename_pair_key" => &["from", "to"],
+        "put_role" => &["role", "rename", "description", "iri"],
+        "set_property" => &["key", "value"],
+        "delete_source" => &["source", "cascade"],
+        "delete_license" => &["license", "cascade"],
+        "delete_pair" => &["pair", "cascade"],
+        "delete_role" => &["role"],
+        "link" | "unlink" => &["subject", "target", "role"],
+        "link_value" | "unlink_value" => &["value", "target", "role"],
+        "value_metadata" => &["scope", "action"],
+        other => return Err(md_err(format!("unknown op {other:?}"))),
+    };
+    let mut all = vec!["op"];
+    all.extend_from_slice(keys);
+    md_keys(obj, &format!("{o:?}"), &all)?;
     Ok(match o {
         "put_source" => MetadataChange::PutSource {
             source: md_ref(&md_req(obj, o, "source")?)?,
@@ -1238,7 +1296,16 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
         },
         "set_property" => MetadataChange::SetProperty {
             key: md_req(obj, o, "key")?.extract()?,
-            value: opt_str(obj, "value")?,
+            // Required: an explicit None clears (a missing key must not).
+            value: match obj.get_item("value") {
+                Ok(v) if v.is_none() => None,
+                Ok(v) => Some(v.extract()?),
+                Err(_) => {
+                    return Err(md_err(
+                        "\"set_property\" needs \"value\" (None clears the key)".into(),
+                    ))
+                }
+            },
         },
         "delete_source" => MetadataChange::DeleteSource {
             source: md_ref(&md_req(obj, o, "source")?)?,

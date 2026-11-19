@@ -116,3 +116,27 @@ def test_deletes_and_refusals(db):
     with pytest.raises(nodal_db.ApiError, match="core-owned"):
         db.commit_changes(metadata=[{"op": "set_property", "key": "schema_version",
                                      "value": "x"}], user="t")
+
+
+def test_misspelled_keys_are_refused(db):
+    annotated(db)
+    bad = [
+        {"op": "put_source", "source": "IEA", "feilds": {"title": "x"}},
+        {"op": "put_source", "source": "IEA", "fields": {"titel": "x"}},
+        {"op": "put_license", "license": "CC-BY-4.0", "fields": {"sdpx": True}},
+        {"op": "link", "subject": {"dataset": True}, "target": {"source": "IEA"},
+         "rol": "primary_source"},
+        {"op": "link", "subject": {"dataset": True, "class": "node"},
+         "target": {"source": "IEA"}},
+        {"op": "link_value", "value": dict(VALUE_A, entty="a"), "target": {"source": "IEA"}},
+        {"op": "value_metadata", "scope": "save",
+         "action": {"set": [{"source": "IEA", "rol": "x"}]}},
+        {"op": "set_property", "key": "title"},
+    ]
+    for item in bad:
+        with pytest.raises(nodal_db.ApiError):
+            db.commit_changes(metadata=[item], user="t")
+    assert db.database_property("title") == "Nordic grid"
+    rep = db.commit_changes(metadata=[{"op": "set_property", "key": "title", "value": None}],
+                            user="t")
+    assert rep["metadata"][0]["effect"] == "cleared"

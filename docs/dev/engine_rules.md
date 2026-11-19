@@ -181,8 +181,12 @@ fails silently: the file is just bigger. The measurements are in
 
 **Guards.**
 [`crates/nodal-db-core/tests/long_index_size.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/long_index_size.rs)
-(fails when the order or a DuckDB upgrade makes the index grow) and the
-key-order checks in `schema/smoke_test.py`.
+(fails when the order or a DuckDB upgrade makes the index grow),
+[`crates/nodal-db-core/tests/metadata_schema.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/metadata_schema.rs)
+(the value-link index `uq_value_metadata_link`, targets and roles first
+and the entity last, at 10^5 links against the reverse order: about 24
+against 126 bytes per link) and the key-order checks in
+`schema/smoke_test.py`.
 
 ## 5. Every connection turns off DuckDB's caching operators
 

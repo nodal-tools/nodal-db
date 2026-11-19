@@ -711,6 +711,10 @@ const ASOF_MACROS: &[&str] = &[
 /// the census below matches `_asof` anywhere in the name.
 const ASOF_POINT_MACROS: &[&str] = &["value_array_asof_for"];
 
+/// Named as-of reads composed of the guarded mirrors (they fail on the
+/// mirrors' guard; the smoke suite sweeps their consumer shapes).
+const ASOF_NAMED_MACROS: &[&str] = &["value_metadata_asof_named"];
+
 /// The consumer shapes of the B1 sweep: bare, aggregate (projection fully
 /// pruned), column-pruned constant projection, and a join into another
 /// relation. Every macro exposes valid_from_commit, so the join is generic.
@@ -1262,6 +1266,7 @@ fn guard_sweep_list_matches_catalog_census() {
     let mut expected: Vec<String> = ASOF_MACROS
         .iter()
         .chain(ASOF_POINT_MACROS)
+        .chain(ASOF_NAMED_MACROS)
         .map(|m| m.to_string())
         .collect();
     expected.sort();
@@ -1285,6 +1290,10 @@ const VIEW_SWEEP_EXCLUSIONS: &[(&str, &str)] = &[
     ),
     (
         "database_property_current",
+        "carries db_identity, a per-init UUID unique by construction",
+    ),
+    (
+        "database_properties",
         "carries db_identity, a per-init UUID unique by construction",
     ),
 ];

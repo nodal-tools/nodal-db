@@ -187,6 +187,11 @@ mirror	class_set_member_current	view		2	member_class_id	BIGINT
 mirror	class_set_member_current	view		3	valid_from_commit	BIGINT
 mirror	class_set_member_current	view		4	valid_to_commit	BIGINT
 mirror	class_set_member_current	view		5	version	SMALLINT
+stable	database_properties	view		1	key	VARCHAR
+stable	database_properties	view		2	value	VARCHAR
+stable	database_properties	view		3	owner	VARCHAR
+stable	database_properties	view		4	well_known	BOOLEAN
+stable	database_properties	view		5	set_at_commit	BIGINT
 mirror	database_property_asof	table_macro	c	1	key	VARCHAR
 mirror	database_property_asof	table_macro	c	2	value	VARCHAR
 mirror	database_property_asof	table_macro	c	3	owner	VARCHAR
@@ -199,6 +204,12 @@ mirror	database_property_current	view		3	owner	VARCHAR
 mirror	database_property_current	view		4	valid_from_commit	BIGINT
 mirror	database_property_current	view		5	valid_to_commit	BIGINT
 mirror	database_property_current	view		6	version	SMALLINT
+stable	dataset_metadata	view		1	target_kind	VARCHAR
+stable	dataset_metadata	view		2	target_id	BIGINT
+stable	dataset_metadata	view		3	target_name	VARCHAR
+stable	dataset_metadata	view		4	pair_value	VARCHAR
+stable	dataset_metadata	view		5	role	VARCHAR
+stable	dataset_metadata	view		6	linked_at_commit	BIGINT
 stable	dataset_version	view		1	version	BIGINT
 mirror	definition_value_array_asof	table_macro	c	1	parameter_definition_id	BIGINT
 mirror	definition_value_array_asof	table_macro	c	2	slot	VARCHAR
@@ -588,6 +599,15 @@ mirror	object_metadata_link_current	view		5	role_id	BIGINT
 mirror	object_metadata_link_current	view		6	valid_from_commit	BIGINT
 mirror	object_metadata_link_current	view		7	valid_to_commit	BIGINT
 mirror	object_metadata_link_current	view		8	version	SMALLINT
+stable	object_metadata_named	view		1	object_type	VARCHAR
+stable	object_metadata_named	view		2	object_id	BIGINT
+stable	object_metadata_named	view		3	object_name	VARCHAR
+stable	object_metadata_named	view		4	target_kind	VARCHAR
+stable	object_metadata_named	view		5	target_id	BIGINT
+stable	object_metadata_named	view		6	target_name	VARCHAR
+stable	object_metadata_named	view		7	pair_value	VARCHAR
+stable	object_metadata_named	view		8	role	VARCHAR
+stable	object_metadata_named	view		9	linked_at_commit	BIGINT
 mirror	parameter_definition_asof	table_macro	c	1	id	BIGINT
 mirror	parameter_definition_asof	table_macro	c	2	entity_class_id	BIGINT
 mirror	parameter_definition_asof	table_macro	c	3	name	VARCHAR
@@ -939,6 +959,12 @@ mirror	source_license_current	view		2	license_id	BIGINT
 mirror	source_license_current	view		3	valid_from_commit	BIGINT
 mirror	source_license_current	view		4	valid_to_commit	BIGINT
 mirror	source_license_current	view		5	version	SMALLINT
+stable	source_licenses_named	view		1	source_id	BIGINT
+stable	source_licenses_named	view		2	source	VARCHAR
+stable	source_licenses_named	view		3	license_id	BIGINT
+stable	source_licenses_named	view		4	license	VARCHAR
+stable	source_licenses_named	view		5	spdx	BOOLEAN
+stable	source_licenses_named	view		6	has_policy	BOOLEAN
 mirror	units_of_measure_asof	table_macro	c	1	id	BIGINT
 mirror	units_of_measure_asof	table_macro	c	2	name	VARCHAR
 mirror	units_of_measure_asof	table_macro	c	3	description	VARCHAR
@@ -1030,6 +1056,16 @@ stable	value_keys	view		1	entity_id	BIGINT
 stable	value_keys	view		2	parameter_definition_id	BIGINT
 stable	value_keys	view		3	alternative_id	BIGINT
 stable	value_keys	view		4	tier	VARCHAR
+stable	value_licenses	view		1	class	VARCHAR
+stable	value_licenses	view		2	entity	VARCHAR
+stable	value_licenses	view		3	parameter	VARCHAR
+stable	value_licenses	view		4	alternative	VARCHAR
+stable	value_licenses	view		5	entity_id	BIGINT
+stable	value_licenses	view		6	parameter_definition_id	BIGINT
+stable	value_licenses	view		7	alternative_id	BIGINT
+stable	value_licenses	view		8	source	VARCHAR
+stable	value_licenses	view		9	license	VARCHAR
+stable	value_licenses	view		10	spdx	BOOLEAN
 mirror	value_long_asof	table_macro	c	1	entity_id	BIGINT
 mirror	value_long_asof	table_macro	c	2	parameter_definition_id	BIGINT
 mirror	value_long_asof	table_macro	c	3	alternative_id	BIGINT
@@ -1094,6 +1130,19 @@ mirror	value_long_current	view		29	v_str	VARCHAR
 mirror	value_long_current	view		30	v_datetime	TIMESTAMP
 mirror	value_long_current	view		31	v_dur_months	INTEGER
 mirror	value_long_current	view		32	v_dur_micros	BIGINT
+stable	value_metadata_asof_named	table_macro	c	1	class	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	2	entity	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	3	parameter	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	4	alternative	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	5	entity_id	BIGINT
+stable	value_metadata_asof_named	table_macro	c	6	parameter_definition_id	BIGINT
+stable	value_metadata_asof_named	table_macro	c	7	alternative_id	BIGINT
+stable	value_metadata_asof_named	table_macro	c	8	target_kind	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	9	target_id	BIGINT
+stable	value_metadata_asof_named	table_macro	c	10	target_name	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	11	pair_value	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	12	role	VARCHAR
+stable	value_metadata_asof_named	table_macro	c	13	linked_at_commit	BIGINT
 mirror	value_metadata_link_asof	table_macro	c	1	entity_id	BIGINT
 mirror	value_metadata_link_asof	table_macro	c	2	parameter_definition_id	BIGINT
 mirror	value_metadata_link_asof	table_macro	c	3	alternative_id	BIGINT
@@ -1112,6 +1161,19 @@ mirror	value_metadata_link_current	view		6	role_id	BIGINT
 mirror	value_metadata_link_current	view		7	valid_from_commit	BIGINT
 mirror	value_metadata_link_current	view		8	valid_to_commit	BIGINT
 mirror	value_metadata_link_current	view		9	version	SMALLINT
+stable	value_metadata_named	view		1	class	VARCHAR
+stable	value_metadata_named	view		2	entity	VARCHAR
+stable	value_metadata_named	view		3	parameter	VARCHAR
+stable	value_metadata_named	view		4	alternative	VARCHAR
+stable	value_metadata_named	view		5	entity_id	BIGINT
+stable	value_metadata_named	view		6	parameter_definition_id	BIGINT
+stable	value_metadata_named	view		7	alternative_id	BIGINT
+stable	value_metadata_named	view		8	target_kind	VARCHAR
+stable	value_metadata_named	view		9	target_id	BIGINT
+stable	value_metadata_named	view		10	target_name	VARCHAR
+stable	value_metadata_named	view		11	pair_value	VARCHAR
+stable	value_metadata_named	view		12	role	VARCHAR
+stable	value_metadata_named	view		13	linked_at_commit	BIGINT
 stable	value_rows	view		1	entity_id	BIGINT
 stable	value_rows	view		2	parameter_definition_id	BIGINT
 stable	value_rows	view		3	alternative_id	BIGINT

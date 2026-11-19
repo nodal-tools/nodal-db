@@ -706,3 +706,114 @@ LEFT JOIN entity_class_display_mode ecdm
   AND ecdm.valid_to_commit IS NULL
 WHERE dm.valid_to_commit IS NULL AND ec.valid_to_commit IS NULL
   AND dm.cur_name = lower(mode_name);
+
+-- ---------------------------------------------------------------------------
+-- Metadata and provenance: links named. Targets are a source, a license or a
+-- pair of the pool; `target_name` is the source or license name or the pair's
+-- key, `pair_value` the pair's value (NULL otherwise); `role` is NULL for a
+-- link without a role; `linked_at_commit` is the link row's
+-- valid_from_commit (a value link belongs to the value version current then).
+-- ---------------------------------------------------------------------------
+
+-- The live links of every current value, by names.
+-- @surface: stable
+CREATE VIEW value_metadata_named AS
+SELECT ec.name AS class, e.name AS entity, pd.name AS parameter, a.name AS alternative,
+       l.entity_id, l.parameter_definition_id, l.alternative_id,
+       l.target_kind, l.target_id,
+       coalesce(s.name, p.name) AS target_name,
+       p.value AS pair_value,
+       r.name AS role,
+       l.valid_from_commit AS linked_at_commit
+FROM value_metadata_link l
+JOIN entity e ON e.id = l.entity_id AND e.valid_to_commit IS NULL
+JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL
+JOIN parameter_definition pd ON pd.id = l.parameter_definition_id AND pd.valid_to_commit IS NULL
+JOIN alternative a ON a.id = l.alternative_id AND a.valid_to_commit IS NULL
+LEFT JOIN source s ON l.target_kind = 'source' AND s.id = l.target_id AND s.valid_to_commit IS NULL
+LEFT JOIN metadata_pair p ON l.target_kind = 'pair' AND p.id = l.target_id AND p.valid_to_commit IS NULL
+LEFT JOIN metadata_role r ON r.id = l.role_id AND r.valid_to_commit IS NULL
+WHERE l.valid_to_commit IS NULL;
+
+-- The live links of the dataset, the entities and the schema objects, by
+-- names. `object_name` is the object's name (an entity's as
+-- `class.entity`, a parameter's as `class.parameter`, a run's id, NULL for
+-- the dataset).
+-- @surface: stable
+CREATE VIEW object_metadata_named AS
+SELECT l.object_type, l.object_id,
+       CASE l.object_type
+         WHEN 'dataset' THEN NULL
+         WHEN 'entity' THEN (SELECT c.name || '.' || e.name FROM entity e
+                             JOIN entity_class c ON c.id = e.entity_class_id AND c.valid_to_commit IS NULL
+                             WHERE e.id = l.object_id AND e.valid_to_commit IS NULL)
+         WHEN 'entity_class' THEN (SELECT name FROM entity_class
+                                   WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'parameter_definition' THEN (SELECT c.name || '.' || d.name FROM parameter_definition d
+                             JOIN entity_class c ON c.id = d.entity_class_id AND c.valid_to_commit IS NULL
+                             WHERE d.id = l.object_id AND d.valid_to_commit IS NULL)
+         WHEN 'alternative' THEN (SELECT name FROM alternative
+                                  WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'scenario' THEN (SELECT name FROM scenario
+                               WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'run' THEN CAST(l.object_id AS VARCHAR)
+         WHEN 'source' THEN (SELECT name FROM source
+                             WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'license' THEN (SELECT name FROM license
+                              WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'parameter_value_list' THEN (SELECT name FROM parameter_value_list
+                                           WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'units_of_measure' THEN (SELECT name FROM units_of_measure
+                                       WHERE id = l.object_id AND valid_to_commit IS NULL)
+       END AS object_name,
+       l.target_kind, l.target_id,
+       coalesce(s.name, li.name, p.name) AS target_name,
+       p.value AS pair_value,
+       r.name AS role,
+       l.valid_from_commit AS linked_at_commit
+FROM object_metadata_link l
+LEFT JOIN source s ON l.target_kind = 'source' AND s.id = l.target_id AND s.valid_to_commit IS NULL
+LEFT JOIN license li ON l.target_kind = 'license' AND li.id = l.target_id AND li.valid_to_commit IS NULL
+LEFT JOIN metadata_pair p ON l.target_kind = 'pair' AND p.id = l.target_id AND p.valid_to_commit IS NULL
+LEFT JOIN metadata_role r ON r.id = l.role_id AND r.valid_to_commit IS NULL
+WHERE l.valid_to_commit IS NULL;
+
+-- Dataset-level metadata: exactly what is linked to the dataset.
+-- @surface: stable
+CREATE VIEW dataset_metadata AS
+SELECT target_kind, target_id, target_name, pair_value, role, linked_at_commit
+FROM object_metadata_named
+WHERE object_type = 'dataset';
+
+-- The licenses of every current source.
+-- @surface: stable
+CREATE VIEW source_licenses_named AS
+SELECT s.id AS source_id, s.name AS source, li.id AS license_id, li.name AS license,
+       li.spdx, li.policy IS NOT NULL AS has_policy
+FROM source_license sl
+JOIN source s ON s.id = sl.source_id AND s.valid_to_commit IS NULL
+JOIN license li ON li.id = sl.license_id AND li.valid_to_commit IS NULL
+WHERE sl.valid_to_commit IS NULL;
+
+-- Value -> source -> license: every current value under every license its
+-- linked sources are published under ("all values under license X").
+-- @surface: stable
+CREATE VIEW value_licenses AS
+SELECT v.class, v.entity, v.parameter, v.alternative,
+       v.entity_id, v.parameter_definition_id, v.alternative_id,
+       sl.source, sl.license, sl.spdx
+FROM value_metadata_named v
+JOIN source_licenses_named sl ON v.target_kind = 'source' AND sl.source_id = v.target_id;
+
+-- The current database properties. `well_known` marks the documented user
+-- keys; `owner` is 'core', 'user' or 'tool'.
+-- @surface: stable
+CREATE VIEW database_properties AS
+SELECT key, value, owner,
+       lower(key) IN ('identifier', 'base_iri', 'title', 'description', 'version',
+                      'created', 'homepage', 'language', 'semantic_context',
+                      'conforms_to') AS well_known,
+       valid_from_commit AS set_at_commit
+FROM database_property
+WHERE valid_to_commit IS NULL;
+

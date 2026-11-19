@@ -945,3 +945,85 @@ fn same_call_rules() {
     );
     clean(&db);
 }
+
+#[test]
+fn the_stable_views_name_the_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = annotated(dir.path());
+    meta(
+        &db,
+        vec![
+            M::PutLicense {
+                license: src("CC-BY-4.0"),
+                rename: None,
+                fields: LicenseFields {
+                    spdx: true,
+                    ..Default::default()
+                },
+            },
+            M::CreatePair {
+                name: "keyword".into(),
+                value: "grid".into(),
+            },
+            M::SetProperty {
+                key: "title".into(),
+                value: Some("Nordic grid".into()),
+            },
+        ],
+    )
+    .unwrap();
+    let first = q(&db, "SELECT max(id) FROM commit");
+    meta(
+        &db,
+        vec![
+            M::SetSourceLicenses {
+                source: src("IEA"),
+                licenses: vec![src("CC-BY-4.0")],
+            },
+            M::Link {
+                subject: Subject::Dataset,
+                link: LinkSpec {
+                    target: Target::Pair(PairRef::Pair {
+                        name: "keyword".into(),
+                        value: "grid".into(),
+                    }),
+                    role: RoleSel::NoRole,
+                },
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        qs(
+            &db,
+            "SELECT class || '.' || entity || '/' || parameter || '/' || alternative || ' -> ' \
+             || target_name FROM value_metadata_named"
+        ),
+        "node.a/p/Base -> IEA"
+    );
+    assert_eq!(
+        qs(&db, "SELECT target_name || '=' || pair_value FROM dataset_metadata"),
+        "keyword=grid"
+    );
+    assert_eq!(
+        qs(&db, "SELECT entity || ' under ' || license FROM value_licenses"),
+        "a under CC-BY-4.0"
+    );
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM database_properties WHERE key = 'title' AND well_known \
+             AND owner = 'user'"
+        ),
+        1
+    );
+    // As of the first commits, the value's link already existed under its
+    // names; before it, nothing.
+    assert_eq!(
+        q(&db, &format!("SELECT count(*) FROM value_metadata_asof_named({first})")),
+        1
+    );
+    assert_eq!(q(&db, "SELECT count(*) FROM value_metadata_asof_named(1)"), 0);
+    assert_eq!(q(&db, "SELECT count(*) FROM audit_license_non_spdx"), 0);
+    clean(&db);
+}

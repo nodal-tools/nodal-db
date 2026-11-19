@@ -54,15 +54,21 @@ From `schema/080_views_read.sql`.
 | `axis_position` | view | One row per (axis, position), for audits, extract and users |
 | `axis_position_stored` | view | Stored (child-table) positions of every axis |
 | `axis_position_stored_in_use(pd_id)` | macro | Stored positions of the axes that CURRENT value rows reference |
+| `database_properties` | view | The current database properties |
+| `dataset_metadata` | view | Dataset-level metadata |
 | `entity_class_display(mode_name)` | macro | Resolved per-mode class presentation (Spine-Toolbox #2492) |
+| `object_metadata_named` | view | The live links of the dataset, the entities and the schema objects, by names |
 | `parameter_effective_unit` | view | Effective unit = override if present, else definition default |
 | `read_parameter(class_name, parameter_name)` | macro | Canonical bulk read |
 | `read_parameter_dense(class_name, parameter_name)` | macro | Hot-path bulk read, dense form |
 | `read_parameter_scalar(class_name, parameter_name)` | macro | Hot-path bulk read, scalar form |
 | `read_value(class_name, parameter_name, entity_name, alternative_name)` | macro | Point read of one value by name, in read_parameter's columns (one entity in every current alternative when the alternative is omitted) |
 | `read_values(class_name, parameter_name, entity_names, alternative_names)` | macro | Point read of a few values by name, in read_parameter's columns |
+| `source_licenses_named` | view | The licenses of every current source |
 | `value_array_cells` | view | Array tier decoded to cells |
 | `value_cells` | view | The tier-unifying cell view |
+| `value_licenses` | view | Value -> source -> license |
+| `value_metadata_named` | view | The live links of every current value, by names |
 | `value_rows` | view | Fully rendered long rows |
 | `value_rows_for(pd_id_arg, entity_ids, alternative_ids)` | macro | Point read by ids, in value_rows' columns |
 
@@ -139,6 +145,7 @@ From `schema/110_views_history.sql`.
 | `value_array_asof(c)` | macro | Rows of `value_array` as of commit `c` |
 | `value_array_asof_for(c, pd_id, e_id, al_id)` | macro | One array value as of commit c |
 | `value_long_asof(c)` | macro | Rows of `value_long` as of commit `c` |
+| `value_metadata_asof_named(c)` | macro | The value links as of commit c, by the names valid at c (through the marker-guarded *_asof mirrors: it fails loudly before an erasure marker) |
 | `value_metadata_link_asof(c)` | macro | Rows of `value_metadata_link` as of commit `c` |
 | `value_scalar_asof(c)` | macro | Rows of `value_scalar` as of commit `c` |
 | `value_timeline` | view | The long leg is VALUE-level |

@@ -461,3 +461,23 @@ FROM value_array_hist;
 -- @surface: stable
 CREATE VIEW history_untrusted_span AS
 SELECT * FROM value_timeline WHERE NOT content_retained;
+
+-- The value links as of commit c, by the names valid at c (through the
+-- marker-guarded *_asof mirrors: it fails loudly before an erasure marker).
+-- @surface: stable
+CREATE MACRO value_metadata_asof_named(c) AS TABLE
+SELECT ec.name AS class, e.name AS entity, pd.name AS parameter, a.name AS alternative,
+       l.entity_id, l.parameter_definition_id, l.alternative_id,
+       l.target_kind, l.target_id,
+       coalesce(s.name, p.name) AS target_name,
+       p.value AS pair_value,
+       r.name AS role,
+       l.valid_from_commit AS linked_at_commit
+FROM value_metadata_link_asof(c) l
+JOIN entity_asof(c) e ON e.id = l.entity_id
+JOIN entity_class_asof(c) ec ON ec.id = e.entity_class_id
+JOIN parameter_definition_asof(c) pd ON pd.id = l.parameter_definition_id
+JOIN alternative_asof(c) a ON a.id = l.alternative_id
+LEFT JOIN source_asof(c) s ON l.target_kind = 'source' AND s.id = l.target_id
+LEFT JOIN metadata_pair_asof(c) p ON l.target_kind = 'pair' AND p.id = l.target_id
+LEFT JOIN metadata_role_asof(c) r ON r.id = l.role_id;

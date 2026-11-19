@@ -62,7 +62,8 @@ There is one file set and three appliers: `schema/build.py`,
 the CLI and the Python skin (a census test asserts the embedded list
 matches `schema/*.sql`).
 
-- `001` meta (commit log, erasure markers, sequences, metadata) · `010`
+- `001` meta (commit log, erasure markers, sequences, database properties,
+  the metadata pool, sources, licenses, roles and links) · `010`
   entities/classes/dimensions · `020` alternatives/scenarios · `030`
   parameter definitions · `040` axes (including parametric float and
   datetime axes, and the CRS property) · `050` value tables (three storage tiers
@@ -443,9 +444,21 @@ discipline. The client-side rules are in
 
 ## 7. Deletion, erasure and the change model
 
-Value deletes, structural changes, object deletes and purges ride the
-same atomic commit as value writes (`api::commit_change_set`, which
-`api::commit_changes` and every wrapper call). Object deletion
+Value deletes, structural changes, object deletes, purges and metadata
+ride the same atomic commit as value writes (`api::commit_change_set`,
+which `api::commit_changes` and every wrapper call). The order inside
+the transaction: structural changes, value writes, value deletes, object
+deletes, purges, then the metadata channel (`metadata.rs`): pool creates
+and revisions, the keep / set / clear statements and value-link items,
+object links, pool deletes. The write path records which values got a
+new version (only for targets that carry value links, read once per
+attempt), and the metadata phase refuses a changed annotated value
+without a statement. Value links belong to a value version: a new
+version closes them and a keep reopens them at the same commit, so link
+spans tile with value versions. Metadata links never block an object
+delete; they close with the object through the same registry legs
+(`DepLeg::blocks`). `property.rs` is the one writer of
+`database_property`, `metadata.rs` of the other metadata tables. Object deletion
 (alternative / parameter / entity / class) closes out the object row and
 its dependents via one **leg registry**, so the preview counts, the
 RESTRICT report and the cascade updates are generated from the same

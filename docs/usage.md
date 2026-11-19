@@ -610,7 +610,7 @@ database; parameter names are unique within their class.
   first: a create of an existing name does nothing, so a create sent
   before the rename of that name lands on the object being renamed.
 - **Template-stamped databases.** On a database that a template stamped
-  (`template_name` in `metadata`), renaming a class or parameter is
+  (the `template_name` database property), renaming a class or parameter is
   refused by default with `TemplateStampedRename`
   (`DbError::TemplateStampedRename`, `nodal_db.TemplateStampedRename`,
   an `ApiError` subclass). nodal-db cannot tell which classes and
@@ -629,7 +629,7 @@ database; parameter names are unique within their class.
   ones. A history-free extract forgets the old names, after which a
   changed template creates the old name anew.
 - **Template documents.** The template-owned parameter groups and audit
-  rules (the `presentation` and `audit_rules` metadata documents) name
+  rules (the `presentation` and `audit_rules` database properties) name
   classes and parameters; a rename updates them in the same commit, and so
   does an object delete or a purge that closes them (see [Purge](#purge)).
 - **Outside the database.** Names that other programs store (Arrow import
@@ -809,6 +809,191 @@ closes template vocabulary. A row an earlier request of the call covers
 counts in that earlier request only, as in the commit. It writes
 nothing, so nothing is spared: its counts are upper bounds of a call
 that also writes.
+
+### Metadata and provenance
+
+nodal-db records where data comes from and under which terms, in three
+kinds of records and two kinds of links:
+
+- **Sources** (a publication, a dataset, a measurement campaign) with a
+  short unique name and descriptive fields (title, path or URL,
+  edition, publisher, issued and retrieved dates, citation,
+  description).
+- **Licenses**, with a unique name, an `spdx` flag for names that are
+  SPDX identifiers, and an optional ODRL policy (JSON-LD, stored as
+  given). A source lists the licenses it is published under.
+- **Pairs**: free `name = value` annotations (keywords, contributors,
+  notes). A pair lives once and anything can link to it.
+- **Object links** hang a source, a license or a pair on the dataset, an
+  entity, a class, a parameter, an alternative, a scenario, a run, a
+  value list, a unit, or on a source or license itself (a source derived
+  from another, a license's own contributors).
+- **Value links** hang a source or a pair on one value. A value reaches
+  licenses through its sources.
+
+Every link may carry a **role** (`primary_source`, `author`, ...). Roles
+are created on purpose (`PutRole` / `put_role`); a link naming an unknown
+role is refused, so a typo never becomes a role. A fresh file has no
+roles. The recommended names, with the term each stands for:
+
+| Role | Meaning |
+|---|---|
+| `author`, `publisher`, `maintainer`, `contributor` | Frictionless / DataCite contributor roles |
+| `primary_source` | prov:hadPrimarySource |
+| `adjustment` | a source that adjusted the primary one |
+| `derived_from`, `edition_of`, `part_of` | relations between sources (prov:wasDerivedFrom, ...) |
+| `declared` | what the data owner declared |
+
+One target under two roles is two links; "no role" is one more.
+
+All of it goes through the metadata channel of a save (`metadata=` in
+Python, `ChangeSet::metadata` in Rust), in the same atomic commit as the
+values. Items are `"op"`-keyed dicts:
+
+=== "Python"
+
+    ```python
+    db.commit_changes(metadata=[
+        {"op": "put_source", "source": "IEA WEO 2024",
+         "fields": {"title": "World Energy Outlook 2024", "issued": "2024-10-16"}},
+        {"op": "put_license", "license": "CC-BY-4.0", "fields": {"spdx": True}},
+        {"op": "set_source_licenses", "source": "IEA WEO 2024", "licenses": ["CC-BY-4.0"]},
+        {"op": "put_role", "role": "primary_source"},
+        {"op": "link", "subject": {"dataset": True},
+         "target": {"source": "IEA WEO 2024"}, "role": "primary_source"},
+        {"op": "link_value",
+         "value": {"class": "node", "parameter": "demand",
+                   "alternative": "Base", "entity": "north"},
+         "target": {"source": "IEA WEO 2024"}},
+        {"op": "set_property", "key": "title", "value": "Nordic grid model"},
+    ], user="alice")
+    ```
+
+=== "Rust"
+
+    ```rust
+    use nodal_db_core::api::{commit_change_set, ChangeSet};
+    use nodal_db_core::types::{LinkSpec, MetadataChange as M, Ref, RoleSel, Target, ValueAddr};
+
+    let set = ChangeSet {
+        metadata: vec![
+            M::PutSource { source: Ref::Name("IEA WEO 2024".into()), rename: None,
+                           fields: Default::default() },
+            M::LinkValue {
+                value: ValueAddr { class: "node".into(), parameter: "demand".into(),
+                                   alternative: "Base".into(), entity: "north".into() },
+                link: LinkSpec { target: Target::Source(Ref::Name("IEA WEO 2024".into())),
+                                 role: RoleSel::NoRole },
+            },
+        ],
+        ..Default::default()
+    };
+    commit_change_set(&db, set, "alice", "provenance", Default::default())?;
+    ```
+
+A `put_*` of an unknown name creates the record; of a known one it
+revises it to exactly the given fields (same id, a new version; nothing
+when equal). Names of sources, licenses, roles, pair keys and property
+keys are identifiers (case-insensitive, NFC, no edge whitespace); pair
+values, titles, paths, citations and policies are stored verbatim. A
+pair whose key differs from an existing key only in case is stored under
+the existing spelling (with a `name_folded` warning); `rename_pair_key`
+re-spells or renames every pair of a key at once.
+
+#### New value versions: keep, set or clear
+
+Value links belong to a **version** of the value. When a save gives a
+value that has links a new version, it must say what the new version
+keeps; there is no default:
+
+- **keep**: the new version keeps the old version's links;
+- **clear**: the new version has none;
+- **set**: the new version has exactly the listed links.
+
+Say it once for the whole save, per `(class, parameter, alternative)`
+target, or per value; the value wins over the target, the target over
+the save:
+
+=== "Python"
+
+    ```python
+    db.write_parameter("node", "demand", "Base", batch, user="alice",
+                       value_metadata="keep")
+    db.commit_changes(segments=[...], user="alice", metadata=[
+        {"op": "value_metadata", "scope": "save", "action": "clear"},
+        {"op": "value_metadata",
+         "scope": {"class": "node", "parameter": "demand", "alternative": "Base"},
+         "action": {"set": [{"source": "IEA WEO 2024"}]}},
+    ])
+    ```
+
+=== "CLI"
+
+    ```bash
+    nodal-db import update.arrows --db demo.duckdb --value-metadata keep
+    ```
+
+A save that changes such a value without a statement is refused as a
+whole (`ValueMetadataUnstated`, Python `nodal_db.ValueMetadataUnstated`,
+with `count` and up to ten `sample` names) and writes nothing. Values
+without links, new values, unchanged writes and deleted values need no
+statement. A save- or target-level `set` also annotates the new values
+of the save ("everything in this import is from IEA"); a value-level
+`set` or `clear` also edits the links of an unchanged value. Next to a
+keep, `link_value` / `unlink_value` add or remove single links; next to
+a value-level `set` they are refused (a set is the exact list).
+Template migrations that only re-spell stored strings keep the links.
+`value_metadata_link_asof(c)` and `value_metadata_asof_named(c)` show
+each version's links.
+
+#### Deleting metadata
+
+`delete_source`, `delete_license` and `delete_pair` refuse while links
+remain (`restricted`, with blockers, nothing closed), judged on the state
+after the save: links the same save removes do not block, links a keep
+reopens do. With `"cascade": True` the links close with the record. A
+source's license list and its own links close with it; a license is
+also restricted by the sources published under it. A role is deleted
+only when nothing uses it (rename it instead). One save may name an
+object in one revise, rename or delete item only; links may name an
+object the same save creates.
+
+Links never block deleting the object they hang on: deleting an entity,
+class, parameter, alternative or scenario closes its links (and the
+links of its values) with it. Erasing an alternative removes its links
+physically; sources, licenses and pairs stay, with their history.
+
+#### Database properties
+
+Single-valued facts about the database live in `database_property`, one
+current value per key:
+
+- **core** keys the core writes (`schema_version`, `db_identity`, the
+  template stamp, `presentation`, `audit_rules`); a save cannot set them;
+- **tool** keys `<tool>:<name>` a tool owns (e.g. `flextool:frozen`);
+- **user** keys, everything else. Documented keys, with their crosswalk:
+
+| Key | Meaning | DCAT / Dublin Core / Frictionless |
+|---|---|---|
+| `identifier` | persistent identifier (DOI) | dct:identifier / `id` |
+| `base_iri` | IRI root of the dataset's terms; survives an extract | void:uriSpace |
+| `title`, `description` | the dataset's title and description | dct:title, dct:description / `title`, `description` |
+| `version` | the dataset's own version label | dcat:version / `version` |
+| `created` | creation date | dct:created / `created` |
+| `homepage` | landing page | dcat:landingPage / `homepage` |
+| `language` | language tag | dct:language |
+| `semantic_context` | JSON-LD context of the IRIs the dataset uses | |
+| `conforms_to` | the profile the dataset claims | dct:conformsTo |
+
+Set or clear one with `set_property` (`"value": None` clears); read them
+with `db.database_property(key)`, `db.database_properties()`, or the
+`database_properties` view. Keywords, themes and contributors, which
+have several values, are pairs linked to the dataset.
+
+**Reads.** `value_metadata_named`, `object_metadata_named`,
+`dataset_metadata`, `source_licenses_named`, `value_licenses` ("every
+value under license X") and `database_properties` name everything; the
+`*_current` / `*_asof(c)` mirrors of the eight tables show the rows.
 
 ### Read with SQL
 

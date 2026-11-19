@@ -457,6 +457,7 @@ _ASOF_MIRRORS = (
 DUMMY_ARGS: dict[str, str] = {
     **{f"{t}_asof": "1::BIGINT" for t in _ASOF_MIRRORS},
     "value_array_asof_for": "1::BIGINT, 1::BIGINT, 1::BIGINT, 1::BIGINT",
+    "value_metadata_asof_named": "1::BIGINT",
     "read_parameter": "'c', 'p'",
     "read_parameter_dense": "'c', 'p'",
     "read_parameter_scalar": "'c', 'p'",

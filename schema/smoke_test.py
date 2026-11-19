@@ -2060,18 +2060,22 @@ def main():
     asof_calls = {m: (lambda c, m=m: f"{m}({c})") for m in asof_macros}
     asof_calls["value_array_asof_for"] = (
         lambda c: "value_array_asof_for({}, {}, {}, {})".format(c, *pt_key))
+    # The named value-link read joins the guarded mirrors (no column parity:
+    # it is a named read, its commit column is linked_at_commit).
+    asof_calls["value_metadata_asof_named"] = lambda c: f"value_metadata_asof_named({c})"
 
     def guard_shapes(m, c):
         # The B1 consumer shapes: bare, aggregate (projection fully pruned),
         # column-pruned constant projection, join into another relation
         # (every macro exposes valid_from_commit).
         call = asof_calls[m](c)
+        col = "linked_at_commit" if m == "value_metadata_asof_named" else "valid_from_commit"
         return [
             f"SELECT * FROM {call}",
             f"SELECT count(*) FROM {call}",
             f"SELECT 1 FROM {call}",
             f'SELECT count(*) FROM {call} t JOIN "commit" cm'
-            f" ON cm.id = t.valid_from_commit"]
+            f" ON cm.id = t.{col}"]
 
     def guard_sweep(c):
         """Per macro: 'error' if all shapes fail loudly on the guard,
@@ -2099,7 +2103,7 @@ def main():
         " WHERE NOT internal AND function_type = 'table_macro'"
         " AND contains(function_name, '_asof')"))
     check("erasure guard: sweep list == catalog census of as-of table macros"
-          " (32, no stragglers)",
+          " (38, no stragglers)",
           census == sorted(asof_calls), str(set(census) ^ set(asof_calls)))
 
     # Column parity: every *_asof macro projects every real (non-generated)
@@ -2115,6 +2119,8 @@ def main():
 
     drift = {}
     for m in asof_calls:
+        if m == "value_metadata_asof_named":
+            continue
         base_table = ("value_array_hist" if m in ("value_array_asof", "value_array_asof_for")
                       else m[:-len("_asof")])
         cols = [r[0] for r in allrows(f"DESCRIBE SELECT * FROM {asof_calls[m](1)}")]

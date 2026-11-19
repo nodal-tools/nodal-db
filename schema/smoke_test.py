@@ -996,7 +996,8 @@ def main():
     for view in ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
                  "audit_type_conformance", "audit_index_accelerator", "audit_axis_integrity",
                  "audit_array_payload_xor", "audit_cross_tier_duplicate", "audit_membership_cycle",
-                 "audit_class_set_entity_name_dup", "audit_element_class_mismatch",
+                 "audit_class_set_entity_name_dup", "audit_entity_tuple_dup",
+                 "audit_element_class_mismatch",
                  "audit_value_class_mismatch", "audit_value_list_membership",
                  "audit_scenario_empty", "audit_required_class_empty",
                  "audit_realizes_cycle", "audit_dangling_semantic_ref",
@@ -1358,6 +1359,24 @@ def main():
           mm == [(l_bad, 7)], str(mm))
     con.execute("DELETE FROM entity_element WHERE entity_id = ?", [l_bad])
     con.execute("DELETE FROM entity WHERE id IN (?, ?)", [l_bad, l_empty])
+
+    # ---- element-tuple uniqueness: a second live holder of link_1's tuple
+    # (the writer refuses it; direct SQL can plant it) fires the audit.
+    con.execute("BEGIN")
+    l_dup = nextval(con, "seq_entity")
+    insert("entity", "id, entity_class_id, name, valid_from_commit", [l_dup, link, "l_dup", c3])
+    insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
+           [l_dup, 1, node_a, c3])
+    insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
+           [l_dup, 2, unit_1, c3])
+    con.execute("COMMIT")
+    dup = allrows("SELECT class, element_names, n, entity_ids, entity_names"
+                  " FROM audit_entity_tuple_dup")
+    check("audit_entity_tuple_dup lists a duplicated tuple with every holder",
+          dup == [("link", ["node_a", "unit_1"], 2, [link_1, l_dup], ["link_1", "l_dup"])],
+          str(dup))
+    con.execute("DELETE FROM entity_element WHERE entity_id = ?", [l_dup])
+    con.execute("DELETE FROM entity WHERE id = ?", [l_dup])
 
     # ---- F3: axis-content corruption fires the new axis audits
     con.execute("BEGIN")
@@ -2205,7 +2224,8 @@ def main():
     final_sweep = ["audit_dangling_ref", "audit_history_tiling", "audit_array_integrity",
                  "audit_type_conformance", "audit_index_accelerator",
                  "audit_cross_tier_duplicate", "audit_membership_cycle",
-                 "audit_class_set_entity_name_dup", "audit_element_class_mismatch",
+                 "audit_class_set_entity_name_dup", "audit_entity_tuple_dup",
+                 "audit_element_class_mismatch",
                  "audit_element_arity", "audit_value_class_mismatch",
                  "audit_value_list_membership", "audit_scenario_empty",
                  "audit_required_class_empty", "audit_axis_integrity",

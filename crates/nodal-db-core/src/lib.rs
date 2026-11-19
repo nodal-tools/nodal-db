@@ -81,6 +81,11 @@ pub mod api;
 /// read-only preview.
 pub mod object_delete;
 
+/// Element-tuple uniqueness of N-D entities: the per-call tuple index the
+/// entity create consults (no two live entities of a class hold one tuple).
+#[doc(hidden)]
+pub mod entity_tuple;
+
 /// Purge (entity_descriptions_purge plan §3): a bulk, versioned close-out of
 /// every item in a named scope, in one commit, through the object delete's
 /// leg registry in set form.

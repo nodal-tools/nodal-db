@@ -53,6 +53,7 @@ use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
 };
+use crate::entity_tuple::TupleIndex;
 use crate::object_delete::{
     apply_object_delete, cascade_scope, prepare_object_deletes, preview_one, reaches_created,
     written_value_covered, PreparedObjectDelete, WrittenIds,
@@ -547,6 +548,10 @@ pub fn commit_change_set(
         // What the structural items name, by id, for the purges' survivors
         // (a closure local, like `calls`; idle unless the call purges).
         let mut touches = CallTouches::new(!purges.is_empty());
+        // The live element tuples of the N-D classes this attempt creates
+        // in, loaded per class on first use (entity_rename_PLAN §5.3; a
+        // closure local, like `calls`).
+        let mut tuples = TupleIndex::for_changes(&structural);
         for (i, ch) in structural.iter().enumerate() {
             apply_structural(
                 conn,
@@ -557,6 +562,7 @@ pub fn commit_change_set(
                 &mut structural_folds,
                 &mut calls,
                 &mut touches,
+                &mut tuples,
             )?;
         }
         report
@@ -3729,7 +3735,7 @@ pub const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), e.id, e.name \
 /// explicit ordinal list otherwise; every ordinal must come back exactly
 /// once (hard check). The one entity lookup of the write path's
 /// [`resolve_entities`] and of the delete channel.
-fn lookup_entities(
+pub(crate) fn lookup_entities(
     conn: &Connection,
     class_id: i64,
     names: &[&str],

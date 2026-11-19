@@ -54,6 +54,12 @@ advisory	audit_element_class_mismatch	view		5	undeclared_position	BOOLEAN
 advisory	audit_entity_alternative_redundant	view		1	entity_id	BIGINT
 advisory	audit_entity_alternative_redundant	view		2	alternative_id	BIGINT
 advisory	audit_entity_alternative_redundant	view		3	active	BOOLEAN
+advisory	audit_entity_tuple_dup	view		1	class_id	BIGINT
+advisory	audit_entity_tuple_dup	view		2	class	VARCHAR
+advisory	audit_entity_tuple_dup	view		3	element_names	VARCHAR[]
+advisory	audit_entity_tuple_dup	view		4	n	BIGINT
+advisory	audit_entity_tuple_dup	view		5	entity_ids	BIGINT[]
+advisory	audit_entity_tuple_dup	view		6	entity_names	VARCHAR[]
 advisory	audit_erasure	view		1	marker_id	BIGINT
 advisory	audit_erasure	view		2	kind	VARCHAR
 advisory	audit_erasure	view		3	alternative_id	BIGINT

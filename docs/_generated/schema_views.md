@@ -167,6 +167,7 @@ From `schema/120_views_audit.sql`.
 | `audit_element_arity` | view | Element arity (the #1015 import-typo class) |
 | `audit_element_class_mismatch` | view | Element class conformance (set-typed dimensions accept entities of any member class; class-typed accept that class) |
 | `audit_entity_alternative_redundant` | view | Redundant activation rows (#3010) |
+| `audit_entity_tuple_dup` | view | Live entities of one class that hold the same element tuple |
 | `audit_erasure` | view | Erasure inventory (reporting, NOT blocking — unlike the audit_* views above, a non-empty result is not damage: it is the truthful record that hard erasure … |
 | `audit_health` | view | Maintenance-health audit |
 | `audit_history_tiling` | view | Version-tiling + span coherence |

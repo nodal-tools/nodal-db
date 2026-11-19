@@ -1726,6 +1726,10 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
     if let Some(seed) = &t.seed {
         // (folded class, folded name) -> declared, for element/membership refs.
         let mut seeded: HashSet<(String, String)> = HashSet::new();
+        // (folded class, folded element names) -> the first seed's name:
+        // an N-D entity's identity is its tuple, and the database holds at
+        // most one live entity per tuple of a class.
+        let mut tuples: HashMap<(String, Vec<String>), String> = HashMap::new();
         for (si, e) in seed.entities.iter().enumerate() {
             let loc = format!("seed.entities[{si}] (class {:?})", e.class);
             let Some(&ci) = class_ix.get(&fold(&e.class)) else {
@@ -1761,6 +1765,18 @@ pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
                             els.len(),
                             c.dimensions.len()
                         ));
+                    }
+                    let key = (fold(&e.class), els.iter().map(|x| fold(x)).collect());
+                    match tuples.get(&key) {
+                        Some(first) => errs.push(format!(
+                            "{loc}: seeds {first:?} and {name:?} have the same elements [{}] \
+                             (an N-D entity's elements identify it: one entity per element \
+                             tuple)",
+                            els.join(", ")
+                        )),
+                        None => {
+                            tuples.insert(key, name.clone());
+                        }
                     }
                 }
                 (None, true) => {}

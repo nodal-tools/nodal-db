@@ -30,6 +30,7 @@ use crate::api::{
     find_value_list, insert_alternative_row, lookup_alternative, lookup_entity,
     lookup_entity_class, lookup_parameter, lookup_scenario,
 };
+use crate::entity_tuple::{element_names, TupleIndex};
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
 use crate::property;
@@ -70,6 +71,7 @@ pub(crate) fn apply_structural(
     folds: &mut NameFolds,
     calls: &mut CallRenames,
     touches: &mut CallTouches,
+    tuples: &mut TupleIndex<'_>,
 ) -> Result<(), DbError> {
     let (kind, object_id, effect) = match change {
         StructuralChange::CreateAlternative { name, description } => {
@@ -161,6 +163,7 @@ pub(crate) fn apply_structural(
                 elements,
                 description.as_deref(),
                 folds,
+                tuples,
             )?;
             (StructuralKind::Entity, id, e)
         }
@@ -1793,6 +1796,21 @@ pub(crate) fn effective_entity_name(
     }
 }
 
+/// Idempotent 0-D / N-D entity create, with the element-tuple rule for N-D
+/// classes (entity_rename_PLAN E2, §5.2): no two live entities of a class
+/// may hold the same element tuple.
+///
+/// - An explicit name that exists is a `NoOp` when its tuple matches (else
+///   refused, as before); a new name over a tuple another entity holds is
+///   refused, naming every holder.
+/// - `name: None` resolves the elements first: a holder whose name folds to
+///   the derived name is a `NoOp`; a holder under another name is refused
+///   ("address it by that name"); with no holder, a derived name another
+///   entity has is refused ("give an explicit name").
+///
+/// `tuples` is the call's [`TupleIndex`] (a constant number of statements
+/// per call and N-D class).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_create_entity(
     conn: &Connection,
     c: i64,
@@ -1801,13 +1819,17 @@ pub(crate) fn apply_create_entity(
     elements: &[String],
     description: Option<&str>,
     folds: &mut NameFolds,
+    tuples: &mut TupleIndex<'_>,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let effective_name = effective_entity_name(name, elements)?;
     let s = entity_class_shape_noted(conn, class, folds)?;
-    if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
-        let eid = f.noted(folds, "entity", &effective_name);
-        verify_entity_elements(conn, class, &effective_name, eid, elements)?;
-        return Ok((eid, StructuralEffect::NoOp));
+    let derived = name.is_none();
+    if !derived || s.dims.is_empty() {
+        if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
+            let eid = f.noted(folds, "entity", &effective_name);
+            verify_entity_elements(conn, class, &effective_name, eid, elements)?;
+            return Ok((eid, StructuralEffect::NoOp));
+        }
     }
     if s.dims.is_empty() {
         if !elements.is_empty() {
@@ -1823,7 +1845,7 @@ pub(crate) fn apply_create_entity(
         )));
     }
     // Resolve every element BEFORE inserting anything (strict, §4.4).
-    let mut el_ids: Vec<(i64, i64)> = Vec::with_capacity(elements.len());
+    let mut el_ids: Vec<i64> = Vec::with_capacity(elements.len());
     for ((pos, dc, ds), el) in s.dims.iter().zip(elements.iter()) {
         let id = find_element(conn, *dc, *ds, el)?
             .ok_or_else(|| {
@@ -1833,11 +1855,49 @@ pub(crate) fn apply_create_entity(
                 ))
             })?
             .noted(folds, "entity", el);
-        el_ids.push((*pos, id));
+        el_ids.push(id);
+    }
+    if !s.dims.is_empty() {
+        let holders = tuples.holders(conn, s.cid, &s.dims, &el_ids)?;
+        if derived {
+            if let Some(h) = holders
+                .iter()
+                .find(|h| fold(&h.name) == fold(&effective_name))
+            {
+                folds.note("entity", &effective_name, &h.name, h.id);
+                return Ok((h.id, StructuralEffect::NoOp));
+            }
+        }
+        if !holders.is_empty() {
+            let names: Vec<String> = holders.iter().map(|h| format!("{:?}", h.name)).collect();
+            return Err(DbError::Api(format!(
+                "ensure_entity: {class}: elements [{}] already exist as {}; {}",
+                elements.join(", "),
+                names.join(", "),
+                if derived {
+                    "address it by that name (duplicate element tuples are not allowed)"
+                } else {
+                    "duplicate element tuples are not allowed"
+                }
+            )));
+        }
+        if derived {
+            if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
+                let have = element_names(conn, f.id)?;
+                return Err(DbError::Api(format!(
+                    "ensure_entity: {class}: the derived name {effective_name:?} is taken by \
+                     an entity with elements [{}]; give an explicit name",
+                    have.join(", ")
+                )));
+            }
+        }
     }
     let eid = insert_entity_row(conn, c, s.cid, &effective_name, description)?;
-    for (pos, el_id) in &el_ids {
-        insert_entity_element_row(conn, c, eid, *pos, *el_id)?;
+    for (i, el_id) in el_ids.iter().enumerate() {
+        insert_entity_element_row(conn, c, eid, s.dims[i].0, *el_id)?;
+    }
+    if !s.dims.is_empty() {
+        tuples.add(s.cid, eid, &effective_name, el_ids);
     }
     Ok((eid, StructuralEffect::Created))
 }

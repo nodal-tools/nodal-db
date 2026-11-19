@@ -381,7 +381,7 @@ fn surface_tag_census() {
             count("advisory"),
             count("internal")
         ),
-        (35, 72, 28, 9)
+        (35, 72, 29, 9)
     );
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("census.duckdb");

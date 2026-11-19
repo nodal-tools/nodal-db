@@ -38,6 +38,7 @@ use crate::api::{
     lookup_parameter, lookup_scenario, lookup_value_list,
 };
 use crate::conn::{core_write_txn_retrying, with_read_plain};
+use crate::entity_tuple::TupleIndex;
 use crate::property;
 use crate::error::DbError;
 use crate::structural::{
@@ -534,15 +535,19 @@ pub fn ensure_entity(
         )));
     }
 
-    // Existing-entity fast path (read-only, no commit): verify the tuple.
+    // Existing-entity fast path (read-only, no commit): a by-name hit whose
+    // tuple verifies. Anything else (a miss, a tuple mismatch) goes to the
+    // transaction, whose create body is the one source of its messages
+    // (the element-tuple rule included).
     let pre = with_read_plain(db, |conn| {
         let s = entity_class_shape(conn, class)?;
         match lookup_entity(conn, s.cid, &effective_name)? {
-            Some(eid) => {
-                verify_entity_elements(conn, class, &effective_name, eid, elements)?;
+            Some(eid) if verify_entity_elements(conn, class, &effective_name, eid, elements)
+                .is_ok() =>
+            {
                 Ok(Some(eid))
             }
-            None => Ok(None),
+            _ => Ok(None),
         }
     })?;
     if let Some(eid) = pre {
@@ -552,8 +557,17 @@ pub fn ensure_entity(
     let msg = format!("ensure_entity {class}:{effective_name}");
     // The shared applier is the one entity+element create body (invariant 2).
     core_write_txn_retrying(db, user, &msg, |conn, c| {
-        apply_create_entity(conn, c, class, name, elements, None, &mut no_report())
-            .map(|(id, _)| id)
+        apply_create_entity(
+            conn,
+            c,
+            class,
+            name,
+            elements,
+            None,
+            &mut no_report(),
+            &mut TupleIndex::new(Vec::new()),
+        )
+        .map(|(id, _)| id)
     })
 }
 

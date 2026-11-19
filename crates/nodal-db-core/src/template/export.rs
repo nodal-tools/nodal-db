@@ -16,6 +16,7 @@
 //! - Non-scalar defaults and `date_time`/`duration` literals have no v1 IR
 //!   form; they surface as export warnings, never silent drops.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -39,6 +40,50 @@ fn lit_of(v: &ScalarValue) -> Option<(Lit, &'static str)> {
         ScalarValue::Str(s) => Some((Lit::Str(s.clone()), "string")),
         _ => None,
     }
+}
+
+/// Refuse an export of a database whose live entities of one class share an
+/// element tuple (written before the element-tuple rule, or by direct SQL),
+/// listing every duplicated tuple and its holders.
+fn refuse_duplicate_tuples(v: &DbVocab) -> Result<(), DbError> {
+    let mut by_tuple: BTreeMap<(String, Vec<i64>), Vec<&str>> = BTreeMap::new();
+    for e in v.entities.values() {
+        if !e.element_ids.is_empty() {
+            by_tuple
+                .entry((fold(&e.class), e.element_ids.clone()))
+                .or_default()
+                .push(&e.name);
+        }
+    }
+    let dups: Vec<String> = v
+        .entities
+        .values()
+        .filter(|e| !e.element_ids.is_empty())
+        .filter_map(|e| {
+            let holders = &by_tuple[&(fold(&e.class), e.element_ids.clone())];
+            // One line per tuple: at its first holder (by name order).
+            (holders.len() > 1 && holders.iter().min() == Some(&e.name.as_str())).then(|| {
+                let mut hs: Vec<String> = holders.iter().map(|h| format!("{h:?}")).collect();
+                hs.sort();
+                format!(
+                    "{}: elements [{}] held by {}",
+                    e.class,
+                    e.elements.join(", "),
+                    hs.join(", ")
+                )
+            })
+        })
+        .collect();
+    if dups.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::Api(format!(
+        "template export refused: {} element tuple(s) are held by more than one entity of a \
+         class, and the template would not load (one entity per element tuple); rename or \
+         delete the duplicates first (the audit_entity_tuple_dup view lists them):\n  - {}",
+        dups.len(),
+        dups.join("\n  - ")
+    )))
 }
 
 /// Export the database's current vocabulary as a [`Template`], plus warnings
@@ -326,7 +371,11 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
         },
     };
 
-    // Seed: every current entity + base membership (module docs).
+    // Seed: every current entity + base membership (module docs). Two live
+    // entities of one class over one element tuple would export two seeds
+    // the loader refuses (an N-D entity's identity is its tuple): refuse
+    // the export, listing them.
+    refuse_duplicate_tuples(v)?;
     let mut entities: Vec<SeedEntity> = v
         .entities
         .values()

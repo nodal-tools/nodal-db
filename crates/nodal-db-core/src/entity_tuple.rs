@@ -42,6 +42,7 @@ struct ClassTuples {
 /// The per-call tuple index (a closure local of the write transaction,
 /// rebuilt on a conflict retry). `scope` holds the `(class, position-1
 /// element)` names of every N-D create of the call, for the scoped load.
+#[derive(Default)]
 pub(crate) struct TupleIndex<'a> {
     scope: Vec<(&'a str, &'a str)>,
     classes: HashMap<i64, ClassTuples>,

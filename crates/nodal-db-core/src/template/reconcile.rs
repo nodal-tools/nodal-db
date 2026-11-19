@@ -52,7 +52,9 @@
 //! ## Partial-apply honesty (review item 14)
 //! When anything the template declares could not be applied (a narrowed type
 //! member kept because values bind it, a seed membership the user excluded, a
-//! default withheld because a non-scalar default occupies the slot), the
+//! default withheld because a non-scalar default occupies the slot, a seed
+//! entity that cannot be created because its name or element tuple is taken
+//! after a user's entity rename, and what depends on such a seed), the
 //! apply does NOT certify convergence: `template_name`/`template_version`
 //! stamp, but `template_content_hash` is withheld (and a stale one closed
 //! out), so the no-op short-circuit can never certify unconverged state —
@@ -89,6 +91,7 @@ use crate::api::{
 use crate::conn::{
     core_write_txn_retrying, core_write_txn_retrying_opts, head_on, with_read_plain, TxnOptions,
 };
+use crate::entity_tuple::TupleIndex;
 use crate::error::DbError;
 use crate::history::{
     close_definition_default, drop_scalar_values_not_matching, literal_cols,
@@ -1165,6 +1168,17 @@ pub fn apply(
             skipped: p.skipped.clone(),
             warnings: Vec::new(),
             ids: IdCache::default(),
+            tuples: TupleIndex::new(
+                p.actions
+                    .iter()
+                    .filter_map(|a| match a {
+                        Action::CreateSeedEntity {
+                            class, elements, ..
+                        } => elements.first().map(|e| (class.as_str(), e.as_str())),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
         };
         for a in &p.actions {
             execute_action(conn, c, a, &mut ctx)?;
@@ -1908,12 +1922,34 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
     // this plan (review item 9: keyed on (folded class, folded name), never
     // name alone). Validation guarantees elements reference declared seed
     // entities, so a stall is a cycle — surfaced as a blocker.
+    //
+    // A declared seed that cannot be created is SKIPPED with a note, never
+    // an error (entity_rename_PLAN E4, §6.2), and the skip withholds the
+    // content hash (the apply is partial until the user resolves it): an
+    // N-D seed whose name is taken by an entity over another tuple, an N-D
+    // seed whose tuple a database entity already holds (one entity per
+    // tuple, E2), a seed whose element is a skipped seed, and a membership
+    // of a skipped seed. No rename is recognized: a 0-D seed the user
+    // renamed away is created again under its declared name.
     if let Some(seed) = &t.seed {
         let mut available: HashSet<(String, String)> = vocab.entities.keys().cloned().collect();
+        // The database's N-D tuples: (folded class, element ids) -> holders.
+        let mut db_tuples: HashMap<(String, Vec<i64>), Vec<&str>> = HashMap::new();
+        for e in vocab.entities.values() {
+            if !e.element_ids.is_empty() {
+                db_tuples
+                    .entry((fold(&e.class), e.element_ids.clone()))
+                    .or_default()
+                    .push(&e.name);
+            }
+        }
+        // (folded class, folded name) of every seed that will not be created.
+        let mut skipped_seeds: HashSet<(String, String)> = HashSet::new();
         let mut pending: Vec<&ir::SeedEntity> = Vec::new();
         for e in &seed.entities {
             let name = e.effective_name();
-            match vocab.entities.get(&(fold(&e.class), fold(&name))) {
+            let key = (fold(&e.class), fold(&name));
+            match vocab.entities.get(&key) {
                 None => pending.push(e),
                 Some(db) => {
                     let want: Vec<String> = e
@@ -1925,50 +1961,99 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
                         .collect();
                     let have: Vec<String> = db.elements.iter().map(|s| fold(s)).collect();
                     if want != have {
-                        p.blocked.push(format!(
-                            "seed entity {}:{name} exists with a different element tuple \
-                             (template: {want:?}, db: {have:?}) — an N-D entity's identity \
-                             is its tuple (reshape door)",
-                            e.class
+                        p.skipped.push(format!(
+                            "seed {}:{name} not created: the name is taken by an entity with \
+                             elements [{}]",
+                            e.class,
+                            db.elements.join(", ")
                         ));
+                        skipped_seeds.insert(key);
                     }
                 }
             }
         }
-        // Can `el` serve as the element at dimension `dim` of `class`, given
-        // what is available? Checked per the dimension's declared referent.
-        let element_ok = |dim: &ir::DimRef, el: &str, avail: &HashSet<(String, String)>| match dim {
-            ir::DimRef::Class(cls) => avail.contains(&(fold(cls), fold(el))),
-            ir::DimRef::Set { class_set } => chk
-                .set_ix
-                .get(&fold(class_set))
-                .map(|&sx| {
-                    t.class_sets[sx]
-                        .members
-                        .iter()
-                        .any(|m| avail.contains(&(fold(m), fold(el))))
-                })
-                .unwrap_or(false),
+        // The folded member classes a dimension accepts.
+        let dim_classes = |dim: &ir::DimRef| -> Vec<String> {
+            match dim {
+                ir::DimRef::Class(cls) => vec![fold(cls)],
+                ir::DimRef::Set { class_set } => chk
+                    .set_ix
+                    .get(&fold(class_set))
+                    .map(|&sx| t.class_sets[sx].members.iter().map(|m| fold(m)).collect())
+                    .unwrap_or_default(),
+            }
         };
+        let dims_of = |e: &ir::SeedEntity| -> &[ir::DimRef] {
+            chk.class_ix
+                .get(&fold(&e.class))
+                .map(|&ci| t.classes[ci].dimensions.as_slice())
+                .unwrap_or(&[])
+        };
+        let els_of = |e: &ir::SeedEntity| -> Vec<String> { e.elements.clone().unwrap_or_default() };
         while !pending.is_empty() {
+            // A seed whose element is a skipped seed is skipped too.
+            let mut skipped_now = false;
+            pending.retain(|e| {
+                let hit = els_of(e).into_iter().zip(dims_of(e)).find(|(el, dim)| {
+                    dim_classes(dim)
+                        .iter()
+                        .any(|c| skipped_seeds.contains(&(c.clone(), fold(el))))
+                });
+                match hit {
+                    Some((el, _)) => {
+                        let name = e.effective_name();
+                        p.skipped.push(format!(
+                            "seed {}:{name} not created: its element {el:?} was skipped",
+                            e.class
+                        ));
+                        skipped_seeds.insert((fold(&e.class), fold(&name)));
+                        skipped_now = true;
+                        false
+                    }
+                    None => true,
+                }
+            });
+            // An element that names entities of two member classes of a
+            // class-set dimension cannot be resolved (a data inconsistency
+            // the executor would meet mid-apply): a blocker.
+            let mut blocked_now = false;
+            pending.retain(|e| {
+                for (i, (el, dim)) in els_of(e).into_iter().zip(dims_of(e)).enumerate() {
+                    let hits: Vec<String> = dim_classes(dim)
+                        .into_iter()
+                        .filter(|c| available.contains(&(c.clone(), fold(&el))))
+                        .collect();
+                    if hits.len() > 1 {
+                        p.blocked.push(format!(
+                            "seed entity {}:{}: element {el:?} at position {} is ambiguous \
+                             across the class-set dimension: it names entities of {hits:?}",
+                            e.class,
+                            e.effective_name(),
+                            i + 1
+                        ));
+                        blocked_now = true;
+                        return false;
+                    }
+                }
+                true
+            });
             let ready: Vec<usize> = pending
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
-                    let Some(&ci) = chk.class_ix.get(&fold(&e.class)) else {
-                        return false;
-                    };
-                    let dims = &t.classes[ci].dimensions;
-                    e.elements
-                        .as_deref()
-                        .unwrap_or(&[])
-                        .iter()
-                        .zip(dims.iter())
-                        .all(|(el, dim)| element_ok(dim, el, &available))
+                    chk.class_ix.contains_key(&fold(&e.class))
+                        && els_of(e).iter().zip(dims_of(e)).all(|(el, dim)| {
+                            dim_classes(dim)
+                                .iter()
+                                .any(|c| available.contains(&(c.clone(), fold(el))))
+                        })
                 })
                 .map(|(i, _)| i)
                 .collect();
             if ready.is_empty() {
+                if skipped_now || blocked_now {
+                    continue;
+                }
                 p.blocked.push(format!(
                     "seed entities form an element-reference cycle: {:?}",
                     pending
@@ -1981,12 +2066,43 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
             for &i in &ready {
                 let e = pending[i];
                 let name = e.effective_name();
-                available.insert((fold(&e.class), fold(&name)));
+                let key = (fold(&e.class), fold(&name));
+                let els = els_of(e);
+                // The element ids, when every element is a database entity
+                // (an element this plan creates has a new id: no holder).
+                let ids: Option<Vec<i64>> = els
+                    .iter()
+                    .zip(dims_of(e))
+                    .map(|(el, dim)| {
+                        dim_classes(dim)
+                            .iter()
+                            .find_map(|c| vocab.entities.get(&(c.clone(), fold(el))))
+                            .map(|x| x.id)
+                    })
+                    .collect();
+                let holders = match ids {
+                    Some(ids) if !els.is_empty() => db_tuples.get(&(key.0.clone(), ids)),
+                    _ => None,
+                };
+                if let Some(h) = holders {
+                    p.skipped.push(format!(
+                        "seed {}:{name} not created: its elements [{}] exist as {}",
+                        e.class,
+                        els.join(", "),
+                        h.iter()
+                            .map(|n| format!("{n:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    skipped_seeds.insert(key);
+                    continue;
+                }
+                available.insert(key);
                 p.actions.push(Action::CreateSeedEntity {
                     class: e.class.clone(),
                     name,
                     description: e.description.clone(),
-                    elements: e.elements.clone().unwrap_or_default(),
+                    elements: els,
                 });
             }
             for &i in ready.iter().rev() {
@@ -2018,6 +2134,18 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
                 fold(&m.member.class),
                 fold(&m.member.entity),
             );
+            let gone = [(&m.group, "group"), (&m.member, "member")]
+                .into_iter()
+                .find(|(r, _)| skipped_seeds.contains(&(fold(&r.class), fold(&r.entity))));
+            if let Some((r, role)) = gone {
+                p.skipped.push(format!(
+                    "seed membership {}:{} <- {}:{} not created: its {role} seed {}:{} was \
+                     skipped",
+                    m.group.class, m.group.entity, m.member.class, m.member.entity, r.class,
+                    r.entity
+                ));
+                continue;
+            }
             match existing.get(&key) {
                 Some(true) => {}
                 Some(false) => p.skipped.push(format!(
@@ -2429,10 +2557,13 @@ fn presentation_subtree(doc: &Value) -> Value {
 /// Per-apply execution context: name→id memoization (one lookup per name per
 /// transaction), apply-time skips (convergence), and warnings.
 #[derive(Default)]
-struct ExecCtx {
+struct ExecCtx<'a> {
     skipped: Vec<String>,
     warnings: Vec<String>,
     ids: IdCache,
+    /// The element tuples of the N-D seed classes, for the backstop of the
+    /// element-tuple rule (scoped to the plan's seed creates).
+    tuples: TupleIndex<'a>,
 }
 
 /// Name→id cache for one transaction (review item 21). Safe: the transaction
@@ -3228,7 +3359,12 @@ pub(crate) fn insert_entity_element_row(
     Ok(())
 }
 
-fn execute_action(conn: &Connection, c: i64, a: &Action, ctx: &mut ExecCtx) -> Result<(), DbError> {
+fn execute_action(
+    conn: &Connection,
+    c: i64,
+    a: &Action,
+    ctx: &mut ExecCtx<'_>,
+) -> Result<(), DbError> {
     match a {
         Action::CreateUnit {
             name,
@@ -3542,11 +3678,35 @@ fn execute_action(conn: &Connection, c: i64, a: &Action, ctx: &mut ExecCtx) -> R
             elements,
         } => {
             let cid = ctx.ids.class(conn, class)?;
-            let eid = insert_entity_row(conn, c, cid, name, description.as_deref())?;
+            let mut el_ids: Vec<i64> = Vec::with_capacity(elements.len());
             for (i, el) in elements.iter().enumerate() {
-                let pos = i as i64 + 1;
-                let el_id = resolve_seed_element(conn, cid, pos, el)?;
-                insert_entity_element_row(conn, c, eid, pos, el_id)?;
+                el_ids.push(resolve_seed_element(conn, cid, i as i64 + 1, el)?);
+            }
+            // The element-tuple rule's backstop (entity_rename_PLAN §6.2):
+            // the plan skips a seed whose tuple is held, so a holder here
+            // means the plan and the executor disagree.
+            if !el_ids.is_empty() {
+                let shape = crate::structural::entity_class_shape(conn, class)?;
+                let holders = ctx.tuples.holders(conn, cid, &shape.dims, &el_ids)?;
+                if !holders.is_empty() {
+                    return Err(DbError::Internal(format!(
+                        "template apply: seed entity {class}:{name}: its elements [{}] are \
+                         already held by {}; the plan and the executor disagree",
+                        elements.join(", "),
+                        holders
+                            .iter()
+                            .map(|h| format!("{:?}", h.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+            let eid = insert_entity_row(conn, c, cid, name, description.as_deref())?;
+            for (i, el_id) in el_ids.iter().enumerate() {
+                insert_entity_element_row(conn, c, eid, i as i64 + 1, *el_id)?;
+            }
+            if !el_ids.is_empty() {
+                ctx.tuples.add(cid, eid, name, el_ids);
             }
         }
         Action::CreateSeedMembership {

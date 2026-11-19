@@ -1409,3 +1409,268 @@ fn nested_self_apply_is_refused() {
     let out = apply(&db, &t4, &working, "tester", "", &ApplyOptions::default()).unwrap();
     assert!(out.converged);
 }
+
+// ---------------------------------------------------------------------------
+// Seeds after entity renames: create where possible, else skip (E4)
+// ---------------------------------------------------------------------------
+
+const SEEDED: &str = r#"
+template: {name: seeded, version: "1"}
+classes:
+  - name: unit
+  - name: node
+  - name: unit__node
+    dimensions: [unit, node]
+  - name: flow
+    dimensions: [unit__node]
+seed:
+  entities:
+    - {class: unit, name: u1}
+    - {class: node, name: n1}
+    - {class: unit__node, elements: [u1, n1]}
+    - {class: flow, name: f1, elements: [u1__n1]}
+  memberships:
+    - {group: {class: unit__node, entity: u1__n1}, member: {class: unit, entity: u1}}
+    - {group: {class: node, entity: n1}, member: {class: unit, entity: u1}}
+"#;
+
+fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let db = dir.path().join("s.duckdb");
+    init_schema(&db).unwrap();
+    let out = apply(
+        &db,
+        &parse_str(SEEDED).unwrap(),
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
+    assert!(out.converged);
+    db
+}
+
+fn rename(db: &Path, class: &str, current: &str, new_name: &str) {
+    nodal_db_core::api::commit_structural(
+        db,
+        vec![nodal_db_core::types::StructuralChange::RenameEntity {
+            class: class.into(),
+            current: current.into(),
+            new_name: new_name.into(),
+            description: None,
+        }],
+        "user",
+        "rename",
+        WriteOptions::default(),
+    )
+    .unwrap();
+}
+
+/// Apply `SEEDED` at version `version`.
+fn apply_seeded(db: &Path, version: &str) -> nodal_db_core::template::ApplyOutcome {
+    let mut t = parse_str(SEEDED).unwrap();
+    t.template.version = version.into();
+    apply(
+        db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap()
+}
+
+fn hash_stamped(db: &Path) -> bool {
+    qs(
+        db,
+        "SELECT value FROM database_property WHERE cur_key = 'template_content_hash'",
+    )
+    .is_some()
+}
+
+fn live(db: &Path, class: &str) -> Vec<String> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity || ':' || array_to_string(element_names, ',') FROM entity_byname \
+             WHERE class = ? ORDER BY entity",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([class], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    rows
+}
+
+#[test]
+fn an_element_rename_recreates_the_0d_seed_and_skips_the_n_d_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded_db(&dir);
+    rename(&db, "node", "n1", "bus");
+    let out = apply_seeded(&db, "2");
+    // The 0-D seed is created again, empty; the N-D seed's name is taken by
+    // the entity over (u1, bus): skipped, with what depends on it.
+    assert_eq!(live(&db, "node"), vec!["bus:", "n1:"]);
+    assert_eq!(live(&db, "unit__node"), vec!["u1__n1:u1,bus"]);
+    let skipped = out.plan.skipped.join("\n");
+    assert!(
+        skipped.contains(
+            "seed unit__node:u1__n1 not created: the name is taken by an entity with elements \
+             [u1, bus]"
+        ),
+        "{skipped}"
+    );
+    // `f1` exists over the entity named `u1__n1`: converged, not skipped.
+    assert!(!skipped.contains("flow:f1"), "{skipped}");
+    assert!(
+        skipped.contains("its group seed unit__node:u1__n1 was skipped"),
+        "{skipped}"
+    );
+    // Not converged: the hash is withheld, and every later apply of the
+    // template reports the skips again.
+    assert!(!out.converged);
+    assert!(!hash_stamped(&db));
+    let again = apply_seeded(&db, "2");
+    assert!(!again.converged);
+    assert_eq!(again.plan.skipped.len(), out.plan.skipped.len());
+    assert!(!hash_stamped(&db));
+}
+
+#[test]
+fn a_renamed_n_d_seed_is_skipped_by_its_tuple() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded_db(&dir);
+    rename(&db, "unit__node", "u1__n1", "link1");
+    let out = apply_seeded(&db, "2");
+    assert_eq!(live(&db, "unit__node"), vec!["link1:u1,n1"]);
+    assert_eq!(live(&db, "flow"), vec!["f1:link1"]);
+    let skipped = out.plan.skipped.join("\n");
+    assert!(
+        skipped.contains(
+            "seed unit__node:u1__n1 not created: its elements [u1, n1] exist as \"link1\""
+        ),
+        "{skipped}"
+    );
+    assert!(!out.converged);
+    assert_eq!(
+        q1(&db, "SELECT count(*) FROM audit_entity_tuple_dup"),
+        0,
+        "no duplicate tuple was written"
+    );
+    // A new seed over the skipped one is skipped too (not a cycle).
+    let mut t = parse_str(
+        &SEEDED
+            .replace(
+                "    dimensions: [unit__node]\n",
+                "    dimensions: [unit__node]\n  - name: flow2\n    dimensions: [unit__node]\n",
+            )
+            .replace(
+                "    - {class: flow, name: f1, elements: [u1__n1]}\n",
+                "    - {class: flow, name: f1, elements: [u1__n1]}\n    \
+                 - {class: flow2, name: f2, elements: [u1__n1]}\n",
+            ),
+    )
+    .unwrap();
+    t.template.version = "3".into();
+    let out = apply(
+        &db,
+        &t,
+        &MigrationRegistry::new(),
+        "tester",
+        "",
+        &ApplyOptions::default(),
+    )
+    .unwrap();
+    let skipped = out.plan.skipped.join("\n");
+    assert!(
+        skipped.contains("seed flow2:f2 not created: its element \"u1__n1\" was skipped"),
+        "{skipped}"
+    );
+    assert_eq!(live(&db, "flow"), vec!["f1:link1"]);
+    // Renaming it back resolves the skips: the next apply converges.
+    rename(&db, "unit__node", "link1", "u1__n1");
+    let out = apply_seeded(&db, "2");
+    assert!(out.plan.skipped.is_empty(), "{:?}", out.plan.skipped);
+    assert!(out.converged);
+    assert!(hash_stamped(&db));
+}
+
+#[test]
+fn export_after_a_rename_carries_the_new_name_and_validates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded_db(&dir);
+    rename(&db, "node", "n1", "bus");
+    rename(&db, "unit__node", "u1__n1", "link1");
+    let (t, _) = nodal_db_core::template::export(&db).unwrap();
+    nodal_db_core::template::validate(&t).unwrap();
+    let names: Vec<String> = t
+        .seed
+        .as_ref()
+        .unwrap()
+        .entities
+        .iter()
+        .map(|e| e.effective_name())
+        .collect();
+    assert!(names.contains(&"bus".to_string()), "{names:?}");
+    assert!(names.contains(&"link1".to_string()), "{names:?}");
+    assert!(!names.contains(&"n1".to_string()), "{names:?}");
+}
+
+#[test]
+fn an_ambiguous_class_set_element_blocks_at_plan_time() {
+    const SET: &str = r#"
+template: {name: sets, version: "1"}
+class_sets:
+  - {name: site, members: [node, unit]}
+classes:
+  - name: node
+  - name: unit
+  - name: link
+    dimensions: [{class_set: site}]
+seed:
+  entities:
+    - {class: node, name: n1}
+    - {class: link, name: l1, elements: [n1]}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("cs.duckdb");
+    init_schema(&db).unwrap();
+    let t = parse_str(SET).unwrap();
+    let opts = ApplyOptions::default();
+    apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts).unwrap();
+    // A user deletes the link and creates a unit spelled like the node.
+    nodal_db_core::api::commit_changes(
+        &db,
+        vec![],
+        vec![nodal_db_core::types::StructuralChange::CreateEntity {
+            class: "unit".into(),
+            name: Some("N1".into()),
+            elements: vec![],
+            description: None,
+        }],
+        vec![],
+        vec![(
+            nodal_db_core::types::ObjectDeleteKey {
+                kind: nodal_db_core::types::ObjectKind::Entity,
+                class: Some("link".into()),
+                target: nodal_db_core::types::ObjectRef::Name("l1".into()),
+            },
+            nodal_db_core::types::ObjectDeleteOpts { cascade: true },
+        )],
+        "user",
+        "m",
+        WriteOptions::default(),
+    )
+    .unwrap();
+    let mut t2 = parse_str(SET).unwrap();
+    t2.template.version = "2".into();
+    let e = apply(&db, &t2, &MigrationRegistry::new(), "tester", "", &opts).unwrap_err();
+    let m = e.to_string();
+    assert!(
+        m.contains("seed entity link:l1: element \"n1\" at position 1 is ambiguous"),
+        "{m}"
+    );
+}

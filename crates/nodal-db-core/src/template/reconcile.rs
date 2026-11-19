@@ -4323,7 +4323,6 @@ fn execute_step(
                                    AND t.parameter_definition_id = ?1 \
                                    AND t.alternative_id = s.alternative_id) \
                          RETURNING entity_id, alternative_id",
-
                     )?;
                     let filled: Vec<(i64, i64)> = stmt
                         .query_map(params![tgt_id, c, src_id], |r| Ok((r.get(0)?, r.get(1)?)))?

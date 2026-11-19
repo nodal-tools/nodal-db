@@ -1917,6 +1917,22 @@ pub(crate) fn apply_channel(
     let mut touched: HashMap<(MetadataKind, i64), usize> = HashMap::new();
     // Sources and licenses a SetSourceLicenses item writes rows for.
     let mut licensed: HashMap<(MetadataKind, i64), usize> = HashMap::new();
+    // Claim an existing object for item `i` before revising it: a second
+    // item on it (an id and a name can alias) is refused, never a raw
+    // unique-key error.
+    fn claim(
+        touched: &mut HashMap<(MetadataKind, i64), usize>,
+        key: (MetadataKind, i64),
+        i: usize,
+    ) -> Result<(), DbError> {
+        match touched.insert(key, i) {
+            Some(j) if j != i => Err(DbError::Api(format!(
+                "metadata items {j} and {i} both revise, rename or delete the same object \
+                 (resolved by id); one item per object per call"
+            ))),
+            _ => Ok(()),
+        }
+    }
     // ---- M1: pool creates and revisions, in item order.
     for (i, it) in items.iter().enumerate() {
         let o = match it {
@@ -1925,6 +1941,9 @@ pub(crate) fn apply_channel(
                 rename,
                 fields,
             } => {
+                if let Some((id, _)) = find_named(&mut cx, "source", source)? {
+                    claim(&mut touched, (MetadataKind::Source, id), i)?;
+                }
                 let (id, e) = put_source(&mut cx, source, rename, fields)?;
                 if e != MetadataEffect::Created {
                     touched.insert((MetadataKind::Source, id), i);
@@ -1936,6 +1955,9 @@ pub(crate) fn apply_channel(
                 rename,
                 fields,
             } => {
+                if let Some((id, _)) = find_named(&mut cx, "license", license)? {
+                    claim(&mut touched, (MetadataKind::License, id), i)?;
+                }
                 let (id, e) = put_license(&mut cx, license, rename, fields)?;
                 if e != MetadataEffect::Created {
                     touched.insert((MetadataKind::License, id), i);
@@ -1948,6 +1970,9 @@ pub(crate) fn apply_channel(
                 description,
                 iri,
             } => {
+                if let Some((id, _)) = find_named(&mut cx, "metadata_role", role)? {
+                    claim(&mut touched, (MetadataKind::Role, id), i)?;
+                }
                 let (id, e) = put_role(&mut cx, role, rename, description, iri)?;
                 if e != MetadataEffect::Created {
                     touched.insert((MetadataKind::Role, id), i);
@@ -1959,11 +1984,22 @@ pub(crate) fn apply_channel(
                 outcome(i, MetadataKind::Pair, id, e)
             }
             MetadataChange::RevisePair { pair, value } => {
+                if let Some((id, _, _)) = find_pair(&mut cx, pair)? {
+                    claim(&mut touched, (MetadataKind::Pair, id), i)?;
+                }
                 let (id, e) = revise_pair(&mut cx, pair, value)?;
                 touched.insert((MetadataKind::Pair, id), i);
                 outcome(i, MetadataKind::Pair, id, e)
             }
             MetadataChange::RenamePairKey { from, to } => {
+                let mut stmt = conn
+                    .prepare("SELECT id FROM metadata_pair WHERE cur_name = lower(?)")?;
+                let held: Vec<i64> = stmt
+                    .query_map(params![from], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                for id in held {
+                    claim(&mut touched, (MetadataKind::Pair, id), i)?;
+                }
                 let ids = rename_pair_key(&mut cx, from, to)?;
                 for id in &ids {
                     touched.insert((MetadataKind::Pair, *id), i);
@@ -1994,7 +2030,14 @@ pub(crate) fn apply_channel(
                 // A delete of this source or of a listed license in the
                 // same call (by an aliasing id / name) would leave the new
                 // rows live and dangling: refused below.
-                licensed.insert((MetadataKind::Source, sid), i);
+                // One SetSourceLicenses per source (resolved: an id and a
+                // name can alias), else the two exact sets would merge.
+                if let Some(j) = licensed.insert((MetadataKind::Source, sid), i) {
+                    return Err(DbError::Api(format!(
+                        "metadata items {j} and {i} both set the licenses of one source \
+                         (resolved by id); one item per object per call"
+                    )));
+                }
                 for l in &lids {
                     licensed.insert((MetadataKind::License, *l), i);
                 }

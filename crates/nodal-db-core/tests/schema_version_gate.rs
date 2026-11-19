@@ -251,7 +251,9 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
          INSERT INTO metadata SELECT 1, key, value, valid_from_commit, NULL, 1 \
            FROM database_property WHERE valid_to_commit IS NULL; \
          UPDATE metadata SET value = '{PRE}' WHERE name = 'schema_version'; \
-         DROP TABLE database_property;"
+         DROP TABLE database_property; \
+         DROP TABLE value_metadata_link; DROP TABLE object_metadata_link; \
+         DROP TABLE source_license;"
     ))
     .unwrap();
     conn.close().unwrap();
@@ -271,6 +273,31 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
     named(
         "database_properties",
         nodal_db_core::api::database_properties(&db).map(|_| ()),
+    );
+    named(
+        "preview_object_deletes",
+        nodal_db_core::api::preview_object_deletes(
+            &db,
+            vec![nodal_db_core::types::ObjectDeleteKey {
+                kind: nodal_db_core::types::ObjectKind::Entity,
+                class: Some("node".into()),
+                target: nodal_db_core::types::ObjectRef::Name("a".into()),
+            }],
+        )
+        .map(|_| ()),
+    );
+    named(
+        "preview_erase_alternative",
+        nodal_db_core::erasure::preview_erase_alternative(
+            &db,
+            &nodal_db_core::types::ObjectDeleteKey {
+                kind: nodal_db_core::types::ObjectKind::Alternative,
+                class: None,
+                target: nodal_db_core::types::ObjectRef::Name("Base".into()),
+            },
+            &nodal_db_core::erasure::EraseOpts::default(),
+        )
+        .map(|_| ()),
     );
     named(
         "preview_purge",

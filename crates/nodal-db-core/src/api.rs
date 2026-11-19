@@ -1845,6 +1845,7 @@ pub fn preview_object_deletes(
         nfc_object_delete_key(k, &mut lookups);
     }
     with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
         keys.iter()
             .enumerate()
             .map(|(i, k)| preview_one(conn, i, k))

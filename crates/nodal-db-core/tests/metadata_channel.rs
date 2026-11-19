@@ -1240,3 +1240,87 @@ fn a_target_scope_set_annotates_only_its_target() {
     );
     clean(&db);
 }
+
+/// Two items on one object aliased by id and by name are refused with the
+/// one-item-per-object message (never a raw unique-key error, never two
+/// merged license sets).
+#[test]
+fn aliased_items_on_one_object_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(dir.path());
+    let lic = |n: &str| M::PutLicense {
+        license: src(n),
+        rename: None,
+        fields: LicenseFields::default(),
+    };
+    meta(
+        &db,
+        vec![
+            put_source("S"),
+            lic("L1"),
+            lic("L2"),
+            M::PutRole {
+                role: src("r"),
+                rename: None,
+                description: None,
+                iri: None,
+            },
+            M::CreatePair {
+                name: "k".into(),
+                value: "v".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let id = |t: &str| q(&db, &format!("SELECT id FROM {t} WHERE valid_to_commit IS NULL"));
+    let titled = |r: Ref| M::PutSource {
+        source: r,
+        rename: None,
+        fields: SourceFields {
+            title: Some("t".into()),
+            ..Default::default()
+        },
+    };
+    let role = |r: Ref, d: &str| M::PutRole {
+        role: r,
+        rename: None,
+        description: Some(d.into()),
+        iri: None,
+    };
+    let cases: Vec<Vec<M>> = vec![
+        vec![
+            M::SetSourceLicenses {
+                source: Ref::Id(id("source")),
+                licenses: vec![src("L1")],
+            },
+            M::SetSourceLicenses {
+                source: src("S"),
+                licenses: vec![src("L2")],
+            },
+        ],
+        vec![titled(Ref::Id(id("source"))), titled(src("s"))],
+        vec![role(Ref::Id(id("metadata_role")), "a"), role(src("R"), "b")],
+        vec![
+            M::RevisePair {
+                pair: PairRef::Pair {
+                    name: "k".into(),
+                    value: "v".into(),
+                },
+                value: "u".into(),
+            },
+            M::RevisePair {
+                pair: PairRef::Id(id("metadata_pair")),
+                value: "w".into(),
+            },
+        ],
+    ];
+    for items in cases {
+        let e = meta(&db, items.clone()).unwrap_err();
+        assert!(
+            matches!(&e, DbError::Api(m) if m.contains("one item per object")),
+            "{items:?}: {e}"
+        );
+    }
+    assert_eq!(q(&db, "SELECT count(*) FROM source_license"), 0);
+    clean(&db);
+}

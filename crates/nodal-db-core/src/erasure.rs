@@ -174,6 +174,7 @@ pub fn preview_erase_alternative(
         .map(|s| crate::text::nfc(s).into_owned())
         .collect();
     with_read_plain(db, |conn| {
+        crate::property::require_current(conn)?;
         let Some(resolved) = resolve_alternative_any(conn, &name)? else {
             return Ok(ErasePreview::default());
         };

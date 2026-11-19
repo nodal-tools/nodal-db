@@ -147,8 +147,8 @@ impl LegKey {
 /// What, in a purge, can spare a dependent leg's rows (purge plan §3.5.3,
 /// §3.6 "two sets per kind"): the survivor grain of its table. A leg with a
 /// grain runs over the scope's dependent set with its own survivor
-/// anti-join; a [`Grain::Descriptor`] leg runs over the close set (a spared
-/// vocabulary object keeps its descriptors, §3.7); a [`Grain::Plain`] leg
+/// anti-join; a [`Grain::Attached`] leg runs over the close set (a spared
+/// object keeps its descriptors and attachments, §3.7); a [`Grain::Plain`] leg
 /// closes over the whole dependent set. The object delete ignores grains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Grain {
@@ -164,10 +164,16 @@ pub(crate) enum Grain {
     Ranking,
     /// `parameter_value_metadata`: the value keys the call writes.
     ValueMeta,
-    /// Describes a vocabulary object (display modes, class-set membership,
-    /// annotations of classes, parameters and lists): kept for a spared one.
-    Descriptor,
-    /// No op of a call can re-state it: closes over the dependent set.
+    /// Describes or is attached to an object and no op of a call re-states
+    /// it: kept for a spared object, closed with a closing one (runs over
+    /// the close set). Vocabulary descriptors (display modes, class-set
+    /// membership, annotations of classes, parameters and lists; V-S5) and,
+    /// by the owner's ruling of 2026-11-19, an entity's attachments
+    /// (locations, units, metadata links, annotations), which the core
+    /// cannot write back for all of them.
+    Attached,
+    /// Closes over the dependent set; also the identity legs' grain (they
+    /// always run over the close set).
     Plain,
 }
 
@@ -447,7 +453,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'entity=' || entity_id || ',unit=' || unit_id",
                     erase: false,
-                    grain: Grain::Plain,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
@@ -467,7 +473,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
-                    grain: Grain::Descriptor,
+                    grain: Grain::Attached,
                 },
             ],
             erase_extra: Vec::new(),
@@ -524,7 +530,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'loc=' || entity_id",
                     erase: false,
-                    grain: Grain::Plain,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "entity_alternative",
@@ -564,7 +570,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'pd=' || parameter_definition_id || ',unit=' || unit_id",
                     erase: false,
-                    grain: Grain::Plain,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "entity_metadata",
@@ -573,7 +579,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'metadata=' || metadata_id",
                     erase: false,
-                    grain: Grain::Plain,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "parameter_value_metadata",
@@ -592,7 +598,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
-                    grain: Grain::Plain,
+                    grain: Grain::Attached,
                 },
                 // EXCLUDED: run.tool_entity_id — immutable append-only leg (§10
                 // ruling 2), like run.result_alternative_id for alternatives.
@@ -624,7 +630,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'set=' || class_set_id",
                     erase: false,
-                    grain: Grain::Descriptor,
+                    grain: Grain::Attached,
                 },
                 DepLeg {
                     table: "entity_class_display_mode",
@@ -633,7 +639,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'mode=' || display_mode_id",
                     erase: false,
-                    grain: Grain::Descriptor,
+                    grain: Grain::Attached,
                 },
                 // Polymorphic annotation table — FILTERED to entity_class rows.
                 DepLeg {
@@ -643,7 +649,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
-                    grain: Grain::Descriptor,
+                    grain: Grain::Attached,
                 },
                 // C7 — class-dimension annotations (object_id = the class id,
                 // object_subkey = position). Deliberately EXCLUDED from
@@ -656,7 +662,7 @@ pub(crate) fn object_legs(kind: ObjectKind) -> Option<ObjectLegSet> {
                     array: false,
                     sample_expr: "'term=' || term_iri",
                     erase: false,
-                    grain: Grain::Descriptor,
+                    grain: Grain::Attached,
                 },
             ],
             erase_extra: Vec::new(),

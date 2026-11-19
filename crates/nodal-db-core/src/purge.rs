@@ -909,7 +909,7 @@ fn survivor_antijoin(leg: &DepLeg) -> Option<String> {
         Grain::Ranking => Some(format!(
             "{t}.scenario_id NOT IN (SELECT id FROM {SURV_RANKING})"
         )),
-        Grain::Descriptor | Grain::Plain => None,
+        Grain::Attached | Grain::Plain => None,
     }
 }
 
@@ -1107,7 +1107,7 @@ fn steps(conn: &Connection, r: usize, scope: &Scope) -> Result<Vec<Step>, DbErro
     for &(k, kind) in &kinds {
         let legs = object_legs(kind).expect("purge kinds have leg sets");
         for l in legs.dependents.iter().filter(|l| l.grain != Grain::Value) {
-            let set = if l.grain == Grain::Descriptor {
+            let set = if l.grain == Grain::Attached {
                 close_table(r, k)
             } else {
                 dep_table(r, k)

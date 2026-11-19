@@ -711,8 +711,12 @@ keeps only its own row and identity (an N-D entity's elements, a
 parameter's types and defaults, a list's members); everything else under
 it closes unless the call states it too. So `entities` plus a
 re-import keeps the re-imported entities and closes their unstated
-values, activations, memberships and locations. Two limits:
+values, activations and memberships. Three limits:
 
+- A spared entity keeps its attachments: its location, its parameter
+  units, its metadata links and its annotations. A call cannot re-state
+  all of them, so closing them would lose them for good. They close only
+  with an entity the purge closes.
 - A spared class, parameter or value list keeps its display modes,
   class-set membership and annotations: nothing in a call re-states
   them, and a template does not carry them.

@@ -463,8 +463,9 @@ fn entities_purge_and_reimport_keeps_restated_closes_unstated() {
     // n1 survives (and its class with it); every other entity closes.
     assert_eq!(live_entities(&db), ["n1"]);
     // Its re-stated value and activation survive; its unstated values (the
-    // high demand, the profile array), its location and its membership
-    // close.
+    // high demand, the profile array) and its membership close. Its
+    // location is an attachment of a spared entity: kept (owner ruling
+    // 2026-11-19); n2's closes with n2.
     assert_eq!(live(&db, "value_scalar"), 1);
     assert_eq!(
         q(
@@ -476,7 +477,7 @@ fn entities_purge_and_reimport_keeps_restated_closes_unstated() {
     );
     assert_eq!(live(&db, "entity_alternative"), 1);
     assert_eq!(q(&db, "SELECT count(*) FROM value_array"), 0);
-    assert_eq!(live(&db, "entity_location"), 0);
+    assert_eq!(live(&db, "entity_location"), 1);
     assert_eq!(live(&db, "membership"), 0);
     let p = &r.purges[0];
     assert_eq!(p.spared.object_rows, 1, "n1");
@@ -1711,6 +1712,57 @@ fn classes_except_must_be_closed_under_class_set_dimensions() {
         ),
         ["k", "q"]
     );
+}
+
+/// A purge plus a re-import that re-states everything the purge would
+/// close is a no-op: the entities' attachments (locations here, which the
+/// write path cannot state) are kept for spared entities, so nothing
+/// closes and nothing is written (owner ruling 2026-11-19).
+#[test]
+fn purge_and_full_reimport_with_locations_is_a_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    let before = head(&db);
+    let r = call(
+        &db,
+        ChangeSet {
+            structural: vec![
+                entity("node", "n1"),
+                entity("node", "n2"),
+                entity("unit", "u1"),
+                entity("unit", "u2"),
+                nd("link", &["n1", "u1"]),
+                nd("link", &["n2", "u2"]),
+                activation("node", "n1", "Base", true),
+                activation("node", "n2", "high", false),
+                membership(("unit", "u1"), ("node", "n1"), None),
+                membership(("unit", "u1"), ("node", "n2"), Some("high")),
+            ],
+            segments: vec![
+                seg(
+                    "node",
+                    "demand",
+                    "Base",
+                    scalars(&[("n1", 1.0), ("n2", 2.0)]),
+                ),
+                seg("node", "demand", "high", scalars(&[("n1", 10.0)])),
+                seg("unit", "cap", "Base", scalars(&[("u1", 5.0), ("u2", 6.0)])),
+                seg(
+                    "link",
+                    "flow",
+                    "Base",
+                    scalars(&[("n1__u1", 7.0), ("n2__u2", 8.0)]),
+                ),
+                seg("node", "profile", "Base", series("n1", &[1.0, 2.0, 3.0])),
+            ],
+            purges: vec![req(PS::Entities { class: None })],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.commit_id, 0, "{:?}", r.purges);
+    assert_eq!(head(&db), before);
+    assert_eq!(live(&db, "entity_location"), 2);
 }
 
 /// `force_replace` stubs every value a purge closes, as for a value delete.

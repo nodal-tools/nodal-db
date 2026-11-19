@@ -464,7 +464,9 @@ names, creates or writes, spared upward to what their identity
 references). The close set drives object rows and identity legs; the
 dependent set drives dependent legs, each with the survivor anti-join of
 its grain (value keys, activation pairs, membership triples, rankings);
-descriptors of vocabulary run over the close set. The frontier of the
+descriptors of vocabulary and an entity's attachments (location, units,
+metadata links, annotations) run over the close set, so a spared object
+keeps them. The frontier of the
 close set reaching a survivor is an internal error. Values close through
 a predicate-scoped statement per tier and retention mode, on the same
 SET lists `history.rs` closes every value with (one close-out

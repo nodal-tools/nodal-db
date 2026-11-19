@@ -3150,6 +3150,66 @@ pub(crate) fn insert_entity_row(
     )?)
 }
 
+/// The one `entity` revision site (`RenameEntity`, entity_rename_PLAN §3
+/// step 6): close the current row and insert the same-id successor at
+/// `version + 1`; or, for a row this commit created or already revised
+/// (`valid_from == c`), edit it in place (D-S5). The close addresses the
+/// row by the `rowid` its fenced read returned, guarded by its id, span and
+/// current-row filter; never through the name index (an `UPDATE` cannot be
+/// fenced). P0 spike (10^6 entities, 10^5 prior revisions): ~2.6 ms per
+/// close vs ~4.5 ms by `id`, whose zone maps widen as successors land at
+/// the table's tail with old ids.
+/// Every entity revision goes through here, or through the set form
+/// `revise_entity_rows_set` (invariant 2).
+pub(crate) fn revise_entity_row(
+    conn: &Connection,
+    c: i64,
+    row: &crate::api::EntityRow,
+) -> Result<(), DbError> {
+    let description = stored_description(row.description.as_deref());
+    if row.valid_from == c {
+        let n = conn
+            .prepare_cached(
+                "UPDATE entity SET name = ?, description = ? \
+                 WHERE id = ? AND valid_from_commit = ? AND valid_to_commit IS NULL",
+            )?
+            .execute(params![row.name, description, row.id, c])?;
+        if n != 1 {
+            return Err(DbError::Internal(format!(
+                "revision of entity id {}: expected one row of this commit, edited {n}",
+                row.id
+            )));
+        }
+        return Ok(());
+    }
+    let n = conn
+        .prepare_cached(
+            "UPDATE entity SET valid_to_commit = ?1 WHERE rowid = ?2 AND id = ?3 \
+             AND valid_from_commit < ?1 AND valid_to_commit IS NULL",
+        )?
+        .execute(params![c, row.rowid, row.id])?;
+    if n != 1 {
+        return Err(DbError::Internal(format!(
+            "revision of entity id {}: expected exactly one current row, closed {n}",
+            row.id
+        )));
+    }
+    conn.prepare_cached(
+        "INSERT INTO entity \
+           (id, entity_class_id, name, description, valid_from_commit, version) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )?
+    .execute(params![
+        row.id,
+        row.entity_class_id,
+        row.name,
+        description,
+        c,
+        row.version + 1
+    ])?;
+    Ok(())
+}
+
 /// The one `entity_element` create site (loader `CreateSeedEntity` + G8
 /// `ensure_entity`).
 pub(crate) fn insert_entity_element_row(

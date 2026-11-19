@@ -725,6 +725,12 @@ pub(crate) fn structural_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Stru
             elements: str_list(obj, "elements")?,
             description: opt_str(obj, "description")?,
         },
+        "rename_entity" => StructuralChange::RenameEntity {
+            class: req_str(obj, &op, "class")?,
+            current: req_str(obj, &op, "current")?,
+            new_name: req_str(obj, &op, "new_name")?,
+            description: opt_str(obj, "description")?,
+        },
         "create_entity_class" => StructuralChange::CreateEntityClass {
             name: req_str(obj, &op, "name")?,
             dims: str_list(obj, "dims")?,

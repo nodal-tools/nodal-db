@@ -56,6 +56,7 @@ From `schema/080_views_read.sql`.
 | `axis_position_stored_in_use(pd_id)` | macro | Stored positions of the axes that CURRENT value rows reference |
 | `database_properties` | view | The current database properties |
 | `dataset_metadata` | view | Dataset-level metadata |
+| `entity_byname` | view | Every current entity with its direct elements by name |
 | `entity_class_display(mode_name)` | macro | Resolved per-mode class presentation (Spine-Toolbox #2492) |
 | `object_metadata_named` | view | The live links of the dataset, the entities and the schema objects, by names |
 | `parameter_effective_unit` | view | Effective unit = override if present, else definition default |

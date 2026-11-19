@@ -589,15 +589,16 @@ pub fn commit_change_set(
                     StructuralKind::Parameter => ObjectKind::Parameter,
                     _ => return None,
                 };
-                let wrote_row = match o.effect {
-                    StructuralEffect::Created => true,
-                    // A rename or description revision writes a successor
-                    // row (valid_from = this commit); an entity has none.
-                    StructuralEffect::Renamed | StructuralEffect::Updated => {
-                        kind != ObjectKind::Entity
-                    }
-                    _ => false,
-                };
+                // A rename or description revision writes a successor row
+                // (valid_from = this commit), entities included
+                // (`RenameEntity`; activation and membership outcomes carry
+                // their own kinds and never reach here).
+                let wrote_row = matches!(
+                    o.effect,
+                    StructuralEffect::Created
+                        | StructuralEffect::Renamed
+                        | StructuralEffect::Updated
+                );
                 wrote_row.then_some((kind, o.object_id))
             })
             .collect();
@@ -918,6 +919,12 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             n.nfc_in_place(new_name);
         }
         StructuralChange::RenameParameter {
+            class,
+            current,
+            new_name,
+            ..
+        }
+        | StructuralChange::RenameEntity {
             class,
             current,
             new_name,
@@ -2263,6 +2270,61 @@ pub(crate) fn lookup_entity(
     name: &str,
 ) -> Result<Option<i64>, DbError> {
     Ok(find_entity(conn, class_id, name)?.map(|f| f.id))
+}
+
+/// The current `entity` row a rename revises, with its `rowid` (the close
+/// addresses it), read through the same `OFFSET 0` fence as
+/// [`ENTITY_NAME_LOOKUP_SQL`] (`?1` class id, `?2` name; guard:
+/// `tests/entity_name_index_scan.rs`).
+#[doc(hidden)]
+pub const ENTITY_ROW_LOOKUP_SQL: &str = "SELECT id, name, description, version, \
+            valid_from_commit, rid FROM \
+       (SELECT rowid AS rid, id, name, description, version, valid_from_commit, \
+               entity_class_id, valid_to_commit FROM entity \
+        WHERE lower(name) = lower(?2) OFFSET 0) \
+     WHERE entity_class_id = ?1 AND valid_to_commit IS NULL";
+
+/// The current row of the entity of class `class_id` named `name` (by the
+/// name fold), for the one entity revision site
+/// ([`crate::template::reconcile::revise_entity_row`]).
+pub(crate) fn find_entity_row(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+) -> Result<Option<EntityRow>, DbError> {
+    let row = conn
+        .prepare_cached(ENTITY_ROW_LOOKUP_SQL)?
+        .query_row(params![class_id, name], |r| {
+            Ok(EntityRow {
+                id: r.get(0)?,
+                entity_class_id: class_id,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                version: r.get(3)?,
+                valid_from: r.get(4)?,
+                rowid: r.get(5)?,
+            })
+        });
+    match row {
+        Ok(r) => Ok(Some(r)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// One current `entity` row, as the rename revises it.
+#[derive(Clone, Debug)]
+pub(crate) struct EntityRow {
+    pub(crate) id: i64,
+    pub(crate) entity_class_id: i64,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) version: i64,
+    /// The current row's `valid_from_commit`: equal to the writing commit
+    /// when this commit created or already revised it (the D-S5 branch).
+    pub(crate) valid_from: i64,
+    /// The current row's `rowid` as read (the close addresses it).
+    pub(crate) rowid: i64,
 }
 
 pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {

@@ -52,7 +52,7 @@ use serde_json::Value as Json;
 
 use nodal_db_core::api::{
     commit_changes, delete_objects, write_parameter, Segment, ENTITY_LOOKUP_ONE_SQL,
-    ENTITY_NAME_LOOKUP_SQL,
+    ENTITY_NAME_LOOKUP_SQL, ENTITY_ROW_LOOKUP_SQL,
 };
 use nodal_db_core::axis::AXIS_CANDIDATES_SQL;
 use nodal_db_core::schema_init::init_schema_with_default;
@@ -362,6 +362,13 @@ fn fenced_lookups_use_the_index_on_a_realistic_fixture() {
             "entity",
             &explain(&conn, ENTITY_LOOKUP_ONE_SQL, duckdb::params![name, node]),
         );
+        // The rename's row read (wider select list, `rowid` included).
+        assert_index_scan(
+            &format!("ENTITY_ROW_LOOKUP_SQL({name})"),
+            &conn,
+            "entity",
+            &explain(&conn, ENTITY_ROW_LOOKUP_SQL, duckdb::params![node, name]),
+        );
     }
 
     let (hash, kind): (u64, String) = conn
@@ -458,6 +465,11 @@ fn fenced_lookups_match_the_cur_name_form() {
                 one(&conn, cls, name).1,
                 want,
                 "ENTITY_LOOKUP_ONE_SQL({cls}, {name:?})"
+            );
+            assert_eq!(
+                opt_id(&conn, ENTITY_ROW_LOOKUP_SQL, cls, name),
+                want,
+                "ENTITY_ROW_LOOKUP_SQL({cls}, {name:?})"
             );
         }
     }

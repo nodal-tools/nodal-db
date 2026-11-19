@@ -127,6 +127,13 @@ impl<'a> TupleIndex<'a> {
         self.names.insert(eid, name.to_string());
     }
 
+    /// Follow a rename of this call: an indexed entity's name changes.
+    pub(crate) fn renamed(&mut self, eid: i64, new_name: &str) {
+        if let Some(n) = self.names.get_mut(&eid) {
+            *n = new_name.to_string();
+        }
+    }
+
     /// The ids of the position-1 element names of the scope's creates of
     /// class `cid` (resolved against dimension 1's class, or
     /// every member class of its class set). Names that resolve to nothing

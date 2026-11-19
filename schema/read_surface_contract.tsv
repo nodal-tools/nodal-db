@@ -374,6 +374,12 @@ mirror	entity_asof	table_macro	c	4	description	VARCHAR
 mirror	entity_asof	table_macro	c	5	valid_from_commit	BIGINT
 mirror	entity_asof	table_macro	c	6	valid_to_commit	BIGINT
 mirror	entity_asof	table_macro	c	7	version	SMALLINT
+stable	entity_byname	view		1	class	VARCHAR
+stable	entity_byname	view		2	entity	VARCHAR
+stable	entity_byname	view		3	entity_id	BIGINT
+stable	entity_byname	view		4	dimension_count	INTEGER
+stable	entity_byname	view		5	element_names	VARCHAR[]
+stable	entity_byname	view		6	element_classes	VARCHAR[]
 mirror	entity_class_asof	table_macro	c	1	id	BIGINT
 mirror	entity_class_asof	table_macro	c	2	name	VARCHAR
 mirror	entity_class_asof	table_macro	c	3	description	VARCHAR

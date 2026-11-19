@@ -28,5 +28,5 @@
 -- @surface: stable
 CREATE MACRO nodal_read_surface() AS TABLE
 SELECT CAST(0 AS INTEGER) AS contract_major,
-       CAST(5 AS INTEGER) AS revision,
-       CAST('8d6efe2a8b94a44f' AS VARCHAR) AS ddl_hash;
+       CAST(6 AS INTEGER) AS revision,
+       CAST('f5358582effb5828' AS VARCHAR) AS ddl_hash;

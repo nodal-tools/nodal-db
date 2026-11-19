@@ -1069,3 +1069,85 @@ fn the_set_path_checks_class_sets_as_the_per_item_path() {
         "{ma}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The swap guard across a class set (review fix 1)
+// ---------------------------------------------------------------------------
+
+/// Make `classes` the members of a new class set `name` (direct SQL; the
+/// structural channel has no class-set op).
+fn add_class_set(db: &Path, name: &str, classes: &[&str]) {
+    let conn = Connection::open(db).unwrap();
+    let c: i64 = conn
+        .query_row(
+            "INSERT INTO commit (user, message) VALUES ('sql', 'set') RETURNING id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO class_set (name, valid_from_commit) VALUES (?, ?)",
+        duckdb::params![name, c],
+    )
+    .unwrap();
+    let list = classes
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.execute(
+        &format!(
+            "INSERT INTO class_set_member (class_set_id, member_class_id, valid_from_commit) \
+             SELECT s.id, ec.id, ? FROM class_set s, entity_class ec \
+             WHERE s.name = ? AND ec.name IN ({list})"
+        ),
+        duckdb::params![c, name],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_name_freed_in_another_class_of_a_set_cannot_be_taken_in_the_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(&dir);
+    add_class_set(&db, "site", &["node", "unit"]);
+    // node:n1 -> x2 frees `n1` in the set; unit:u1 -> n1 would make a later
+    // set-typed element `n1` bind to the unit.
+    let m = api_err(st(&db, vec![ren("node", "n1", "x2"), ren("unit", "u1", "n1")]));
+    assert!(
+        m.contains("was renamed away from node (to \"x2\") earlier in this call")
+            && m.contains("shares class set \"site\""),
+        "{m}"
+    );
+    // Two commits are fine.
+    ok(&db, vec![ren("node", "n1", "x2")]);
+    ok(&db, vec![ren("unit", "u1", "n1")]);
+    // A class in no set is unaffected: the same swap across node and a
+    // class outside the set passes in one call.
+    ok(&db, vec![class("other", &[]), ent("other", "o1")]);
+    ok(&db, vec![ren("node", "n2", "y"), ren("other", "o1", "n2")]);
+}
+
+#[test]
+fn the_batch_path_refuses_an_in_set_swap_as_the_per_item_path() {
+    let setup = |dir: &tempfile::TempDir| {
+        let db = many(dir, 30);
+        ok(&db, vec![class("unit", &[]), ent("unit", "u7")]);
+        add_class_set(&db, "site", &["node", "unit"]);
+        db
+    };
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let (a, b) = (setup(&d1), setup(&d2));
+    let call = || {
+        let mut v: Vec<SC> = (0..25)
+            .map(|i| ren("node", &format!("e{i}"), &format!("r{i}")))
+            .collect();
+        v[21] = ren("unit", "u7", "e3");
+        v
+    };
+    let ma = api_err(st(&a, call()));
+    let mb = set_hooks::without_set_path(|| api_err(st(&b, call())));
+    assert_eq!(ma, mb);
+    assert!(ma.contains("was renamed away from node (to \"r3\")"), "{ma}");
+}

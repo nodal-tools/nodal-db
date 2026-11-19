@@ -20,7 +20,7 @@
 //! P0 spike (10^6 entities): 10^4 renames per item 90–140 s, as a set
 //! 2.7–3.6 s; the two cross near 20 items.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use duckdb::types::Value;
 use duckdb::{params, Connection};
@@ -29,8 +29,8 @@ use crate::api::find_entity_class;
 use crate::entity_tuple::TupleIndex;
 use crate::error::DbError;
 use crate::structural::{
-    class_set_co_members, decide_revision, note_renamed_away, refuse_freed_name, CallRenames,
-    CallTouches,
+    class_set_co_members, decide_revision, note_renamed_away, refuse_freed_in_class_sets,
+    refuse_freed_name, CallRenames, CallTouches,
 };
 use crate::text::{stored_description, NameFolds};
 use crate::types::{
@@ -71,8 +71,9 @@ struct View {
     snapshot: HashMap<(i64, String), i64>,
     /// Rows by id: the snapshot's, then the run's edits.
     rows: HashMap<i64, Row>,
-    /// Ids the run revised.
+    /// Ids the run revised, in first-revision order, and as a set.
     changed: Vec<i64>,
+    changed_set: HashSet<i64>,
     /// `(class id, fold(name))` whose holder the run changed: `Some(id)`
     /// taken, `None` freed.
     overlay: HashMap<(i64, String), Option<i64>>,
@@ -153,6 +154,7 @@ pub(crate) fn apply_rename_run(
         snapshot: HashMap::new(),
         rows: HashMap::new(),
         changed: Vec::new(),
+        changed_set: HashSet::new(),
         overlay: HashMap::new(),
     };
     if !keys.is_empty() {
@@ -214,6 +216,7 @@ pub(crate) fn apply_rename_run(
             calls.entities.get(&(cid, fold(new_name))),
         )?;
         if fold(new_name) != fold(&row.name) {
+            refuse_freed_in_class_sets(class, current, new_name, &co_members[&cid], calls)?;
             if let Some(other) = view.resolve(cid, new_name) {
                 if other != id {
                     return Err(DbError::Api(format!(
@@ -246,7 +249,7 @@ pub(crate) fn apply_rename_run(
                 let r = view.rows.get_mut(&id).expect("a resolved row");
                 r.name = new_name.to_string();
                 r.description = rev.description;
-                if !view.changed.contains(&id) {
+                if view.changed_set.insert(id) {
                     view.changed.push(id);
                 }
                 if fold(&old) != fold(new_name) {

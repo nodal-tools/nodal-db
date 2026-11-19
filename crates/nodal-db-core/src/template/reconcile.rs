@@ -3290,8 +3290,8 @@ pub(crate) fn insert_entity_row(
 /// fenced). P0 spike (10^6 entities, 10^5 prior revisions): ~2.6 ms per
 /// close vs ~4.5 ms by `id`, whose zone maps widen as successors land at
 /// the table's tail with old ids.
-/// Every entity revision goes through here, or through the set form
-/// `revise_entity_rows_set` (invariant 2).
+/// Every entity revision goes through here, or through the batch writes of
+/// `entity_rename_set::apply_rename_run` (invariant 2).
 pub(crate) fn revise_entity_row(
     conn: &Connection,
     c: i64,

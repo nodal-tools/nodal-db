@@ -1488,6 +1488,8 @@ pub(crate) fn check_entity_rename(
     if fold(new_name) == fold(stored) {
         return Ok(());
     }
+    let co_members = class_set_co_members(conn, cid)?;
+    refuse_freed_in_class_sets(class, current, new_name, &co_members, calls)?;
     if let Some(other) = lookup_entity(conn, cid, new_name)? {
         if other != id {
             return Err(DbError::Api(format!(
@@ -1496,13 +1498,42 @@ pub(crate) fn check_entity_rename(
             )));
         }
     }
-    for (set, member, member_name) in class_set_co_members(conn, cid)? {
+    for (set, member, member_name) in co_members {
         if let Some(f) = find_entity(conn, member, new_name)? {
             return Err(DbError::Api(format!(
                 "rename_entity: {class}:{current} -> {new_name:?}: the name would be ambiguous \
                  across class set {set:?}, where {member_name}:{} exists (an element of a \
                  set-typed dimension is looked up by name in every member class)",
                 f.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The swap guard across class sets: a rename (that changes the fold) may
+/// not take a name an earlier rename of the call freed in another member
+/// class of a class set the entity's class belongs to. Otherwise a later
+/// element of a set-typed dimension spelled with that name would silently
+/// bind to this entity instead of the renamed one (an in-set swap).
+pub(crate) fn refuse_freed_in_class_sets(
+    class: &str,
+    current: &str,
+    new_name: &str,
+    co_members: &[(String, i64, String)],
+    calls: &CallRenames,
+) -> Result<(), DbError> {
+    if calls.entities.is_empty() {
+        return Ok(());
+    }
+    for (set, member, member_name) in co_members {
+        if let Some((_, to)) = calls.entities.get(&(*member, fold(new_name))) {
+            return Err(DbError::Api(format!(
+                "rename_entity: {class}:{current} -> {new_name:?}: the name {new_name:?} was \
+                 renamed away from {member_name} (to {to:?}) earlier in this call, and \
+                 {member_name} shares class set {set:?} with {class}; a name freed in a call \
+                 cannot be taken in the same call (in-call swaps are refused): rename in two \
+                 commits"
             )));
         }
     }

@@ -662,6 +662,9 @@ earlier commits. In addition:
   name must also be free in every other member class of the set: an
   element of a set-typed dimension is found by its name in all member
   classes, so a shared name would make it ambiguous. Both are refused.
+  For the same reason, a name freed by a rename earlier in the call is
+  taken neither in the entity's own class nor in another class of a set
+  the class belongs to (rename in two commits).
 - **The old name in the same call.** A segment, a value delete, an
   object delete (by name or by element tuple), an activation, a
   membership, a `CreateEntity` element or a metadata item that uses the

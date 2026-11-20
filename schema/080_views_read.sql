@@ -684,6 +684,26 @@ LEFT JOIN entity_parameter_unit o
        ON o.entity_id = e.id AND o.parameter_definition_id = pd.id AND o.valid_to_commit IS NULL
 WHERE pd.valid_to_commit IS NULL;
 
+-- Every current entity with its direct elements by name: the element names
+-- and their classes in position order (empty lists for a 0-D entity). Read
+-- an N-D entity's elements here and never parse its name: the name is a
+-- stored string that does not follow renames of its elements.
+-- @surface: stable
+CREATE VIEW entity_byname AS
+SELECT ec.name AS class, e.name AS entity, e.id AS entity_id,
+       CAST(count(ee.position) AS INTEGER) AS dimension_count,
+       coalesce(list(el.name ORDER BY ee.position) FILTER (WHERE ee.position IS NOT NULL),
+                CAST([] AS VARCHAR[])) AS element_names,
+       coalesce(list(elc.name ORDER BY ee.position) FILTER (WHERE ee.position IS NOT NULL),
+                CAST([] AS VARCHAR[])) AS element_classes
+FROM entity e
+JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL
+LEFT JOIN entity_element ee ON ee.entity_id = e.id AND ee.valid_to_commit IS NULL
+LEFT JOIN entity el ON el.id = ee.element_entity_id AND el.valid_to_commit IS NULL
+LEFT JOIN entity_class elc ON elc.id = el.entity_class_id AND elc.valid_to_commit IS NULL
+WHERE e.valid_to_commit IS NULL
+GROUP BY ec.name, e.name, e.id;
+
 -- Resolved per-mode class presentation (Spine-Toolbox #2492): every current
 -- class gets a row; a class with no entity_class_display_mode row defaults to
 -- visible + its own display_order (greyed-not-hidden means a class is never

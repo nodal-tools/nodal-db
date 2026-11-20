@@ -912,6 +912,24 @@ pub enum StructuralChange {
         elements: Vec<String>,
         description: Option<String>,
     },
+    /// Versioned rename and/or description revision of one entity of
+    /// `class`, addressed by the names the class and the entity have at
+    /// this point of the call, with [`StructuralChange::RenameAlternative`]'s
+    /// rules (effects, description, swaps, old-name references). The id is
+    /// preserved, so elements, N-D entities that use it, activations,
+    /// memberships, values, locations and metadata follow; nothing else is
+    /// rewritten. Names are unique per class, and a class's entity names
+    /// must also stay unique across every class set the class belongs to.
+    ///
+    /// An N-D entity's name is independent of its elements: renaming an
+    /// element does not rename the N-D entities that use it (read their
+    /// elements from the `entity_byname` view; never parse an N-D name).
+    RenameEntity {
+        class: String,
+        current: String,
+        new_name: String,
+        description: Option<String>,
+    },
     /// Idempotent entity-class create (0-D or N-D). `description` applies on
     /// create only (an existing class is a NoOp that checks the dims and
     /// ignores it); `Some("")` stores no description.

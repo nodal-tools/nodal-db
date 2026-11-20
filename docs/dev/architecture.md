@@ -311,6 +311,32 @@ or revised is refused, since the same-commit guard would leave the row
 that change wrote live. Direct `history`
 callers in their own transaction still commit.
 
+**Entity renames and element tuples.** Entity rows are the largest
+identity table (10^5 to 10^6 rows), so their structural writes avoid
+per-item scans. `RenameEntity` has one revision site
+(`template::reconcile::revise_entity_row`): the current row is read
+through the fenced name index (`api::ENTITY_ROW_LOOKUP_SQL`, which also
+returns its `rowid`; see engine rule 3), closed by that `rowid` guarded by
+its id, span and current-row filter, and followed by a same-id successor
+at `version + 1`; a row this commit wrote is edited in place. Closing by
+`rowid` stays fast as successor rows widen the `id` zone maps at the
+table's tail (measured on 10^6 entities after 10^5 revisions: about
+2.6 ms per close, against 4.5 ms by `id`). A run of 20 or more
+consecutive `RenameEntity` items takes a set path
+(`entity_rename_set`): one statement reads every name the run can look
+up, the items are checked in Rust against that snapshot and the run's own
+changes with the per-item rules and messages, and one set close, one
+insert and one in-place update write the rows (10^4 renames: about 3 s
+instead of 90 to 140 s). Per-item and set paths write identical rows
+(tested). N-D entity creates enforce one live entity per element tuple
+per class through a per-call tuple index (`entity_tuple`): the first N-D
+create of a class loads only the tuples whose first element is among the
+call's creates of that class (one statement, after resolving those
+element names by fenced lookups below 20 names or one set statement
+from 20), so the guard costs a constant number of statements per call
+and class. The template executor uses the same index as a backstop
+behind the plan's seed skips.
+
 Canonical encodings: axes and values serialize to a pinned byte layout
 hashed with **XXH3-64, seed 0**. The hash is only an accelerator:
 deduplication narrows by hash and then compares bytes, so a hash

@@ -150,6 +150,8 @@ pub struct DbEntity {
     pub description: Option<String>,
     /// Element entity names, position order (empty for 0-D).
     pub elements: Vec<String>,
+    /// Element entity ids, position order (empty for 0-D).
+    pub element_ids: Vec<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -703,6 +705,7 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
                     name,
                     description,
                     elements: Vec::new(),
+                    element_ids: Vec::new(),
                 },
             );
         }
@@ -717,7 +720,9 @@ pub fn read_vocab(conn: &Connection, warnings: &mut Vec<String>) -> Result<DbVoc
                 continue;
             };
             let el_name = v.entities[elk].name.clone();
-            v.entities.get_mut(ek).unwrap().elements.push(el_name);
+            let e = v.entities.get_mut(ek).unwrap();
+            e.elements.push(el_name);
+            e.element_ids.push(el_id);
         }
         let mut mstmt = conn.prepare(
             "SELECT group_entity_id, member_entity_id, included FROM membership \

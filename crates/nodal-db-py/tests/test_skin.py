@@ -1056,6 +1056,35 @@ def test_class_and_parameter_rename_ops(db):
         )
 
 
+def test_entity_rename_op(db):
+    db.write_parameter("node", "demand", "Base", scalar_batch(["n1"], [1.0]), user="t")
+    rep = db.commit_structural(
+        [
+            {"op": "rename_entity", "class": "node", "current": "n1", "new_name": "bus"},
+            {"op": "rename_entity", "class": "node", "current": "bus", "new_name": "bus",
+             "description": "A bus."},
+            {"op": "rename_entity", "class": "node", "current": "bus", "new_name": "bus"},
+        ],
+        user="t",
+    )
+    got = [(o["kind"], o["effect"]) for o in rep["structural"]]
+    assert got == [("entity", "renamed"), ("entity", "updated"), ("entity", "no_op")]
+    assert one_value(db, "SELECT count(*) FROM read_values('node', 'demand', ['bus'])") == 1
+    assert (
+        one_value(db, "SELECT description FROM entity_current WHERE name = 'bus'")
+        == "A bus."
+    )
+    # A refusal is an ApiError (uniqueness in the class).
+    db.commit_structural(
+        [{"op": "create_entity", "class": "node", "name": "n2"}], user="t"
+    )
+    with pytest.raises(nodal_db.ApiError, match="already names a different entity"):
+        db.commit_structural(
+            [{"op": "rename_entity", "class": "node", "current": "bus", "new_name": "N2"}],
+            user="t",
+        )
+
+
 def test_create_entity_description_round_trip(db):
     rep = db.commit_structural(
         [

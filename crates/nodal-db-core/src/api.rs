@@ -53,6 +53,7 @@ use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
 };
+use crate::entity_tuple::TupleIndex;
 use crate::object_delete::{
     apply_object_delete, cascade_scope, prepare_object_deletes, preview_one, reaches_created,
     written_value_covered, PreparedObjectDelete, WrittenIds,
@@ -547,17 +548,42 @@ pub fn commit_change_set(
         // What the structural items name, by id, for the purges' survivors
         // (a closure local, like `calls`; idle unless the call purges).
         let mut touches = CallTouches::new(!purges.is_empty());
-        for (i, ch) in structural.iter().enumerate() {
+        // The live element tuples of the N-D classes this attempt creates
+        // in, loaded per class on first use (entity_rename_PLAN §5.3; a
+        // closure local, like `calls`).
+        let mut tuples = TupleIndex::for_changes(&structural);
+        let mut i = 0;
+        while i < structural.len() {
+            // A run of RenameEntity items long enough for the set path
+            // (entity_rename_PLAN §3.2) is applied as one batch.
+            if crate::entity_rename_set::takes_set_path(&structural[i..]) {
+                let n = crate::entity_rename_set::rename_run_len(&structural[i..]);
+                crate::entity_rename_set::apply_rename_run(
+                    conn,
+                    commit_id,
+                    i,
+                    &structural[i..i + n],
+                    &mut report,
+                    &mut structural_folds,
+                    &mut calls,
+                    &mut touches,
+                    &mut tuples,
+                )?;
+                i += n;
+                continue;
+            }
             apply_structural(
                 conn,
                 commit_id,
                 i,
-                ch,
+                &structural[i],
                 &mut report,
                 &mut structural_folds,
                 &mut calls,
                 &mut touches,
+                &mut tuples,
             )?;
+            i += 1;
         }
         report
             .warnings
@@ -583,15 +609,16 @@ pub fn commit_change_set(
                     StructuralKind::Parameter => ObjectKind::Parameter,
                     _ => return None,
                 };
-                let wrote_row = match o.effect {
-                    StructuralEffect::Created => true,
-                    // A rename or description revision writes a successor
-                    // row (valid_from = this commit); an entity has none.
-                    StructuralEffect::Renamed | StructuralEffect::Updated => {
-                        kind != ObjectKind::Entity
-                    }
-                    _ => false,
-                };
+                // A rename or description revision writes a successor row
+                // (valid_from = this commit), entities included
+                // (`RenameEntity`; activation and membership outcomes carry
+                // their own kinds and never reach here).
+                let wrote_row = matches!(
+                    o.effect,
+                    StructuralEffect::Created
+                        | StructuralEffect::Renamed
+                        | StructuralEffect::Updated
+                );
                 wrote_row.then_some((kind, o.object_id))
             })
             .collect();
@@ -916,6 +943,12 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             current,
             new_name,
             ..
+        }
+        | StructuralChange::RenameEntity {
+            class,
+            current,
+            new_name,
+            ..
         } => {
             n.nfc_in_place(class);
             n.nfc_in_place(current);
@@ -952,13 +985,15 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
     }
 }
 
-/// Refuse every segment, value-delete key and object-delete key of the call
-/// that addresses a class, parameter, alternative or scenario by a name a
-/// rename earlier in the call freed and that does not resolve now
-/// (class_param_rename_PLAN §4.5 f, OD5). A same-call create of the old name
-/// makes it resolve again (to the new object), and a case-only rename frees
-/// no name, so neither is refused. Runs after the structural changes and
-/// before the first value write.
+/// Refuse every segment, value-delete key, object-delete key and metadata
+/// item of the call that addresses a class, parameter, alternative,
+/// scenario or entity by a name a rename earlier in the call freed and that
+/// does not resolve now (class_param_rename_PLAN §4.5 f, OD5;
+/// entity_rename_PLAN §4). A same-call create of the old name makes it
+/// resolve again (to the new object), and a case-only rename frees no
+/// name, so neither is refused. Runs after the structural changes and
+/// before the first value write. Segment entity labels are checked only
+/// for the classes with an entity renamed in the call.
 fn refuse_renamed_away_references(
     conn: &Connection,
     calls: &CallRenames,
@@ -986,21 +1021,59 @@ fn refuse_renamed_away_references(
         }
         Ok::<(), DbError>(())
     };
+    // An entity of `class` (as it resolves now) by a renamed-away name.
+    // Class names resolve once per fold (`types::fold` is DuckDB's
+    // `lower()`, engine rule 8), only when an entity was renamed.
+    let renamed_classes = calls.entity_rename_classes();
+    let class_ids: std::cell::RefCell<HashMap<String, Option<i64>>> = Default::default();
+    let class_id = |class: &str| -> Result<Option<i64>, DbError> {
+        let k = fold(class);
+        if let Some(id) = class_ids.borrow().get(&k) {
+            return Ok(*id);
+        }
+        let id = lookup_entity_class(conn, class)?;
+        class_ids.borrow_mut().insert(k, id);
+        Ok(id)
+    };
+    let renamed_entity = |class: &str, name: &str| -> Result<Option<String>, DbError> {
+        if renamed_classes.is_empty() {
+            return Ok(None);
+        }
+        match class_id(class)? {
+            Some(cid) if renamed_classes.contains(&cid) => {
+                calls.renamed_entity_of(conn, cid, name)
+            }
+            _ => Ok(None),
+        }
+    };
+    let check_entity = |what: &str, class: &str, name: &str| {
+        if let Some(to) = renamed_entity(class, name)? {
+            return Err(refuse(what.to_string(), "entity", name, &to));
+        }
+        Ok::<(), DbError>(())
+    };
     for (i, s) in segments.iter().enumerate() {
-        check_value_key(
-            format!("segment {} ({}:{})", i + 1, s.class, s.parameter),
-            &s.class,
-            &s.parameter,
-            &s.alternative,
-        )?;
+        let what = format!("segment {} ({}:{})", i + 1, s.class, s.parameter);
+        check_value_key(what.clone(), &s.class, &s.parameter, &s.alternative)?;
+        if renamed_classes.is_empty() {
+            continue;
+        }
+        let Some(cid) = class_id(&s.class)? else {
+            continue;
+        };
+        if !renamed_classes.contains(&cid) {
+            continue;
+        }
+        for name in &s.names {
+            if let Some(to) = calls.renamed_entity_of(conn, cid, name)? {
+                return Err(refuse(what, "entity", name, &to));
+            }
+        }
     }
     for (i, k) in deletes {
-        check_value_key(
-            format!("delete key {i}"),
-            &k.class,
-            &k.parameter,
-            &k.alternative,
-        )?;
+        let what = format!("delete key {i}");
+        check_value_key(what.clone(), &k.class, &k.parameter, &k.alternative)?;
+        check_entity(&what, &k.class, &k.entity)?;
     }
     for p in object_deletes {
         let what = format!("object-delete key {}", p.key_index);
@@ -1023,17 +1096,48 @@ fn refuse_renamed_away_references(
             return Err(refuse(what, p.key.kind.tag(), name, &to));
         }
     }
+    // Entity object deletes: by name, and every element of a tuple address
+    // (of the dimension's class, or of any member class of a class-set
+    // dimension).
+    if !calls.entities.is_empty() {
+        for p in object_deletes {
+            let (ObjectKind::Entity, Some(class)) = (p.key.kind, &p.key.class) else {
+                continue;
+            };
+            let what = format!("object-delete key {}", p.key_index);
+            match &p.key.target {
+                ObjectRef::Name(name) => check_entity(&what, class, name)?,
+                ObjectRef::Elements(els) => {
+                    let Ok(shape) = crate::structural::entity_class_shape(conn, class) else {
+                        continue;
+                    };
+                    for ((_, dc, ds), el) in shape.dims.iter().zip(els) {
+                        let classes: Vec<i64> = match (dc, ds) {
+                            (Some(c), _) => vec![*c],
+                            (None, Some(set)) => crate::structural::class_set_members(conn, *set)?,
+                            (None, None) => Vec::new(),
+                        };
+                        for c in classes {
+                            if let Some(to) = calls.renamed_entity_of(conn, c, el)? {
+                                return Err(refuse(what, "entity", el, &to));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Metadata items: subjects, values and target scopes (R-3).
     use crate::types::{Scope, Subject};
     for (i, it) in metadata.iter().enumerate() {
         let what = format!("metadata item {i}");
-        let mut values: Vec<(&str, &str, &str)> = Vec::new();
+        let mut values: Vec<(&str, &str, &str, &str)> = Vec::new();
         let subject = match it {
             MetadataChange::Link { subject, .. } | MetadataChange::Unlink { subject, .. } => {
                 Some(subject)
             }
             MetadataChange::LinkValue { value, .. } | MetadataChange::UnlinkValue { value, .. } => {
-                values.push((&value.class, &value.parameter, &value.alternative));
+                values.push((&value.class, &value.parameter, &value.alternative, &value.entity));
                 None
             }
             MetadataChange::ValueMetadata { scope, .. } => {
@@ -1043,15 +1147,20 @@ fn refuse_renamed_away_references(
                         class,
                         parameter,
                         alternative,
-                    } => values.push((class, parameter, alternative)),
-                    Scope::Value(v) => values.push((&v.class, &v.parameter, &v.alternative)),
+                    } => values.push((class, parameter, alternative, "")),
+                    Scope::Value(v) => {
+                        values.push((&v.class, &v.parameter, &v.alternative, &v.entity))
+                    }
                 }
                 None
             }
             _ => None,
         };
-        for (c, p, a) in values {
+        for (c, p, a, e) in values {
             check_value_key(what.clone(), c, p, a)?;
+            if !e.is_empty() {
+                check_entity(&what, c, e)?;
+            }
         }
         let Some(s) = subject else { continue };
         let hit = match s {
@@ -1060,9 +1169,10 @@ fn refuse_renamed_away_references(
                 calls.renamed_alternative(conn, n)?.map(|t| ("alternative", n, t))
             }
             Subject::Scenario(n) => calls.renamed_scenario(conn, n)?.map(|t| ("scenario", n, t)),
-            Subject::Entity { class, .. } => {
-                calls.renamed_class(conn, class)?.map(|t| ("class", class, t))
-            }
+            Subject::Entity { class, name } => match calls.renamed_class(conn, class)? {
+                Some(t) => Some(("class", class, t)),
+                None => renamed_entity(class, name)?.map(|t| ("entity", name, t)),
+            },
             Subject::Parameter { class, name } => match calls.renamed_class(conn, class)? {
                 Some(t) => Some(("class", class, t)),
                 None => calls
@@ -2257,6 +2367,61 @@ pub(crate) fn lookup_entity(
     name: &str,
 ) -> Result<Option<i64>, DbError> {
     Ok(find_entity(conn, class_id, name)?.map(|f| f.id))
+}
+
+/// The current `entity` row a rename revises, with its `rowid` (the close
+/// addresses it), read through the same `OFFSET 0` fence as
+/// [`ENTITY_NAME_LOOKUP_SQL`] (`?1` class id, `?2` name; guard:
+/// `tests/entity_name_index_scan.rs`).
+#[doc(hidden)]
+pub const ENTITY_ROW_LOOKUP_SQL: &str = "SELECT id, name, description, version, \
+            valid_from_commit, rid FROM \
+       (SELECT rowid AS rid, id, name, description, version, valid_from_commit, \
+               entity_class_id, valid_to_commit FROM entity \
+        WHERE lower(name) = lower(?2) OFFSET 0) \
+     WHERE entity_class_id = ?1 AND valid_to_commit IS NULL";
+
+/// The current row of the entity of class `class_id` named `name` (by the
+/// name fold), for the one entity revision site
+/// ([`crate::template::reconcile::revise_entity_row`]).
+pub(crate) fn find_entity_row(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+) -> Result<Option<EntityRow>, DbError> {
+    let row = conn
+        .prepare_cached(ENTITY_ROW_LOOKUP_SQL)?
+        .query_row(params![class_id, name], |r| {
+            Ok(EntityRow {
+                id: r.get(0)?,
+                entity_class_id: class_id,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                version: r.get(3)?,
+                valid_from: r.get(4)?,
+                rowid: r.get(5)?,
+            })
+        });
+    match row {
+        Ok(r) => Ok(Some(r)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// One current `entity` row, as the rename revises it.
+#[derive(Clone, Debug)]
+pub(crate) struct EntityRow {
+    pub(crate) id: i64,
+    pub(crate) entity_class_id: i64,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) version: i64,
+    /// The current row's `valid_from_commit`: equal to the writing commit
+    /// when this commit created or already revised it (the D-S5 branch).
+    pub(crate) valid_from: i64,
+    /// The current row's `rowid` as read (the close addresses it).
+    pub(crate) rowid: i64,
 }
 
 pub(crate) fn lookup_class_set(conn: &Connection, name: &str) -> Result<Option<i64>, DbError> {
@@ -3729,7 +3894,7 @@ pub const ENTITY_LOOKUP_ONE_SQL: &str = "SELECT lower(?1), e.id, e.name \
 /// explicit ordinal list otherwise; every ordinal must come back exactly
 /// once (hard check). The one entity lookup of the write path's
 /// [`resolve_entities`] and of the delete channel.
-fn lookup_entities(
+pub(crate) fn lookup_entities(
     conn: &Connection,
     class_id: i64,
     names: &[&str],

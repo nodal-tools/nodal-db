@@ -597,6 +597,7 @@ const MUST_BE_EMPTY: &[&str] = &[
     "audit_dangling_ref",
     "audit_dangling_semantic_ref",
     "audit_class_set_entity_name_dup",
+    "audit_entity_tuple_dup",
     "audit_element_class_mismatch",
     "audit_element_arity",
     "audit_value_class_mismatch",

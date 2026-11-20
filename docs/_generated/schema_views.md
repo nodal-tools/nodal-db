@@ -56,6 +56,7 @@ From `schema/080_views_read.sql`.
 | `axis_position_stored_in_use(pd_id)` | macro | Stored positions of the axes that CURRENT value rows reference |
 | `database_properties` | view | The current database properties |
 | `dataset_metadata` | view | Dataset-level metadata |
+| `entity_byname` | view | Every current entity with its direct elements by name |
 | `entity_class_display(mode_name)` | macro | Resolved per-mode class presentation (Spine-Toolbox #2492) |
 | `object_metadata_named` | view | The live links of the dataset, the entities and the schema objects, by names |
 | `parameter_effective_unit` | view | Effective unit = override if present, else definition default |
@@ -167,6 +168,7 @@ From `schema/120_views_audit.sql`.
 | `audit_element_arity` | view | Element arity (the #1015 import-typo class) |
 | `audit_element_class_mismatch` | view | Element class conformance (set-typed dimensions accept entities of any member class; class-typed accept that class) |
 | `audit_entity_alternative_redundant` | view | Redundant activation rows (#3010) |
+| `audit_entity_tuple_dup` | view | Live entities of one class that hold the same element tuple |
 | `audit_erasure` | view | Erasure inventory (reporting, NOT blocking — unlike the audit_* views above, a non-empty result is not damage: it is the truthful record that hard erasure … |
 | `audit_health` | view | Maintenance-health audit |
 | `audit_history_tiling` | view | Version-tiling + span coherence |

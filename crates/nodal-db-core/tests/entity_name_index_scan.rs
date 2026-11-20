@@ -52,7 +52,7 @@ use serde_json::Value as Json;
 
 use nodal_db_core::api::{
     commit_changes, delete_objects, write_parameter, Segment, ENTITY_LOOKUP_ONE_SQL,
-    ENTITY_NAME_LOOKUP_SQL,
+    ENTITY_NAME_LOOKUP_SQL, ENTITY_ROW_LOOKUP_SQL,
 };
 use nodal_db_core::axis::AXIS_CANDIDATES_SQL;
 use nodal_db_core::schema_init::init_schema_with_default;
@@ -362,6 +362,13 @@ fn fenced_lookups_use_the_index_on_a_realistic_fixture() {
             "entity",
             &explain(&conn, ENTITY_LOOKUP_ONE_SQL, duckdb::params![name, node]),
         );
+        // The rename's row read (wider select list, `rowid` included).
+        assert_index_scan(
+            &format!("ENTITY_ROW_LOOKUP_SQL({name})"),
+            &conn,
+            "entity",
+            &explain(&conn, ENTITY_ROW_LOOKUP_SQL, duckdb::params![node, name]),
+        );
     }
 
     let (hash, kind): (u64, String) = conn
@@ -459,6 +466,11 @@ fn fenced_lookups_match_the_cur_name_form() {
                 want,
                 "ENTITY_LOOKUP_ONE_SQL({cls}, {name:?})"
             );
+            assert_eq!(
+                opt_id(&conn, ENTITY_ROW_LOOKUP_SQL, cls, name),
+                want,
+                "ENTITY_ROW_LOOKUP_SQL({cls}, {name:?})"
+            );
         }
     }
 
@@ -540,4 +552,107 @@ fn entity_created_in_one_segment_resolves_in_the_next() {
         Some(ids[0])
     );
     conn.close().unwrap();
+}
+
+// --- the entity rename's close (revise_entity_row) ---------------------------
+
+/// The close statement of `template::reconcile::revise_entity_row` (copied:
+/// the revision site keeps it inline; a change there must change this).
+const ROWID_CLOSE_SQL: &str = "UPDATE entity SET valid_to_commit = ?1 WHERE rowid = ?2 \
+     AND id = ?3 AND valid_from_commit < ?1 AND valid_to_commit IS NULL";
+/// Control: the same close by `id` alone.
+const ID_CLOSE_SQL: &str = "UPDATE entity SET valid_to_commit = ?1 WHERE id = ?2 \
+     AND valid_from_commit < ?1 AND valid_to_commit IS NULL";
+
+/// `(row groups scanned, row groups to scan)` of every TABLE_SCAN of
+/// `entity` in an EXPLAIN ANALYZE plan.
+fn row_groups(plan: &Json) -> Vec<(u64, u64)> {
+    fn walk(node: &Json, out: &mut Vec<(u64, u64)>) {
+        if node.get("type").and_then(Json::as_str) == Some("TABLE_SCAN")
+            && node["extra_info"]
+                .get("Table")
+                .and_then(Json::as_str)
+                .map(|t| t.rsplit('.').next())
+                == Some(Some("entity"))
+        {
+            let g = |k: &str| node.get(k).and_then(Json::as_u64).unwrap_or(u64::MAX);
+            out.push((g("row_groups_scanned"), g("total_row_groups_to_scan")));
+        }
+        if let Some(ch) = node.get("children").and_then(Json::as_array) {
+            for c in ch {
+                walk(c, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for r in plan
+        .get("operator")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+    {
+        walk(r, &mut out);
+    }
+    out
+}
+
+/// The close of an entity rename addresses the row by `rowid`: it reads one
+/// or two row groups however scattered the ids are, while a close by `id`
+/// on the same file reads most of them (its zone maps are wide once ids are
+/// out of order, as successor rows make them). 2·10^6 entities with ids in
+/// hash order (a fixture written by direct SQL; the guard is the plan).
+#[test]
+fn the_rename_close_by_rowid_reads_few_row_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("scrambled.duckdb");
+    init_schema_with_default(&db, None).unwrap();
+    const N: i64 = 2_000_000;
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO commit (user, message) VALUES ('t', 'fixture'); \
+             INSERT INTO entity_class (name, valid_from_commit) VALUES ('node', 1); \
+             INSERT INTO entity (id, entity_class_id, name, valid_from_commit) \
+               SELECT 2 * i + 1, 1, 'e' || i, 1 FROM range({N}) t(i) ORDER BY hash(i); \
+             INSERT INTO commit (user, message) VALUES ('t', 'close'); \
+             CHECKPOINT;"
+        ))
+        .unwrap();
+    }
+    let conn = guard_conn(&db);
+    let mut checked = 0;
+    // Mid-range ids: near the extremes even scattered zone maps prune.
+    for name in ["e600000", "e1000001", "e1400000"] {
+        let (rowid, id): (i64, i64) = conn
+            .query_row("SELECT rowid, id FROM entity WHERE name = ?", [name], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        let run = |sql: &str, p: &[&dyn duckdb::ToSql]| {
+            conn.execute_batch("BEGIN").unwrap();
+            let plan = explain(&conn, sql, p);
+            conn.execute_batch("ROLLBACK").unwrap();
+            row_groups(&plan)
+        };
+        let by_rowid = run(ROWID_CLOSE_SQL, &[&2i64, &rowid, &id]);
+        let by_id = run(ID_CLOSE_SQL, &[&2i64, &id]);
+        let ver = engine_version(&conn);
+        assert_eq!(by_rowid.len(), 1, "{name}: scans of entity {by_rowid:?}");
+        let (scanned, total) = by_rowid[0];
+        assert!(
+            total >= 10 && scanned <= 2,
+            "{name}: the rowid close read {scanned} of {total} row groups on DuckDB {ver}: \
+             rowid filters no longer prune row groups; re-measure the close forms \
+             (entity_rename spike) before choosing another"
+        );
+        // Control: the fixture really scatters ids (else the guard is vacuous).
+        let (id_scanned, _) = by_id[0];
+        assert!(
+            id_scanned > total / 2,
+            "{name}: the id close read only {id_scanned} of {total} row groups: the fixture \
+             does not scatter ids"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 3);
 }

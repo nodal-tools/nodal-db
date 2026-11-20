@@ -551,12 +551,14 @@ The CLI has no scenario commands; use Python or Rust, or a template.
 
 ### Renaming objects and editing descriptions
 
-Four structural changes rename an object or revise its description:
-`RenameAlternative`, `RenameScenario`, `RenameEntityClass` and
-`RenameParameter` (Python ops `rename_alternative`, `rename_scenario`,
-`rename_entity_class`, `rename_parameter`). Each takes the object's
-`current` name, a `new_name` and an optional `description`;
-`RenameParameter` also takes the `class` the parameter belongs to.
+Five structural changes rename an object or revise its description:
+`RenameAlternative`, `RenameScenario`, `RenameEntityClass`,
+`RenameParameter` and `RenameEntity` (Python ops `rename_alternative`,
+`rename_scenario`, `rename_entity_class`, `rename_parameter`,
+`rename_entity`). Each takes the object's `current` name, a `new_name`
+and an optional `description`; `RenameParameter` and `RenameEntity` also
+take the `class` the parameter or entity belongs to. Entities have rules
+of their own as well: see [Renaming entities](#renaming-entities).
 
 ```python
 db.commit_structural([
@@ -593,8 +595,8 @@ database; parameter names are unique within their class.
   `create_entity`) also take a `description`, applied only when the
   class or entity is created: a create of an existing one is a `NoOp`
   that keeps the stored description (when one call creates the same
-  entity twice, the first description wins). An entity's description
-  cannot be revised yet.
+  entity twice, the first description wins). `RenameEntity` revises an
+  entity's description.
 - **Several changes in one call** apply in order. Address an object by
   the name it has at that point of the call: after `node -> bus`, a
   later item, segment or delete uses `bus`. A reference by the old name
@@ -637,6 +639,114 @@ database; parameter names are unique within their class.
   `read_parameter('node', 'demand')`) are not updated: after a rename a
   read by the old name returns no rows, and a write by it creates a new
   object. Update those references together with the rename.
+
+### Renaming entities
+
+`RenameEntity` (Python op `rename_entity`) renames one entity of a class
+and/or revises its description, with the rules above:
+
+```python
+db.commit_structural([
+    {"op": "rename_entity", "class": "node", "current": "n1",
+     "new_name": "bus", "description": "Main bus"},
+], user="alice")
+```
+
+The entity keeps its id, so its values, activations, memberships,
+location, metadata links and the N-D entities that use it as an element
+all follow the rename; `entity_asof(commit)` shows the old name at
+earlier commits. In addition:
+
+- **Uniqueness.** Entity names are unique within their class, compared
+  case-insensitively. When the class is a member of a class set, the new
+  name must also be free in every other member class of the set: an
+  element of a set-typed dimension is found by its name in all member
+  classes, so a shared name would make it ambiguous. Both are refused.
+  For the same reason, a name freed by a rename earlier in the call is
+  taken neither in the entity's own class nor in another class of a set
+  the class belongs to (rename in two commits).
+- **The old name in the same call.** A segment, a value delete, an
+  object delete (by name or by element tuple), an activation, a
+  membership, a `CreateEntity` element or a metadata item that uses the
+  old name is refused, naming the new one. Without this a 0-D segment
+  label spelled with the old name would create a new, empty entity.
+  `CreateEntity` of the old name creates a new entity (a new id); after
+  that, the old name refers to the new entity.
+- **Deletes and purges.** A renamed entity cannot be object-deleted in
+  the same call (by either name, through its class, or through an element
+  whose delete would cascade to it); deleting an N-D entity that uses a
+  renamed element is allowed. A purge of the entity's class keeps the
+  renamed entity (it is part of the call) and closes its values that the
+  call does not write.
+- **Many renames.** A long run of consecutive `RenameEntity` items (20 or
+  more) is applied as one batch, so renaming thousands of entities in one
+  call takes seconds rather than minutes. The result is the same as
+  applying them one by one.
+- **Templates.** Entity renames need no `allow_on_template` flag; see
+  [N-D entities](#n-d-entities-elements-names-and-duplicates) for what a
+  later template apply does with a renamed seed entity.
+- **A Spine re-import.** Importing the same Spine database again after a
+  rename does not follow it: a renamed 0-D entity is created again under
+  its old name, and an N-D entity whose element was renamed fails to
+  import ("already exists with elements [u1, bus], not [u1, n1]"). Rename
+  in the source as well, or purge and re-import. A re-import does not
+  update descriptions.
+
+#### N-D entities: elements, names and duplicates
+
+An N-D entity's identity is its element tuple; its name is a separate,
+stored string.
+
+- **Names do not follow elements.** `CreateEntity` without a `name`
+  derives one from the element names joined with `__` (`u1__n1`), once,
+  at create time. Renaming an element does not rename the N-D entities
+  that use it: after `n1 -> bus`, `u1__n1` keeps its name and its
+  elements are `(u1, bus)`.
+- **Never parse an N-D entity's name** to find its elements: after a
+  rename the parsed name is wrong, and if a new `n1` is created later it
+  points at the wrong entity without any error. Read the elements from
+  the `entity_byname` view (`class`, `entity`, `entity_id`,
+  `dimension_count`, `element_names`, `element_classes`; empty lists for
+  a 0-D entity).
+- **One entity per element tuple.** Two live entities of one class may
+  not hold the same element tuple. `CreateEntity`, `ensure_entity` and
+  the Spine importer follow this table:
+
+  | Create | Result |
+  |---|---|
+  | explicit name that exists, same elements | `NoOp` |
+  | explicit name that exists, other elements | refused ("already exists with elements …") |
+  | new explicit name, elements free | created |
+  | new explicit name, elements held | refused: "elements [u1, bus] already exist as \"u1__n1\"; duplicate element tuples are not allowed" |
+  | no name, elements held by an entity with the derived name | `NoOp` |
+  | no name, elements held under another name | refused: "… already exist as \"link\"; address it by that name" |
+  | no name, elements free, derived name taken by another tuple | refused: "the derived name \"u1__n1\" is taken by an entity with elements [u1, bus]; give an explicit name" |
+  | no name, elements free, derived name free | created |
+
+  Elements are resolved first, so an unknown element is reported before
+  anything else. Deleting an N-D entity and creating its tuple again in
+  one call is refused (deletes run after the structural changes): use
+  two calls. Uniqueness is enforced by nodal-db's writer, not by an
+  index; files written before the rule (or by direct SQL) may hold
+  duplicates. The advisory `audit_entity_tuple_dup` view lists them
+  (class, element names, the holders' ids and names). They are left as
+  they are and every other operation on them works, but a new create of
+  such a tuple is refused (listing all holders), and template export
+  refuses until they are resolved.
+- **Templates and renamed seeds.** A template apply does not recognize
+  renames. It creates what the template declares where it can and skips
+  what it cannot, with a note in the plan and apply report: a 0-D seed
+  that was renamed away is created again, empty, under its declared
+  name; an N-D seed whose name is taken by an entity over other elements,
+  or whose elements an entity already holds under another name, is
+  skipped, and so are the seeds and seed memberships that depend on a
+  skipped seed. An apply with skips is not stamped converged
+  (`template_content_hash` is withheld), so every later apply of the same
+  template reports the skips again until they are resolved (by renaming
+  back, deleting the clashing entity, or a template that drops the seed).
+  Template validation refuses two seeds of a class with the same
+  elements. Migration `run:` programs see renamed seed entities under
+  their current names.
 
 ### Purge
 

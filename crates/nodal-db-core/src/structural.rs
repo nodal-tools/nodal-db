@@ -26,10 +26,11 @@ use std::collections::{HashMap, HashSet};
 use duckdb::{params, Connection};
 
 use crate::api::{
-    find_alternative, find_entity, find_entity_class, find_parameter, find_scenario,
-    find_value_list, insert_alternative_row, lookup_alternative, lookup_entity,
+    find_alternative, find_entity, find_entity_class, find_entity_row, find_parameter,
+    find_scenario, find_value_list, insert_alternative_row, lookup_alternative, lookup_entity,
     lookup_entity_class, lookup_parameter, lookup_scenario,
 };
+use crate::entity_tuple::{element_names, TupleIndex};
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
 use crate::property;
@@ -39,7 +40,7 @@ use crate::template::reconcile::{
     insert_class_dim_row, insert_class_row, insert_definition_row,
     insert_entity_element_row, insert_entity_row, insert_membership_row, insert_scenario_row,
     insert_type_member, read_ec_row, read_pd_row, revise_alternative_row, revise_ec_row,
-    revise_pd_row, revise_scenario_row,
+    revise_entity_row, revise_pd_row, revise_scenario_row,
 };
 use crate::text::NameFolds;
 use crate::types::{
@@ -70,6 +71,53 @@ pub(crate) fn apply_structural(
     folds: &mut NameFolds,
     calls: &mut CallRenames,
     touches: &mut CallTouches,
+    tuples: &mut TupleIndex<'_>,
+) -> Result<(), DbError> {
+    match apply_one(
+        conn,
+        c,
+        change_index,
+        change,
+        report,
+        folds,
+        calls,
+        touches,
+        tuples,
+    ) {
+        // An entity a rename of this call took the name of: say so once,
+        // here, instead of in every applier (entity_rename_PLAN §4, C-13).
+        Err(DbError::Api(m)) if m.contains("not found") || m.contains("does not name") => {
+            let refs = calls.renamed_entity_refs(conn, change)?;
+            if refs.is_empty() {
+                return Err(DbError::Api(m));
+            }
+            let notes: Vec<String> = refs
+                .iter()
+                .map(|(old, to)| {
+                    format!("entity {old:?} was renamed to {to:?} earlier in this call")
+                })
+                .collect();
+            Err(DbError::Api(format!(
+                "{m} ({}; address it by its new name)",
+                notes.join("; ")
+            )))
+        }
+        other => other,
+    }
+}
+
+/// [`apply_structural`]'s body.
+#[allow(clippy::too_many_arguments)]
+fn apply_one(
+    conn: &Connection,
+    c: i64,
+    change_index: usize,
+    change: &StructuralChange,
+    report: &mut WriteReport,
+    folds: &mut NameFolds,
+    calls: &mut CallRenames,
+    touches: &mut CallTouches,
+    tuples: &mut TupleIndex<'_>,
 ) -> Result<(), DbError> {
     let (kind, object_id, effect) = match change {
         StructuralChange::CreateAlternative { name, description } => {
@@ -161,6 +209,7 @@ pub(crate) fn apply_structural(
                 elements,
                 description.as_deref(),
                 folds,
+                tuples,
             )?;
             (StructuralKind::Entity, id, e)
         }
@@ -205,6 +254,25 @@ pub(crate) fn apply_structural(
             };
             let (id, e) = apply_rename_parameter(conn, c, class, &r, folds, calls)?;
             (StructuralKind::Parameter, id, e)
+        }
+        StructuralChange::RenameEntity {
+            class,
+            current,
+            new_name,
+            description,
+        } => {
+            let (id, e) = apply_rename_entity(
+                conn,
+                c,
+                class,
+                current,
+                new_name,
+                description.as_deref(),
+                folds,
+                calls,
+                tuples,
+            )?;
+            (StructuralKind::Entity, id, e)
         }
         StructuralChange::CreateParameter {
             class,
@@ -272,7 +340,7 @@ impl CallTouches {
     /// Names resolve by lookup in the open transaction, right after the
     /// item applied, so they find the rows the item resolved (nothing
     /// renames between the two).
-    fn note(
+    pub(crate) fn note(
         &mut self,
         conn: &Connection,
         change: &StructuralChange,
@@ -328,7 +396,7 @@ impl CallTouches {
                     self.memberships.insert((g, m, a));
                 }
             }
-            StructuralChange::CreateEntity { .. } => {
+            StructuralChange::CreateEntity { .. } | StructuralChange::RenameEntity { .. } => {
                 self.entities.insert(object_id);
             }
             StructuralChange::CreateEntityClass { .. }
@@ -417,6 +485,8 @@ pub(crate) struct CallRenames {
     pub(crate) classes: HashMap<String, (i64, String)>,
     /// `(class id, fold(old))` -> (definition id, current name).
     pub(crate) parameters: HashMap<(i64, String), (i64, String)>,
+    /// `(class id, fold(old))` -> (entity id, current name).
+    pub(crate) entities: HashMap<(i64, String), (i64, String)>,
     /// Class id -> its name before the call's first rename of it, for every
     /// class whose name bytes a rename of this call changed (the metadata
     /// document rewrite, §5.2).
@@ -446,7 +516,98 @@ impl CallRenames {
             && self.scenarios.is_empty()
             && self.classes.is_empty()
             && self.parameters.is_empty()
+            && self.entities.is_empty()
     }
+
+    /// The current name of the entity of class id `cid` that `name` was
+    /// renamed away from in this call, when `name` does not resolve now (a
+    /// same-call create of the old name makes it resolve again). The map
+    /// keeps every renamed-away name pointing at the entity's newest name.
+    pub(crate) fn renamed_entity_of(
+        &self,
+        conn: &Connection,
+        cid: i64,
+        name: &str,
+    ) -> Result<Option<String>, DbError> {
+        match self.entities.get(&(cid, fold(name))) {
+            Some((_, to)) if lookup_entity(conn, cid, name)?.is_none() => Ok(Some(to.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    /// As [`CallRenames::renamed_entity_of`], for the class named `class`
+    /// (as it resolves now).
+    pub(crate) fn renamed_entity(
+        &self,
+        conn: &Connection,
+        class: &str,
+        name: &str,
+    ) -> Result<Option<String>, DbError> {
+        if self.entities.is_empty() {
+            return Ok(None);
+        }
+        match lookup_entity_class(conn, class)? {
+            Some(cid) => self.renamed_entity_of(conn, cid, name),
+            None => Ok(None),
+        }
+    }
+
+    /// The classes (by id) with an entity renamed away in this call.
+    pub(crate) fn entity_rename_classes(&self) -> HashSet<i64> {
+        self.entities.keys().map(|(cid, _)| *cid).collect()
+    }
+
+    /// The renamed-away entity names `change` writes, for the "renamed to"
+    /// note on its not-found error (entity_rename_PLAN §4): `(old, new)`
+    /// per name. An element of a `CreateEntity` matches in its dimension's
+    /// class, or in every member class of a class-set dimension.
+    fn renamed_entity_refs(
+        &self,
+        conn: &Connection,
+        change: &StructuralChange,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        if self.entities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut by_class = |class: &str, name: &str| -> Result<(), DbError> {
+            if let Some(to) = self.renamed_entity(conn, class, name)? {
+                out.push((name.to_string(), to));
+            }
+            Ok(())
+        };
+        match change {
+            StructuralChange::SetEntityActivation { class, entity, .. } => by_class(class, entity)?,
+            StructuralChange::SetMembership { group, member, .. } => {
+                by_class(&group.class, &group.name)?;
+                by_class(&member.class, &member.name)?;
+            }
+            StructuralChange::RenameEntity { class, current, .. } => by_class(class, current)?,
+            StructuralChange::CreateEntity {
+                class, elements, ..
+            } => {
+                let Ok(shape) = entity_class_shape(conn, class) else {
+                    return Ok(out);
+                };
+                for ((_, dc, ds), el) in shape.dims.iter().zip(elements) {
+                    let classes = match (dc, ds) {
+                        (Some(c), _) => vec![*c],
+                        (None, Some(set)) => class_set_members(conn, *set)?,
+                        (None, None) => Vec::new(),
+                    };
+                    for c in classes {
+                        if let Some(to) = self.renamed_entity_of(conn, c, el)? {
+                            out.push((el.clone(), to));
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(out)
+    }
+
 
     /// Did a rename of this call change any class or parameter name's
     /// bytes (so the name-keyed metadata documents may need a rewrite)?
@@ -907,7 +1068,7 @@ pub(crate) fn refuse_template_stamped_renames(
 /// (keyed by `key(fold(old))`), keeping every earlier entry of the same id
 /// pointing at its newest name (a chain `a -> b -> c` leaves `a` and `b`
 /// both renamed to `c`). A case-only rename frees no name.
-fn note_renamed_away<K: std::hash::Hash + Eq>(
+pub(crate) fn note_renamed_away<K: std::hash::Hash + Eq>(
     away: &mut HashMap<K, (i64, String)>,
     key: K,
     id: i64,
@@ -928,7 +1089,7 @@ fn note_renamed_away<K: std::hash::Hash + Eq>(
 /// rename of the same call freed. Otherwise `a -> t`, `b -> a`, `t -> b`
 /// would make both old names resolve again, to each other's objects, and a
 /// later reference by an old name would silently address the other object.
-fn refuse_freed_name(
+pub(crate) fn refuse_freed_name(
     what: &str,
     current: &str,
     new_name: &str,
@@ -1264,6 +1425,163 @@ pub(crate) fn apply_rename_parameter(
         }
     }
     Ok((id, rev.effect))
+}
+
+/// `RenameEntity` (entity_rename_PLAN §3): strict resolution of the class
+/// and the entity (by the names they have at this point of the call), the
+/// swap guard, per-class uniqueness (self excluded by id) and the class-set
+/// check, the shared decision step, then the one `entity` revision site.
+/// Nothing else is written: every reference to an entity is by id, and an
+/// N-D entity's name does not follow its elements' (E1).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_rename_entity(
+    conn: &Connection,
+    c: i64,
+    class: &str,
+    current: &str,
+    new_name: &str,
+    description: Option<&str>,
+    folds: &mut NameFolds,
+    calls: &mut CallRenames,
+    tuples: &mut TupleIndex<'_>,
+) -> Result<(i64, StructuralEffect), DbError> {
+    let cid = find_entity_class(conn, class)?
+        .ok_or_else(|| DbError::Api(format!("rename_entity: class {class:?} not found")))?
+        .noted(folds, "entity_class", class);
+    let mut row = find_entity_row(conn, cid, current)?.ok_or_else(|| {
+        DbError::Api(format!(
+            "rename_entity: entity {class}:{current} not found"
+        ))
+    })?;
+    let id = row.id;
+    folds.note("entity", current, &row.name, id);
+    check_entity_rename(conn, cid, class, current, new_name, &row.name, id, calls)?;
+    let Some(rev) = decide_revision(&row.name, row.description.as_deref(), new_name, description)
+    else {
+        return Ok((id, StructuralEffect::NoOp));
+    };
+    let old = std::mem::replace(&mut row.name, new_name.to_string());
+    row.description = rev.description;
+    revise_entity_row(conn, c, &row)?;
+    if rev.effect == StructuralEffect::Renamed {
+        note_renamed_away(&mut calls.entities, (cid, fold(&old)), id, &old, new_name);
+        tuples.renamed(id, new_name);
+    }
+    Ok((id, rev.effect))
+}
+
+/// The guards of one entity rename before anything is written: the swap
+/// guard (a name freed earlier in the call), uniqueness in the class (self
+/// excluded), and uniqueness across every class set the class is a member
+/// of (an element name of a set-typed dimension must name one entity of the
+/// set's classes, else every later lookup by it fails). A rename that keeps
+/// the fold collides with nothing new.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_entity_rename(
+    conn: &Connection,
+    cid: i64,
+    class: &str,
+    current: &str,
+    new_name: &str,
+    stored: &str,
+    id: i64,
+    calls: &CallRenames,
+) -> Result<(), DbError> {
+    refuse_freed_name(
+        "entity",
+        current,
+        new_name,
+        stored,
+        calls.entities.get(&(cid, fold(new_name))),
+    )?;
+    if fold(new_name) == fold(stored) {
+        return Ok(());
+    }
+    let co_members = class_set_co_members(conn, cid)?;
+    refuse_freed_in_class_sets(class, current, new_name, &co_members, calls)?;
+    if let Some(other) = lookup_entity(conn, cid, new_name)? {
+        if other != id {
+            return Err(DbError::Api(format!(
+                "rename_entity: {new_name:?} already names a different entity of class \
+                 {class:?}"
+            )));
+        }
+    }
+    for (set, member, member_name) in co_members {
+        if let Some(f) = find_entity(conn, member, new_name)? {
+            return Err(DbError::Api(format!(
+                "rename_entity: {class}:{current} -> {new_name:?}: the name would be ambiguous \
+                 across class set {set:?}, where {member_name}:{} exists (an element of a \
+                 set-typed dimension is looked up by name in every member class)",
+                f.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The swap guard across class sets: a rename (that changes the fold) may
+/// not take a name an earlier rename of the call freed in another member
+/// class of a class set the entity's class belongs to. Otherwise a later
+/// element of a set-typed dimension spelled with that name would silently
+/// bind to this entity instead of the renamed one (an in-set swap).
+pub(crate) fn refuse_freed_in_class_sets(
+    class: &str,
+    current: &str,
+    new_name: &str,
+    co_members: &[(String, i64, String)],
+    calls: &CallRenames,
+) -> Result<(), DbError> {
+    if calls.entities.is_empty() {
+        return Ok(());
+    }
+    for (set, member, member_name) in co_members {
+        if let Some((_, to)) = calls.entities.get(&(*member, fold(new_name))) {
+            return Err(DbError::Api(format!(
+                "rename_entity: {class}:{current} -> {new_name:?}: the name {new_name:?} was \
+                 renamed away from {member_name} (to {to:?}) earlier in this call, and \
+                 {member_name} shares class set {set:?} with {class}; a name freed in a call \
+                 cannot be taken in the same call (in-call swaps are refused): rename in two \
+                 commits"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The live member classes of class set `set`.
+pub(crate) fn class_set_members(conn: &Connection, set: i64) -> Result<Vec<i64>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT member_class_id FROM class_set_member \
+         WHERE class_set_id = ? AND valid_to_commit IS NULL",
+    )?;
+    let rows = stmt
+        .query_map(params![set], |r| r.get::<_, i64>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// The other member classes of every class set `cid` is a member of, as
+/// `(set name, member class id, member class name)`; empty for a class in
+/// no set (one statement on the small `class_set_member` table).
+pub(crate) fn class_set_co_members(
+    conn: &Connection,
+    cid: i64,
+) -> Result<Vec<(String, i64, String)>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT cs.name, m2.member_class_id, ec.name \
+         FROM class_set_member m1 \
+         JOIN class_set cs ON cs.id = m1.class_set_id AND cs.valid_to_commit IS NULL \
+         JOIN class_set_member m2 ON m2.class_set_id = m1.class_set_id \
+          AND m2.valid_to_commit IS NULL AND m2.member_class_id <> m1.member_class_id \
+         JOIN entity_class ec ON ec.id = m2.member_class_id AND ec.valid_to_commit IS NULL \
+         WHERE m1.member_class_id = ? AND m1.valid_to_commit IS NULL \
+         ORDER BY cs.name, ec.name",
+    )?;
+    let rows = stmt
+        .query_map(params![cid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -1793,6 +2111,21 @@ pub(crate) fn effective_entity_name(
     }
 }
 
+/// Idempotent 0-D / N-D entity create, with the element-tuple rule for N-D
+/// classes (entity_rename_PLAN E2, §5.2): no two live entities of a class
+/// may hold the same element tuple.
+///
+/// - An explicit name that exists is a `NoOp` when its tuple matches (else
+///   refused, as before); a new name over a tuple another entity holds is
+///   refused, naming every holder.
+/// - `name: None` resolves the elements first: a holder whose name folds to
+///   the derived name is a `NoOp`; a holder under another name is refused
+///   ("address it by that name"); with no holder, a derived name another
+///   entity has is refused ("give an explicit name").
+///
+/// `tuples` is the call's [`TupleIndex`] (a constant number of statements
+/// per call and N-D class).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_create_entity(
     conn: &Connection,
     c: i64,
@@ -1801,13 +2134,17 @@ pub(crate) fn apply_create_entity(
     elements: &[String],
     description: Option<&str>,
     folds: &mut NameFolds,
+    tuples: &mut TupleIndex<'_>,
 ) -> Result<(i64, StructuralEffect), DbError> {
     let effective_name = effective_entity_name(name, elements)?;
     let s = entity_class_shape_noted(conn, class, folds)?;
-    if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
-        let eid = f.noted(folds, "entity", &effective_name);
-        verify_entity_elements(conn, class, &effective_name, eid, elements)?;
-        return Ok((eid, StructuralEffect::NoOp));
+    let derived = name.is_none();
+    if !derived || s.dims.is_empty() {
+        if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
+            let eid = f.noted(folds, "entity", &effective_name);
+            verify_entity_elements(conn, class, &effective_name, eid, elements)?;
+            return Ok((eid, StructuralEffect::NoOp));
+        }
     }
     if s.dims.is_empty() {
         if !elements.is_empty() {
@@ -1823,7 +2160,7 @@ pub(crate) fn apply_create_entity(
         )));
     }
     // Resolve every element BEFORE inserting anything (strict, §4.4).
-    let mut el_ids: Vec<(i64, i64)> = Vec::with_capacity(elements.len());
+    let mut el_ids: Vec<i64> = Vec::with_capacity(elements.len());
     for ((pos, dc, ds), el) in s.dims.iter().zip(elements.iter()) {
         let id = find_element(conn, *dc, *ds, el)?
             .ok_or_else(|| {
@@ -1833,11 +2170,49 @@ pub(crate) fn apply_create_entity(
                 ))
             })?
             .noted(folds, "entity", el);
-        el_ids.push((*pos, id));
+        el_ids.push(id);
+    }
+    if !s.dims.is_empty() {
+        let holders = tuples.holders(conn, s.cid, &s.dims, &el_ids)?;
+        if derived {
+            if let Some(h) = holders
+                .iter()
+                .find(|h| fold(&h.name) == fold(&effective_name))
+            {
+                folds.note("entity", &effective_name, &h.name, h.id);
+                return Ok((h.id, StructuralEffect::NoOp));
+            }
+        }
+        if !holders.is_empty() {
+            let names: Vec<String> = holders.iter().map(|h| format!("{:?}", h.name)).collect();
+            return Err(DbError::Api(format!(
+                "ensure_entity: {class}: elements [{}] already exist as {}; {}",
+                elements.join(", "),
+                names.join(", "),
+                if derived {
+                    "address it by that name (duplicate element tuples are not allowed)"
+                } else {
+                    "duplicate element tuples are not allowed"
+                }
+            )));
+        }
+        if derived {
+            if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
+                let have = element_names(conn, f.id)?;
+                return Err(DbError::Api(format!(
+                    "ensure_entity: {class}: the derived name {effective_name:?} is taken by \
+                     an entity with elements [{}]; give an explicit name",
+                    have.join(", ")
+                )));
+            }
+        }
     }
     let eid = insert_entity_row(conn, c, s.cid, &effective_name, description)?;
-    for (pos, el_id) in &el_ids {
-        insert_entity_element_row(conn, c, eid, *pos, *el_id)?;
+    for (i, el_id) in el_ids.iter().enumerate() {
+        insert_entity_element_row(conn, c, eid, s.dims[i].0, *el_id)?;
+    }
+    if !s.dims.is_empty() {
+        tuples.add(s.cid, eid, &effective_name, el_ids);
     }
     Ok((eid, StructuralEffect::Created))
 }
@@ -2057,6 +2432,21 @@ pub(crate) fn prepare_structural(
         _ => None,
     })?;
 
+    // Entities: keyed by (class as written, entity), as parameters are.
+    check_rename_coherence(changes, |ch| match ch {
+        StructuralChange::RenameEntity {
+            class,
+            current,
+            new_name,
+            ..
+        } if current != new_name => Some((
+            format!("{}\u{0}{}", fold(class), fold(current)),
+            current,
+            new_name,
+        )),
+        _ => None,
+    })?;
+
     // Cross-channel object-delete guard (critique M2): a commit that both
     // structurally references an object AND object-deletes it by folded name
     // would leave a live orphan under the same-commit guard. That includes
@@ -2185,6 +2575,19 @@ pub(crate) fn prepare_structural(
                     || del_params.contains(&(fold(class), fold(new_name)))
                 {
                     return Err(orphan("parameter", current));
+                }
+            }
+            StructuralChange::RenameEntity {
+                class,
+                current,
+                new_name,
+                ..
+            } => {
+                if clash_class(class) {
+                    return Err(orphan("class", class));
+                }
+                if clash_entity(class, current) || clash_entity(class, new_name) {
+                    return Err(orphan("entity", current));
                 }
             }
             StructuralChange::CreateAlternative { name, .. } if clash_alt(name) => {
@@ -2351,6 +2754,16 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             require_nonempty("class", class)?;
             require_nonempty("parameter", current)?;
             require_charset("parameter", new_name)
+        }
+        StructuralChange::RenameEntity {
+            class,
+            current,
+            new_name,
+            ..
+        } => {
+            require_nonempty("class", class)?;
+            require_nonempty("entity", current)?;
+            require_charset("entity", new_name)
         }
     }
 }

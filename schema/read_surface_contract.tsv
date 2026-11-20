@@ -54,6 +54,12 @@ advisory	audit_element_class_mismatch	view		5	undeclared_position	BOOLEAN
 advisory	audit_entity_alternative_redundant	view		1	entity_id	BIGINT
 advisory	audit_entity_alternative_redundant	view		2	alternative_id	BIGINT
 advisory	audit_entity_alternative_redundant	view		3	active	BOOLEAN
+advisory	audit_entity_tuple_dup	view		1	class_id	BIGINT
+advisory	audit_entity_tuple_dup	view		2	class	VARCHAR
+advisory	audit_entity_tuple_dup	view		3	element_names	VARCHAR[]
+advisory	audit_entity_tuple_dup	view		4	n	BIGINT
+advisory	audit_entity_tuple_dup	view		5	entity_ids	BIGINT[]
+advisory	audit_entity_tuple_dup	view		6	entity_names	VARCHAR[]
 advisory	audit_erasure	view		1	marker_id	BIGINT
 advisory	audit_erasure	view		2	kind	VARCHAR
 advisory	audit_erasure	view		3	alternative_id	BIGINT
@@ -368,6 +374,12 @@ mirror	entity_asof	table_macro	c	4	description	VARCHAR
 mirror	entity_asof	table_macro	c	5	valid_from_commit	BIGINT
 mirror	entity_asof	table_macro	c	6	valid_to_commit	BIGINT
 mirror	entity_asof	table_macro	c	7	version	SMALLINT
+stable	entity_byname	view		1	class	VARCHAR
+stable	entity_byname	view		2	entity	VARCHAR
+stable	entity_byname	view		3	entity_id	BIGINT
+stable	entity_byname	view		4	dimension_count	INTEGER
+stable	entity_byname	view		5	element_names	VARCHAR[]
+stable	entity_byname	view		6	element_classes	VARCHAR[]
 mirror	entity_class_asof	table_macro	c	1	id	BIGINT
 mirror	entity_class_asof	table_macro	c	2	name	VARCHAR
 mirror	entity_class_asof	table_macro	c	3	description	VARCHAR

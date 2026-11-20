@@ -548,6 +548,26 @@ def test_purge_classes_then_reimport_converges(tmp_path, monkeypatch):
         == n_values
 
 
+def test_reimport_after_an_element_rename_fails_on_the_n_d_entity(tmp_path, monkeypatch):
+    """A write-stream test, as above: after a nodal-side rename of the
+    element ``h1`` the source still says ``h1``, so the re-import creates a
+    new ``h1`` and then refuses ``w1__h1`` (it exists over ``(w1, hX)``):
+    rename in the source too, or purge and re-import."""
+    import nodal_db
+
+    spine = make_basic_spine(tmp_path)
+    _rep, out = run_import(tmp_path, spine)
+    db = _nodal(out)
+    db.commit_structural(
+        [{"op": "rename_entity", "class": "hub", "current": "h1", "new_name": "hX"}],
+        user="t",
+    )
+    monkeypatch.setattr(nodal_db, "init", nodal_db.open)
+    imp = SpineImporter(str(spine), str(out), SyntheticProfile(), user="t", version="7")
+    with pytest.raises(Exception, match=r"already exists with elements \[w1, hx\], not \[w1, h1\]"):
+        imp._import_into(str(out))
+
+
 def test_case_colliding_names_refuse(tmp_path):
     from spinedb_api import DatabaseMapping
 

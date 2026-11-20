@@ -336,6 +336,31 @@ WHERE cs.valid_to_commit IS NULL
 GROUP BY cs.id, cs.name, lower(e.name)
 HAVING count(*) > 1;
 
+-- Live entities of one class that hold the same element tuple. The writer
+-- refuses to create such a duplicate (an N-D entity's identity is its
+-- tuple); this view finds the ones written before that rule, or by direct
+-- SQL. One row per duplicated tuple: the element names (current, in
+-- position order) and every holder.
+-- @surface: advisory
+CREATE VIEW audit_entity_tuple_dup AS
+WITH t AS (
+  SELECT ee.entity_id,
+         list(ee.element_entity_id ORDER BY ee.position) AS element_ids,
+         list(el.name ORDER BY ee.position) AS element_names
+  FROM entity_element ee
+  LEFT JOIN entity el ON el.id = ee.element_entity_id AND el.valid_to_commit IS NULL
+  WHERE ee.valid_to_commit IS NULL
+  GROUP BY ee.entity_id
+)
+SELECT ec.id AS class_id, ec.name AS class, any_value(t.element_names) AS element_names,
+       count(*) AS n, list(e.id ORDER BY e.id) AS entity_ids,
+       list(e.name ORDER BY e.id) AS entity_names
+FROM t
+JOIN entity e ON e.id = t.entity_id AND e.valid_to_commit IS NULL
+JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL
+GROUP BY ec.id, ec.name, t.element_ids
+HAVING count(*) > 1;
+
 -- Element class conformance (set-typed dimensions accept
 -- entities of any member class; class-typed accept that class).
 -- LEFT JOIN on the dimension (critique F6): an element at an UNDECLARED

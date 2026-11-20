@@ -81,6 +81,12 @@ other names, for example a prefix of your tool's.
 - **Names are case-insensitive** in every name argument (class,
   parameter, entity, alternative, scenario, display mode). An unknown
   name returns zero rows, never an error.
+- **Never parse an N-D entity's name** to find its elements. A name
+  derived from the element names (`u1__n1`) is stored once, at create
+  time, and does not follow renames of its elements; a parsed name can
+  silently point at the wrong entity. Join `entity_byname`, which lists
+  every current entity with its element names and classes in position
+  order.
 
 ## Which read to use
 
@@ -94,6 +100,7 @@ other names, for example a prefix of your tool's.
 | Everything current, by ids | `value_rows` (rendered) or `value_cells` (positions only) | For bulk export, not for point reads. |
 | One scenario's winners | `resolved_value_rows(scenario)` | It still reads `value_rows` (a full scan; the dict-cache rule applies). |
 | Competing values, candidates | `scenario_value_conflict`, `scenario_value_candidate`, `scenario_value_resolved` | |
+| An N-D entity's elements, by name | `entity_byname` | Its name is not a reliable spelling of its elements. |
 | Past state | `<table>_asof(c)`, `value_array_asof_for(c, …)` | They fail loudly instead of answering when an erasure removed content of that commit. |
 | Every position of every axis | `axis_position` | For audits and exports only: it expands every axis of the file, so never join it in a read path. |
 

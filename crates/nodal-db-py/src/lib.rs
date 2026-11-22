@@ -1284,7 +1284,7 @@ impl Database {
     /// `compact(if_needed=True)` can now fire on the commit count even when
     /// the file has not grown**, and, when the growth gate does not fire,
     /// it opens the database read-only once to read the head commit.
-    /// `max_commits`: `"auto"` (default: 50, scaled up to 200 for large
+    /// `max_commits`: `"auto"` (default: 30, scaled up to 40 for large
     /// files), an int N, or `None` / `0` to disable the commit count.
     #[pyo3(signature = (*, if_needed = false, growth = None, max_commits = MaxCommits::Auto))]
     fn compact<'py>(

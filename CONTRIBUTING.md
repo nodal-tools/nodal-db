@@ -94,7 +94,8 @@ branch as soon as its DDL changes.
 
 ## Unicode version bumps
 Names and index labels are stored in NFC under **Unicode 16.0.0**, the
-version the canonical encoding pins (spec `canonical_encoding.md`
+version the canonical encoding pins
+([`docs/dev/canonical_encoding.md`](docs/dev/canonical_encoding.md)
 §3.4.1.1). Three things hold it: the exact
 `unicode-normalization = "=0.1.24"` pin (the crate's tables;
 `tests/text_nfc.rs` asserts the version), the vendored data in

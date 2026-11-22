@@ -174,7 +174,7 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 9|"integer"|3|4369567586608917938|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 10|"float"|3|10900306413928828894|NULL|NULL|NULL|NULL|NULL|f:3fe0000000000000|f:3fd0000000000000|NULL|NULL|NULL
 11|"label"|2|13512544053144758679|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
-12|"time_pattern"|2|9816456900946707930|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+12|"time_pattern"|2|11678377380871582546|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 13|"label"|2|2247023855897725752|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 14|"integer"|2|7415226039924035556|NULL|NULL|NULL|-3|3|NULL|NULL|NULL|NULL|NULL
 15|"datetime"|2|3040296506545474259|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
@@ -844,10 +844,10 @@ WriteOutcome { tier: None, version: 0, rows_written: 0, rows_closed: 1, axes_cre
 ## axis_period (axis_id,pos,start_ts,end_ts,years_presented)
 21|0|ts:1577836800000000|ts:1609372800000000|f:409f900000000000
 21|1|ts:1609372800000000|ts:1640908800000000|NULL
-## axis_time_pattern (axis_id,pos,ordinal,term_no,unit,range_start,range_end)
-12|0|0|1|"M"|1|6
-12|1|1|1|"h"|1|8
-12|1|1|2|"WD"|6|7
+## axis_time_pattern (axis_id,pos,ordinal,term_no,clause_no,unit,range_start,range_end)
+12|0|0|1|0|"M"|1|6
+12|1|1|1|0|"h"|1|8
+12|1|1|2|1|"WD"|6|7
 ## value_scalar (entity_id,parameter_definition_id,alternative_id,parameter_type_id,valid_from_commit,valid_to_commit,version,content_retained,value_kind,v_float,v_int,v_bool,v_str,v_datetime,v_dur_months,v_dur_micros,ce,cp,ca)
 1|2|1|2|6|9|1|true|"float"|f:4012000000000000|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
 1|2|1|2|9|10|2|false|"float"|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL

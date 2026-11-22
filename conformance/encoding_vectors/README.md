@@ -1,14 +1,15 @@
 # Axis canonical-encoding conformance vectors
 
 Language-neutral test vectors for the axis canonical byte encoding and the
-64-bit content hash, as pinned by `specs/canonical_encoding.md`. Any
+64-bit content hash, as pinned by
+[`docs/dev/canonical_encoding.md`](../../docs/dev/canonical_encoding.md). Any
 implementation (the Rust core, the SQL side, a future Python/engine skin) MUST
 reproduce `expected_canonical_hex` and `expected_hash_u64` byte-for-byte for
 each vector. The authoritative runner is
 `crates/nodal-db-core/tests/encoding_vectors.rs`.
 
 Value encodings (spec §9) are **not** covered here — they live in
-`conformance/value_vectors/` (OPEN-7 resolved 2026-08-17; runner
+`conformance/value_vectors/` (runner
 `crates/nodal-db-core/tests/value_vectors.rs`, oracle
 `conformance/oracle/encode_value.py`).
 
@@ -49,7 +50,9 @@ Each `*.json` file is one object:
 - `FloatMaterialized` `{ coords: [f64, …] }`
 - `Label` `{ positions: [{ ordinal: i32, label: str }, …] }`
 - `Period` `{ positions: [{ start_ts: i64, end_ts: i64, years_presented: f64|null }, …] }`
-- `TimePattern` `{ positions: [{ ordinal: i32, terms: [{ unit, range_start:i16, range_end:i16 }, …] }, …] }`
+- `TimePattern` `{ positions: [{ ordinal: i32, clauses: [[{ unit, range_start:i16, range_end:i16 }, …], …] }, …] }`
+  (each position is a list of clauses, unioned; each clause a non-empty list
+  of terms, intersected; spec §7.7)
 
 Timestamps are µs since the Unix epoch (naive). Doubles are JSON numbers; the
 1-ULP fixture relies on shortest-round-trip decimals parsing back to the exact

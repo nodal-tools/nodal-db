@@ -55,6 +55,20 @@ fn core_keys_equal_the_ddl_check_list() {
     assert_eq!(owner_of("flextool:frozen"), Owner::Tool);
     assert_eq!(owner_of("title"), Owner::User);
     assert_eq!(owner_of(":x"), Owner::User, "the DDL classifies ':x' as user");
+    // The reserved `nodal:` namespace (OD-3): core-owned in any case, never
+    // a tool's, with no DDL edit per key.
+    assert_eq!(owner_of("nodal:future_key"), Owner::Core);
+    assert_eq!(owner_of("Nodal:Other"), Owner::Core, "any case");
+    let insert = |key: &str, owner: &str| {
+        conn.execute(
+            "INSERT INTO database_property (key, value, owner, valid_from_commit) \
+             VALUES (?, 'x', ?, 1)",
+            duckdb::params![key, owner],
+        )
+    };
+    insert("nodal:future_key", "core").expect("a nodal: key is core");
+    insert("NODAL:other", "tool").expect_err("no tool is called nodal");
+    insert("nodalx:k", "tool").expect("only the exact `nodal:` prefix is reserved");
     conn.close().unwrap();
 }
 

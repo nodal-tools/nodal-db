@@ -1,7 +1,7 @@
 # Array payload hash conformance vectors
 
 Language-neutral test vectors for the **array payload hash**
-(`specs/canonical_encoding.md` §13), the value stored in
+([`docs/dev/canonical_encoding.md`](../../docs/dev/canonical_encoding.md) §13), the value stored in
 `value_array.content_hash`. Any implementation MUST reproduce
 `expected_hash_u64` exactly. Runners:
 

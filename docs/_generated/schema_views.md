@@ -9,6 +9,7 @@ From `schema/070_views_current.sql`.
 | `alternative_current` | view | Current rows of `alternative` |
 | `class_set_current` | view | Current rows of `class_set` |
 | `class_set_member_current` | view | Current rows of `class_set_member` |
+| `commit_log` | view | The commit log, one row per commit |
 | `database_property_current` | view | Current rows of `database_property` |
 | `dataset_version` | view | Change-detection cookie (#2252) |
 | `definition_value_array_current` | view | Current rows of `definition_value_array` |
@@ -81,11 +82,11 @@ From `schema/090_views_resolution.sql`.
 | --- | --- | --- |
 | `deact_edge` | view | Deactivation edges for the pass-2 fixpoint |
 | `entity_activation_own` | view | — |
-| `entity_activation_resolved` | view | — |
+| `entity_activation_resolved` | view | Membership resolution, pass 2 |
 | `membership_base_flat` | view | Base-only membership flattening, NOT gated on scenarios (a model must be definable "with everything on Base", and with zero scenarios the scenario-scoped … |
 | `membership_flat` | view | Transitive flattening of resolved membership (included rows only) |
 | `membership_resolved` | view | Membership resolution, pass 1 |
-| `realizes_edge` | view | Membership resolution, pass 2 |
+| `realizes_edge` | view | Refinement edges |
 | `resolved_value_rows(scenario_name)` | macro | Resolved long-shape read for one scenario (macro because views take no parameters; joins the collapsed winner back to the canonical rows) |
 | `scenario_contents(scenario_name)` | macro | Resolved-scenario-contents |
 | `scenario_diff(scenario_a, scenario_b)` | macro | Scenario-diff |

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Generate the vendored Unicode normalization table (spec §3.4.1.1).
+"""Generate the vendored Unicode normalization table
+(`docs/dev/canonical_encoding.md` §3.4.1.1).
 
 Usage:
 

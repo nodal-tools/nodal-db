@@ -9,6 +9,15 @@
 -- @surface: stable
 CREATE VIEW dataset_version AS SELECT max(id) AS version FROM commit;
 
+-- The commit log, one row per commit: its id (the validity edge every
+-- versioned row cites, increasing), the time it was written (naive UTC),
+-- its author and message. Append-only: rows are never changed or removed.
+-- The base table `commit` is private like every base table; this is its
+-- stable name. `timestamp` and `user` are SQL keywords in some engines:
+-- quote them ("timestamp", "user").
+-- @surface: stable
+CREATE VIEW commit_log AS SELECT id, "timestamp", "user", message FROM "commit";
+
 -- @surface: mirror
 CREATE VIEW database_property_current AS
   SELECT * EXCLUDE (cur_key) FROM database_property WHERE valid_to_commit IS NULL;

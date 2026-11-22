@@ -164,6 +164,29 @@ pub fn apply_schema_from(conn: &Connection, dir: &Path) -> Result<(), DbError> {
     Ok(())
 }
 
+/// The `created_by` core property of a file this build creates (init, and
+/// the history-free extract, which makes a new file): the core package and
+/// its version, and the git commit it was built from when known
+/// (`nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)`). Compaction keeps the
+/// original's value: it rebuilds a file, it does not create one.
+pub fn created_by() -> String {
+    let base = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
+    match env!("NODAL_DB_GIT_COMMIT") {
+        "" => base.to_string(),
+        commit => format!("{base} (git {commit})"),
+    }
+}
+
+/// Record [`created_by`] at the bootstrap commit of a fresh file.
+fn stamp_created_by(conn: &Connection) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO database_property (key, value, owner, valid_from_commit) \
+         VALUES ('created_by', ?, 'core', (SELECT max(id) FROM commit))",
+        [created_by()],
+    )?;
+    Ok(())
+}
+
 /// Seed one default alternative after the schema is applied (decision D3). This
 /// is an OBJECT seed — the same raw-INSERT shape the old `900_bootstrap.sql`
 /// used for `Base`, now parameterized and explicit — so it does NOT go through
@@ -233,6 +256,7 @@ pub fn init_schema_from_dir_with_default(
     if let Some(name) = default_alternative {
         seed_default_alternative(&conn, name)?;
     }
+    stamp_created_by(&conn)?;
     conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
     Ok(())
 }
@@ -260,6 +284,7 @@ pub fn init_schema_from_sources_with_default(
     if let Some(name) = default_alternative {
         seed_default_alternative(&conn, name)?;
     }
+    stamp_created_by(&conn)?;
     conn.close().map_err(|(_, e)| DbError::Duckdb(e))?;
     Ok(())
 }

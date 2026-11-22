@@ -6,6 +6,7 @@
 //!
 //! **Eight verbs**: [`ensure_alternative`], [`set_scenario_alternatives`],
 //! [`set_entity_activation`], [`set_class_active_by_default`],
+//! [`set_refinement_class`],
 //! [`ensure_entity_class`], [`ensure_parameter_definition`],
 //! [`ensure_entity`], [`stamp_template_identity`].
 //!
@@ -330,6 +331,102 @@ pub fn set_class_active_by_default(
         }
         row.active_by_default = active_by_default;
         revise_ec_row(conn, c, &row)
+    })
+}
+
+/// The core property that lists the refinement classes (read by the
+/// `realizes_edge` view): a JSON array of `entity_class` ids, ascending and
+/// without spaces (`[12,40]`); absent when there are none.
+pub const REFINEMENT_CLASSES_KEY: &str = "refinement_classes";
+
+/// Parse the stored [`REFINEMENT_CLASSES_KEY`] value (ids that do not parse
+/// are skipped, as the view's `TRY_CAST` skips them).
+fn parse_class_ids(value: &str) -> Vec<i64> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect()
+}
+
+/// The canonical stored form of a refinement-class id set.
+fn format_class_ids(ids: &std::collections::BTreeSet<i64>) -> String {
+    let parts: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// The current refinement classes, by id.
+fn refinement_class_ids(conn: &Connection) -> Result<std::collections::BTreeSet<i64>, DbError> {
+    Ok(property::read(conn, REFINEMENT_CLASSES_KEY)?
+        .map(|v| parse_class_ids(&v).into_iter().collect())
+        .unwrap_or_default())
+}
+
+/// Mark (or with `refinement = false`, unmark) `class` as a refinement
+/// class. Every current entity of a refinement class is a refinement link:
+/// its element 1 is the coarse entity and element 2 the fine one, and an
+/// explicit deactivation of the coarse entity propagates to the fine one in
+/// every scenario (`realizes_edge`, `entity_activation_resolved`). The class
+/// must have exactly two dimensions. The marker is the core property
+/// [`REFINEMENT_CLASSES_KEY`], keyed by class id, so it follows renames; a
+/// class name has no meaning of its own. Idempotent: no change burns no
+/// commit.
+pub fn set_refinement_class(
+    db: &Path,
+    class: &str,
+    refinement: bool,
+    user: &str,
+) -> Result<(), DbError> {
+    // Names in NFC (the text rule, `text.rs`).
+    let class = &*nfc(class);
+    require_user(user)?;
+    require_name("class", class)?;
+    // The class id, after checking a new refinement class's shape.
+    let class_id = |conn: &Connection| -> Result<i64, DbError> {
+        let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
+            DbError::Api(format!("set_refinement_class: class {class:?} not found"))
+        })?;
+        if refinement {
+            let dims: i64 = conn.query_row(
+                "SELECT count(*) FROM entity_class_dimension WHERE cur_c = ?",
+                params![cid],
+                |r| r.get(0),
+            )?;
+            if dims != 2 {
+                return Err(DbError::Api(format!(
+                    "set_refinement_class: class {class:?} has {dims} dimension(s); a \
+                     refinement class has exactly two (coarse, fine)"
+                )));
+            }
+        }
+        Ok(cid)
+    };
+    let noop = with_read_plain(db, |conn| {
+        let cid = class_id(conn)?;
+        Ok(refinement_class_ids(conn)?.contains(&cid) == refinement)
+    })?;
+    if noop {
+        return Ok(());
+    }
+    let msg = format!("set_refinement_class {class} = {refinement}");
+    core_write_txn_retrying(db, user, &msg, |conn, c| {
+        let cid = class_id(conn)?;
+        let mut ids = refinement_class_ids(conn)?;
+        let changed = if refinement {
+            ids.insert(cid)
+        } else {
+            ids.remove(&cid)
+        };
+        if !changed {
+            return Ok(()); // raced into the desired state
+        }
+        if ids.is_empty() {
+            property::clear_core(conn, c, REFINEMENT_CLASSES_KEY)
+        } else {
+            property::set_core(conn, c, REFINEMENT_CLASSES_KEY, &format_class_ids(&ids))
+        }
     })
 }
 

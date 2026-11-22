@@ -16,7 +16,7 @@ CREATE TABLE display_mode (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -41,7 +41,7 @@ CREATE TABLE entity_class_display_mode (
   background_color  VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_dm BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN display_mode_id END) VIRTUAL,
   cur_ec BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_class_id END) VIRTUAL

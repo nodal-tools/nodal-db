@@ -17,7 +17,7 @@ CREATE TABLE alternative (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -34,7 +34,7 @@ CREATE TABLE scenario (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -50,7 +50,7 @@ CREATE TABLE scenario_alternative (
   rank              INTEGER NOT NULL CHECK (rank >= 1),
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_s  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN scenario_id END) VIRTUAL,
   cur_a  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL,
@@ -69,7 +69,7 @@ CREATE TABLE entity_alternative (
   active            BOOLEAN NOT NULL,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_e BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL,
   cur_a BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN alternative_id END) VIRTUAL
@@ -91,7 +91,7 @@ CREATE TABLE membership (
   included          BOOLEAN NOT NULL DEFAULT TRUE,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_g BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN group_entity_id END) VIRTUAL,
   cur_m BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN member_entity_id END) VIRTUAL,

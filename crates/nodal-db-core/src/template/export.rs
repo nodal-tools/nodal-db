@@ -364,7 +364,7 @@ fn template_of(v: &DbVocab, warnings: &mut Vec<String>) -> Result<Template, DbEr
     // Audit rules document.
     let audit_rules: Option<AuditRules> = match &v.audit_rules {
         None => None,
-        Some(doc) => match serde_json::from_str::<AuditRules>(doc) {
+        Some(doc) => match super::ir::parse_audit_rules_doc(doc) {
             Ok(r) => declared_audit_rules(r, &classes, warnings),
             Err(e) => {
                 warnings.push(format!(

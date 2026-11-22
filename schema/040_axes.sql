@@ -100,11 +100,17 @@ CREATE TABLE axis_float (
 -- unrepresentable (#1569). Real per-unit range CHECKs (the v1 placeholder
 -- TRUE was flagged must-fix — VMP Part 4). Units: Y year(>=1), M month 1-12,
 -- D day 1-31, WD weekday 1-7, h hour 1-24, m minute 1-60, s second 1-60.
+-- A position is a union of clauses, a clause an intersection of terms
+-- (`M1-4;WD1-5,M9-10`: months 1-4 AND weekdays 1-5, OR months 9-10). One row
+-- per term: term_no 1..n over the position, clause_no 0..k-1 over its
+-- clauses in term_no order (a clause's terms are consecutive). A union of
+-- single ranges is one clause per term; a single range is clause 0.
 CREATE TABLE axis_time_pattern (
   axis_id     BIGINT NOT NULL REFERENCES axis(id),
   pos         INTEGER NOT NULL CHECK (pos >= 0),
   ordinal     INTEGER NOT NULL,   -- explicit per-position ordinal (patterns are set-like)
-  term_no     INTEGER NOT NULL CHECK (term_no >= 1),  -- terms of one position union together
+  term_no     INTEGER NOT NULL CHECK (term_no >= 1),    -- order of the terms of one position
+  clause_no   INTEGER NOT NULL CHECK (clause_no >= 0),  -- terms of one clause intersect; clauses union
   unit        VARCHAR NOT NULL,
   range_start SMALLINT NOT NULL,
   range_end   SMALLINT NOT NULL,

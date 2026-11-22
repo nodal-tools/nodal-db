@@ -690,7 +690,7 @@ pub struct WriteOutcome {
     /// an unchanged write, the version of the current row. Long: the
     /// highest version among the value's current cells after the write
     /// (versions are per cell; a cell diff leaves equal cells at theirs).
-    pub version: u16,
+    pub version: u32,
     /// The stored value already equals the written one (same tier, binding,
     /// axes and stored payload), so nothing was written: `rows_written` and
     /// `rows_closed` are 0 (skip_unchanged_writes_PLAN §2).

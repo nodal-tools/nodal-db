@@ -6,8 +6,11 @@
 //! through the retained `SELECT *` pre-image copy, while the stub form,
 //! which names `content_hash`, failed).
 //!
-//! The fixture is a current file relabelled `0.4-array-id`: the gate reads
-//! only the version, so the label is what it decides on.
+//! The fixture is a current file relabelled `0.6-metadata`, the last of the
+//! labelled pre-release versions (the version is a plain integer since the
+//! pre-0.1.0 format freeze): the gate reads only the version, so the label
+//! is what it decides on, and an older string-versioned file is refused by
+//! name.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +27,7 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WriteOptions, WriteReport};
 
-const OLD: &str = "0.4-array-id";
+const OLD: &str = "0.6-metadata";
 
 fn batch(entities: &[&str], t: Option<&[i64]>, vals: ArrayRef) -> RecordBatch {
     let mut fields = vec![Field::new("entity", DataType::Utf8, false)];
@@ -155,7 +158,8 @@ fn assert_refused(what: &str, r: Result<impl std::fmt::Debug, DbError>) {
             message,
         }) => {
             assert_eq!(found, OLD, "{what}");
-            assert_eq!(expected, SCHEMA_VERSION, "{what}");
+            assert_eq!(expected, SCHEMA_VERSION.to_string(), "{what}");
+            assert!(message.contains("\"0.6-metadata\""), "{what}: {message}");
             assert!(message.contains("write refused"), "{what}: {message}");
         }
         other => panic!("{what}: expected SchemaMismatch, got {other:?}"),

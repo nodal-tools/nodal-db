@@ -102,7 +102,7 @@ erDiagram
     | `database_property` | `owner` | `VARCHAR` |  |  |
     | `database_property` | `valid_from_commit` | `BIGINT` |  | FK |
     | `database_property` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `database_property` | `version` | `SMALLINT` |  |  |
+    | `database_property` | `version` | `INTEGER` |  |  |
     | `erasure_marker` | `id` | `BIGINT` |  | PK |
     | `erasure_marker` | `kind` | `VARCHAR` |  |  |
     | `erasure_marker` | `alternative_id` | `BIGINT` | yes | FK |
@@ -121,20 +121,20 @@ erDiagram
     | `license` | `policy` | `VARCHAR` | yes |  |
     | `license` | `valid_from_commit` | `BIGINT` |  | FK |
     | `license` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `license` | `version` | `SMALLINT` |  |  |
+    | `license` | `version` | `INTEGER` |  |  |
     | `metadata_pair` | `id` | `BIGINT` |  |  |
     | `metadata_pair` | `name` | `VARCHAR` |  |  |
     | `metadata_pair` | `value` | `VARCHAR` |  |  |
     | `metadata_pair` | `valid_from_commit` | `BIGINT` |  | FK |
     | `metadata_pair` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `metadata_pair` | `version` | `SMALLINT` |  |  |
+    | `metadata_pair` | `version` | `INTEGER` |  |  |
     | `metadata_role` | `id` | `BIGINT` |  |  |
     | `metadata_role` | `name` | `VARCHAR` |  |  |
     | `metadata_role` | `description` | `VARCHAR` | yes |  |
     | `metadata_role` | `iri` | `VARCHAR` | yes |  |
     | `metadata_role` | `valid_from_commit` | `BIGINT` |  | FK |
     | `metadata_role` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `metadata_role` | `version` | `SMALLINT` |  |  |
+    | `metadata_role` | `version` | `INTEGER` |  |  |
     | `object_metadata_link` | `object_type` | `VARCHAR` |  |  |
     | `object_metadata_link` | `object_id` | `BIGINT` |  |  |
     | `object_metadata_link` | `target_kind` | `VARCHAR` |  |  |
@@ -142,7 +142,7 @@ erDiagram
     | `object_metadata_link` | `role_id` | `BIGINT` | yes |  |
     | `object_metadata_link` | `valid_from_commit` | `BIGINT` |  | FK |
     | `object_metadata_link` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `object_metadata_link` | `version` | `SMALLINT` |  |  |
+    | `object_metadata_link` | `version` | `INTEGER` |  |  |
     | `source` | `id` | `BIGINT` |  |  |
     | `source` | `name` | `VARCHAR` |  |  |
     | `source` | `title` | `VARCHAR` | yes |  |
@@ -155,12 +155,12 @@ erDiagram
     | `source` | `description` | `VARCHAR` | yes |  |
     | `source` | `valid_from_commit` | `BIGINT` |  | FK |
     | `source` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `source` | `version` | `SMALLINT` |  |  |
+    | `source` | `version` | `INTEGER` |  |  |
     | `source_license` | `source_id` | `BIGINT` |  | FK |
     | `source_license` | `license_id` | `BIGINT` |  | FK |
     | `source_license` | `valid_from_commit` | `BIGINT` |  | FK |
     | `source_license` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `source_license` | `version` | `SMALLINT` |  |  |
+    | `source_license` | `version` | `INTEGER` |  |  |
     | `value_metadata_link` | `entity_id` | `BIGINT` |  | FK |
     | `value_metadata_link` | `parameter_definition_id` | `BIGINT` |  | FK |
     | `value_metadata_link` | `alternative_id` | `BIGINT` |  | FK |
@@ -169,7 +169,7 @@ erDiagram
     | `value_metadata_link` | `role_id` | `BIGINT` | yes |  |
     | `value_metadata_link` | `valid_from_commit` | `BIGINT` |  | FK |
     | `value_metadata_link` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `value_metadata_link` | `version` | `SMALLINT` |  |  |
+    | `value_metadata_link` | `version` | `INTEGER` |  |  |
 
 ### Entity classes, class-sets, dimensions, entities, elements, locations
 
@@ -236,19 +236,19 @@ erDiagram
     | `class_set` | `description` | `VARCHAR` | yes |  |
     | `class_set` | `valid_from_commit` | `BIGINT` |  | FK |
     | `class_set` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `class_set` | `version` | `SMALLINT` |  |  |
+    | `class_set` | `version` | `INTEGER` |  |  |
     | `class_set_member` | `class_set_id` | `BIGINT` |  | FK |
     | `class_set_member` | `member_class_id` | `BIGINT` |  | FK |
     | `class_set_member` | `valid_from_commit` | `BIGINT` |  | FK |
     | `class_set_member` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `class_set_member` | `version` | `SMALLINT` |  |  |
+    | `class_set_member` | `version` | `INTEGER` |  |  |
     | `entity` | `id` | `BIGINT` |  |  |
     | `entity` | `entity_class_id` | `BIGINT` |  | FK |
     | `entity` | `name` | `VARCHAR` |  |  |
     | `entity` | `description` | `VARCHAR` | yes |  |
     | `entity` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity` | `version` | `SMALLINT` |  |  |
+    | `entity` | `version` | `INTEGER` |  |  |
     | `entity_class` | `id` | `BIGINT` |  |  |
     | `entity_class` | `name` | `VARCHAR` |  |  |
     | `entity_class` | `description` | `VARCHAR` | yes |  |
@@ -257,20 +257,20 @@ erDiagram
     | `entity_class` | `display_order` | `INTEGER` | yes |  |
     | `entity_class` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_class` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_class` | `version` | `SMALLINT` |  |  |
+    | `entity_class` | `version` | `INTEGER` |  |  |
     | `entity_class_dimension` | `entity_class_id` | `BIGINT` |  | FK |
     | `entity_class_dimension` | `position` | `TINYINT` |  |  |
     | `entity_class_dimension` | `dimension_class_id` | `BIGINT` | yes | FK |
     | `entity_class_dimension` | `dimension_class_set_id` | `BIGINT` | yes | FK |
     | `entity_class_dimension` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_class_dimension` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_class_dimension` | `version` | `SMALLINT` |  |  |
+    | `entity_class_dimension` | `version` | `INTEGER` |  |  |
     | `entity_element` | `entity_id` | `BIGINT` |  | FK |
     | `entity_element` | `position` | `TINYINT` |  |  |
     | `entity_element` | `element_entity_id` | `BIGINT` |  | FK |
     | `entity_element` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_element` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_element` | `version` | `SMALLINT` |  |  |
+    | `entity_element` | `version` | `INTEGER` |  |  |
     | `entity_location` | `entity_id` | `BIGINT` |  | FK |
     | `entity_location` | `lat` | `DOUBLE` | yes |  |
     | `entity_location` | `lon` | `DOUBLE` | yes |  |
@@ -278,7 +278,7 @@ erDiagram
     | `entity_location` | `shape` | `VARCHAR` | yes |  |
     | `entity_location` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_location` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_location` | `version` | `SMALLINT` |  |  |
+    | `entity_location` | `version` | `INTEGER` |  |  |
 
 ### Alternatives, scenarios, entity activation, and the generalized group-membership relation
 
@@ -329,32 +329,32 @@ erDiagram
     | `alternative` | `description` | `VARCHAR` | yes |  |
     | `alternative` | `valid_from_commit` | `BIGINT` |  | FK |
     | `alternative` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `alternative` | `version` | `SMALLINT` |  |  |
+    | `alternative` | `version` | `INTEGER` |  |  |
     | `entity_alternative` | `entity_id` | `BIGINT` |  | FK |
     | `entity_alternative` | `alternative_id` | `BIGINT` |  | FK |
     | `entity_alternative` | `active` | `BOOLEAN` |  |  |
     | `entity_alternative` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_alternative` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_alternative` | `version` | `SMALLINT` |  |  |
+    | `entity_alternative` | `version` | `INTEGER` |  |  |
     | `membership` | `group_entity_id` | `BIGINT` |  | FK |
     | `membership` | `member_entity_id` | `BIGINT` |  | FK |
     | `membership` | `alternative_id` | `BIGINT` | yes | FK |
     | `membership` | `included` | `BOOLEAN` |  |  |
     | `membership` | `valid_from_commit` | `BIGINT` |  | FK |
     | `membership` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `membership` | `version` | `SMALLINT` |  |  |
+    | `membership` | `version` | `INTEGER` |  |  |
     | `scenario` | `id` | `BIGINT` |  |  |
     | `scenario` | `name` | `VARCHAR` |  |  |
     | `scenario` | `description` | `VARCHAR` | yes |  |
     | `scenario` | `valid_from_commit` | `BIGINT` |  | FK |
     | `scenario` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `scenario` | `version` | `SMALLINT` |  |  |
+    | `scenario` | `version` | `INTEGER` |  |  |
     | `scenario_alternative` | `scenario_id` | `BIGINT` |  | FK |
     | `scenario_alternative` | `alternative_id` | `BIGINT` |  | FK |
     | `scenario_alternative` | `rank` | `INTEGER` |  |  |
     | `scenario_alternative` | `valid_from_commit` | `BIGINT` |  | FK |
     | `scenario_alternative` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `scenario_alternative` | `version` | `SMALLINT` |  |  |
+    | `scenario_alternative` | `version` | `INTEGER` |  |  |
 
 ### Units registry, value lists, parameter definitions, per-entity unit override, and structural type declarations
 
@@ -439,7 +439,7 @@ erDiagram
     | `entity_parameter_unit` | `unit_id` | `BIGINT` |  | FK |
     | `entity_parameter_unit` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_parameter_unit` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_parameter_unit` | `version` | `SMALLINT` |  |  |
+    | `entity_parameter_unit` | `version` | `INTEGER` |  |  |
     | `list_value` | `id` | `BIGINT` |  |  |
     | `list_value` | `parameter_value_list_id` | `BIGINT` |  | FK |
     | `list_value` | `ordinal` | `INTEGER` |  |  |
@@ -455,7 +455,7 @@ erDiagram
     | `list_value` | `v_dur_micros` | `BIGINT` | yes |  |
     | `list_value` | `valid_from_commit` | `BIGINT` |  | FK |
     | `list_value` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `list_value` | `version` | `SMALLINT` |  |  |
+    | `list_value` | `version` | `INTEGER` |  |  |
     | `parameter_definition` | `id` | `BIGINT` |  |  |
     | `parameter_definition` | `entity_class_id` | `BIGINT` |  | FK |
     | `parameter_definition` | `name` | `VARCHAR` |  |  |
@@ -467,7 +467,7 @@ erDiagram
     | `parameter_definition` | `retain_content` | `BOOLEAN` |  |  |
     | `parameter_definition` | `valid_from_commit` | `BIGINT` |  | FK |
     | `parameter_definition` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `parameter_definition` | `version` | `SMALLINT` |  |  |
+    | `parameter_definition` | `version` | `INTEGER` |  |  |
     | `parameter_type` | `id` | `BIGINT` |  |  |
     | `parameter_type` | `parameter_definition_id` | `BIGINT` |  | FK |
     | `parameter_type` | `value_kind` | `VARCHAR` |  |  |
@@ -476,20 +476,20 @@ erDiagram
     | `parameter_type` | `expected_tier` | `VARCHAR` | yes |  |
     | `parameter_type` | `valid_from_commit` | `BIGINT` |  | FK |
     | `parameter_type` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `parameter_type` | `version` | `SMALLINT` |  |  |
+    | `parameter_type` | `version` | `INTEGER` |  |  |
     | `parameter_type_dimension` | `parameter_type_id` | `BIGINT` |  | FK |
     | `parameter_type_dimension` | `position` | `TINYINT` |  |  |
     | `parameter_type_dimension` | `dimension_name` | `VARCHAR` |  |  |
     | `parameter_type_dimension` | `kind` | `VARCHAR` |  |  |
     | `parameter_type_dimension` | `valid_from_commit` | `BIGINT` |  | FK |
     | `parameter_type_dimension` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `parameter_type_dimension` | `version` | `SMALLINT` |  |  |
+    | `parameter_type_dimension` | `version` | `INTEGER` |  |  |
     | `parameter_value_list` | `id` | `BIGINT` |  |  |
     | `parameter_value_list` | `name` | `VARCHAR` |  |  |
     | `parameter_value_list` | `description` | `VARCHAR` | yes |  |
     | `parameter_value_list` | `valid_from_commit` | `BIGINT` |  | FK |
     | `parameter_value_list` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `parameter_value_list` | `version` | `SMALLINT` |  |  |
+    | `parameter_value_list` | `version` | `INTEGER` |  |  |
     | `units_of_measure` | `id` | `BIGINT` |  |  |
     | `units_of_measure` | `name` | `VARCHAR` |  |  |
     | `units_of_measure` | `description` | `VARCHAR` | yes |  |
@@ -497,7 +497,7 @@ erDiagram
     | `units_of_measure` | `quantity_kind_link` | `VARCHAR` | yes |  |
     | `units_of_measure` | `valid_from_commit` | `BIGINT` |  | FK |
     | `units_of_measure` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `units_of_measure` | `version` | `SMALLINT` |  |  |
+    | `units_of_measure` | `version` | `INTEGER` |  |  |
 
 ### Shared axis objects
 
@@ -556,6 +556,7 @@ erDiagram
         INTEGER pos PK
         INTEGER ordinal
         INTEGER term_no PK
+        INTEGER clause_no
         VARCHAR unit
         SMALLINT range_start
         SMALLINT range_end
@@ -609,6 +610,7 @@ erDiagram
     | `axis_time_pattern` | `pos` | `INTEGER` |  | PK |
     | `axis_time_pattern` | `ordinal` | `INTEGER` |  |  |
     | `axis_time_pattern` | `term_no` | `INTEGER` |  | PK |
+    | `axis_time_pattern` | `clause_no` | `INTEGER` |  |  |
     | `axis_time_pattern` | `unit` | `VARCHAR` |  |  |
     | `axis_time_pattern` | `range_start` | `SMALLINT` |  |  |
     | `axis_time_pattern` | `range_end` | `SMALLINT` |  |  |
@@ -727,7 +729,7 @@ erDiagram
     | `value_array` | `alternative_id` | `BIGINT` |  | FK,UK |
     | `value_array` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `value_array` | `valid_from_commit` | `BIGINT` |  | FK |
-    | `value_array` | `version` | `SMALLINT` |  |  |
+    | `value_array` | `version` | `INTEGER` |  |  |
     | `value_array` | `axis1_id` | `BIGINT` |  | FK |
     | `value_array` | `axis2_id` | `BIGINT` | yes | FK |
     | `value_array` | `axis3_id` | `BIGINT` | yes | FK |
@@ -743,7 +745,7 @@ erDiagram
     | `value_array_hist` | `alternative_id` | `BIGINT` |  | FK |
     | `value_array_hist` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `value_array_hist` | `valid_from_commit` | `BIGINT` |  |  |
-    | `value_array_hist` | `version` | `SMALLINT` |  |  |
+    | `value_array_hist` | `version` | `INTEGER` |  |  |
     | `value_array_hist` | `axis1_id` | `BIGINT` |  | FK |
     | `value_array_hist` | `axis2_id` | `BIGINT` | yes | FK |
     | `value_array_hist` | `axis3_id` | `BIGINT` | yes | FK |
@@ -761,7 +763,7 @@ erDiagram
     | `value_long` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `value_long` | `valid_from_commit` | `BIGINT` |  | FK |
     | `value_long` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `value_long` | `version` | `SMALLINT` |  |  |
+    | `value_long` | `version` | `INTEGER` |  |  |
     | `value_long` | `content_retained` | `BOOLEAN` |  |  |
     | `value_long` | `axis1_id` | `BIGINT` |  | FK |
     | `value_long` | `axis2_id` | `BIGINT` | yes | FK |
@@ -793,7 +795,7 @@ erDiagram
     | `value_scalar` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `value_scalar` | `valid_from_commit` | `BIGINT` |  | FK |
     | `value_scalar` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `value_scalar` | `version` | `SMALLINT` |  |  |
+    | `value_scalar` | `version` | `INTEGER` |  |  |
     | `value_scalar` | `content_retained` | `BOOLEAN` |  |  |
     | `value_scalar` | `value_kind` | `VARCHAR` |  |  |
     | `value_scalar` | `v_float` | `DOUBLE` | yes |  |
@@ -883,7 +885,7 @@ erDiagram
     | `definition_value_array` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `definition_value_array` | `valid_from_commit` | `BIGINT` |  | FK |
     | `definition_value_array` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `definition_value_array` | `version` | `SMALLINT` |  |  |
+    | `definition_value_array` | `version` | `INTEGER` |  |  |
     | `definition_value_array` | `content_retained` | `BOOLEAN` |  |  |
     | `definition_value_array` | `axis1_id` | `BIGINT` |  | FK |
     | `definition_value_array` | `axis2_id` | `BIGINT` | yes | FK |
@@ -898,7 +900,7 @@ erDiagram
     | `definition_value_long` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `definition_value_long` | `valid_from_commit` | `BIGINT` |  | FK |
     | `definition_value_long` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `definition_value_long` | `version` | `SMALLINT` |  |  |
+    | `definition_value_long` | `version` | `INTEGER` |  |  |
     | `definition_value_long` | `content_retained` | `BOOLEAN` |  |  |
     | `definition_value_long` | `axis1_id` | `BIGINT` |  | FK |
     | `definition_value_long` | `axis2_id` | `BIGINT` | yes | FK |
@@ -929,7 +931,7 @@ erDiagram
     | `definition_value_scalar` | `parameter_type_id` | `BIGINT` | yes | FK |
     | `definition_value_scalar` | `valid_from_commit` | `BIGINT` |  | FK |
     | `definition_value_scalar` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `definition_value_scalar` | `version` | `SMALLINT` |  |  |
+    | `definition_value_scalar` | `version` | `INTEGER` |  |  |
     | `definition_value_scalar` | `content_retained` | `BOOLEAN` |  |  |
     | `definition_value_scalar` | `value_kind` | `VARCHAR` |  |  |
     | `definition_value_scalar` | `v_float` | `DOUBLE` | yes |  |
@@ -1013,7 +1015,7 @@ erDiagram
     | `display_mode` | `description` | `VARCHAR` | yes |  |
     | `display_mode` | `valid_from_commit` | `BIGINT` |  | FK |
     | `display_mode` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `display_mode` | `version` | `SMALLINT` |  |  |
+    | `display_mode` | `version` | `INTEGER` |  |  |
     | `entity_class_display_mode` | `display_mode_id` | `BIGINT` |  | FK |
     | `entity_class_display_mode` | `entity_class_id` | `BIGINT` |  | FK |
     | `entity_class_display_mode` | `display_status` | `VARCHAR` |  |  |
@@ -1022,7 +1024,7 @@ erDiagram
     | `entity_class_display_mode` | `background_color` | `VARCHAR` | yes |  |
     | `entity_class_display_mode` | `valid_from_commit` | `BIGINT` |  | FK |
     | `entity_class_display_mode` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `entity_class_display_mode` | `version` | `SMALLINT` |  |  |
+    | `entity_class_display_mode` | `version` | `INTEGER` |  |  |
 
 ### Polymorphic ontology crosswalk
 
@@ -1057,4 +1059,4 @@ erDiagram
     | `semantic_annotation` | `note` | `VARCHAR` | yes |  |
     | `semantic_annotation` | `valid_from_commit` | `BIGINT` |  | FK |
     | `semantic_annotation` | `valid_to_commit` | `BIGINT` | yes | FK |
-    | `semantic_annotation` | `version` | `SMALLINT` |  |  |
+    | `semantic_annotation` | `version` | `INTEGER` |  |  |

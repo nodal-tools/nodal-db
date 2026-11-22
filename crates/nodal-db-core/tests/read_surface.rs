@@ -381,7 +381,7 @@ fn surface_tag_census() {
             count("advisory"),
             count("internal")
         ),
-        (36, 72, 29, 9)
+        (37, 72, 29, 9)
     );
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("census.duckdb");
@@ -547,8 +547,8 @@ fn the_explicit_refresh_changes_no_data() {
     assert!(r.refreshed);
     assert_eq!(r.check.status, SurfaceStatus::Missing);
     assert_eq!(
-        r.schema_version.as_deref(),
-        Some(compaction::SCHEMA_VERSION)
+        r.schema_version,
+        Some(compaction::SCHEMA_VERSION.to_string())
     );
     assert_eq!(status(&db), SurfaceStatus::Current);
     assert_eq!(
@@ -728,6 +728,9 @@ fn stale_reads_overlay_and_match_the_refreshed_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = data_file(dir.path(), "stale.duckdb");
     age(&db);
+    // The frozen old surface carries no marker (read as major 0); mark it an
+    // older revision of this build's major, the case the overlay serves.
+    set_marker(&db, read_surface::build_version().contract_major, 1, "0000000000000000");
     let refreshed = dir.path().join("refreshed.duckdb");
     fs::copy(&db, &refreshed).unwrap();
     api::refresh_read_surface(&refreshed, false).unwrap();
@@ -766,7 +769,8 @@ fn stale_reads_overlay_and_match_the_refreshed_file() {
         DbError::ReadSurfaceStale {
             found, expected, ..
         } => {
-            assert_eq!(found, &None);
+            let marker = format!("{}.1 (0000000000000000)", build_version().contract_major);
+            assert_eq!(found.as_deref(), Some(marker.as_str()));
             assert_eq!(expected, &build_version().to_string());
         }
         other => panic!("{other:?}"),
@@ -782,7 +786,7 @@ fn stale_reads_overlay_and_match_the_refreshed_file() {
     assert!(matches!(e, DbError::Duckdb(_)), "{e:?}");
 
     assert_eq!(fs::read(&db).unwrap(), bytes, "reads never write");
-    assert_eq!(status(&db), SurfaceStatus::Missing);
+    assert_eq!(status(&db), SurfaceStatus::Older);
 }
 
 // --- extract and compaction --------------------------------------------------

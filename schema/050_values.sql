@@ -19,7 +19,7 @@ CREATE TABLE value_scalar (
                                      -- (audit_dangling_ref), like the key triple.
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),   -- NULL = current
-  version                  SMALLINT NOT NULL,              -- 1..n per key (critique #1)
+  version                  INTEGER  NOT NULL,              -- 1..n per key (critique #1)
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,  -- FALSE = retention stub (VMP Part 5)
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   value_kind               VARCHAR NOT NULL,  -- 'float'|'int'|'bool'|'string'|'date_time'|'duration'|… (Decision 4: additive tag, no CHECK)
@@ -50,7 +50,7 @@ CREATE TABLE value_long (
   parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),   -- NULL = current
-  version                  SMALLINT NOT NULL,              -- per (triple, index tuple)
+  version                  INTEGER  NOT NULL,              -- per (triple, index tuple)
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   axis1_id BIGINT NOT NULL REFERENCES axis(id),
@@ -127,7 +127,7 @@ CREATE TABLE value_array (
   alternative_id           BIGINT NOT NULL,
   parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
-  version                  SMALLINT NOT NULL,
+  version                  INTEGER  NOT NULL,
   axis1_id BIGINT NOT NULL REFERENCES axis(id),
   axis2_id BIGINT REFERENCES axis(id),
   axis3_id BIGINT REFERENCES axis(id),
@@ -138,7 +138,7 @@ CREATE TABLE value_array (
   CHECK ((values IS NULL) != (values_int IS NULL)),  -- exactly one populated (current table only)
   v_min DOUBLE, v_max DOUBLE,        -- per-row pruning metadata (Timescale lesson, VMP Part 3);
                                       -- DOUBLE for both kinds (int min/max cast when exact, else NULL)
-  content_hash UBIGINT,               -- XXH3-64 of the payload's elements (canonical_encoding.md §13);
+  content_hash UBIGINT,               -- XXH3-64 of the payload's elements (docs/dev/canonical_encoding.md §13);
                                       -- unchanged-write accelerator, never trusted; NULL = unknown
   UNIQUE (entity_id, parameter_definition_id, alternative_id)   -- uniqueness of the triple, engine-enforced (VMP Part 2)
 );
@@ -158,7 +158,7 @@ CREATE TABLE value_array_hist (
   alternative_id           BIGINT NOT NULL,
   parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL,
-  version                  SMALLINT NOT NULL,
+  version                  INTEGER  NOT NULL,
   axis1_id BIGINT NOT NULL,
   axis2_id BIGINT,
   axis3_id BIGINT,
@@ -187,7 +187,7 @@ CREATE TABLE definition_value_scalar (
   parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),
-  version                  SMALLINT NOT NULL,
+  version                  INTEGER  NOT NULL,
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   value_kind               VARCHAR NOT NULL,
@@ -205,7 +205,7 @@ CREATE TABLE definition_value_long (
   parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),
-  version                  SMALLINT NOT NULL,
+  version                  INTEGER  NOT NULL,
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   axis1_id BIGINT NOT NULL REFERENCES axis(id),
@@ -241,7 +241,7 @@ CREATE TABLE definition_value_array (
   parameter_type_id       BIGINT,   -- D11 member binding (see value_scalar)
   valid_from_commit        BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit          BIGINT REFERENCES commit(id),   -- from/to even on the array shape (no twin here)
-  version                  SMALLINT NOT NULL,
+  version                  INTEGER  NOT NULL,
   content_retained         BOOLEAN NOT NULL DEFAULT TRUE,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   axis1_id BIGINT NOT NULL REFERENCES axis(id),

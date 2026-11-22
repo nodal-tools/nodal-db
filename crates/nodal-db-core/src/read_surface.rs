@@ -796,7 +796,7 @@ pub(crate) fn refresh_before_write(conn: &Connection, db_path: &Path) {
         if !check.is_stale() {
             return None;
         }
-        if schema_version_on(conn)? != SCHEMA_VERSION {
+        if !crate::compaction::is_current_schema_version(&schema_version_on(conn)?) {
             return None;
         }
         let key = canonical_path_key(db_path);
@@ -875,7 +875,7 @@ pub fn refresh_read_surface(db: &Path, force: bool) -> Result<SurfaceReport, DbE
                 db.display().to_string()
             )));
         };
-        if found != SCHEMA_VERSION {
+        if !crate::compaction::is_current_schema_version(&found) {
             return Err(DbError::SchemaMismatch {
                 message: format!(
                     "refresh-views refused: database schema version {found:?} is not this \

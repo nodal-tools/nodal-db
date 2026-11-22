@@ -115,12 +115,15 @@ CREATE TABLE erasure_marker (
 -- is the one classifier:
 --   'core' — written only by the core: schema_version (replaces
 --            alembic_version), db_identity (the stable DB-identity UUID
---            minted by 900_bootstrap.sql and never changed), the template
---            stamp keys, the shared `presentation` document and
---            `audit_rules`. Adding a core key edits the CHECK list below, i.e.
---            it is a schema change with a SCHEMA_VERSION bump (core keys come
---            only with core changes, like erasure_marker.kind);
---   'tool' — `<tool>:<name>` keys a tool owns (e.g. `flextool:frozen`);
+--            minted by 900_bootstrap.sql and never changed), created_by (the
+--            nodal-db build that created the file), the template stamp keys,
+--            the shared `presentation` document, `audit_rules`,
+--            `refinement_classes` (the classes whose entities are refinement
+--            links, read by `realizes_edge`), and every key in the reserved
+--            `nodal:` namespace. A new core key goes into `nodal:` (no DDL
+--            change); the bare names below are the closed list of 0.1.0;
+--   'tool' — `<tool>:<name>` keys a tool owns (e.g. `flextool:frozen`),
+--            any tool name except `nodal`;
 --   'user' — every other key (documented well-known keys: identifier,
 --            base_iri, title, description, version, created, homepage,
 --            language, semantic_context, conforms_to).
@@ -134,15 +137,16 @@ CREATE TABLE database_property (
   owner             VARCHAR NOT NULL CHECK (owner IN ('core', 'user', 'tool')),
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),  -- NULL = current
-  version           SMALLINT NOT NULL DEFAULT 1,   -- 1..n per key
+  version           INTEGER  NOT NULL DEFAULT 1,   -- 1..n per key
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   -- tool keys: '<tool>:<name>' (the writer checks both parts; this is the
   -- coarse backstop)
-  CHECK ((owner = 'tool') = (strpos(key, ':') > 1)),
-  CHECK ((owner = 'core') = (lower(key) IN ('schema_version', 'db_identity',
+  CHECK ((owner = 'tool') = (strpos(key, ':') > 1 AND NOT starts_with(lower(key), 'nodal:'))),
+  CHECK ((owner = 'core') = (lower(key) IN ('schema_version', 'db_identity', 'created_by',
      'template_name', 'template_version', 'template_content_hash',
      'template_migration_step', 'template_applied_commit',
-     'presentation', 'audit_rules'))),
+     'presentation', 'audit_rules', 'refinement_classes')
+     OR starts_with(lower(key), 'nodal:'))),
   cur_key VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(key) END) VIRTUAL
 );
 CREATE UNIQUE INDEX uq_database_property ON database_property (cur_key);
@@ -156,7 +160,7 @@ CREATE TABLE metadata_pair (
   value             VARCHAR NOT NULL,          -- data: verbatim
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL,
@@ -180,7 +184,7 @@ CREATE TABLE source (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -200,7 +204,7 @@ CREATE TABLE license (
   policy            VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -214,7 +218,7 @@ CREATE TABLE source_license (
   license_id        BIGINT NOT NULL,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   cur_s BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN source_id END) VIRTUAL,
   cur_l BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN license_id END) VIRTUAL
@@ -230,7 +234,7 @@ CREATE TABLE metadata_role (
   iri               VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -244,18 +248,21 @@ CREATE UNIQUE INDEX uq_metadata_role_name ON metadata_role (cur_name);
 -- does not enforce rows with a NULL key column. For the same reason the role
 -- enters the key as coalesce(role_id, 0): "no role" is one key value. Object
 -- types are a CHECK list (each type has a close-out leg when its object
--- dies), not an open tag.
+-- dies), not an open tag. 'commit', 'list_value', 'class_set' and
+-- 'display_mode' are reserved: the DDL accepts them so the write API can
+-- add them without a schema change, but the API does not write them yet.
 CREATE TABLE object_metadata_link (
   object_type       VARCHAR NOT NULL CHECK (object_type IN ('dataset', 'entity',
      'entity_class', 'parameter_definition', 'alternative', 'scenario', 'run',
-     'source', 'license', 'parameter_value_list', 'units_of_measure')),
+     'source', 'license', 'parameter_value_list', 'units_of_measure',
+     'commit', 'list_value', 'class_set', 'display_mode')),
   object_id         BIGINT NOT NULL,           -- 0 for 'dataset'
   target_kind       VARCHAR NOT NULL CHECK (target_kind IN ('source', 'license', 'pair')),
   target_id         BIGINT NOT NULL,
   role_id           BIGINT,                    -- NULL = no role
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   CHECK ((object_type = 'dataset') = (object_id = 0)),
   CHECK (NOT (object_type = target_kind AND object_id = target_id)),  -- no self-link
@@ -283,7 +290,7 @@ CREATE TABLE value_metadata_link (
   role_id                 BIGINT,              -- NULL = no role
   valid_from_commit       BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit         BIGINT REFERENCES commit(id),
-  version                 SMALLINT NOT NULL DEFAULT 1,
+  version                 INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),
   cur_tk VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN target_kind END) VIRTUAL,
   cur_t  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN target_id END) VIRTUAL,

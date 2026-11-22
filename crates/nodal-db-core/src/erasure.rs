@@ -419,7 +419,7 @@ fn assert_schema_version(db: &Path) -> Result<(), DbError> {
         Ok(crate::property::schema_version_any(conn)?.unwrap_or_default())
     })?;
     let expected = crate::compaction::SCHEMA_VERSION;
-    if found != expected {
+    if !crate::compaction::is_current_schema_version(&found) {
         return Err(DbError::SchemaMismatch {
             message: format!(
                 "erase refused: database schema_version {found:?} != current {expected:?} \

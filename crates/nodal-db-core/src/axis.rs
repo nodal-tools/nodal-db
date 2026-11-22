@@ -200,7 +200,7 @@ fn ensure_text_canonical(axis: &CanonicalAxis) -> Result<(), DbError> {
             }
         }
         AxisBody::TimePattern { positions } => {
-            for t in positions.iter().flat_map(|p| &p.terms) {
+            for t in positions.iter().flat_map(|p| p.clauses.iter().flatten()) {
                 if !is_nfc(&t.unit) {
                     return Err(malformed(format!(
                         "the time-pattern unit {} is not in NFC",
@@ -393,11 +393,12 @@ fn read_f64s(conn: &Connection, sql: &str, axis_id: i64) -> Result<Vec<f64>, DbE
     Ok(v)
 }
 
-/// Reconstruct time-pattern positions: rows are `(pos, ordinal, term_no, ...)`,
-/// ordered so consecutive terms of one `pos` group together.
+/// Reconstruct time-pattern positions: rows are `(pos, ordinal, clause_no,
+/// ...)`, ordered by `term_no` so consecutive terms of one `pos` (and of one
+/// clause) group together.
 fn read_time_pattern(conn: &Connection, id: i64) -> Result<Vec<TimePatternPos>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT pos, ordinal, unit, range_start, range_end
+        "SELECT pos, ordinal, clause_no, unit, range_start, range_end
          FROM axis_time_pattern WHERE axis_id = ? ORDER BY pos, term_no",
     )?;
     let rows = stmt
@@ -405,24 +406,29 @@ fn read_time_pattern(conn: &Connection, id: i64) -> Result<Vec<TimePatternPos>, 
             Ok((
                 r.get::<_, i32>(0)?, // pos
                 r.get::<_, i32>(1)?, // ordinal
-                r.get::<_, String>(2)?,
-                r.get::<_, i16>(3)?,
+                r.get::<_, i32>(2)?, // clause_no
+                r.get::<_, String>(3)?,
                 r.get::<_, i16>(4)?,
+                r.get::<_, i16>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut positions: Vec<TimePatternPos> = Vec::new();
-    let mut cur_pos: Option<i32> = None;
-    for (pos, ordinal, unit, range_start, range_end) in rows {
-        if cur_pos != Some(pos) {
+    let mut cur: Option<(i32, i32)> = None;
+    for (pos, ordinal, clause_no, unit, range_start, range_end) in rows {
+        if cur.map(|(p, _)| p) != Some(pos) {
             positions.push(TimePatternPos {
                 ordinal,
-                terms: Vec::new(),
+                clauses: Vec::new(),
             });
-            cur_pos = Some(pos);
         }
-        positions.last_mut().unwrap().terms.push(TimePatternTerm {
+        let p = positions.last_mut().unwrap();
+        if cur != Some((pos, clause_no)) {
+            p.clauses.push(Vec::new());
+        }
+        cur = Some((pos, clause_no));
+        p.clauses.last_mut().unwrap().push(TimePatternTerm {
             unit,
             range_start,
             range_end,
@@ -598,31 +604,40 @@ fn insert_axis(conn: &Connection, axis: &CanonicalAxis, hash: u64) -> Result<i64
             )?;
         }
         AxisBody::TimePattern { positions: tp } => {
-            // One row per (position, term), terms numbered from 1 in order.
+            // One row per (position, term): terms numbered from 1 in order
+            // over the whole position, clauses from 0 (spec §7.7).
             let mut pos = Vec::new();
             let mut ordinal = Vec::new();
+            let mut clause_no = Vec::new();
             let mut term_no = Vec::new();
             let mut terms = Vec::new();
             for (i, p) in tp.iter().enumerate() {
-                for (t, term) in p.terms.iter().enumerate() {
-                    pos.push(i as i32);
-                    ordinal.push(p.ordinal);
-                    term_no.push((t + 1) as i32);
-                    terms.push(term);
+                let mut t = 0;
+                for (c, clause) in p.clauses.iter().enumerate() {
+                    for term in clause {
+                        t += 1;
+                        pos.push(i as i32);
+                        ordinal.push(p.ordinal);
+                        clause_no.push(c as i32);
+                        term_no.push(t);
+                        terms.push(term);
+                    }
                 }
             }
             exec_columnar(
                 conn,
                 "INSERT INTO axis_time_pattern \
-                   (axis_id, pos, ordinal, term_no, unit, range_start, range_end) \
+                   (axis_id, pos, ordinal, clause_no, term_no, unit, range_start, range_end) \
                  SELECT ?, unnest(?::INTEGER[]), unnest(?::INTEGER[]), unnest(?::INTEGER[]), \
-                        unnest(?::VARCHAR[]), unnest(?::SMALLINT[]), unnest(?::SMALLINT[])",
+                        unnest(?::INTEGER[]), unnest(?::VARCHAR[]), unnest(?::SMALLINT[]), \
+                        unnest(?::SMALLINT[])",
                 terms.len(),
                 |r| {
                     vec![
                         id.clone(),
                         list(clip(&pos, &r), |&v| Value::Int(v)),
                         list(clip(&ordinal, &r), |&v| Value::Int(v)),
+                        list(clip(&clause_no, &r), |&v| Value::Int(v)),
                         list(clip(&term_no, &r), |&v| Value::Int(v)),
                         list(clip(&terms, &r), |t| Value::Text(t.unit.clone())),
                         list(clip(&terms, &r), |t| Value::SmallInt(t.range_start)),

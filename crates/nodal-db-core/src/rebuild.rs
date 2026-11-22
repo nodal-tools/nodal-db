@@ -490,7 +490,7 @@ pub(crate) fn q(ident: &str) -> String {
 /// against DDL drift). Read before B1 wipes `database_property`.
 pub(crate) fn assert_temp_schema_version(conn: &Connection) -> Result<(), DbError> {
     let v: String = crate::property::read(conn, "schema_version")?.unwrap_or_default();
-    if v != SCHEMA_VERSION {
+    if !crate::compaction::is_current_schema_version(&v) {
         return Err(DbError::Api(format!(
             "internal: fresh temp seeded schema_version {v:?} != compaction::SCHEMA_VERSION \
              {SCHEMA_VERSION:?} — the const has drifted from the DDL"

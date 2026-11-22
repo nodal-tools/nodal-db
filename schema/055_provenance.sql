@@ -7,6 +7,9 @@
 -- Append-only / immutable, like `commit` (001_meta.sql): no from/to span,
 -- no version, id is a real PRIMARY KEY. A correction is a new run row, never
 -- an in-place edit — so no _current view and no _asof macro are needed.
+-- RESERVED in 0.x: no API writes this table yet, and its columns may change
+-- (with a SCHEMA_VERSION bump) when the run write API is designed. Do not
+-- write or read it as a contract.
 
 CREATE TABLE run (
   id                    BIGINT PRIMARY KEY DEFAULT nextval('seq_run'),

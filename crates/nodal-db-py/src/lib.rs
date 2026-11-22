@@ -1023,6 +1023,25 @@ impl Database {
         .and_then(|v| with_notices(py, v))
     }
 
+    /// Mark (or with `refinement=False`, unmark) `class_name` as a
+    /// refinement class: each of its entities links a coarse entity
+    /// (element 1) to a fine one (element 2), and an explicit deactivation
+    /// of the coarse entity propagates to the fine one in every scenario.
+    /// The class must have exactly two dimensions. Idempotent.
+    #[pyo3(signature = (class_name, refinement, *, user))]
+    fn set_refinement_class(
+        &self,
+        py: Python<'_>,
+        class_name: String,
+        refinement: bool,
+        user: String,
+    ) -> PyResult<()> {
+        let path = self.path.clone();
+        py.detach(move || verbs::set_refinement_class(&path, &class_name, refinement, &user))
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))
+    }
+
     /// Drop an orphan value list at runtime. Refuses a list a current
     /// definition still binds — rebind/drop those definitions first.
     /// Idempotent: a missing list is a no-op.

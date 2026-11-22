@@ -336,7 +336,8 @@ fn compact_rejects_schema_version_mismatch() {
     );
     assert!(
         matches!(&err, DbError::SchemaMismatch { found, expected, .. }
-            if found == "9.9-bogus" && expected == nodal_db_core::compaction::SCHEMA_VERSION),
+            if found == "9.9-bogus"
+                && *expected == nodal_db_core::compaction::SCHEMA_VERSION.to_string()),
         "{err:?}"
     );
 

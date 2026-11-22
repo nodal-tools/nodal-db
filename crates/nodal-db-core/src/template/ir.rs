@@ -2351,7 +2351,27 @@ pub fn normalize_audit_rules(rules: &AuditRules) -> Option<Value> {
             json!({"class": r.class, "selector": r.selector, "when": Value::Object(when)})
         })
         .collect();
-    Some(json!({ "conditional_requirements": Value::Array(arr) }))
+    Some(json!({
+        "version": DOCUMENT_VERSION,
+        "conditional_requirements": Value::Array(arr),
+    }))
+}
+
+/// The `version` member of the core's stored JSON documents (`audit_rules`,
+/// `presentation`): the shape version of the document. Both documents are
+/// internal to nodal-db and its editor; the member lets a reader tell a
+/// later shape apart.
+pub const DOCUMENT_VERSION: u64 = 1;
+
+/// Parse a stored `audit_rules` document as the IR block: its `version`
+/// member is the stored document's, not part of the IR, so it is dropped
+/// first.
+pub fn parse_audit_rules_doc(doc: &str) -> Result<AuditRules, serde_json::Error> {
+    let mut v: Value = serde_json::from_str(doc)?;
+    if let Value::Object(m) = &mut v {
+        m.remove("version");
+    }
+    serde_json::from_value(v)
 }
 
 /// The `template_content_hash` value (§4.1): XXH3-64 (the project's one

@@ -346,7 +346,7 @@ pub(crate) fn batches_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatc
 
 /// `{position: [label, ...]}` -> the core's ordinal label domains
 /// (decision D's in-process channel; the Arrow field-metadata channel
-/// `spinal:label_domain` passes through untouched on the batch itself).
+/// `nodal:label_domain` passes through untouched on the batch itself).
 pub(crate) fn domains_from_py(domains: Option<HashMap<u8, Vec<String>>>) -> Vec<LabelDomain> {
     domains
         .unwrap_or_default()

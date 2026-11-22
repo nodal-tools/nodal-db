@@ -71,7 +71,7 @@ fn scalar_batch2(entities: &[&str], vals: &[f64]) -> RecordBatch {
 }
 
 /// Rank-1 label-indexed float batch, optionally carrying a
-/// `spinal:label_domain` JSON metadata domain on the dim field (decision D).
+/// `nodal:label_domain` JSON metadata domain on the dim field (decision D).
 fn label_batch(
     entity: &str,
     dim: &str,
@@ -83,7 +83,7 @@ fn label_batch(
     let mut field = Field::new(dim, DataType::Utf8, false);
     if let Some(js) = metadata_json {
         field = field.with_metadata(std::collections::HashMap::from([(
-            "spinal:label_domain".to_string(),
+            "nodal:label_domain".to_string(),
             js.to_string(),
         )]));
     }
@@ -1411,7 +1411,7 @@ fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
 
 // --- decision-D metadata channel (promoted critique probes) ----------------
 
-/// Metadata channel happy path: the `spinal:label_domain` field metadata alone
+/// Metadata channel happy path: the `nodal:label_domain` field metadata alone
 /// supplies the ordered domain; present labels take their domain ordinals.
 #[test]
 fn metadata_label_domain_sets_ordinals() {
@@ -1451,7 +1451,7 @@ fn metadata_label_domain_sets_ordinals() {
     );
 }
 
-/// Malformed `spinal:label_domain` JSON fails loudly BEFORE any DB work.
+/// Malformed `nodal:label_domain` JSON fails loudly BEFORE any DB work.
 #[test]
 fn malformed_label_domain_metadata_fails_before_db_work() {
     let (_dir, db) = fresh_db();
@@ -1469,7 +1469,7 @@ fn malformed_label_domain_metadata_fails_before_db_work() {
     )
     .expect_err("malformed metadata must be loud");
     assert!(
-        err.to_string().contains("spinal:label_domain"),
+        err.to_string().contains("nodal:label_domain"),
         "unexpected: {err}"
     );
     assert_eq!(

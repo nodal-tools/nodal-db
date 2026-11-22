@@ -19,7 +19,7 @@ the file.
 This page describes **format version 1.0**.
 
 Every stream in a file declares its version in the
-`spinal:format_version` metadata key as `MAJOR.MINOR`. The importer
+`nodal:format_version` metadata key as `MAJOR.MINOR`. The importer
 applies this rule:
 
 | File declares | Importer behaviour |
@@ -30,7 +30,7 @@ applies this rule:
 The compatibility promise that makes the second row safe:
 
 - A **minor** version only adds constructs that an older importer
-  cannot misread: a new Arrow type, a new `spinal:form` value, or a new
+  cannot misread: a new Arrow type, a new `nodal:form` value, or a new
   optional metadata key whose absence changes nothing. A file that uses
   such a construct fails on an older importer with a specific error; it
   is never imported with a different meaning.
@@ -41,14 +41,9 @@ The compatibility promise that makes the second row safe:
   stored timestamps mean.
 
 !!! warning "Write `1.0`"
-    Producers should write `spinal:format_version = "1.0"`. The value
+    Producers should write `nodal:format_version = "1.0"`. The value
     must be decimal `MAJOR.MINOR` with no leading zeros (`1.0`, not
     `01.0` or `1`); anything else is E3.
-
-!!! note "The `spinal:` prefix"
-    The metadata keys use the prefix `spinal:` and the format name
-    `spinal-db-bulk`, from the project's earlier name. They are part of
-    the 1.0 format and will not change within major version 1.
 
 ## Container
 
@@ -108,23 +103,23 @@ Schema-level metadata on each segment (string keys and values):
 
 | Key | Required | Value |
 |---|---|---|
-| `spinal:format` | yes | exactly `spinal-db-bulk` (else E2) |
-| `spinal:format_version` | yes | `1.0` (see [Format version](#format-version)) |
-| `spinal:segment_count` | yes | total number of segments in the file, as a positive decimal integer; the same on every segment |
-| `spinal:class` | yes | target entity class name |
-| `spinal:parameter` | yes | target parameter name |
-| `spinal:form` | yes | `long` or `dense` |
-| `spinal:alternative` | no | target alternative name (see below) |
+| `nodal:format` | yes | exactly `nodal-db-bulk` (else E2) |
+| `nodal:format_version` | yes | `1.0` (see [Format version](#format-version)) |
+| `nodal:segment_count` | yes | total number of segments in the file, as a positive decimal integer; the same on every segment |
+| `nodal:class` | yes | target entity class name |
+| `nodal:parameter` | yes | target parameter name |
+| `nodal:form` | yes | `long` or `dense` |
+| `nodal:alternative` | no | target alternative name (see below) |
 
-A missing `spinal:segment_count`, `spinal:class`, `spinal:parameter`
-or `spinal:form`, or a `spinal:form` other than `long`/`dense`, is E4.
-A missing `spinal:format` is E2 and a missing `spinal:format_version`
-is E3. `spinal:segment_count` lets the importer detect a file that was cut
+A missing `nodal:segment_count`, `nodal:class`, `nodal:parameter`
+or `nodal:form`, or a `nodal:form` other than `long`/`dense`, is E4.
+A missing `nodal:format` is E2 and a missing `nodal:format_version`
+is E3. `nodal:segment_count` lets the importer detect a file that was cut
 off cleanly between two segments: if the segments disagree on the count,
 or the file holds a different number of segments than declared, the
 import fails with E10.
 
-Unknown keys in the `spinal:` namespace, in schema or field metadata,
+Unknown keys in the `nodal:` namespace, in schema or field metadata,
 produce a warning and are otherwise ignored (E5). Keys outside the namespace are ignored silently,
 so other tools may add their own metadata.
 
@@ -134,7 +129,7 @@ Classes, parameters, entities and alternatives are referenced **by
 name**. Name matching is case-insensitive (`Flow` and `flow` are the
 same parameter).
 
-The alternative of a segment is taken from `spinal:alternative` if
+The alternative of a segment is taken from `nodal:alternative` if
 present, otherwise from the `--alternative` command-line option. If
 neither is given, the import fails (E4). If both are given, they must
 match case-insensitively (E4 otherwise); one never silently overrides
@@ -158,7 +153,7 @@ and each entity. Two exceptions:
 
 ## Long form
 
-`spinal:form = long` carries values as one row per index tuple. The
+`nodal:form = long` carries values as one row per index tuple. The
 columns are identified **by position**:
 
 | Position | Name (recommended) | Arrow type | Content |
@@ -211,7 +206,7 @@ not present in the segment are not touched.
 
 ## Dense form
 
-`spinal:form = dense` carries **one row per entity**, with each
+`nodal:form = dense` carries **one row per entity**, with each
 dimension's coordinates as a list and the values as one flat list. It
 avoids repeating the coordinates on every row for regular data such as
 a large set of hourly series.
@@ -343,7 +338,7 @@ Every label dimension must carry its **ordered domain**: the list of
 labels in their meaningful order. It is stored as Arrow **field
 metadata** on the dimension's field:
 
-- key: `spinal:label_domain`
+- key: `nodal:label_domain`
 - value: a JSON array of strings, for example `["low", "mid", "high"]`
 
 Rules:
@@ -415,22 +410,22 @@ is stable; the message text may change between releases.
 | Class | Meaning | Typical causes |
 |---|---|---|
 | E1 | not an Arrow IPC stream | empty file; IPC file / Feather format (`ARROW1` magic); not Arrow at all |
-| E2 | wrong format identifier | `spinal:format` missing or not `spinal-db-bulk` |
-| E3 | version problem | `spinal:format_version` missing, malformed, a major version other than 1, or different in different segments |
-| E4 | metadata or target problem | `spinal:segment_count`, `spinal:class`, `spinal:parameter` or `spinal:form` missing; unknown `spinal:form`; no alternative; `spinal:alternative` conflicts with `--alternative`; `--class`/`--parameter` assertion does not match |
-| E5 | warning only | unknown `spinal:` metadata key, ignored |
+| E2 | wrong format identifier | `nodal:format` missing or not `nodal-db-bulk` |
+| E3 | version problem | `nodal:format_version` missing, malformed, a major version other than 1, or different in different segments |
+| E4 | metadata or target problem | `nodal:segment_count`, `nodal:class`, `nodal:parameter` or `nodal:form` missing; unknown `nodal:form`; no alternative; `nodal:alternative` conflicts with `--alternative`; `--class`/`--parameter` assertion does not match |
+| E5 | warning only | unknown `nodal:` metadata key, ignored |
 | E6 | malformed payload or rejected by the core | unsupported Arrow type (`timestamp[ns]`, `large_utf8`, `float32`, …); run-end encoding; rank above 4; null where not allowed; zero-row segment; `entity`/`value` column out of place; label domain missing, invalid, repeating a label or not covering the data; duplicate index tuple or dense entity; rank-0 entity with several rows; timestamp outside the supported range (290309 BC to 294247 AD), including after conversion from s/ms; empty entity name or two spellings of one entity; type does not match the existing definition; entity of a multi-dimensional class does not exist; `--db` is not an initialized nodal-db database; trailing bytes after a segment; a stream cut off in the middle of a message |
 | E7 | duplicate target | two segments target the same `(class, parameter, alternative)` |
 | E8 | dense shape error | value list length is not the product of the dimension list lengths; duplicate coordinate in a dimension list; empty dimension list |
 | E9 | database busy | the write lock could not be obtained, or a write conflict persisted, within the retry budget; retry later |
-| E10 | file truncated or mis-assembled | a segment lacks the end-of-stream marker; legacy 4-byte end marker; segments disagree on `spinal:segment_count`; actual segment count differs from the declared one; `spinal:segment_count` not a positive integer |
+| E10 | file truncated or mis-assembled | a segment lacks the end-of-stream marker; legacy 4-byte end marker; segments disagree on `nodal:segment_count`; actual segment count differs from the declared one; `nodal:segment_count` not a positive integer |
 
 Some real messages:
 
 ```text
 Error: E1: file.arrow is in the Arrow IPC *file* (Feather / random-access) format; this importer accepts only the IPC *stream* format (pyarrow: pa.ipc.new_stream, not new_file)
 Error: E6: segment 1 (node:cap): column "t" is timestamp[ns]; nanosecond truncation is lossy and never silent — cast to microseconds producer-side (pandas: .astype("datetime64[us]"))
-Error: E6: segment 1 (node:cap): label dimension "s" has no spinal:label_domain field metadata (required on every label dimension)
+Error: E6: segment 1 (node:cap): label dimension "s" has no nodal:label_domain field metadata (required on every label dimension)
 Error: E6: segment 1 (node:cap): dimension column "t", row 1 (entity "a"): timestamp[s] value 4611686018427387904 overflows the supported timestamp range when converted to microseconds (×1000000); supported timestamps run from 290309 BC to 294247 AD
 Error: E6: entity "n1" (class "node", parameter "cap", alternative "Base"): duplicate index tuple ("high"); a value maps one measure per index tuple
 Error: E8: segment 1 (node:cap): dense row 0 (entity "a"): payload length 2 != product of axis lengths 3 (values are row-major: the last dimension varies fastest)
@@ -454,12 +449,12 @@ SEGMENTS = 2  # total segments in this file; stamped on every segment
 
 def write_segment(sink, cls, param, form, fields, columns):
     meta = {
-        "spinal:format": "spinal-db-bulk",
-        "spinal:format_version": "1.0",
-        "spinal:segment_count": str(SEGMENTS),
-        "spinal:class": cls,
-        "spinal:parameter": param,
-        "spinal:form": form,
+        "nodal:format": "nodal-db-bulk",
+        "nodal:format_version": "1.0",
+        "nodal:segment_count": str(SEGMENTS),
+        "nodal:class": cls,
+        "nodal:parameter": param,
+        "nodal:form": form,
     }
     schema = pa.schema(fields, metadata=meta)
     batch = pa.record_batch(columns, schema=schema)
@@ -476,7 +471,7 @@ with open("results.arrows", "wb") as f:
         [
             pa.field("entity", pa.string(), nullable=False),
             pa.field("scenario", pa.string(), nullable=False,
-                     metadata={"spinal:label_domain": json.dumps(["low", "mid", "high"])}),
+                     metadata={"nodal:label_domain": json.dumps(["low", "mid", "high"])}),
             pa.field("time", pa.timestamp("us"), nullable=False),
             pa.field("value", pa.float64()),
         ],
@@ -576,13 +571,13 @@ The null cell was dropped, and the labels sort by their domain order
 - [ ] IPC **stream** format, one stream per `(class, parameter,
       alternative)`, each writer closed so the end marker is written.
 - [ ] All six required metadata keys on every segment, with the same
-      `spinal:segment_count` everywhere.
+      `nodal:segment_count` everywhere.
 - [ ] Strings as `utf8`, not `large_utf8` or string view.
 - [ ] Timestamps in `s`, `ms` or `us`, never `ns`; preferably
       timezone-naive.
 - [ ] Integers as `int64` (R's `integer` and many defaults are 32-bit),
       floats as `float64`.
-- [ ] `spinal:label_domain` on every label dimension.
+- [ ] `nodal:label_domain` on every label dimension.
 - [ ] Dense values flattened row-major (last dimension fastest).
 - [ ] Missing cells as null values (long form) or omitted rows, not as
       NaN.

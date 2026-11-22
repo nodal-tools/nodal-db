@@ -102,12 +102,12 @@ fn segment_metadata(
     count: usize,
 ) -> HashMap<String, String> {
     HashMap::from([
-        ("spinal:format".into(), "spinal-db-bulk".into()),
-        ("spinal:format_version".into(), "1.0".into()),
-        ("spinal:segment_count".into(), count.to_string()),
-        ("spinal:class".into(), class.into()),
-        ("spinal:parameter".into(), parameter.into()),
-        ("spinal:form".into(), form.into()),
+        ("nodal:format".into(), "nodal-db-bulk".into()),
+        ("nodal:format_version".into(), "1.0".into()),
+        ("nodal:segment_count".into(), count.to_string()),
+        ("nodal:class".into(), class.into()),
+        ("nodal:parameter".into(), parameter.into()),
+        ("nodal:form".into(), form.into()),
     ])
 }
 
@@ -169,12 +169,12 @@ fn long_segment(class: &str, parameter: &str, count: usize, rows: &[(&str, i64, 
 }
 
 /// A rank-1 long segment with a label dimension: (entity, scenario Utf8,
-/// value Float64), with `spinal:label_domain` field metadata when given.
+/// value Float64), with `nodal:label_domain` field metadata when given.
 fn label_segment(domain: Option<&str>, rows: &[(&str, &str, f64)]) -> Vec<u8> {
     let mut scenario = Field::new("scenario", DataType::Utf8, false);
     if let Some(d) = domain {
         scenario = scenario.with_metadata(HashMap::from([(
-            "spinal:label_domain".to_string(),
+            "nodal:label_domain".to_string(),
             d.to_string(),
         )]));
     }
@@ -458,7 +458,7 @@ fn version_major_mismatch_is_e3() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
-    md.insert("spinal:format_version".into(), "2.0".into());
+    md.insert("nodal:format_version".into(), "2.0".into());
     let schema = Arc::new(Schema::new_with_metadata(
         vec![
             Field::new("entity", DataType::Utf8, false),
@@ -666,9 +666,9 @@ fn unicode_case_aliased_alternative_target_is_e7() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let mut md1 = segment_metadata("node", "profile", "long", 2);
-    md1.insert("spinal:alternative".into(), "Ä".into());
+    md1.insert("nodal:alternative".into(), "Ä".into());
     let mut md2 = segment_metadata("node", "profile", "long", 2);
-    md2.insert("spinal:alternative".into(), "ä".into());
+    md2.insert("nodal:alternative".into(), "ä".into());
     let mut container = long_segment_md(md1, &[("n1", 0, 1.0)]);
     container.extend(long_segment_md(md2, &[("n1", 0, 2.0)]));
     let file = write_file(dir.path(), "umlaut.arrows", &container);
@@ -863,13 +863,13 @@ fn garbage_file_is_e1() {
     assert_error_leaves_db_untouched(&db, &out, "E1");
 }
 
-/// E2: a segment without the `spinal:format` key is rejected per segment.
+/// E2: a segment without the `nodal:format` key is rejected per segment.
 #[test]
 fn missing_format_key_is_e2() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
-    md.remove("spinal:format");
+    md.remove("nodal:format");
     let file = write_file(
         dir.path(),
         "noformat.arrows",
@@ -879,7 +879,7 @@ fn missing_format_key_is_e2() {
     assert_error_leaves_db_untouched(&db, &out, "E2");
 }
 
-/// E4: an unknown `spinal:form` value is rejected (the §3.2 minor-version door).
+/// E4: an unknown `nodal:form` value is rejected (the §3.2 minor-version door).
 #[test]
 fn unknown_form_value_is_e4() {
     let dir = tempfile::tempdir().unwrap();
@@ -896,14 +896,14 @@ fn unknown_form_value_is_e4() {
     assert_error_leaves_db_untouched(&db, &out, "E4");
 }
 
-/// E5 is a WARNING, not an error (spec §3.2): an unknown `spinal:` key is
+/// E5 is a WARNING, not an error (spec §3.2): an unknown `nodal:` key is
 /// named on stdout and the import proceeds.
 #[test]
-fn unknown_spinal_key_is_e5_warning_not_error() {
+fn unknown_nodal_key_is_e5_warning_not_error() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
-    md.insert("spinal:future_hint".into(), "x".into());
+    md.insert("nodal:future_hint".into(), "x".into());
     let file = write_file(
         dir.path(),
         "e5.arrows",
@@ -918,7 +918,7 @@ fn unknown_spinal_key_is_e5_warning_not_error() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("spinal:future_hint") && stdout.contains("E5"),
+        stdout.contains("nodal:future_hint") && stdout.contains("E5"),
         "warning must name the key: {stdout}"
     );
     assert_eq!(
@@ -1086,7 +1086,7 @@ fn zstd_compressed_stream_imports() {
     assert_eq!(vals, vec![1.5, 2.5]);
 }
 
-/// §7.2: a label dimension without `spinal:label_domain` is E6 naming the field.
+/// §7.2: a label dimension without `nodal:label_domain` is E6 naming the field.
 #[test]
 fn label_dimension_without_domain_is_e6() {
     let dir = tempfile::tempdir().unwrap();
@@ -1099,7 +1099,7 @@ fn label_dimension_without_domain_is_e6() {
     let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
     assert_error_leaves_db_untouched(&db, &out, "E6");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("spinal:label_domain"),
+        String::from_utf8_lossy(&out.stderr).contains("nodal:label_domain"),
         "must name the missing key: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -1210,14 +1210,14 @@ fn superset_domain_accepted_with_domain_ordinals() {
     );
 }
 
-/// OPEN-Q3-5: `spinal:alternative` metadata conflicting with `--alternative`
+/// OPEN-Q3-5: `nodal:alternative` metadata conflicting with `--alternative`
 /// is E4 — no precedence, a conflict is always a mistake (spec §4.3).
 #[test]
 fn alternative_flag_conflicting_with_metadata_is_e4() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
-    md.insert("spinal:alternative".into(), "Base".into());
+    md.insert("nodal:alternative".into(), "Base".into());
     let file = write_file(
         dir.path(),
         "conflict.arrows",
@@ -1290,7 +1290,7 @@ fn newer_minor_version_is_attempted() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let mut md = segment_metadata("node", "profile", "long", 1);
-    md.insert("spinal:format_version".into(), "1.7".into());
+    md.insert("nodal:format_version".into(), "1.7".into());
     let file = write_file(
         dir.path(),
         "minor.arrows",

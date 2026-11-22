@@ -144,12 +144,12 @@ do either.
 
     def segment(sink, cls, param, batch, n_segments):
         meta = {
-            "spinal:format": "spinal-db-bulk",
-            "spinal:format_version": "1.0",
-            "spinal:segment_count": str(n_segments),
-            "spinal:class": cls,
-            "spinal:parameter": param,
-            "spinal:form": "long",
+            "nodal:format": "nodal-db-bulk",
+            "nodal:format_version": "1.0",
+            "nodal:segment_count": str(n_segments),
+            "nodal:class": cls,
+            "nodal:parameter": param,
+            "nodal:form": "long",
         }
         schema = batch.schema.with_metadata(meta)
         with pa.ipc.new_stream(sink, schema) as w:   # one complete stream per segment
@@ -172,11 +172,6 @@ do either.
         segment(f, "node", "demand", demand, 2)
         segment(f, "unit", "capacity", capacity, 2)
     ```
-
-    !!! note
-        The metadata keys keep the `spinal:` prefix and the format name
-        `spinal-db-bulk` from the project's earlier name. They are part
-        of the frozen v1.0 format.
 
     Import it as one commit:
 
@@ -289,7 +284,7 @@ Label domains given by position (the `domains` argument) apply to the
 dimension that the first group with a label dimension at that position
 has. A group whose label dimension at that position has another name
 does not get that domain; give it its own in the column's
-`spinal:label_domain` field metadata. In a segment of one group nothing
+`nodal:label_domain` field metadata. In a segment of one group nothing
 changes: the `domains` argument wins over field metadata at the same
 position.
 

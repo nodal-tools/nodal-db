@@ -241,7 +241,7 @@ The pipeline:
    coordinates per dimension, sorted by kind. Regular progressions are
    always stored in parametric form (start, step, length). Label
    ordinals come from the caller's ordered domain (an in-process
-   argument, or the `spinal:label_domain` field metadata in the bulk
+   argument, or the `nodal:label_domain` field metadata in the bulk
    format).
 3. **Row-major sort** in declared-dimension order.
 4. **Tier decision** — rank 0 → scalar; rank ≥ 1, float-valued, full
@@ -754,10 +754,3 @@ following:
   process, value inheritance, symbols, structured units, in-place
   reshape.
 
-## 11. Naming note
-
-The project was renamed from spinal-db to nodal-db; crates, CLI and
-Python package use `nodal-db` / `nodal_db`. The `spinal:*` Arrow
-metadata keys of the [bulk format](arrow_import_format.md) were
-deliberately *not* renamed: they are frozen in format v1.0, and changing
-them would be a format break.

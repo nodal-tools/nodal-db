@@ -92,7 +92,7 @@ Design points:
 
 The [schema page](../schema.md) shows the generated table diagram.
 
-The schema is verified by `schema/smoke_test.py` (234 checks), which
+The schema is verified by `schema/smoke_test.py`, which
 includes hostile-data regressions: it plants corruptions and asserts
 that the right constraint or audit fires. Run it with the project-local
 `.venv/bin/python`; its DuckDB version must match the engine bundled in
@@ -340,8 +340,10 @@ behind the plan's seed skips.
 Canonical encodings: axes and values serialize to a pinned byte layout
 hashed with **XXH3-64, seed 0**. The hash is only an accelerator:
 deduplication narrows by hash and then compares bytes, so a hash
-collision can never attach values to the wrong axis. A value content
-hash is implemented but not yet stored. The byte layouts are pinned by
+collision can never attach values to the wrong axis. An array value's
+payload hash is stored on its row (`value_array.content_hash`, and in
+`value_array_hist`) and only narrows the skip-unchanged compare
+("Unchanged writes are skipped", above). The byte layouts are pinned by
 the vectors in
 [`conformance/encoding_vectors`](https://github.com/nodal-tools/nodal-db/tree/main/conformance/encoding_vectors)
 and
@@ -680,8 +682,8 @@ make a compaction on the commit path fail on it.
 Three legs, run through `just` (`just` is the quick gate, `just full`
 the release gate that adds the `#[ignore]`d slow tests and benchmarks):
 
-1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`, 233
-   checks): builds a demo model, exercises resolution, membership,
+1. **Schema smoke suite** (`.venv/bin/python schema/smoke_test.py`; it
+   prints its own pass count): builds a demo model, exercises resolution, membership,
    history and audits, then plants hostile-data corruptions and asserts
    that the right constraint or audit fires.
 2. **Rust suite** (`cargo test --workspace`): unit tests, integration

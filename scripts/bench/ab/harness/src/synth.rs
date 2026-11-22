@@ -594,8 +594,10 @@ enum Tier {
 }
 
 /// A replace cycle (one whole `write_parameter` commit of one entity, then
-/// CHECKPOINT) on a fresh copy of the synthetic file, 3 cycles per sample;
-/// the sample is the mean cycle. The fresh copy removes criterion's
+/// CHECKPOINT) on a fresh copy of the synthetic file, 3 cycles per sample
+/// (the mean cycle); the long tier takes 9 cycles and the median cycle,
+/// since its cycles are bimodal (~265 or ~400 ms on the compacted fixture)
+/// and a 3-cycle mean swung the A/A to 0.88. The fresh copy removes criterion's
 /// "later iterations are slower" accumulation. Checks: one commit per
 /// cycle, and the entity reads back with the last written content.
 fn cycle(dir: &Path, s: Scale, tier: Tier) -> Sample {
@@ -604,7 +606,8 @@ fn cycle(dir: &Path, s: Scale, tier: Tier) -> Sample {
     let (sn, ln, an) = names(s);
     let before = head(&db);
     let mut spans = vec![];
-    for k in 0..3usize {
+    let cycles = if matches!(tier, Tier::Long) { 9 } else { 3 };
+    for k in 0..cycles {
         let t = Instant::now();
         match tier {
             Tier::Scalar => write_scalars(&db, std::slice::from_ref(&sn), &[1e6 + k as f64]),
@@ -614,7 +617,7 @@ fn cycle(dir: &Path, s: Scale, tier: Tier) -> Sample {
         checkpoint(&db);
         spans.push(elapsed_ms(t));
     }
-    check_commits(&db, before, 3);
+    check_commits(&db, before, cycles as i64);
     let (sql, want) = match tier {
         Tier::Scalar => (
             format!(
@@ -655,21 +658,21 @@ fn cycle(dir: &Path, s: Scale, tier: Tier) -> Sample {
                 "SELECT v_float FROM read_parameter_scalar('bench_scalar', 'p_scalar') \
                  WHERE entity = '{sn}'"
             ),
-            1e6 + 2.0,
+            1e6 + (cycles - 1) as f64,
         ),
         Tier::Array => (
             format!(
                 "SELECT v_float FROM read_parameter('bench_array', 'p_series') \
                  WHERE entity = '{an}' ORDER BY idx1_ts LIMIT 1"
             ),
-            float_series(20_002)[0],
+            float_series(20_000 + cycles - 1)[0],
         ),
         Tier::Long => (
             format!(
                 "SELECT v_int::DOUBLE FROM read_parameter('bench_long', 'p_long') \
                  WHERE entity = '{ln}' ORDER BY idx1_ts LIMIT 1"
             ),
-            int_series(30_002)[0] as f64,
+            int_series(30_000 + cycles - 1)[0] as f64,
         ),
     };
     let got: f64 = with_read(&db, |c| Ok(c.query_row(&sql1, [], |r| r.get(0))?))
@@ -678,5 +681,6 @@ fn cycle(dir: &Path, s: Scale, tier: Tier) -> Sample {
         got == want1,
         &format!("read-back: the first cell is {got}, the last cycle wrote {want1}"),
     );
-    Sample::new(mean(&spans)).hash("readback", &h)
+    let ms = if matches!(tier, Tier::Long) { median(spans) } else { mean(&spans) };
+    Sample::new(ms).hash("readback", &h)
 }

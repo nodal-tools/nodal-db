@@ -434,15 +434,14 @@ check = "3 commits; the array reads back with the last cycle's content (8 760 ce
 
 [metric.wr_replace_long_cycle_ckpt]
 release_scale = "full"
-# Compacted fixture (2026-11-22): ~265 ms per cycle (was ~620 as built),
-# and bimodal: some samples take ~400 ms in either arm, so a 6-pair look
-# can sit far from 1.0 (A/A 0.884 [0.647, 1.063], 0.949, 0.995). The floor
-# only labels a FAIL within it; consider more cycles per sample.
+# Compacted fixture (2026-11-22): ~265 ms per cycle (was ~620 as built).
+# Its cycles are bimodal (~265 or ~400 ms in either arm), so a sample is
+# the median of 9 cycles (the other tiers: the mean of 3).
 layout_floor = 0.115
 class = "io"
 fixtures = ["synth"]
 scaled = true
-check = "3 commits; the long value reads back with the last cycle's content (8 760 cells + digest)"
+check = "9 commits; the long value reads back with the last cycle's content (8 760 cells + digest)"
 
 [metric.wr_unchanged_scalar_10k]
 layout_floor = 0.030

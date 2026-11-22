@@ -253,6 +253,20 @@ fn q_param(i: usize) -> String {
 /// Build the 10^5-scalar base file: parameter `p` over entities
 /// `s000000..s099999` (10 commits of 10 000, the gate's shape), then one
 /// value on `s000000` for each of the 20 parameters `q00..q19`.
+/// `compact_fixture <path>`: the arm's own core compaction of a freshly
+/// built fixture (metrics.toml `compact = true`), so the metrics measure the
+/// code on a file at its compacted state, not the open-time growth the
+/// fixture's build commits left behind (duckdb#27808; perf findings §14).
+/// The baseline sidecar is removed: the metrics copy the `.db` file only,
+/// and the cache must hold one file per fixture.
+fn compact_fixture(path: &Path) {
+    nodal_db_core::compaction::compact(path).expect("compact fixture");
+    let sidecar = nodal_db_core::compaction::baseline_path(path);
+    if sidecar.exists() {
+        std::fs::remove_file(&sidecar).expect("remove the compaction sidecar");
+    }
+}
+
 fn build_100k(path: &Path) {
     let t = Instant::now();
     init_schema_with_default(path, Some("Base")).unwrap();
@@ -476,6 +490,10 @@ fn build_big(path: &Path) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args[1].as_str();
+    if mode == "compact_fixture" {
+        compact_fixture(Path::new(&args[2]));
+        return;
+    }
     if mode == "build_100k" {
         build_100k(Path::new(&args[2]));
         return;

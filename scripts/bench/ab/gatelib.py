@@ -106,6 +106,10 @@ class Fixture:
         self.build = d.get("build")  # harness subcommand, or None (cli, ipc)
         self.scaled = bool(d.get("scaled", False))
         self.shared = bool(d.get("shared", False))  # one file for both arms
+        # compacted by the arm's own core right after the build
+        self.compact = bool(d.get("compact", False))
+        if self.compact and self.build is None:
+            raise ConfigError(f"fixture {fid}: compact needs a built database fixture")
 
 
 class Config:

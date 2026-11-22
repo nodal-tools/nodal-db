@@ -310,6 +310,13 @@ def build_fixtures(cfg, metrics, arms, work, scale):
                 env = clean_env()
                 env.update(gatelib.duckdb_env(cfg.caps.fixture_threads, cfg.caps.memory_mb))
                 subprocess.run(args, check=True, env=env, stdout=subprocess.DEVNULL)
+                if fx.compact:
+                    # Each arm compacts its own fixture with its own core
+                    # (its file has that arm's schema; another core's
+                    # compaction would refuse it), right after the build,
+                    # so both arms measure a file at its compacted state.
+                    subprocess.run([arm.binary, "compact_fixture", tmp], check=True, env=env,
+                                   stdout=subprocess.DEVNULL)
                 os.replace(tmp, path)
                 log(f"{arm.name}: fixture {fid} built in {time.time() - t0:.0f} s")
             if fx.shared:

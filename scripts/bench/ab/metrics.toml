@@ -70,24 +70,36 @@ size = 1.02
 # by each arm's own binary; `scaled` = built at the run's --quick/--full
 # scale; `shared` = built once (by the candidate) and read by both arms.
 # A fixture without `build` is the arm's own nodal-db CLI binary.
+# `compact` = after the build, the arm's own binary compacts the file with
+# that arm's core (`compact_fixture`), so the metrics measure the code on a
+# compacted file. Without it a fixture built through ~200 commits carries
+# their open-time growth (duckdb#27808: every commit+CHECKPOINT adds ~1 ms
+# to every later open), and a metric that opens it several times measures
+# the fixture's history, not the code (on 62f2603, +190 ms per checkpoint
+# cycle as built, +15-48 ms compacted). Not set on hheavy and xsrc: the
+# compaction and extract metrics measure their history-heavy input as built.
 
 [fixture.base100k]
 env = "NODAL_AB_BASE"
 build = "build_100k"
+compact = true
 
 [fixture.big]
 env = "NODAL_AB_BIG"
 build = "build_big"
+compact = true
 
 [fixture.longbig]
 env = "NODAL_AB_LONGBIG"
 build = "build_longbig"
+compact = true
 
 # The criterion gate's synthetic DB (full) or a tenth of it (quick).
 [fixture.synth]
 env = "NODAL_AB_SYNTH"
 build = "build_synth"
 scaled = true
+compact = true
 
 # compaction_size.rs's history-heavy long table (raw SQL, like that bench).
 [fixture.hheavy]
@@ -119,6 +131,7 @@ env = "NODAL_AB_CLI"
 env = "NODAL_AB_SYNTH_AXES"
 build = "build_synth_axes"
 scaled = true
+compact = true
 
 # ----------------------------------------------------------------- reads
 # Synthetic-fixture reads (the criterion gate's point and bulk groups) on

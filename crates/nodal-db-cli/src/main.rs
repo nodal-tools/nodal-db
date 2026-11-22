@@ -232,7 +232,7 @@ enum MaintainCommand {
         growth: Option<f64>,
         /// Commit count for --if-needed: compact once this many commits have
         /// landed since the last compaction, even if the file has not grown.
-        /// Default: 30, scaled up to 40 for files from about 50 MiB. 0 disables the
+        /// Default: 60, scaled up to 100 for files from about 560 MiB. 0 disables the
         /// commit count (growth only).
         #[arg(long, requires = "if_needed")]
         max_commits: Option<u64>,

@@ -61,8 +61,9 @@ on compacted 20 MiB and 96 MiB files: +51 ms after 40 commits, +108 ms
 after 100). A data-only rebuild (`COPY FROM DATABASE`) does not reset
 it. The core's compaction does, which is why `compact_if_due` has a
 commit-count backstop next to its byte-growth gate (see
-[Architecture, §8 Compaction](architecture.md#8-compaction)). Its cap,
-40 commits, is an open-time budget of about +50 ms over the compacted
+[Architecture, §8 Compaction](architecture.md#8-compaction)). Its N, 60
+commits rising to 100 on files from about 560 MiB, bounds the growth to
+about +70 ms (up to +110 ms on the largest files) over the compacted
 open. Do not remove the backstop because a file's size looks fine: size
 is not what it protects. **Re-measure trigger:** a DuckDB bump that
 includes duckdb PR #28176, which removes the growth (measured on a PR

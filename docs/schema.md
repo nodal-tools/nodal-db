@@ -87,6 +87,31 @@ The DDL files form layers, each building on the ones before:
   which keeps no payload). The table-shaped views `value_array_current`
   and `value_array_asof` show it; `value_array_asof_for` and the logical
   read surface do not.
+- **Unsigned hashes.** The `content_hash` columns of `axis`,
+  `value_array` and `value_array_hist` are `UBIGINT`. An engine without an
+  unsigned 64-bit type holds the same 64 bits as a signed `BIGINT` (two's
+  complement: a value `v ≥ 2^63` is stored as `v − 2^64`); hashes are
+  compared for equality only, never ordered. See
+  [Canonical encoding §2](dev/canonical_encoding.md).
+- **The commit log.** `commit` is append-only and immutable: `id`
+  (increasing), `timestamp` (naive UTC), `user`, `message`. Read it
+  through the stable view `commit_log`
+  ([The read surface](dev/read_surface.md#the-commit-log)).
+- **Names that are SQL keywords.** The table `commit` and the columns
+  `user`, `timestamp` and `values` are keywords in SQL. DuckDB accepts
+  most of them unquoted, other engines do not: quote them (`"commit"`,
+  `"user"`, `"timestamp"`, `"values"`).
+- **`version` is an `INTEGER`** (1, 2, … per key).
+- **Locations.** `entity_location.lat` and `lon` are decimal degrees in
+  WGS 84 (EPSG:4326), north and east positive; `alt` is metres above the
+  WGS 84 ellipsoid, as in GeoJSON. `shape` is a geometry document (for
+  example GeoJSON) the core stores but does not interpret.
+- **Reserved tables.** `run` (production provenance) has no write API
+  yet; its columns may change when one is designed. The object types
+  `commit`, `list_value`, `class_set` and `display_mode` of
+  `object_metadata_link`, and the `aggregation` methods of
+  `parameter_type` (the CF cell methods), are accepted by the schema but
+  not written by the core yet.
 - **One current row, case-insensitive names.** Hidden generated `cur_*`
   columns back unique indexes that allow exactly one current row per id
   and case-insensitive name uniqueness; they are omitted from the diagrams.

@@ -133,7 +133,9 @@ The current state of the project is visible in its
   of the test suites.
 
 Features that are planned but not yet implemented are marked as such in
-the [feature tour](features.md).
+the [feature tour](features.md). The 0.x releases are for test users:
+[Versions and compatibility](versions.md) says what a new release means
+for existing files.
 
 ## Where to go next
 

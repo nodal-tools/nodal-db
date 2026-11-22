@@ -84,8 +84,10 @@ Design points:
   `valid_to_commit`. A row of the `commit` table is the validity edge:
   every change made in one commit carries that commit's id.
 - **Scenario resolution is done in views.** Alternatives are stacked by
-  rank, and activation propagation (membership plus `realizes`
-  refinement edges) is a recursive view. Structural *resolution* lives
+  rank, and activation propagation (membership plus refinement edges,
+  `realizes_edge`: the links of the classes the core lists in the
+  `refinement_classes` property, never a naming rule) is a recursive
+  view. Structural *resolution* lives
   in SQL; value *transforms* stay in tool code.
 - **Units and CRS are expressed, never asserted**: they are carried and
   hashed with the data, never converted.

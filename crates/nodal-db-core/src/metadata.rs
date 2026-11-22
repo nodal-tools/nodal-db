@@ -1099,6 +1099,28 @@ fn unknown<T>(what: String) -> Result<Resolved<T>, DbError> {
     Err(DbError::Api(format!("metadata: no {what}")))
 }
 
+/// A lookup of `name` in `table` (narrowed by `pred`) missed: `Covered`
+/// (via [`covered_or`], naming `deleted`) when an object delete or purge of
+/// this call closed it, else the "no {unknown}" error. Used at every level a
+/// subject or value resolves through (class, parameter, alternative,
+/// entity), so a delete that cascades from any of them drops the item.
+fn missing<T>(
+    cx: &Ctx<'_>,
+    table: &str,
+    pred: &str,
+    name: &str,
+    deleted: String,
+    unknown_what: String,
+) -> Result<Resolved<T>, DbError> {
+    if closed_here(cx, table, pred, name)? {
+        covered_or(cx, deleted)
+    } else {
+        unknown(unknown_what)
+    }
+}
+
+const BY_NAME: &str = "lower(name) = lower(?)";
+
 fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static str, i64)>, DbError> {
     let named = |cx: &mut Ctx<'_>,
                  found: Option<crate::api::Found>,
@@ -1138,7 +1160,14 @@ fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static s
         },
         Subject::Entity { class, name } => {
             let Some(cid) = find_entity_class(cx.conn, class)? else {
-                return unknown(format!("class named {class:?}"));
+                return missing(
+                    cx,
+                    "entity_class",
+                    BY_NAME,
+                    class,
+                    format!("entity_class {class:?}"),
+                    format!("class named {class:?}"),
+                );
             };
             let cid = cid.noted(&mut cx.folds, "entity_class", class);
             let f = find_entity(cx.conn, cid, name)?;
@@ -1158,7 +1187,14 @@ fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static s
         }
         Subject::Parameter { class, name } => {
             let Some(cid) = find_entity_class(cx.conn, class)? else {
-                return unknown(format!("class named {class:?}"));
+                return missing(
+                    cx,
+                    "entity_class",
+                    BY_NAME,
+                    class,
+                    format!("entity_class {class:?}"),
+                    format!("class named {class:?}"),
+                );
             };
             let cid = cid.noted(&mut cx.folds, "entity_class", class);
             match find_parameter(cx.conn, cid, name)? {
@@ -1199,15 +1235,36 @@ fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static s
 fn resolve_value(cx: &mut Ctx<'_>, v: &ValueAddr, changed: &HashSet<Triple>) -> Result<Resolved<Triple>, DbError> {
     let label = format!("{}.{} / {} / {}", v.class, v.parameter, v.alternative, v.entity);
     let Some(cid) = find_entity_class(cx.conn, &v.class)? else {
-        return unknown(format!("value {label} (unknown class)"));
+        return missing(
+            cx,
+            "entity_class",
+            BY_NAME,
+            &v.class,
+            format!("value {label} (its class {:?})", v.class),
+            format!("value {label} (unknown class)"),
+        );
     };
     let cid = cid.noted(&mut cx.folds, "entity_class", &v.class);
     let Some(pd) = find_parameter(cx.conn, cid, &v.parameter)? else {
-        return unknown(format!("value {label} (unknown parameter)"));
+        return missing(
+            cx,
+            "parameter_definition",
+            &format!("entity_class_id = {cid} AND {BY_NAME}"),
+            &v.parameter,
+            format!("value {label} (its parameter {:?})", v.parameter),
+            format!("value {label} (unknown parameter)"),
+        );
     };
     let pd = pd.noted(&mut cx.folds, "parameter_definition", &v.parameter);
     let Some(alt) = find_alternative(cx.conn, &v.alternative)? else {
-        return unknown(format!("value {label} (unknown alternative)"));
+        return missing(
+            cx,
+            "alternative",
+            BY_NAME,
+            &v.alternative,
+            format!("value {label} (its alternative {:?})", v.alternative),
+            format!("value {label} (unknown alternative)"),
+        );
     };
     let alt = alt.noted(&mut cx.folds, "alternative", &v.alternative);
     let ent = match find_entity(cx.conn, cid, &v.entity)? {
@@ -1912,9 +1969,12 @@ pub(crate) fn apply_channel(
     };
     let items = call.items;
     let mut outs: Vec<Option<MetadataOutcome>> = vec![None; items.len()];
-    // Objects revised / renamed / deleted (kind, id) by item, and objects
-    // created by this call (which links may name).
+    // Objects revised / renamed / deleted (kind, id) by item.
     let mut touched: HashMap<(MetadataKind, i64), usize> = HashMap::new();
+    // Objects an item of this call created (kind, id): links may name them,
+    // but no other item may revise, rename or delete them (the row is this
+    // commit's own, so a close-out would match nothing).
+    let mut created: HashMap<(MetadataKind, i64), usize> = HashMap::new();
     // Sources and licenses a SetSourceLicenses item writes rows for.
     let mut licensed: HashMap<(MetadataKind, i64), usize> = HashMap::new();
     // Claim an existing object for item `i` before revising it: a second
@@ -1922,13 +1982,30 @@ pub(crate) fn apply_channel(
     // unique-key error.
     fn claim(
         touched: &mut HashMap<(MetadataKind, i64), usize>,
+        created: &HashMap<(MetadataKind, i64), usize>,
         key: (MetadataKind, i64),
         i: usize,
     ) -> Result<(), DbError> {
+        refuse_created(created, key, i)?;
         match touched.insert(key, i) {
             Some(j) if j != i => Err(DbError::Api(format!(
                 "metadata items {j} and {i} both revise, rename or delete the same object \
                  (resolved by id); one item per object per call"
+            ))),
+            _ => Ok(()),
+        }
+    }
+    // A second item on an object an earlier item of this call created.
+    fn refuse_created(
+        created: &HashMap<(MetadataKind, i64), usize>,
+        key: (MetadataKind, i64),
+        i: usize,
+    ) -> Result<(), DbError> {
+        match created.get(&key) {
+            Some(&j) if j != i => Err(DbError::Api(format!(
+                "metadata item {i} revises, renames or deletes the object that item {j} \
+                 creates (resolved by id); one item per object per call: create it in its \
+                 final form, or change it in a later call"
             ))),
             _ => Ok(()),
         }
@@ -1942,10 +2019,12 @@ pub(crate) fn apply_channel(
                 fields,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "source", source)? {
-                    claim(&mut touched, (MetadataKind::Source, id), i)?;
+                    claim(&mut touched, &created, (MetadataKind::Source, id), i)?;
                 }
                 let (id, e) = put_source(&mut cx, source, rename, fields)?;
-                if e != MetadataEffect::Created {
+                if e == MetadataEffect::Created {
+                    created.insert((MetadataKind::Source, id), i);
+                } else {
                     touched.insert((MetadataKind::Source, id), i);
                 }
                 outcome(i, MetadataKind::Source, id, e)
@@ -1956,10 +2035,12 @@ pub(crate) fn apply_channel(
                 fields,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "license", license)? {
-                    claim(&mut touched, (MetadataKind::License, id), i)?;
+                    claim(&mut touched, &created, (MetadataKind::License, id), i)?;
                 }
                 let (id, e) = put_license(&mut cx, license, rename, fields)?;
-                if e != MetadataEffect::Created {
+                if e == MetadataEffect::Created {
+                    created.insert((MetadataKind::License, id), i);
+                } else {
                     touched.insert((MetadataKind::License, id), i);
                 }
                 outcome(i, MetadataKind::License, id, e)
@@ -1971,21 +2052,26 @@ pub(crate) fn apply_channel(
                 iri,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "metadata_role", role)? {
-                    claim(&mut touched, (MetadataKind::Role, id), i)?;
+                    claim(&mut touched, &created, (MetadataKind::Role, id), i)?;
                 }
                 let (id, e) = put_role(&mut cx, role, rename, description, iri)?;
-                if e != MetadataEffect::Created {
+                if e == MetadataEffect::Created {
+                    created.insert((MetadataKind::Role, id), i);
+                } else {
                     touched.insert((MetadataKind::Role, id), i);
                 }
                 outcome(i, MetadataKind::Role, id, e)
             }
             MetadataChange::CreatePair { name, value } => {
                 let (id, e) = create_pair(&mut cx, name, value)?;
+                if e == MetadataEffect::Created {
+                    created.insert((MetadataKind::Pair, id), i);
+                }
                 outcome(i, MetadataKind::Pair, id, e)
             }
             MetadataChange::RevisePair { pair, value } => {
                 if let Some((id, _, _)) = find_pair(&mut cx, pair)? {
-                    claim(&mut touched, (MetadataKind::Pair, id), i)?;
+                    claim(&mut touched, &created, (MetadataKind::Pair, id), i)?;
                 }
                 let (id, e) = revise_pair(&mut cx, pair, value)?;
                 touched.insert((MetadataKind::Pair, id), i);
@@ -1998,7 +2084,7 @@ pub(crate) fn apply_channel(
                     .query_map(params![from], |r| r.get(0))?
                     .collect::<Result<_, _>>()?;
                 for id in held {
-                    claim(&mut touched, (MetadataKind::Pair, id), i)?;
+                    claim(&mut touched, &created, (MetadataKind::Pair, id), i)?;
                 }
                 let ids = rename_pair_key(&mut cx, from, to)?;
                 for id in &ids {
@@ -2079,6 +2165,7 @@ pub(crate) fn apply_channel(
                  {j} sets licenses for (resolved by id); one item per object per call"
             )));
         }
+        refuse_created(&created, (kind, id), i)?;
         if let Some(j) = touched.insert((kind, id), i) {
             return Err(DbError::Api(format!(
                 "metadata items {j} and {i} both revise, rename or delete the same object \

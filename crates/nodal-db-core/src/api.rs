@@ -597,7 +597,7 @@ pub fn commit_change_set(
         // resolved-id repeat of the name-level guard in `prepare_structural`,
         // and the real guarantee: it also sees cascade children and names
         // the prepare check cannot match (class_param_rename_PLAN §4.5 d).
-        let revised: HashSet<(ObjectKind, i64)> = report
+        let mut revised: HashSet<(ObjectKind, i64)> = report
             .structural
             .iter()
             .filter_map(|o| {
@@ -611,8 +611,9 @@ pub fn commit_change_set(
                 };
                 // A rename or description revision writes a successor row
                 // (valid_from = this commit), entities included
-                // (`RenameEntity`; activation and membership outcomes carry
-                // their own kinds and never reach here).
+                // (`RenameEntity`). Activation, membership and ranking
+                // outcomes carry their own kinds: what their rows reference
+                // is added below from `touches.row_refs`.
                 let wrote_row = matches!(
                     o.effect,
                     StructuralEffect::Created
@@ -622,12 +623,19 @@ pub fn commit_change_set(
                 wrote_row.then_some((kind, o.object_id))
             })
             .collect();
+        // An activation, membership or ranking row this call wrote points
+        // at its entity (group and member), scenario and alternative; a
+        // delete whose cascade reaches one of them (a class delete, an
+        // element entity cascading into its N-D container, a delete by
+        // element tuple) would leave that row live over a closed object.
+        revised.extend(touches.row_refs.iter().copied());
         for p in &prepared_object_deletes {
             if let Some((kind, id)) = reaches_created(conn, &p.key, &revised)? {
                 return Err(DbError::Api(format!(
                     "object-delete key {} ({} {}) reaches the {} id {id} that a \
-                     structural change of this call creates or revises: create, \
-                     rename or revise an object and delete it in separate calls",
+                     structural change of this call creates or revises (or sets \
+                     an activation, membership or scenario ranking on): create, \
+                     rename, revise or set an object and delete it in separate calls",
                     p.key_index,
                     p.key.kind.tag(),
                     object_target_label(&p.key),
@@ -791,6 +799,10 @@ pub fn commit_change_set(
         // leaves a template-stamped database unconverged: its certified
         // content hash goes, so the next apply replans and meets the
         // removed-locally blocker (purge plan §3.8, V-B2).
+        // A class or parameter rename (`allow_on_template`) deliberately
+        // keeps the hash: the renamed-away blocker (OD7) guards a CHANGED
+        // template, and a re-apply of the same template short-circuits
+        // harmlessly (re-creating the old name is what that blocker stops).
         // Read from the rows, not the outcomes: only a pre-call class or
         // definition whose id has no live row left counts.
         let deleted_vocabulary = !prepared_object_deletes.is_empty()

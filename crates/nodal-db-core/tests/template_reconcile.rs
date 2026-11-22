@@ -1533,9 +1533,20 @@ fn an_element_rename_recreates_the_0d_seed_and_skips_the_n_d_seed() {
     // template reports the skips again.
     assert!(!out.converged);
     assert!(!hash_stamped(&db));
+    // A repeat apply changes nothing: it reports the skips but writes no
+    // identity-stamp commit (a no-op is no commit).
+    let head = qs(&db, "SELECT max(id)::VARCHAR FROM commit");
     let again = apply_seeded(&db, "2");
     assert!(!again.converged);
+    assert!(again.no_op, "{:?}", again.plan.actions);
+    assert!(again.commits.is_empty());
+    assert_eq!(qs(&db, "SELECT max(id)::VARCHAR FROM commit"), head);
     assert_eq!(again.plan.skipped.len(), out.plan.skipped.len());
+    assert!(
+        again.warnings.iter().any(|w| w.contains("withheld")),
+        "{:?}",
+        again.warnings
+    );
     assert!(!hash_stamped(&db));
 }
 

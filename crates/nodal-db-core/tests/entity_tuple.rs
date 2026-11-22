@@ -8,15 +8,15 @@ use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, commit_structural};
+use nodal_db_core::api::{commit_change_set, commit_changes, commit_structural, ChangeSet};
 use nodal_db_core::entity_tuple::test_hooks;
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::export::export;
 use nodal_db_core::template::{parse_str, validate};
 use nodal_db_core::types::{
-    ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, StructuralChange as SC,
-    StructuralEffect as SE, WarningKind, WriteOptions, WriteReport,
+    ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, PurgeRequest, PurgeScope,
+    StructuralChange as SC, StructuralEffect as SE, WarningKind, WriteOptions, WriteReport,
 };
 use nodal_db_core::verbs::ensure_entity;
 
@@ -281,6 +281,31 @@ fn a_delete_and_a_re_create_of_a_tuple_in_one_call_is_refused() {
     );
     let m = api_err(r);
     assert!(m.contains("already exist as \"u1__n1\""), "{m}");
+    // The error is not prefixed with a verb's name (`commit_changes` is
+    // not `ensure_entity`) and points at the rename.
+    assert!(!m.contains("ensure_entity"), "{m}");
+    assert!(m.contains("use RenameEntity"), "{m}");
+    // A purge of the class in the same call (a "true replace") does not
+    // free the tuple either: the structural changes run first.
+    let r = commit_change_set(
+        &db,
+        ChangeSet {
+            structural: vec![nd("unit__node", Some("again"), &["u1", "n1"])],
+            purges: vec![PurgeRequest::new(PurgeScope::Entities {
+                class: Some("unit__node".into()),
+            })],
+            ..Default::default()
+        },
+        "t",
+        "m",
+        WriteOptions::default(),
+    );
+    let m = api_err(r);
+    assert!(
+        m.contains("already exist as \"u1__n1\"") && m.contains("use RenameEntity"),
+        "{m}"
+    );
+    assert_eq!(live_nd(&db), 1, "nothing written");
 }
 
 #[test]

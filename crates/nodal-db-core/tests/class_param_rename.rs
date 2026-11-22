@@ -1879,6 +1879,48 @@ fn reconcile_blocks_a_declared_class_renamed_away() {
     );
 }
 
+/// The asymmetry is intended (OD7 targets a CHANGED template): an allowed
+/// class or parameter rename keeps the certified `template_content_hash`,
+/// so the same template still short-circuits (with no commit), while an
+/// object delete of declared vocabulary withdraws it (V-B2).
+#[test]
+fn a_rename_keeps_the_template_content_hash_a_delete_clears_it() {
+    let hash = |db: &Path| {
+        qopt(
+            db,
+            "SELECT max(value) FROM database_property \
+             WHERE cur_key = 'template_content_hash'",
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh_db(&dir);
+    let v = "classes:\n  - name: node\n    parameters:\n      - {name: demand, types: [{kind: float}]}\n  - name: unit\n";
+    apply_t(&db, &tmpl("1", v)).unwrap();
+    let stamped = hash(&db).expect("a converged apply stamps the hash");
+    cs(
+        &db,
+        vec![
+            allowed(ren_class("unit", "plant")),
+            allowed(ren_param("node", "demand", "load")),
+        ],
+    );
+    assert_eq!(hash(&db), Some(stamped), "a rename keeps the hash");
+    let before = commits(&db);
+    let out = apply_t(&db, &tmpl("1", v)).unwrap();
+    assert!(out.no_op, "the same template short-circuits after a rename");
+    assert_eq!(commits(&db), before, "and commits nothing");
+    // An object delete of a declared class withdraws the hash.
+    call(
+        &db,
+        vec![],
+        vec![],
+        vec![],
+        vec![okey(ObjectKind::Class, None, "plant")],
+    )
+    .unwrap();
+    assert_eq!(hash(&db), None, "a vocabulary delete clears the hash");
+}
+
 #[test]
 fn reconcile_blocks_a_declared_parameter_renamed_away() {
     let dir = tempfile::tempdir().unwrap();

@@ -235,7 +235,8 @@ fn every_write_to_an_older_file_is_refused_and_writes_nothing() {
 
 /// A file in the pre-0.6 layout (its schema version in the `metadata` table,
 /// no `database_property`) is named by its own version on every path that
-/// gates on it — a write, compaction, extract and erase — never refused with
+/// gates on it — a write, compaction, extract, erase, `db_identity` and
+/// `template export` — never refused with
 /// a raw "table does not exist" catalog error.
 #[test]
 fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
@@ -253,7 +254,8 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
          UPDATE metadata SET value = '{PRE}' WHERE name = 'schema_version'; \
          DROP TABLE database_property; \
          DROP TABLE value_metadata_link; DROP TABLE object_metadata_link; \
-         DROP TABLE source_license;"
+         DROP TABLE source_license; DROP TABLE source; DROP TABLE license; \
+         DROP TABLE metadata_pair; DROP TABLE metadata_role;"
     ))
     .unwrap();
     conn.close().unwrap();
@@ -273,6 +275,16 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
     named(
         "database_properties",
         nodal_db_core::api::database_properties(&db).map(|_| ()),
+    );
+    named(
+        "db_identity",
+        nodal_db_core::api::db_identity(&db).map(|_| ()),
+    );
+    // `template export` reads the metadata pool's tables (it exports the
+    // vocabulary's links), so it gates like a read of them.
+    named(
+        "template export",
+        nodal_db_core::template::export(&db).map(|_| ()),
     );
     named(
         "preview_object_deletes",

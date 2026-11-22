@@ -90,7 +90,12 @@ fn refuse_duplicate_tuples(v: &DbVocab) -> Result<(), DbError> {
 /// for anything the v1 IR cannot represent. One per-operation RO connection.
 pub fn export(db: &Path) -> Result<(Template, Vec<String>), DbError> {
     let mut warnings = Vec::new();
-    let vocab = with_read_plain(db, |conn| read_vocab(conn, &mut warnings))?;
+    let vocab = with_read_plain(db, |conn| {
+        // An old-layout file is named by its version, never refused with a
+        // raw catalog error from a table it lacks.
+        crate::property::require_current(conn)?;
+        read_vocab(conn, &mut warnings)
+    })?;
     let t = template_of(&vocab, &mut warnings)?;
     Ok((t, warnings))
 }

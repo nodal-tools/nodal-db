@@ -626,7 +626,11 @@ database; parameter names are unique within their class.
   the old name stops with a message naming the rename (rename it back,
   or have the template rename it with a `rename_class` /
   `rename_parameter` hint) instead of creating a second, empty object
-  under the old name; re-applying the same template does nothing. A
+  under the old name; re-applying the same template does nothing. (So a
+  rename keeps the template's certified content hash, while a purge or
+  object delete of vocabulary withdraws it: the same template still
+  counts as applied after a rename, and re-applying it would otherwise
+  only re-create the old name.) A
   changed template also writes its own descriptions back over edited
   ones. A history-free extract forgets the old names, after which a
   changed template creates the old name anew.
@@ -724,9 +728,11 @@ stored string.
   | no name, elements free, derived name free | created |
 
   Elements are resolved first, so an unknown element is reported before
-  anything else. Deleting an N-D entity and creating its tuple again in
-  one call is refused (deletes run after the structural changes): use
-  two calls. Uniqueness is enforced by nodal-db's writer, not by an
+  anything else. Deleting or purging an N-D entity and creating its
+  tuple again in one call is refused, also under a new name (deletes and
+  purges run after the structural changes, so the tuple is still held):
+  to give an N-D entity a new name, use `RenameEntity`; to replace it,
+  use two calls. Uniqueness is enforced by nodal-db's writer, not by an
   index; files written before the rule (or by direct SQL) may hold
   duplicates. The advisory `audit_entity_tuple_dup` view lists them
   (class, element names, the holders' ids and names). They are left as
@@ -821,7 +827,10 @@ keeps only its own row and identity (an N-D entity's elements, a
 parameter's types and defaults, a list's members); everything else under
 it closes unless the call states it too. So `entities` plus a
 re-import keeps the re-imported entities and closes their unstated
-values, activations and memberships. Three limits:
+values, activations and memberships. A re-import cannot move an N-D
+entity's element tuple to a new name: the old holder is still live when
+the create runs, so the create is refused (see [N-D entities: elements, names and
+duplicates](#n-d-entities-elements-names-and-duplicates)); use `RenameEntity`. Three limits:
 
 - A spared entity keeps its attachments: its location, its parameter
   units, its metadata links and its annotations. A call cannot re-state
@@ -1066,7 +1075,8 @@ source's license list and its own links close with it; a license is
 also restricted by the sources published under it. A role is deleted
 only when nothing uses it (rename it instead). One save may name an
 object in one revise, rename or delete item only; links may name an
-object the same save creates.
+object the same save creates, but no other item may revise, rename or
+delete it (create it in its final form, or change it in a later save).
 
 Links never block deleting the object they hang on: deleting an entity,
 class, parameter, alternative or scenario closes its links (and the

@@ -295,6 +295,7 @@ fn apply_one(
         }
     };
     touches.note(conn, change, object_id)?;
+    touches.note_row_refs(conn, change, object_id, effect)?;
     report.structural.push(StructuralOutcome {
         change_index,
         kind,
@@ -326,6 +327,15 @@ pub(crate) struct CallTouches {
     pub(crate) memberships: HashSet<(i64, i64, i64)>,
     /// The scenarios a `SetScenarioAlternatives` ranks.
     pub(crate) rankings: HashSet<i64>,
+    /// The objects a row this call wrote for a `SetEntityActivation`,
+    /// `SetMembership` or `SetScenarioAlternatives` references: the entity
+    /// (group and member), the scenario and the alternative. Always filled,
+    /// purge or not: an object delete of this call that reaches one of them
+    /// is refused (the same-commit guard would leave that row live and
+    /// pointing at a closed object). The outcomes cannot say this: an
+    /// activation outcome carries only the entity, a membership outcome
+    /// only the group.
+    pub(crate) row_refs: HashSet<(ObjectKind, i64)>,
 }
 
 impl CallTouches {
@@ -334,6 +344,60 @@ impl CallTouches {
             enabled,
             ..Default::default()
         }
+    }
+
+    /// Record in [`Self::row_refs`] the objects a row `change` wrote (with
+    /// effect `effect` and outcome id `object_id`) references. `NoOp` and
+    /// `Cleared` leave no row of this call live, so they record nothing.
+    pub(crate) fn note_row_refs(
+        &mut self,
+        conn: &Connection,
+        change: &StructuralChange,
+        object_id: i64,
+        effect: StructuralEffect,
+    ) -> Result<(), DbError> {
+        if matches!(effect, StructuralEffect::NoOp | StructuralEffect::Cleared) {
+            return Ok(());
+        }
+        let entity = |a: &EntityAddr| -> Result<Option<i64>, DbError> {
+            match lookup_entity_class(conn, &a.class)? {
+                Some(cid) => lookup_entity(conn, cid, &a.name),
+                None => Ok(None),
+            }
+        };
+        match change {
+            StructuralChange::SetScenarioAlternatives { alternatives, .. } => {
+                self.row_refs.insert((ObjectKind::Scenario, object_id));
+                for a in alternatives {
+                    if let Some(a) = lookup_alternative(conn, a)? {
+                        self.row_refs.insert((ObjectKind::Alternative, a));
+                    }
+                }
+            }
+            StructuralChange::SetEntityActivation { alternative, .. } => {
+                self.row_refs.insert((ObjectKind::Entity, object_id));
+                if let Some(a) = lookup_alternative(conn, alternative)? {
+                    self.row_refs.insert((ObjectKind::Alternative, a));
+                }
+            }
+            StructuralChange::SetMembership {
+                group,
+                member,
+                alternative,
+                ..
+            } => {
+                for e in [entity(group)?, entity(member)?].into_iter().flatten() {
+                    self.row_refs.insert((ObjectKind::Entity, e));
+                }
+                if let Some(n) = alternative {
+                    if let Some(a) = lookup_alternative(conn, n)? {
+                        self.row_refs.insert((ObjectKind::Alternative, a));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Record what `change` (applied, with outcome id `object_id`) names.
@@ -996,6 +1060,13 @@ pub(crate) fn rewrite_name_documents(
 /// object that existed before the call (one this call created cannot be
 /// template-declared), when the database is stamped with a template. Reads
 /// `template_name` only when there is something to refuse.
+///
+/// An allowed rename keeps `template_content_hash`, unlike an object delete
+/// or purge of vocabulary (which clears it, V-B2): the same template
+/// re-applied still short-circuits as converged, which is harmless (it would
+/// otherwise only re-create the old name, the second empty object the
+/// renamed-away blocker exists to stop), and a changed template replans and
+/// meets that blocker.
 pub(crate) fn refuse_template_stamped_renames(
     conn: &Connection,
     calls: &CallRenames,
@@ -2185,14 +2256,18 @@ pub(crate) fn apply_create_entity(
         }
         if !holders.is_empty() {
             let names: Vec<String> = holders.iter().map(|h| format!("{:?}", h.name)).collect();
+            // No verb prefix: this is reached from `commit_change_set`'s
+            // `CreateEntity` as well as from the `ensure_entity` verb.
             return Err(DbError::Api(format!(
-                "ensure_entity: {class}: elements [{}] already exist as {}; {}",
+                "class {class:?}: elements [{}] already exist as {}; {}",
                 elements.join(", "),
                 names.join(", "),
                 if derived {
                     "address it by that name (duplicate element tuples are not allowed)"
                 } else {
-                    "duplicate element tuples are not allowed"
+                    "duplicate element tuples are not allowed (to give that entity a new \
+                     name, use RenameEntity: a delete or purge of it in the same call does \
+                     not free its elements)"
                 }
             )));
         }
@@ -2200,7 +2275,7 @@ pub(crate) fn apply_create_entity(
             if let Some(f) = find_entity(conn, s.cid, &effective_name)? {
                 let have = element_names(conn, f.id)?;
                 return Err(DbError::Api(format!(
-                    "ensure_entity: {class}: the derived name {effective_name:?} is taken by \
+                    "class {class:?}: the derived name {effective_name:?} is taken by \
                      an entity with elements [{}]; give an explicit name",
                     have.join(", ")
                 )));
@@ -2477,9 +2552,10 @@ pub(crate) fn prepare_structural(
                 }
                 ObjectKind::Entity => {
                     // Element-tuple-addressed (`ObjectRef::Elements`) entity
-                    // deletes are intentionally NOT matched by this name-level
-                    // guard — that residual self-heals in resolution (a D5-class
-                    // edge, like the value-write/delete edges).
+                    // deletes are not matched by this name-level guard: the
+                    // resolved-id guard in `commit_changes` (`reaches_created`
+                    // over `CallTouches::row_refs`) refuses them, and so every
+                    // cascade this name-level check cannot see.
                     if let Some(cls) = &key.class {
                         del_entities.insert((fold(cls), fold(n)));
                     }

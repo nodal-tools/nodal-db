@@ -1137,6 +1137,14 @@ pub fn apply(
     if pre_plan.actions.is_empty() {
         out.no_op = out.commits.is_empty();
         out.converged = pre_plan.skipped.is_empty();
+        if !out.converged {
+            out.warnings.push(format!(
+                "template_content_hash withheld: {} declared item(s) skipped — nothing \
+                 changed, so nothing was committed; the template will replan until it \
+                 converges",
+                pre_plan.skipped.len()
+            ));
+        }
         out.plan = pre_plan;
         return Ok(out);
     }
@@ -2197,13 +2205,18 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
         });
     }
 
-    // --- identity stamps. Also re-emitted when skips exist while a hash is
-    // stamped: the executor then CLOSES the stale hash (a certified hash on
-    // unconverged state is the one lie the short-circuit would believe). ---
+    // --- identity stamps. The hash the stamp should leave: the template's
+    // own when nothing was skipped, none when anything was (convergence
+    // withheld). So a stamped hash with skips re-emits the stamp, and the
+    // executor CLOSES the stale hash (a certified hash on unconverged state
+    // is the one lie the short-circuit would believe); a repeat apply whose
+    // skips persist, with name and version stamped and the hash already
+    // withheld, plans nothing and commits nothing (a no-op is no commit). ---
+    let desired_hash = p.skipped.is_empty().then_some(chk.hash.as_str());
     let identity_dirty = vocab.template_name.as_deref() != Some(t.template.name.as_str())
         || vocab.template_version.as_deref() != Some(t.template.version.as_str())
-        || vocab.template_content_hash.as_deref() != Some(chk.hash.as_str());
-    if identity_dirty || (!p.skipped.is_empty() && vocab.template_content_hash.is_some()) {
+        || vocab.template_content_hash.as_deref() != desired_hash;
+    if identity_dirty {
         p.actions.push(Action::StampIdentity {
             name: t.template.name.clone(),
             version: t.template.version.clone(),

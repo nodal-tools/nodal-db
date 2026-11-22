@@ -646,7 +646,12 @@ CHECK (clause_no >= 0)` naming the clause the term belongs to:
         - `range_end` (`i16` LE).
 
 Clauses and terms MUST be emitted in these orders, so a position has one
-canonical serialization.
+canonical serialization. The order of the clauses and of the terms within
+a clause is part of the canonical form and of the hash: `WD1-5;M1-4` and
+`M1-4;WD1-5` mean the same set of times but are different axes (the
+encoding never sorts or deduplicates). That a clause's terms are
+consecutive in `term_no` (§7.7.2) is a writer rule; the DDL does not check
+it.
 
 7.7.4. **Ordinal is constant per `pos` (a writer invariant).** The schema
 stores `ordinal` on every term row but does **not** constrain it to be

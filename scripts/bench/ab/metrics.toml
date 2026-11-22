@@ -338,7 +338,9 @@ check = "3 commits; the 300 new (entity, value) rows read back (count + digest)"
 note = "ms per value; 3 commits of 100 new scalar entities on the 10^5 file"
 
 [metric.wr_scalar_1_replace_100k]
-layout_floor = 0.030
+# Recalibrated on compacted fixtures (2026-11-22, A/A salts 1-3: 0.953,
+# 1.006, 0.963).
+layout_floor = 0.045
 class = "io"
 fixtures = ["base100k"]
 check = "3 commits; the 3 replaced values read back (count + digest)"
@@ -413,7 +415,9 @@ note = "gate arm semantics: RO head poll + commit (the save_api feature is never
 
 [metric.wr_replace_scalar_cycle_ckpt]
 release_scale = "full"
-layout_floor = 0.015
+# Compacted fixture (2026-11-22): ~130 ms per cycle (was ~470 as built);
+# A/A 0.992, 1.010, 0.981.
+layout_floor = 0.020
 class = "io"
 fixtures = ["synth"]
 scaled = true
@@ -430,7 +434,11 @@ check = "3 commits; the array reads back with the last cycle's content (8 760 ce
 
 [metric.wr_replace_long_cycle_ckpt]
 release_scale = "full"
-layout_floor = 0.010
+# Compacted fixture (2026-11-22): ~265 ms per cycle (was ~620 as built),
+# and bimodal: some samples take ~400 ms in either arm, so a 6-pair look
+# can sit far from 1.0 (A/A 0.884 [0.647, 1.063], 0.949, 0.995). The floor
+# only labels a FAIL within it; consider more cycles per sample.
+layout_floor = 0.115
 class = "io"
 fixtures = ["synth"]
 scaled = true

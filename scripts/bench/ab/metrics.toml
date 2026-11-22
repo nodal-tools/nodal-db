@@ -436,8 +436,10 @@ check = "3 commits; the array reads back with the last cycle's content (8 760 ce
 release_scale = "full"
 # Compacted fixture (2026-11-22): ~265 ms per cycle (was ~620 as built).
 # Its cycles are bimodal (~265 or ~400 ms in either arm), so a sample is
-# the median of 9 cycles (the other tiers: the mean of 3).
-layout_floor = 0.115
+# the median of 9 cycles (the other tiers: the mean of 3). A/A on 950c9ac
+# (salts 1-3): 1.002 [0.961, 1.044], 0.970 [0.882, 1.013], 0.983 [0.883,
+# 1.022], each decided at 6 pairs.
+layout_floor = 0.030
 class = "io"
 fixtures = ["synth"]
 scaled = true

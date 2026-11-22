@@ -586,7 +586,7 @@ The CLI verb is `nodal-db maintain compact`; Python has
 **When to compact: `compact_if_due`.** Two costs grow between
 compactions. The file accretes dead blocks (every commit's checkpoint
 strands some), and every read-write commit-checkpoint cycle adds a
-roughly constant cost (≈0.9 ms) to every *later* open of the file, while
+roughly constant cost (≈1.2 ms on the 0.6 schema) to every *later* open of the file, while
 barely moving its byte size. `compaction::compact_if_due(db, policy,
 head)` gates on both, cheapest first:
 
@@ -594,10 +594,17 @@ head)` gates on both, cheapest first:
 2. the byte gate: the file is at least `growth_factor` (3.0) times its
    size right after the last compaction ⇒ compact;
 3. the commit-count backstop: at least `N` commits since the last
-   compaction ⇒ compact. `N` is 50 for files up to ≈68 MiB and grows with
-   the size to 200 (`size_scaled_max_commits`: the amortized optimum
-   √(2·C/g) with the repack cost C estimated from the size), so huge
-   files, whose repack takes seconds, compact less often. A head below
+   compaction ⇒ compact. `N` is 60 for files up to ≈180 MiB and grows with
+   the size to 100 from ≈560 MiB (`size_scaled_max_commits`: the amortized
+   optimum √(2·C/g) with the repack cost C estimated from the size and g =
+   2.4 ms per commit for a save's two opens, clamped to 60..100). The
+   per-open growth does not shrink with the file size (≈+63 ms after 50
+   commits and +108 ms after 100 on both a 20 MiB and a 96 MiB file), so
+   the clamp sets the open-time budget: at most ≈+70 ms (N = 60) to
+   ≈+110 ms (N = 100) over the compacted open. The owner chose this middle
+   setting (2026-11-22) over a tighter budget (N = 30..40, ≈+50 ms),
+   trading somewhat slower opens for fewer multi-second repacks of large
+   files. A head below
    the recorded commit means the baseline belongs to another file
    (restored or replaced) ⇒ compact. The backstop works around a DuckDB
    catalog growth issue

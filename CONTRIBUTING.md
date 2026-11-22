@@ -214,7 +214,13 @@ ratios on one host**, never against absolute milliseconds recorded on
 another machine. The millisecond numbers in `benches/RESULTS.md` and the
 criterion benches (`just bench`) are information only. The gate builds the code before your change
 (BASE) and with it (CAND), runs both on the same fixtures, interleaved, and
-compares their times.
+compares their times. Each arm builds its fixtures with its own core and
+then compacts the database fixtures with that same core
+(`compact = true` in `metrics.toml`). Without that, a fixture built
+through hundreds of commits carries their open-time growth
+(duckdb#27808), and a metric that opens it several times measures the
+fixture's history instead of the code. The compaction and extract inputs
+(`hheavy`, `xsrc`) are left as built.
 
 **When to run it.** Before merging a branch that touches the write path,
 the read macros, the schema or its indexes, SQL in the core, compaction or

@@ -49,15 +49,26 @@ a native file).
 and the storage-format check in `schema/smoke_test.py`.
 
 **Related: open time grows with commits.** Each read-write
-commit-and-checkpoint cycle adds a roughly constant cost (about 0.9 ms)
-to every later open of the file, while barely changing its size. This is
-a DuckDB catalog growth issue tied to foreign keys
-([duckdb/duckdb#27808](https://github.com/duckdb/duckdb/issues/27808)).
-Compaction resets it, which is why `compact_if_due` has a commit-count
-backstop next to its byte-growth gate (see
-[Architecture, §8 Compaction](architecture.md#8-compaction)). Do not
-remove the backstop because a file's size looks fine: size is not what
-it protects.
+commit-and-checkpoint cycle adds a roughly constant cost to every later
+open of the file, while barely changing its size. This is a DuckDB
+catalog growth issue tied to foreign keys
+([duckdb/duckdb#27808](https://github.com/duckdb/duckdb/issues/27808)):
+it scales with the number of foreign keys to the written table and does
+not depend on the file size. On the 0.6 schema (75 foreign keys to
+`commit`) it is about 1.1–1.25 ms per commit per open (about 0.9 ms on
+0.4), and it grows faster than linearly after about 50 commits (measured
+on compacted 20 MiB and 96 MiB files: +51 ms after 40 commits, +108 ms
+after 100). A data-only rebuild (`COPY FROM DATABASE`) does not reset
+it. The core's compaction does, which is why `compact_if_due` has a
+commit-count backstop next to its byte-growth gate (see
+[Architecture, §8 Compaction](architecture.md#8-compaction)). Its N, 60
+commits rising to 100 on files from about 560 MiB, bounds the growth to
+about +70 ms (up to +110 ms on the largest files) over the compacted
+open. Do not remove the backstop because a file's size looks fine: size
+is not what it protects. **Re-measure trigger:** a DuckDB bump that
+includes duckdb PR #28176, which removes the growth (measured on a PR
+build: flat over 300 cycles). Then the backstop can go back to the byte
+gate alone, or to a much larger N.
 
 ## 2. Array payloads are read through `array_id`, and ids stay odd
 

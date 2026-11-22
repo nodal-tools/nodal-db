@@ -300,6 +300,23 @@ class ReleaseSuite(unittest.TestCase):
                                            "release_scale": "full"},
                                     "sz": d}})
 
+    def test_fixture_compact_flag(self):
+        cfg = g.Config({"classes": CLASSES, "fixture": {
+            "a": {"env": "A", "build": "b", "compact": True}, "c": {"env": "C", "build": "b"}},
+            "metric": {}})
+        self.assertTrue(cfg.fixtures["a"].compact)
+        self.assertFalse(cfg.fixtures["c"].compact)
+        with self.assertRaises(g.ConfigError):
+            g.Config({"classes": CLASSES, "fixture": {"cli": {"env": "X", "compact": True}},
+                      "metric": {}})
+        # The gate's own config: the database fixtures are compacted after
+        # the build, the compaction and extract inputs are measured as built.
+        real = g.load_config(os.path.join(HERE, "..", "metrics.toml"))
+        compacted = sorted(f for f, fx in real.fixtures.items() if fx.compact)
+        self.assertEqual(compacted, ["base100k", "big", "longbig", "synth", "synth_axes"])
+        for f in ("hheavy", "xsrc"):
+            self.assertFalse(real.fixtures[f].compact, f)
+
     def test_size_from_validation(self):
         self.assertEqual(self.cfg(size_from="mt").metrics["sz"].size_from, "mt")
         for bad in ({"size_from": "nope"}, {"size_from": "sz"},

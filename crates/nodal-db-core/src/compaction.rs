@@ -179,7 +179,9 @@ pub enum CompactionTrigger {
 ///
 /// **Why a commit count.** Every RW load→checkpoint cycle adds a roughly
 /// constant cost to every later open of the file (engine-FK catalog growth,
-/// `commit_fixed_cost_FINDINGS.md`: ≈0.85-0.9 ms per commit per open), and
+/// `commit_fixed_cost_FINDINGS.md`: ≈0.85-0.9 ms per commit per open on the
+/// 0.4 schema, ≈1.1-1.25 ms on the 0.6 schema with its extra foreign keys to
+/// `commit`), and
 /// that growth barely moves the byte size, so the 3× byte gate almost never
 /// trips on it. A repack resets it. The backstop works around a DuckDB
 /// catalog growth issue, <https://github.com/duckdb/duckdb/issues/27808>;
@@ -190,8 +192,8 @@ pub enum CommitBackstop {
     Off,
     /// A fixed `N`; `Fixed(0)` is the same as [`CommitBackstop::Off`].
     Fixed(u64),
-    /// `N` scaled with the file size ([`size_scaled_max_commits`]): 50 for
-    /// editor-sized files, up to 200 for very large ones.
+    /// `N` scaled with the file size ([`size_scaled_max_commits`]): 60 for
+    /// files up to ≈180 MiB, up to 100 from ≈560 MiB.
     #[default]
     SizeScaled,
 }
@@ -224,27 +226,38 @@ impl Default for CompactionPolicy {
     }
 }
 
-/// Floor of the size-scaled commit backstop (plan D5: N = 50, owner-approved).
-pub const COMMIT_BACKSTOP_FLOOR: u64 = 50;
-/// Cap of the size-scaled commit backstop (plan C9).
-pub const COMMIT_BACKSTOP_CAP: u64 = 200;
+/// Floor of the size-scaled commit backstop (owner, 2026-11-22: the middle
+/// setting, fewer repacks than a pure open-time budget would need). Every
+/// commit+checkpoint cycle adds ≈1.1–1.25 ms to every later open on the 0.6
+/// schema, independent of the file size (measured on compacted 20 MiB and
+/// 96 MiB files, DuckDB 2.0.0: +51 ms after 40 cycles, +63 after 50, +82
+/// after 75, +108 after 100; faster than linearly beyond). At 60 an open is
+/// at most ≈+70 ms over its compacted time.
+pub const COMMIT_BACKSTOP_FLOOR: u64 = 60;
+/// Cap of the size-scaled commit backstop: at most ≈+110 ms per open from
+/// the growth, for files of ≈560 MiB and up, whose repack takes 10 s or
+/// more. Re-measure when the bundled DuckDB has the fix of duckdb#27808
+/// (PR #28176, which removes the growth).
+pub const COMMIT_BACKSTOP_CAP: u64 = 100;
 
-/// The size-scaled `N` (plan C9/D5): the amortized-cost optimum
-/// `N* = sqrt(2·C_est / g)`, clamped to
-/// [`COMMIT_BACKSTOP_FLOOR`]..=[`COMMIT_BACKSTOP_CAP`].
+/// The size-scaled `N`: the amortized-cost optimum `N* = sqrt(2·C_est / g)`,
+/// clamped to [`COMMIT_BACKSTOP_FLOOR`]..=[`COMMIT_BACKSTOP_CAP`].
 ///
-/// - `g` = 1.75 ms: the per-commit open-cost growth an editor save pays (two
-///   opens per save: the RW commit and the RO reload);
+/// - `g` = 2.4 ms: the per-commit open-cost growth an editor save pays (two
+///   opens per save, the RW commit and the RO reload, at ≈1.2 ms each on the
+///   0.6 schema; it was 1.75 ms on the 0.4 schema with fewer foreign keys to
+///   `commit`);
 /// - `C_est` = 0.85 s + 19.7 ms/MiB: the repack's cost, fitted through the
 ///   measured 25 MiB (1.34 s) and 419 MiB (9.1 s) points.
 ///
-/// Result: 50 up to ≈68 MiB, 57 at 100 MiB, ≈102 at 419 MiB, capped at 200
-/// from ≈1.7 GiB. A pure function of the size the gate already `stat`s: no
-/// extra I/O.
+/// Result: 60 up to ≈180 MiB, 75 at 300 MiB, 87 at 419 MiB, capped at 100
+/// from ≈560 MiB. The worst-case open-time growth is therefore ≈+70 ms (the
+/// floor) to ≈+110 ms (the cap) over the compacted open. A pure function of
+/// the size the gate already `stat`s: no extra I/O.
 pub fn size_scaled_max_commits(bytes: u64) -> u64 {
     let mib = bytes as f64 / (1024.0 * 1024.0);
     let c_est_ms = 850.0 + 19.7 * mib;
-    let n = (2.0 * c_est_ms / 1.75).sqrt().round() as u64;
+    let n = (2.0 * c_est_ms / 2.4).sqrt().round() as u64;
     n.clamp(COMMIT_BACKSTOP_FLOOR, COMMIT_BACKSTOP_CAP)
 }
 
@@ -1163,18 +1176,20 @@ mod tests {
         assert_eq!(parse_baseline("junk=1\nbytes=1\ncommit=1"), None);
     }
 
-    /// Plan test 22: the size-scaled N is the floor for editor-sized files,
-    /// grows past ≈68 MiB, is ≈100 at results scale, and is capped.
+    /// Plan test 22: the size-scaled N is the floor (60) up to ≈180 MiB,
+    /// grows with the size, and is capped at 100 from ≈560 MiB.
     #[test]
     fn size_scaled_n_floor_growth_and_cap() {
         const MIB: u64 = 1024 * 1024;
-        for mib in [0, 1, 16, 25, 64] {
-            assert_eq!(size_scaled_max_commits(mib * MIB), 50, "{mib} MiB");
+        for mib in [0, 1, 25, 100, 175] {
+            assert_eq!(size_scaled_max_commits(mib * MIB), 60, "{mib} MiB");
         }
-        assert_eq!(size_scaled_max_commits(100 * MIB), 57);
-        assert_eq!(size_scaled_max_commits(419 * MIB), 102);
-        assert_eq!(size_scaled_max_commits(2048 * MIB), 200);
-        assert_eq!(size_scaled_max_commits(u64::MAX), 200);
+        assert_eq!(size_scaled_max_commits(300 * MIB), 75);
+        assert_eq!(size_scaled_max_commits(419 * MIB), 87);
+        for mib in [570, 1024, 2048] {
+            assert_eq!(size_scaled_max_commits(mib * MIB), 100, "{mib} MiB");
+        }
+        assert_eq!(size_scaled_max_commits(u64::MAX), 100);
         let mut prev = 0;
         for mib in (0..4096).step_by(16) {
             let n = size_scaled_max_commits(mib * MIB);
@@ -1187,6 +1202,7 @@ mod tests {
         assert_eq!(failure_backoff_commits(50), 10);
         assert_eq!(failure_backoff_commits(10), 5);
         assert_eq!(failure_backoff_commits(200), 40);
+        assert_eq!(failure_backoff_commits(60), 12);
     }
 
     /// R3: [`check_catalog`] fires when the generated-column map claims a column

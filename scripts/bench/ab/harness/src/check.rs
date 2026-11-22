@@ -196,6 +196,9 @@ pub struct RowHash {
 }
 
 fn logical(name: &str) -> bool {
+    // A result column's name (SQL identifiers of the read surface), not a
+    // database name: engine rule 8's name fold does not apply.
+    #[allow(clippy::disallowed_methods)]
     let n = name.to_ascii_lowercase();
     !(n == "id" || n.ends_with("_id") || n.ends_with("_commit") || n == "version")
 }

@@ -12,7 +12,9 @@ different question:
 
 A file also records the build that created it in the `created_by`
 property (`SELECT value FROM database_property_current WHERE key =
-'created_by'`), for example `nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)`.
+'created_by'`), for example `nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)` for a
+release build, or `nodal-db-core 0.1.0 (dev)` for a build from a source
+checkout.
 Include it in bug reports.
 
 ## Schema version

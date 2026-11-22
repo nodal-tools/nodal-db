@@ -355,6 +355,19 @@ whole pipeline catches a slowdown or a wrong result.
 ## PR checklist
 To be defined with the first release process.
 
+## Release builds
+A release or CI build of the CLI or the Python wheel sets
+`NODAL_DB_GIT_COMMIT` to the commit it builds, so every file it creates
+records it in the `created_by` property:
+
+```bash
+NODAL_DB_GIT_COMMIT=$(git rev-parse --short=12 HEAD) cargo build --release -p nodal-db-cli
+NODAL_DB_GIT_COMMIT=$(git rev-parse --short=12 HEAD) maturin build --release   # in crates/nodal-db-py
+```
+
+Without it (every local build) the value is `nodal-db-core <version> (dev)`.
+The core's `build.rs` only reads the variable; it never runs git.
+
 ## Docs
 The documentation site is built with [Zensical](https://zensical.org) from
 `docs/` (config: `zensical.toml`) and published to GitHub Pages by

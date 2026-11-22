@@ -166,13 +166,14 @@ pub fn apply_schema_from(conn: &Connection, dir: &Path) -> Result<(), DbError> {
 
 /// The `created_by` core property of a file this build creates (init, and
 /// the history-free extract, which makes a new file): the core package and
-/// its version, and the git commit it was built from when known
-/// (`nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)`). Compaction keeps the
+/// its version, and the git commit of a release build
+/// (`nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)`), or `(dev)` for a build that
+/// did not set `NODAL_DB_GIT_COMMIT` (`build.rs`). Compaction keeps the
 /// original's value: it rebuilds a file, it does not create one.
 pub fn created_by() -> String {
     let base = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
     match env!("NODAL_DB_GIT_COMMIT") {
-        "" => base.to_string(),
+        "" => format!("{base} (dev)"),
         commit => format!("{base} (git {commit})"),
     }
 }

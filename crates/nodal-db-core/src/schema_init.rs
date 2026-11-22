@@ -1,13 +1,18 @@
 //! Apply `schema/*.sql` in numbered order into a connection — the `build.py`
 //! algorithm, in Rust (rust_implementation_plan.md Part 3 `schema_init`).
 //!
-//! Used by every DB-backed test fixture and (later) the CLI `init` verb. The
-//! schema directory is resolved from `CARGO_MANIFEST_DIR` for now; a
-//! `--schema-dir` override / `include_str!` embedding is a later decision
-//! (plan Q4) and deliberately not blocked on here — a directory read is fine.
+//! Every run-time path (the CLI `init` verb, the Python skin's `init`,
+//! compaction's and extract's fresh temp, every test fixture) applies the
+//! schema embedded at compile time ([`EMBEDDED_SCHEMA`]): a released binary or
+//! wheel has no source tree, so nothing at run time may read `schema/` from
+//! disk. The directory functions ([`init_schema_from_dir`],
+//! [`apply_schema_from`], [`schema_dir`]) are dev overrides and test helpers
+//! only; [`disk_schema_reads`] counts their use so a test can prove a run-time
+//! path never touches the source tree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use duckdb::Connection;
 
@@ -89,9 +94,25 @@ pub static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
     ),
 ];
 
+/// How many times this process resolved or read the schema from disk
+/// ([`schema_dir`], [`apply_schema_from`], the directory init functions).
+static DISK_SCHEMA_READS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of disk schema reads so far in this process. A run-time path
+/// (init, compaction, extract, the read-surface refresh) must leave it
+/// unchanged: a released artifact has no `schema/` directory (guarded by
+/// `tests/embedded_schema_runtime.rs`).
+#[doc(hidden)]
+pub fn disk_schema_reads() -> usize {
+    DISK_SCHEMA_READS.load(Ordering::Relaxed)
+}
+
 /// The repo's `schema/` directory, resolved relative to this crate:
-/// `crates/nodal-db-core` → repo root → `schema`.
+/// `crates/nodal-db-core` → repo root → `schema`. A compile-time source-tree
+/// path: for dev overrides and tests only, never a run-time path (it does
+/// not exist next to a released binary or wheel).
 pub fn schema_dir() -> PathBuf {
+    DISK_SCHEMA_READS.fetch_add(1, Ordering::Relaxed);
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -104,6 +125,7 @@ pub fn schema_dir() -> PathBuf {
 /// glob `[0-9]*.sql`): only files whose name starts with an ASCII digit, so
 /// `build.py`/`smoke_test.py` and helpers are skipped.
 fn numbered_sql_files(dir: &Path) -> Result<Vec<PathBuf>, DbError> {
+    DISK_SCHEMA_READS.fetch_add(1, Ordering::Relaxed);
     let read = fs::read_dir(dir).map_err(|source| DbError::SchemaDir {
         path: dir.display().to_string(),
         source,
@@ -158,10 +180,10 @@ fn seed_default_alternative(conn: &Connection, name: &str) -> Result<(), DbError
     Ok(())
 }
 
-/// Build a fresh database at `db_path` and apply the full schema (from the
-/// crate-resolved `schema_dir()`). Opens read-write, applies, closes — the
-/// `init` primitive tests and the CLI share. Seeds NO alternative (decision D3;
-/// back-compat shim over `init_schema_with_default(.., None)`).
+/// Build a fresh database at `db_path` and apply the full embedded schema
+/// ([`EMBEDDED_SCHEMA`]). Opens read-write, applies, closes — the `init`
+/// primitive of compaction, extract and the tests. Seeds NO alternative
+/// (decision D3; shim over `init_schema_with_default(.., None)`).
 pub fn init_schema(db_path: &Path) -> Result<(), DbError> {
     init_schema_with_default(db_path, None)
 }
@@ -188,7 +210,7 @@ pub fn init_schema_with_default(
     db_path: &Path,
     default_alternative: Option<&str>,
 ) -> Result<(), DbError> {
-    init_schema_from_dir_with_default(db_path, &schema_dir(), default_alternative)
+    init_schema_from_sources_with_default(db_path, EMBEDDED_SCHEMA, default_alternative)
 }
 
 /// As [`init_schema_from_dir`], with the optional D3 default-alternative seed.

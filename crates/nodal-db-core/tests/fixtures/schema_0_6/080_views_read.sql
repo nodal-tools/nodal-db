@@ -1,0 +1,839 @@
+-- 080_views_read.sql — the unified read surface: axis rendering, the
+-- canonical logical-long shape over all three tiers (VMP Part 3 "The read
+-- surface unifies the tiers"; VMP Part 6 canonical bulk read), and the
+-- effective-unit view (Decision 9).
+--
+-- Reworked after the DDL critique (F4): the array decode is zip-unnest
+-- (one pass, no per-cell list_extract), and value_rows is split into
+-- rank-specialized branches so scalar reads render no axis and rank-1
+-- reads render one dimension instead of four. Constant filters on the
+-- branch discriminators (tier, axis2_id) let the optimizer prune whole
+-- branches of the UNION ALL.
+
+-- ---------------------------------------------------------------------------
+-- Axis rendering (axis_position_cost_PLAN; docs/dev/engine_rules.md §7).
+-- Read paths never expand a parametric axis: a cell's coordinate is
+-- computed from its own position with the scalar macros below, and stored
+-- (child-table) positions are joined only for the axes current values
+-- reference. Expanding every axis and joining the expansion made every
+-- read pay for every axis in the file (axis_position joined five times in
+-- value_rows, hash-built five times whatever the read touched).
+--
+-- The parametric arithmetic, ONE definition: axis_position, value_rows,
+-- read_parameter all call these macros, and encoding.rs mirrors them
+-- (roundtrip_duckdb.rs pins the pair bit-for-bit). Each position is
+-- computed independently from the start (no accumulation): calendar months
+-- are applied once (Jan 31 + 2 months = Mar 31). Macro arguments keep
+-- their types, so INTEGER positions times INTEGER months stay INTEGER, as
+-- in the expansion this replaced. The step_months = 0 branch drops only
+-- `+ to_months(0)`, the identity on every timestamp (bit-identical; the
+-- smoke suite checks it); it saves ~35 % of the arithmetic of the common
+-- fixed-step axis.
+-- @surface: internal
+CREATE MACRO axis_param_ts(start_ts, step_months, step_micros, pos) AS
+  CASE WHEN step_months = 0 THEN start_ts + to_microseconds(step_micros * pos)
+       ELSE start_ts + to_months(step_months * pos) + to_microseconds(step_micros * pos) END;
+-- @surface: internal
+CREATE MACRO axis_param_num(start_int, step_int, pos) AS start_int + step_int * pos;
+-- coord = p_start_dbl + p_step_dbl*pos (THE expression the writer uses to
+-- test bit-exact regularity — parametric-first, VMP Part 4 §3.3)
+-- @surface: internal
+CREATE MACRO axis_param_coord(start_dbl, step_dbl, pos) AS start_dbl + step_dbl * pos;
+
+-- One row per parametric axis, with its kind as flags. A rendering helper,
+-- not a user surface.
+-- @surface: internal
+CREATE VIEW axis_parametric AS
+SELECT id AS axis_id, kind, length,
+       (kind = 'datetime') AS is_datetime, (kind = 'integer') AS is_integer, (kind = 'float') AS is_float,
+       p_start_ts, p_step_months, p_step_micros, p_start_int, p_step_int, p_start_dbl, p_step_dbl
+FROM axis
+WHERE (kind = 'datetime' AND p_start_ts IS NOT NULL)
+   OR (kind = 'integer'  AND p_start_int IS NOT NULL)
+   OR (kind = 'float'    AND p_start_dbl IS NOT NULL);
+
+-- Stored (child-table) positions of every axis. The six legs are written
+-- twice: here, and filtered in axis_position_stored_in_use below. The
+-- single-text spellings (an axis-id list argument, or a filter on this
+-- view) were measured and rejected: on 500 stored axes the list forms fell
+-- apart (4+ s array reads) and the filtered view let common_subplan
+-- materialize the whole unfiltered union. tests/axis_render_equality.rs
+-- compares both copies against the frozen pre-change rendering, so drift
+-- between them fails a test.
+-- @surface: internal
+CREATE VIEW axis_position_stored AS
+-- materialized (irregular) datetime
+SELECT a.id AS axis_id, a.kind, d.pos, d.pos AS ordinal, d.ts, NULL::TIMESTAMP AS end_ts, NULL::BIGINT AS num,
+       NULL::VARCHAR AS label, NULL::DOUBLE AS years_presented, NULL::DOUBLE AS coord
+FROM axis a JOIN axis_datetime d ON d.axis_id = a.id
+WHERE a.kind = 'datetime' AND a.p_start_ts IS NULL
+UNION ALL
+-- materialized (irregular) integer (deviation D4)
+SELECT a.id, a.kind, i.pos, i.pos, NULL, NULL, i.num, NULL, NULL, NULL
+FROM axis a JOIN axis_integer i ON i.axis_id = a.id
+WHERE a.kind = 'integer' AND a.p_start_int IS NULL
+UNION ALL
+-- periods: explicit stored [start, end) bounds (critique #10)
+SELECT a.id, a.kind, p.pos, p.pos, p.start_ts, p.end_ts, NULL, NULL, p.years_presented, NULL
+FROM axis a JOIN axis_period p ON p.axis_id = a.id
+UNION ALL
+-- labels: stored ordinal, scoped to the axis (GDX anti-lesson)
+SELECT a.id, a.kind, l.pos, l.ordinal, NULL, NULL, NULL, l.label, NULL, NULL
+FROM axis a JOIN axis_label l ON l.axis_id = a.id
+UNION ALL
+-- time patterns: terms of one position render as one unioned pattern text
+SELECT a.id, a.kind, t.pos, any_value(t.ordinal), NULL, NULL, NULL,
+       string_agg(t.unit || t.range_start || '-' || t.range_end, ',' ORDER BY t.term_no), NULL, NULL
+FROM axis a JOIN axis_time_pattern t ON t.axis_id = a.id
+GROUP BY a.id, a.kind, t.pos
+UNION ALL
+-- materialized (irregular) float
+SELECT a.id, a.kind, f.pos, f.pos, NULL, NULL, NULL, NULL, NULL, f.coord
+FROM axis a JOIN axis_float f ON f.axis_id = a.id
+WHERE a.kind = 'float' AND a.p_start_dbl IS NULL;
+
+-- Stored positions of the axes that CURRENT value rows reference; with
+-- pd_id, only that parameter's rows (NULL = every parameter). The filter
+-- sits on the axis scan AND on the child-table scan of each leg, with the
+-- axis set computed inside the macro (distinct 4-tuples first, then a
+-- 4-element unnest; no join below the unnest). Cost per call: one scan of
+-- the long and array tiers' key columns (O(current long rows)), plus the
+-- stored positions of the axes in use.
+-- @surface: internal
+CREATE MACRO axis_position_stored_in_use(pd_id) AS TABLE
+WITH ax AS (
+  SELECT DISTINCT a AS axis_id FROM (
+    SELECT unnest([axis1_id, axis2_id, axis3_id, axis4_id]) AS a FROM (
+      SELECT DISTINCT axis1_id, axis2_id, axis3_id, axis4_id FROM value_long
+      WHERE valid_to_commit IS NULL AND (pd_id IS NULL OR parameter_definition_id = pd_id)
+      UNION
+      SELECT DISTINCT axis1_id, axis2_id, axis3_id, axis4_id FROM value_array
+      WHERE pd_id IS NULL OR parameter_definition_id = pd_id
+      -- -1 (no axis) keeps the set non-empty: an empty set reaches the
+      -- child-table scans as no filter at all, and they start reading
+      -- (a scalar parameter, an unknown name)
+      UNION
+      SELECT -1, NULL, NULL, NULL))
+  WHERE a IS NOT NULL
+)
+SELECT a.id AS axis_id, a.kind, d.pos, d.pos AS ordinal, d.ts, NULL::TIMESTAMP AS end_ts, NULL::BIGINT AS num,
+       NULL::VARCHAR AS label, NULL::DOUBLE AS years_presented, NULL::DOUBLE AS coord
+FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
+JOIN (SELECT * FROM axis_datetime WHERE axis_id IN (SELECT axis_id FROM ax)) d ON d.axis_id = a.id
+WHERE a.kind = 'datetime' AND a.p_start_ts IS NULL
+UNION ALL
+SELECT a.id, a.kind, i.pos, i.pos, NULL, NULL, i.num, NULL, NULL, NULL
+FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
+JOIN (SELECT * FROM axis_integer WHERE axis_id IN (SELECT axis_id FROM ax)) i ON i.axis_id = a.id
+WHERE a.kind = 'integer' AND a.p_start_int IS NULL
+UNION ALL
+SELECT a.id, a.kind, p.pos, p.pos, p.start_ts, p.end_ts, NULL, NULL, p.years_presented, NULL
+FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
+JOIN (SELECT * FROM axis_period WHERE axis_id IN (SELECT axis_id FROM ax)) p ON p.axis_id = a.id
+UNION ALL
+SELECT a.id, a.kind, l.pos, l.ordinal, NULL, NULL, NULL, l.label, NULL, NULL
+FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
+JOIN (SELECT * FROM axis_label WHERE axis_id IN (SELECT axis_id FROM ax)) l ON l.axis_id = a.id
+UNION ALL
+SELECT a.id, a.kind, t.pos, any_value(t.ordinal), NULL, NULL, NULL,
+       string_agg(t.unit || t.range_start || '-' || t.range_end, ',' ORDER BY t.term_no), NULL, NULL
+FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
+JOIN (SELECT * FROM axis_time_pattern WHERE axis_id IN (SELECT axis_id FROM ax)) t ON t.axis_id = a.id
+GROUP BY a.id, a.kind, t.pos
+UNION ALL
+SELECT a.id, a.kind, f.pos, f.pos, NULL, NULL, NULL, NULL, NULL, f.coord
+FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
+JOIN (SELECT * FROM axis_float WHERE axis_id IN (SELECT axis_id FROM ax)) f ON f.axis_id = a.id
+WHERE a.kind = 'float' AND a.p_start_dbl IS NULL;
+
+-- One row per (axis, position), for audits, extract and users: every
+-- parametric axis expanded (through the macros above) UNION ALL every
+-- stored position. pos = physical slot (0-based); ordinal = semantic order
+-- (equals pos for sortable kinds — axes are stored monotonic, CF rule).
+-- Read paths do not join this view (engine_rules §7): its cost grows with
+-- every axis in the file. unnest(range(...)) in the SELECT list, not a
+-- lateral subquery — the lateral form measured ~5x slower per evaluation
+-- (critique F4 rework).
+-- @surface: stable
+CREATE VIEW axis_position AS
+SELECT x.axis_id, x.kind, x.pos, x.pos AS ordinal,
+       CASE WHEN x.is_datetime THEN axis_param_ts(x.p_start_ts, x.p_step_months, x.p_step_micros, x.pos) END AS ts,
+       NULL::TIMESTAMP AS end_ts,
+       CASE WHEN x.is_integer THEN axis_param_num(x.p_start_int, x.p_step_int, x.pos) END AS num,
+       NULL::VARCHAR AS label, NULL::DOUBLE AS years_presented,
+       CASE WHEN x.is_float THEN axis_param_coord(x.p_start_dbl, x.p_step_dbl, x.pos) END AS coord
+FROM (SELECT ap.*, unnest(range(ap.length))::INTEGER AS pos FROM axis_parametric ap) x
+UNION ALL
+SELECT * FROM axis_position_stored;
+
+-- Array tier decoded to cells: row-major flat index -> per-dimension
+-- positions (rank is metadata over flattened storage — VMP Part 3).
+-- Zip-unnest form (critique F4a): the payload and range(len) unnest side by
+-- side in one SELECT, so the cell value arrives with its flat position and no
+-- per-cell list_extract runs (measured ~4x faster than vals[flat_pos + 1]).
+-- One branch over BOTH payload columns: exactly one of values/values_int is
+-- populated (the XOR CHECK), and the NULL one unnests as NULL padding beside
+-- the other, so float and int rows decode in the same pass.
+-- Narrow-first self-join: `k` resolves the keys without touching the list
+-- columns; `p` fetches the payload by the single-column key array_id. A
+-- selective outer filter (one value's triple) then reaches the payload scan
+-- as an IN filter on array_id, which DuckDB serves by an index scan instead
+-- of scanning the list data of the whole table.
+-- @surface: internal
+CREATE VIEW value_array_cells AS
+SELECT entity_id, parameter_definition_id, alternative_id,
+       axis1_id, axis2_id, axis3_id, axis4_id,
+       (flat_pos // (n2 * n3 * n4))::INTEGER        AS i1_pos,
+       ((flat_pos // (n3 * n4)) % n2)::INTEGER      AS i2_pos,
+       ((flat_pos // n4) % n3)::INTEGER             AS i3_pos,
+       (flat_pos % n4)::INTEGER                     AS i4_pos,
+       CASE WHEN is_float THEN 'float' ELSE 'int' END AS value_kind,
+       vf                                           AS v_float,
+       vi                                           AS v_int
+FROM (
+  SELECT k.entity_id, k.parameter_definition_id, k.alternative_id,
+         k.axis1_id, k.axis2_id, k.axis3_id, k.axis4_id,
+         coalesce(a2.length, 1) AS n2,
+         coalesce(a3.length, 1) AS n3,
+         coalesce(a4.length, 1) AS n4,
+         p.values IS NOT NULL AS is_float,
+         unnest(p.values) AS vf,
+         unnest(p.values_int) AS vi,
+         unnest(range(coalesce(len(p.values), len(p.values_int)))) AS flat_pos
+  FROM value_array k
+  JOIN value_array p ON p.array_id = k.array_id
+  LEFT JOIN axis a2 ON a2.id = k.axis2_id
+  LEFT JOIN axis a3 ON a3.id = k.axis3_id
+  LEFT JOIN axis a4 ON a4.id = k.axis4_id
+);
+
+-- The tier-unifying cell view: current rows of all three tiers in one
+-- logical long shape keyed by (triple, axis ids, positions). Tier choice is
+-- invisible to readers (VMP Part 3); the straddling fix (critique #8) —
+-- a parameter split across array and long tiers reads as one relation.
+-- The long branch carries the full VMP Part 2 scalar-kind set including
+-- date_time and duration (critique F9).
+-- @surface: stable
+CREATE VIEW value_cells AS
+SELECT entity_id, parameter_definition_id, alternative_id, 'scalar' AS tier,
+       value_kind,
+       NULL::BIGINT AS axis1_id, NULL::BIGINT AS axis2_id,
+       NULL::BIGINT AS axis3_id, NULL::BIGINT AS axis4_id,
+       0::INTEGER AS i1_pos, 0::INTEGER AS i2_pos, 0::INTEGER AS i3_pos, 0::INTEGER AS i4_pos,
+       v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros
+FROM value_scalar WHERE valid_to_commit IS NULL
+UNION ALL
+SELECT entity_id, parameter_definition_id, alternative_id, 'long',
+       value_kind, axis1_id, axis2_id, axis3_id, axis4_id,
+       i1_pos, i2_pos, i3_pos, i4_pos,
+       v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros
+FROM value_long WHERE valid_to_commit IS NULL
+UNION ALL
+SELECT entity_id, parameter_definition_id, alternative_id, 'array',
+       value_kind, axis1_id, axis2_id, axis3_id, axis4_id,
+       i1_pos, i2_pos, i3_pos, i4_pos,
+       v_float, v_int, NULL, NULL, NULL, NULL, NULL
+FROM value_array_cells;
+
+-- Fully rendered long rows: cells with their coordinates per dimension.
+-- idxN_text carries the native text of label/time_pattern positions (NULL
+-- for sortable kinds — clients render timestamps/integers from the typed
+-- idxN_ts/idxN_num columns; the previous uniform ts::VARCHAR rendering cost
+-- ~4.8 s alone on an 8.76M-cell read). Typed columns carry the native
+-- index values; idxN_ordinal the semantic sort key.
+-- Rendering (engine_rules §7): a parametric dimension joins its one
+-- axis_parametric row and computes the coordinate from the cell's position
+-- (axis_param_*); the ON-clause range reproduces the expansion's
+-- range(length), so an out-of-range or negative position renders NULL and
+-- the row is kept. A stored dimension joins `ms`, the stored positions of
+-- the axes current values reference, evaluated ONCE per query (MATERIALIZED;
+-- it holds no outer-filtered table, so outer filters still reach the tier
+-- scans). At most one side matches: a parametric axis has no stored rows,
+-- a stored axis no axis_parametric row. LEFT JOINs, so a corrupt axis
+-- renders NULL and is caught by audit_axis_integrity /
+-- audit_position_range, never dropped.
+-- Cost: a call scans the long and array tiers' key columns once (the in-use
+-- set; O(current long rows)) and hash-builds the stored positions of every
+-- axis in use, not only those of the rows it returns. A view cannot see the
+-- caller's filter: point reads go through read_value / read_values /
+-- value_rows_for, bulk reads through read_parameter (parameter-scoped).
+-- Rank-specialized branches (critique F4b): the scalar branch performs no
+-- axis joins at all, the rank-1 branch renders one dimension, and only
+-- rank >= 2 rows pay the four-way rendering. The branch predicates (tier,
+-- axis2_id) are pushed into the tier scans, so a query that only touches
+-- one shape scans only that shape.
+-- Stated non-goal (VMP Part 3): this view cannot push predicates into LIST
+-- cells — engines wanting raw speed use the client library's bulk reader
+-- (or the read_parameter_dense macro below). Point reads of array values
+-- go through read_value / read_values / value_rows_for (rendered, below),
+-- read_parameter_dense or value_cells, which fetch the payload by
+-- array_id; this view's rank branches keep a full scan of the array payload
+-- even for a point read.
+-- @surface: stable
+CREATE VIEW value_rows AS
+WITH ms AS MATERIALIZED (SELECT * FROM axis_position_stored_in_use(NULL))
+SELECT * FROM (
+  -- rank 0: scalars, no axis machinery
+  SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
+         c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
+         NULL::VARCHAR AS idx1_text, NULL::TIMESTAMP AS idx1_ts, NULL::TIMESTAMP AS idx1_end_ts,
+         NULL::BIGINT AS idx1_num, NULL::INTEGER AS idx1_ordinal, NULL::DOUBLE AS idx1_coord,
+         NULL::VARCHAR AS idx2_text, NULL::TIMESTAMP AS idx2_ts, NULL::TIMESTAMP AS idx2_end_ts,
+         NULL::BIGINT AS idx2_num, NULL::INTEGER AS idx2_ordinal, NULL::DOUBLE AS idx2_coord,
+         NULL::VARCHAR AS idx3_text, NULL::TIMESTAMP AS idx3_ts, NULL::TIMESTAMP AS idx3_end_ts,
+         NULL::BIGINT AS idx3_num, NULL::INTEGER AS idx3_ordinal, NULL::DOUBLE AS idx3_coord,
+         NULL::VARCHAR AS idx4_text, NULL::TIMESTAMP AS idx4_ts, NULL::TIMESTAMP AS idx4_end_ts,
+         NULL::BIGINT AS idx4_num, NULL::INTEGER AS idx4_ordinal, NULL::DOUBLE AS idx4_coord,
+         c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
+  FROM value_cells c
+  WHERE c.tier = 'scalar'
+  UNION ALL
+  -- rank 1: one dimension rendered
+  SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
+         c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
+         m1.label AS idx1_text,
+         CASE WHEN a1.is_datetime THEN axis_param_ts(a1.p_start_ts, a1.p_step_months, a1.p_step_micros, c.i1_pos) ELSE m1.ts END AS idx1_ts,
+         m1.end_ts AS idx1_end_ts,
+         CASE WHEN a1.is_integer THEN axis_param_num(a1.p_start_int, a1.p_step_int, c.i1_pos) ELSE m1.num END AS idx1_num,
+         CASE WHEN a1.axis_id IS NOT NULL THEN c.i1_pos ELSE m1.ordinal END AS idx1_ordinal,
+         CASE WHEN a1.is_float THEN axis_param_coord(a1.p_start_dbl, a1.p_step_dbl, c.i1_pos) ELSE m1.coord END AS idx1_coord,
+         NULL::VARCHAR AS idx2_text, NULL::TIMESTAMP AS idx2_ts, NULL::TIMESTAMP AS idx2_end_ts,
+         NULL::BIGINT AS idx2_num, NULL::INTEGER AS idx2_ordinal, NULL::DOUBLE AS idx2_coord,
+         NULL::VARCHAR AS idx3_text, NULL::TIMESTAMP AS idx3_ts, NULL::TIMESTAMP AS idx3_end_ts,
+         NULL::BIGINT AS idx3_num, NULL::INTEGER AS idx3_ordinal, NULL::DOUBLE AS idx3_coord,
+         NULL::VARCHAR AS idx4_text, NULL::TIMESTAMP AS idx4_ts, NULL::TIMESTAMP AS idx4_end_ts,
+         NULL::BIGINT AS idx4_num, NULL::INTEGER AS idx4_ordinal, NULL::DOUBLE AS idx4_coord,
+         c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
+  FROM value_cells c
+  LEFT JOIN axis_parametric a1 ON a1.axis_id = c.axis1_id AND c.i1_pos >= 0 AND c.i1_pos < a1.length
+  LEFT JOIN ms m1 ON m1.axis_id = c.axis1_id AND m1.pos = c.i1_pos
+  WHERE c.tier <> 'scalar' AND c.axis2_id IS NULL
+  UNION ALL
+  -- rank 2-4: full four-way rendering
+  SELECT c.entity_id, c.parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
+         c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
+         m1.label AS idx1_text,
+         CASE WHEN a1.is_datetime THEN axis_param_ts(a1.p_start_ts, a1.p_step_months, a1.p_step_micros, c.i1_pos) ELSE m1.ts END AS idx1_ts,
+         m1.end_ts AS idx1_end_ts,
+         CASE WHEN a1.is_integer THEN axis_param_num(a1.p_start_int, a1.p_step_int, c.i1_pos) ELSE m1.num END AS idx1_num,
+         CASE WHEN a1.axis_id IS NOT NULL THEN c.i1_pos ELSE m1.ordinal END AS idx1_ordinal,
+         CASE WHEN a1.is_float THEN axis_param_coord(a1.p_start_dbl, a1.p_step_dbl, c.i1_pos) ELSE m1.coord END AS idx1_coord,
+         m2.label AS idx2_text,
+         CASE WHEN a2.is_datetime THEN axis_param_ts(a2.p_start_ts, a2.p_step_months, a2.p_step_micros, c.i2_pos) ELSE m2.ts END AS idx2_ts,
+         m2.end_ts AS idx2_end_ts,
+         CASE WHEN a2.is_integer THEN axis_param_num(a2.p_start_int, a2.p_step_int, c.i2_pos) ELSE m2.num END AS idx2_num,
+         CASE WHEN a2.axis_id IS NOT NULL THEN c.i2_pos ELSE m2.ordinal END AS idx2_ordinal,
+         CASE WHEN a2.is_float THEN axis_param_coord(a2.p_start_dbl, a2.p_step_dbl, c.i2_pos) ELSE m2.coord END AS idx2_coord,
+         m3.label AS idx3_text,
+         CASE WHEN a3.is_datetime THEN axis_param_ts(a3.p_start_ts, a3.p_step_months, a3.p_step_micros, c.i3_pos) ELSE m3.ts END AS idx3_ts,
+         m3.end_ts AS idx3_end_ts,
+         CASE WHEN a3.is_integer THEN axis_param_num(a3.p_start_int, a3.p_step_int, c.i3_pos) ELSE m3.num END AS idx3_num,
+         CASE WHEN a3.axis_id IS NOT NULL THEN c.i3_pos ELSE m3.ordinal END AS idx3_ordinal,
+         CASE WHEN a3.is_float THEN axis_param_coord(a3.p_start_dbl, a3.p_step_dbl, c.i3_pos) ELSE m3.coord END AS idx3_coord,
+         m4.label AS idx4_text,
+         CASE WHEN a4.is_datetime THEN axis_param_ts(a4.p_start_ts, a4.p_step_months, a4.p_step_micros, c.i4_pos) ELSE m4.ts END AS idx4_ts,
+         m4.end_ts AS idx4_end_ts,
+         CASE WHEN a4.is_integer THEN axis_param_num(a4.p_start_int, a4.p_step_int, c.i4_pos) ELSE m4.num END AS idx4_num,
+         CASE WHEN a4.axis_id IS NOT NULL THEN c.i4_pos ELSE m4.ordinal END AS idx4_ordinal,
+         CASE WHEN a4.is_float THEN axis_param_coord(a4.p_start_dbl, a4.p_step_dbl, c.i4_pos) ELSE m4.coord END AS idx4_coord,
+         c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
+  FROM value_cells c
+  LEFT JOIN axis_parametric a1 ON a1.axis_id = c.axis1_id AND c.i1_pos >= 0 AND c.i1_pos < a1.length
+  LEFT JOIN ms m1 ON m1.axis_id = c.axis1_id AND m1.pos = c.i1_pos
+  LEFT JOIN axis_parametric a2 ON a2.axis_id = c.axis2_id AND c.i2_pos >= 0 AND c.i2_pos < a2.length
+  LEFT JOIN ms m2 ON m2.axis_id = c.axis2_id AND m2.pos = c.i2_pos
+  LEFT JOIN axis_parametric a3 ON a3.axis_id = c.axis3_id AND c.i3_pos >= 0 AND c.i3_pos < a3.length
+  LEFT JOIN ms m3 ON m3.axis_id = c.axis3_id AND m3.pos = c.i3_pos
+  LEFT JOIN axis_parametric a4 ON a4.axis_id = c.axis4_id AND c.i4_pos >= 0 AND c.i4_pos < a4.length
+  LEFT JOIN ms m4 ON m4.axis_id = c.axis4_id AND m4.pos = c.i4_pos
+  WHERE c.axis2_id IS NOT NULL
+);
+
+-- Canonical bulk read: one logical long shape regardless of
+-- tier mix. SQL macros cannot emit per-parameter dimension-name columns —
+-- the client library renames idxN to the declared dimension names from
+-- parameter_type_dimension (canonical result shape note in ddl_sketch.md).
+-- D2(a)/D11 (template_ir_plan §3.3, D11 2026-09-18): under a declared
+-- allowed-type SET, every writer-produced value row persists the member it
+-- bound to (`parameter_type_id` on the payload tables), so bound rows are
+-- EXACTLY labelable — the client resolves the row's member and renames idxN
+-- to that member's declared dimension names. The blanket rename by
+-- definition alone remains well-defined only when all current members agree
+-- on the name vector per (rank, index-kind signature). For NULL-binding rows
+-- only (pre-D11 data, out-of-contract writers) member attribution is
+-- unrecoverable — axes carry kinds, not names; clients may disambiguate such
+-- rows by rank and the populated index-kind columns (idxN_ts/idxN_num/
+-- idxN_text). These read macros do not yet expose the binding column; a
+-- later change MAY add it.
+-- The definition is resolved first; every tier scan is filtered by it
+-- (axis_position_cost_PLAN D3/D4: joining the id to value_rows above the
+-- tier union never reached the array tier, so every call unnested every
+-- array in the file, even for a scalar parameter). Scalars come straight
+-- from value_scalar; the long and array tiers of the one parameter render
+-- in one four-dimension branch, through the arithmetic blocks for
+-- parametric axes and the parameter's own stored positions
+-- (axis_position_stored_in_use(pd); -1 for an unknown name: no axes).
+-- Array payloads are fetched like the point-read macros' (engine_rules §2
+-- and §6): a SEMI join on one scalar key list, only payload-scan columns
+-- through the UNNEST, axis lengths looked up after it. That makes this
+-- macro immune to the DuckDB 2.0 dict-cache bug (§5), which value_rows'
+-- array leg still has. Row order is unspecified.
+-- The period end bounds (idx1_end_ts .. idx4_end_ts, the `[start, end)` of
+-- a period axis; NULL for every other kind) are appended after the value
+-- columns, so the order of the earlier columns is unchanged
+-- (read_surface_contract_PLAN A-D3).
+-- @surface: stable
+CREATE MACRO read_parameter(class_name, parameter_name) AS TABLE
+WITH pd_pick AS (
+  SELECT pd.id
+  FROM parameter_definition pd
+  JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL
+  WHERE pd.valid_to_commit IS NULL
+    AND lower(ec.name) = lower(class_name) AND lower(pd.name) = lower(parameter_name)
+), cells AS (
+  -- the long and array tiers of the one parameter
+  SELECT vl.entity_id, vl.alternative_id, 'long' AS tier, vl.value_kind,
+         vl.axis1_id, vl.axis2_id, vl.axis3_id, vl.axis4_id, vl.i1_pos, vl.i2_pos, vl.i3_pos, vl.i4_pos,
+         vl.v_float, vl.v_int, vl.v_bool, vl.v_str, vl.v_datetime, vl.v_dur_months, vl.v_dur_micros
+  FROM value_long vl
+  WHERE vl.valid_to_commit IS NULL AND vl.parameter_definition_id IN (SELECT id FROM pd_pick)
+  UNION ALL
+  SELECT x.entity_id, x.alternative_id, 'array', CASE WHEN x.is_float THEN 'float' ELSE 'int' END,
+         x.axis1_id, x.axis2_id, x.axis3_id, x.axis4_id,
+         (x.flat_pos // (n2 * n3 * n4))::INTEGER, ((x.flat_pos // (n3 * n4)) % n2)::INTEGER,
+         ((x.flat_pos // n4) % n3)::INTEGER, (x.flat_pos % n4)::INTEGER,
+         x.vf, x.vi, NULL, NULL, NULL, NULL, NULL
+  FROM (
+    SELECT p.entity_id, p.alternative_id, p.axis1_id, p.axis2_id, p.axis3_id, p.axis4_id,
+           p.values IS NOT NULL AS is_float,
+           unnest(p.values) AS vf, unnest(p.values_int) AS vi,
+           unnest(range(coalesce(len(p.values), len(p.values_int)))) AS flat_pos
+    FROM value_array p
+    -- [-1] only for an empty list (a scalar or long parameter, a miss)
+    WHERE p.array_id = ANY(coalesce((SELECT list(va.array_id) FROM value_array va
+                                     WHERE va.parameter_definition_id IN (SELECT id FROM pd_pick)), [-1]))
+  ) x,
+  LATERAL (SELECT coalesce((SELECT length FROM axis WHERE id = x.axis2_id), 1) AS n2,
+                  coalesce((SELECT length FROM axis WHERE id = x.axis3_id), 1) AS n3,
+                  coalesce((SELECT length FROM axis WHERE id = x.axis4_id), 1) AS n4)
+), vr AS (
+  SELECT vs.entity_id, vs.alternative_id, 'scalar' AS tier, vs.value_kind,
+         NULL::VARCHAR AS idx1_text, NULL::VARCHAR AS idx2_text, NULL::VARCHAR AS idx3_text, NULL::VARCHAR AS idx4_text,
+         NULL::TIMESTAMP AS idx1_ts, NULL::TIMESTAMP AS idx2_ts, NULL::TIMESTAMP AS idx3_ts, NULL::TIMESTAMP AS idx4_ts,
+         NULL::BIGINT AS idx1_num, NULL::BIGINT AS idx2_num, NULL::BIGINT AS idx3_num, NULL::BIGINT AS idx4_num,
+         NULL::INTEGER AS idx1_ordinal, NULL::INTEGER AS idx2_ordinal, NULL::INTEGER AS idx3_ordinal, NULL::INTEGER AS idx4_ordinal,
+         NULL::DOUBLE AS idx1_coord, NULL::DOUBLE AS idx2_coord, NULL::DOUBLE AS idx3_coord, NULL::DOUBLE AS idx4_coord,
+         vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime, vs.v_dur_months, vs.v_dur_micros,
+         NULL::TIMESTAMP AS idx1_end_ts, NULL::TIMESTAMP AS idx2_end_ts, NULL::TIMESTAMP AS idx3_end_ts, NULL::TIMESTAMP AS idx4_end_ts
+  FROM value_scalar vs
+  WHERE vs.valid_to_commit IS NULL AND vs.parameter_definition_id IN (SELECT id FROM pd_pick)
+  UNION ALL
+  SELECT c.entity_id, c.alternative_id, c.tier, c.value_kind,
+         m1.label AS idx1_text,
+         m2.label AS idx2_text,
+         m3.label AS idx3_text,
+         m4.label AS idx4_text,
+         CASE WHEN a1.is_datetime THEN axis_param_ts(a1.p_start_ts, a1.p_step_months, a1.p_step_micros, c.i1_pos) ELSE m1.ts END AS idx1_ts,
+         CASE WHEN a2.is_datetime THEN axis_param_ts(a2.p_start_ts, a2.p_step_months, a2.p_step_micros, c.i2_pos) ELSE m2.ts END AS idx2_ts,
+         CASE WHEN a3.is_datetime THEN axis_param_ts(a3.p_start_ts, a3.p_step_months, a3.p_step_micros, c.i3_pos) ELSE m3.ts END AS idx3_ts,
+         CASE WHEN a4.is_datetime THEN axis_param_ts(a4.p_start_ts, a4.p_step_months, a4.p_step_micros, c.i4_pos) ELSE m4.ts END AS idx4_ts,
+         CASE WHEN a1.is_integer THEN axis_param_num(a1.p_start_int, a1.p_step_int, c.i1_pos) ELSE m1.num END AS idx1_num,
+         CASE WHEN a2.is_integer THEN axis_param_num(a2.p_start_int, a2.p_step_int, c.i2_pos) ELSE m2.num END AS idx2_num,
+         CASE WHEN a3.is_integer THEN axis_param_num(a3.p_start_int, a3.p_step_int, c.i3_pos) ELSE m3.num END AS idx3_num,
+         CASE WHEN a4.is_integer THEN axis_param_num(a4.p_start_int, a4.p_step_int, c.i4_pos) ELSE m4.num END AS idx4_num,
+         CASE WHEN a1.axis_id IS NOT NULL THEN c.i1_pos ELSE m1.ordinal END AS idx1_ordinal,
+         CASE WHEN a2.axis_id IS NOT NULL THEN c.i2_pos ELSE m2.ordinal END AS idx2_ordinal,
+         CASE WHEN a3.axis_id IS NOT NULL THEN c.i3_pos ELSE m3.ordinal END AS idx3_ordinal,
+         CASE WHEN a4.axis_id IS NOT NULL THEN c.i4_pos ELSE m4.ordinal END AS idx4_ordinal,
+         CASE WHEN a1.is_float THEN axis_param_coord(a1.p_start_dbl, a1.p_step_dbl, c.i1_pos) ELSE m1.coord END AS idx1_coord,
+         CASE WHEN a2.is_float THEN axis_param_coord(a2.p_start_dbl, a2.p_step_dbl, c.i2_pos) ELSE m2.coord END AS idx2_coord,
+         CASE WHEN a3.is_float THEN axis_param_coord(a3.p_start_dbl, a3.p_step_dbl, c.i3_pos) ELSE m3.coord END AS idx3_coord,
+         CASE WHEN a4.is_float THEN axis_param_coord(a4.p_start_dbl, a4.p_step_dbl, c.i4_pos) ELSE m4.coord END AS idx4_coord,
+         c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros,
+         m1.end_ts AS idx1_end_ts, m2.end_ts AS idx2_end_ts, m3.end_ts AS idx3_end_ts, m4.end_ts AS idx4_end_ts
+  FROM cells c
+  LEFT JOIN axis_parametric a1 ON a1.axis_id = c.axis1_id AND c.i1_pos >= 0 AND c.i1_pos < a1.length
+  LEFT JOIN axis_position_stored_in_use(coalesce((SELECT id FROM pd_pick), -1)) m1
+         ON m1.axis_id = c.axis1_id AND m1.pos = c.i1_pos
+  LEFT JOIN axis_parametric a2 ON a2.axis_id = c.axis2_id AND c.i2_pos >= 0 AND c.i2_pos < a2.length
+  LEFT JOIN axis_position_stored_in_use(coalesce((SELECT id FROM pd_pick), -1)) m2
+         ON m2.axis_id = c.axis2_id AND m2.pos = c.i2_pos
+  LEFT JOIN axis_parametric a3 ON a3.axis_id = c.axis3_id AND c.i3_pos >= 0 AND c.i3_pos < a3.length
+  LEFT JOIN axis_position_stored_in_use(coalesce((SELECT id FROM pd_pick), -1)) m3
+         ON m3.axis_id = c.axis3_id AND m3.pos = c.i3_pos
+  LEFT JOIN axis_parametric a4 ON a4.axis_id = c.axis4_id AND c.i4_pos >= 0 AND c.i4_pos < a4.length
+  LEFT JOIN axis_position_stored_in_use(coalesce((SELECT id FROM pd_pick), -1)) m4
+         ON m4.axis_id = c.axis4_id AND m4.pos = c.i4_pos
+)
+SELECT e.name AS entity, al.name AS alternative, vr.tier, vr.value_kind,
+       vr.idx1_text, vr.idx2_text, vr.idx3_text, vr.idx4_text,
+       vr.idx1_ts, vr.idx2_ts, vr.idx3_ts, vr.idx4_ts,
+       vr.idx1_num, vr.idx2_num, vr.idx3_num, vr.idx4_num,
+       vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
+       vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
+       vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime,
+       vr.v_dur_months, vr.v_dur_micros,
+       vr.idx1_end_ts, vr.idx2_end_ts, vr.idx3_end_ts, vr.idx4_end_ts
+FROM vr
+JOIN entity e ON e.id = vr.entity_id AND e.valid_to_commit IS NULL
+JOIN alternative al ON al.id = vr.alternative_id AND al.valid_to_commit IS NULL;
+
+-- Hot-path bulk read, dense form: array-tier rows as list<double> payloads
+-- with axis ids —
+-- the client library renders indices and entity/alternative names from its
+-- cached dictionaries (ids only on purpose: routing the ~70 MB list payload
+-- through name joins measured +45% wall time). This is the engine-side
+-- budget path for large series; read_parameter is the convenience/display
+-- path (critique F4c).
+-- @surface: stable
+CREATE MACRO read_parameter_dense(class_name, parameter_name) AS TABLE
+WITH pd_pick AS (
+  SELECT pd.id
+  FROM parameter_definition pd
+  JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL
+  WHERE pd.valid_to_commit IS NULL
+    AND lower(ec.name) = lower(class_name) AND lower(pd.name) = lower(parameter_name)
+), k AS (
+  -- narrow key resolution: never touches the list columns
+  SELECT va.array_id, va.entity_id, va.alternative_id,
+         va.axis1_id, va.axis2_id, va.axis3_id, va.axis4_id, va.v_min, va.v_max
+  FROM value_array va
+  JOIN pd_pick ON pd_pick.id = va.parameter_definition_id
+)
+-- payload fetch by the single-column key: an outer filter on entity or
+-- alternative reaches this scan as an IN filter on array_id (index scan, up
+-- to 50 keys; larger key sets and whole-parameter reads scan, as before)
+SELECT k.entity_id, k.alternative_id,
+       k.axis1_id, k.axis2_id, k.axis3_id, k.axis4_id,
+       p.values, p.values_int, k.v_min, k.v_max
+FROM k
+JOIN value_array p ON p.array_id = k.array_id;
+
+-- Hot-path bulk read, scalar form: value_scalar only — no tier union, no
+-- axis_position hash builds (a tier-generic read pays ~25 ms of fixed
+-- axis-machinery overhead even when the parameter is scalar; this macro
+-- reads a 10^5-row scalar parameter at raw-scan parity, VMP Part 6 second
+-- budget line).
+-- @surface: stable
+CREATE MACRO read_parameter_scalar(class_name, parameter_name) AS TABLE
+WITH pd_pick AS (
+  SELECT pd.id
+  FROM parameter_definition pd
+  JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL
+  WHERE pd.valid_to_commit IS NULL
+    AND lower(ec.name) = lower(class_name) AND lower(pd.name) = lower(parameter_name)
+)
+SELECT e.name AS entity, al.name AS alternative, vs.value_kind,
+       vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime,
+       vs.v_dur_months, vs.v_dur_micros
+FROM value_scalar vs
+JOIN pd_pick ON pd_pick.id = vs.parameter_definition_id
+JOIN entity e ON e.id = vs.entity_id AND e.valid_to_commit IS NULL
+JOIN alternative al ON al.id = vs.alternative_id AND al.valid_to_commit IS NULL
+WHERE vs.valid_to_commit IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Point and few-key reads (fast_point_reads_PLAN): the current rows of ONE
+-- parameter for a small key set, rendered exactly like value_rows /
+-- read_parameter, without scanning the array payload of the whole table.
+-- read_parameter / value_rows cannot do this: a filter written outside a
+-- macro or view never reaches its tier scans. One body (value_rows_for),
+-- two name-level entry points (read_values, read_value).
+--
+-- How the payload is fetched (docs/dev/engine_rules.md §2 and §6; both are
+-- optimizer behaviour, guarded by tests/point_read_index_scan.rs):
+--   * keys are resolved on narrow columns first, then folded into ONE
+--     scalar list: `array_id = ANY(coalesce((SELECT list(DISTINCT …)), [-1]))`.
+--     That is an index scan of the payload for 0 to 50 keys. [-1] stands in
+--     only for an EMPTY list (a scalar/long parameter, a miss): a sentinel
+--     appended to a non-empty list takes one of the 50 dynamic-filter slots.
+--     Never a `UNION ALL SELECT -1` sentinel: inside this macro it falls
+--     back to a full payload scan. Above 50 value hits (existing arrays,
+--     i.e. entities x alternatives, not names) the scan is sequential.
+--   * no column produced by a join's build side passes through the UNNEST
+--     (the DuckDB 2.0 dict-cache bug, engine_rules §6): the payload scan
+--     meets its key list in a SEMI join, which emits probe-side columns
+--     only, and the axis-length lookups run after the unnest.
+--   * axis_position is evaluated only for the value's own axes (`ap`): the
+--     unfiltered view costs in proportion to every axis in the file.
+-- Input keys are deduplicated (kk is DISTINCT): a repeated id must neither
+-- duplicate scalar/long rows nor take extra dynamic-filter slots.
+-- Row order is unspecified, as for read_parameter.
+
+-- Point read by ids, in value_rows' columns: the current rows of one
+-- parameter for lists of entity and alternative ids (every pair).
+-- @surface: stable
+CREATE MACRO value_rows_for(pd_id_arg, entity_ids, alternative_ids) AS TABLE
+WITH kk AS (
+  SELECT DISTINCT pd_id_arg::BIGINT AS pd_id, e.id AS e_id, a.id AS al_id
+  FROM (SELECT unnest(entity_ids) AS id) e CROSS JOIN (SELECT unnest(alternative_ids) AS id) a
+), cells AS MATERIALIZED (
+  SELECT vs.entity_id, vs.alternative_id, 'scalar' AS tier, vs.value_kind,
+         NULL::BIGINT AS axis1_id, NULL::BIGINT AS axis2_id, NULL::BIGINT AS axis3_id, NULL::BIGINT AS axis4_id,
+         0::INTEGER AS i1_pos, 0::INTEGER AS i2_pos, 0::INTEGER AS i3_pos, 0::INTEGER AS i4_pos,
+         vs.v_float, vs.v_int, vs.v_bool, vs.v_str, vs.v_datetime, vs.v_dur_months, vs.v_dur_micros
+  FROM value_scalar vs
+  JOIN kk ON vs.entity_id = kk.e_id AND vs.parameter_definition_id = kk.pd_id AND vs.alternative_id = kk.al_id
+  WHERE vs.valid_to_commit IS NULL
+  UNION ALL
+  SELECT vl.entity_id, vl.alternative_id, 'long', vl.value_kind, vl.axis1_id, vl.axis2_id, vl.axis3_id, vl.axis4_id,
+         vl.i1_pos, vl.i2_pos, vl.i3_pos, vl.i4_pos,
+         vl.v_float, vl.v_int, vl.v_bool, vl.v_str, vl.v_datetime, vl.v_dur_months, vl.v_dur_micros
+  FROM value_long vl
+  JOIN kk ON vl.entity_id = kk.e_id AND vl.parameter_definition_id = kk.pd_id AND vl.alternative_id = kk.al_id
+  WHERE vl.valid_to_commit IS NULL
+  UNION ALL
+  -- array leg: the payload is fetched by array_id through the scalar key
+  -- list (index scan), and every column that is unnested or passed through
+  -- comes from the payload scan itself (engine_rules §6).
+  SELECT x.entity_id, x.alternative_id, 'array', CASE WHEN x.is_float THEN 'float' ELSE 'int' END,
+         x.axis1_id, x.axis2_id, x.axis3_id, x.axis4_id,
+         (x.flat_pos // (n2 * n3 * n4))::INTEGER, ((x.flat_pos // (n3 * n4)) % n2)::INTEGER,
+         ((x.flat_pos // n4) % n3)::INTEGER, (x.flat_pos % n4)::INTEGER,
+         x.vf, x.vi, NULL, NULL, NULL, NULL, NULL
+  FROM (
+    SELECT p.entity_id, p.alternative_id, p.axis1_id, p.axis2_id, p.axis3_id, p.axis4_id,
+           p.values IS NOT NULL AS is_float,
+           unnest(p.values) AS vf, unnest(p.values_int) AS vi,
+           unnest(range(coalesce(len(p.values), len(p.values_int)))) AS flat_pos
+    FROM value_array p
+    WHERE p.array_id = ANY(coalesce(
+            (SELECT list(DISTINCT va.array_id) FROM value_array va
+             JOIN kk ON va.entity_id = kk.e_id AND va.parameter_definition_id = kk.pd_id
+                    AND va.alternative_id = kk.al_id),
+            [-1]))
+  ) x,
+  LATERAL (SELECT coalesce((SELECT length FROM axis WHERE id = x.axis2_id), 1) AS n2,
+                  coalesce((SELECT length FROM axis WHERE id = x.axis3_id), 1) AS n3,
+                  coalesce((SELECT length FROM axis WHERE id = x.axis4_id), 1) AS n4)
+), ax AS (
+  SELECT DISTINCT a FROM (SELECT unnest([axis1_id, axis2_id, axis3_id, axis4_id]) AS a
+                          FROM (SELECT DISTINCT axis1_id, axis2_id, axis3_id, axis4_id FROM cells))
+  WHERE a IS NOT NULL
+), ap AS MATERIALIZED (
+  -- the value's own axes only (a runtime join filter reaches the axis scans)
+  SELECT * FROM axis_position WHERE axis_id IN (SELECT a FROM ax)
+)
+SELECT c.entity_id, pd_id_arg::BIGINT AS parameter_definition_id, c.alternative_id, c.tier, c.value_kind,
+       c.i1_pos, c.i2_pos, c.i3_pos, c.i4_pos,
+       p1.label AS idx1_text, p1.ts AS idx1_ts, p1.end_ts AS idx1_end_ts, p1.num AS idx1_num, p1.ordinal AS idx1_ordinal, p1.coord AS idx1_coord,
+       p2.label AS idx2_text, p2.ts AS idx2_ts, p2.end_ts AS idx2_end_ts, p2.num AS idx2_num, p2.ordinal AS idx2_ordinal, p2.coord AS idx2_coord,
+       p3.label AS idx3_text, p3.ts AS idx3_ts, p3.end_ts AS idx3_end_ts, p3.num AS idx3_num, p3.ordinal AS idx3_ordinal, p3.coord AS idx3_coord,
+       p4.label AS idx4_text, p4.ts AS idx4_ts, p4.end_ts AS idx4_end_ts, p4.num AS idx4_num, p4.ordinal AS idx4_ordinal, p4.coord AS idx4_coord,
+       c.v_float, c.v_int, c.v_bool, c.v_str, c.v_datetime, c.v_dur_months, c.v_dur_micros
+FROM cells c
+LEFT JOIN ap p1 ON p1.axis_id = c.axis1_id AND p1.pos = c.i1_pos
+LEFT JOIN ap p2 ON p2.axis_id = c.axis2_id AND p2.pos = c.i2_pos
+LEFT JOIN ap p3 ON p3.axis_id = c.axis3_id AND p3.pos = c.i3_pos
+LEFT JOIN ap p4 ON p4.axis_id = c.axis4_id AND p4.pos = c.i4_pos;
+
+-- Point read of a few values by name, in read_parameter's columns: lists
+-- of entity and alternative names (every pair). Names match
+-- case-insensitively (lower()), like the class and parameter arguments.
+-- alternative_names NULL (the default) = every current alternative;
+-- [] = none.
+-- @surface: stable
+CREATE MACRO read_values(class_name, parameter_name, entity_names, alternative_names := NULL) AS TABLE
+WITH pd_pick AS (
+  SELECT pd.id, pd.entity_class_id FROM parameter_definition pd
+  JOIN entity_class ec ON ec.id = pd.entity_class_id AND ec.valid_to_commit IS NULL
+  WHERE pd.valid_to_commit IS NULL
+    AND lower(ec.name) = lower(class_name) AND lower(pd.name) = lower(parameter_name)
+), e_pick AS (
+  SELECT e.id, e.name FROM entity e JOIN pd_pick ON e.entity_class_id = pd_pick.entity_class_id
+  WHERE e.valid_to_commit IS NULL AND lower(e.name) IN (SELECT lower(unnest(entity_names)))
+), al_pick AS (
+  SELECT al.id, al.name FROM alternative al
+  WHERE al.valid_to_commit IS NULL
+    AND (alternative_names IS NULL
+         OR lower(al.name) IN (SELECT lower(unnest(alternative_names))))
+)
+SELECT e.name AS entity, al.name AS alternative, vr.tier, vr.value_kind,
+       vr.idx1_text, vr.idx2_text, vr.idx3_text, vr.idx4_text,
+       vr.idx1_ts, vr.idx2_ts, vr.idx3_ts, vr.idx4_ts,
+       vr.idx1_num, vr.idx2_num, vr.idx3_num, vr.idx4_num,
+       vr.idx1_ordinal, vr.idx2_ordinal, vr.idx3_ordinal, vr.idx4_ordinal,
+       vr.idx1_coord, vr.idx2_coord, vr.idx3_coord, vr.idx4_coord,
+       vr.v_float, vr.v_int, vr.v_bool, vr.v_str, vr.v_datetime, vr.v_dur_months, vr.v_dur_micros,
+       vr.idx1_end_ts, vr.idx2_end_ts, vr.idx3_end_ts, vr.idx4_end_ts
+FROM value_rows_for(coalesce((SELECT id FROM pd_pick), -1),
+                    coalesce((SELECT list(id) FROM e_pick), []),
+                    coalesce((SELECT list(id) FROM al_pick), [])) vr
+JOIN e_pick e ON e.id = vr.entity_id
+JOIN al_pick al ON al.id = vr.alternative_id;
+
+-- Point read of one value by name, in read_parameter's columns (one entity
+-- in every current alternative when the alternative is omitted). [NULL] is
+-- not NULL, so an omitted alternative is passed through as NULL rather
+-- than wrapped, or it would silently match nothing.
+-- @surface: stable
+CREATE MACRO read_value(class_name, parameter_name, entity_name, alternative_name := NULL) AS TABLE
+SELECT * FROM read_values(class_name, parameter_name, [entity_name],
+                          CASE WHEN alternative_name IS NULL THEN NULL ELSE [alternative_name] END);
+
+-- Effective unit = override if present, else definition default; no
+-- per-value replication anywhere (Decision 9).
+-- @surface: stable
+CREATE VIEW parameter_effective_unit AS
+SELECT e.id AS entity_id, pd.id AS parameter_definition_id,
+       coalesce(o.unit_id, pd.unit_id) AS unit_id,
+       (o.unit_id IS NOT NULL) AS overridden
+FROM parameter_definition pd
+JOIN entity e ON e.entity_class_id = pd.entity_class_id AND e.valid_to_commit IS NULL
+LEFT JOIN entity_parameter_unit o
+       ON o.entity_id = e.id AND o.parameter_definition_id = pd.id AND o.valid_to_commit IS NULL
+WHERE pd.valid_to_commit IS NULL;
+
+-- Every current entity with its direct elements by name: the element names
+-- and their classes in position order (empty lists for a 0-D entity). Read
+-- an N-D entity's elements here and never parse its name: the name is a
+-- stored string that does not follow renames of its elements.
+-- @surface: stable
+CREATE VIEW entity_byname AS
+SELECT ec.name AS class, e.name AS entity, e.id AS entity_id,
+       CAST(count(ee.position) AS INTEGER) AS dimension_count,
+       coalesce(list(el.name ORDER BY ee.position) FILTER (WHERE ee.position IS NOT NULL),
+                CAST([] AS VARCHAR[])) AS element_names,
+       coalesce(list(elc.name ORDER BY ee.position) FILTER (WHERE ee.position IS NOT NULL),
+                CAST([] AS VARCHAR[])) AS element_classes
+FROM entity e
+JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL
+LEFT JOIN entity_element ee ON ee.entity_id = e.id AND ee.valid_to_commit IS NULL
+LEFT JOIN entity el ON el.id = ee.element_entity_id AND el.valid_to_commit IS NULL
+LEFT JOIN entity_class elc ON elc.id = el.entity_class_id AND elc.valid_to_commit IS NULL
+WHERE e.valid_to_commit IS NULL
+GROUP BY ec.name, e.name, e.id;
+
+-- Resolved per-mode class presentation (Spine-Toolbox #2492): every current
+-- class gets a row; a class with no entity_class_display_mode row defaults to
+-- visible + its own display_order (greyed-not-hidden means a class is never
+-- dropped from the list). Any interface renders this without tool-specific
+-- knowledge. Views take no parameters, so this is a MACRO (cf. the *_asof
+-- macros / read_parameter).
+-- @surface: stable
+CREATE MACRO entity_class_display(mode_name) AS TABLE
+SELECT dm.name                                        AS display_mode,
+       ec.id                                          AS entity_class_id,
+       ec.name                                        AS entity_class,
+       coalesce(ecdm.display_status, 'visible')       AS display_status,
+       coalesce(ecdm.display_order, ec.display_order) AS display_order,
+       ecdm.font_color,
+       ecdm.background_color
+FROM display_mode dm
+CROSS JOIN entity_class ec
+LEFT JOIN entity_class_display_mode ecdm
+  ON ecdm.display_mode_id = dm.id AND ecdm.entity_class_id = ec.id
+  AND ecdm.valid_to_commit IS NULL
+WHERE dm.valid_to_commit IS NULL AND ec.valid_to_commit IS NULL
+  AND dm.cur_name = lower(mode_name);
+
+-- ---------------------------------------------------------------------------
+-- Metadata and provenance: links named. Targets are a source, a license or a
+-- pair of the pool; `target_name` is the source or license name or the pair's
+-- key, `pair_value` the pair's value (NULL otherwise); `role` is NULL for a
+-- link without a role; `linked_at_commit` is the link row's
+-- valid_from_commit (a value link belongs to the value version current then).
+-- ---------------------------------------------------------------------------
+
+-- The live links of every current value, by names.
+-- @surface: stable
+CREATE VIEW value_metadata_named AS
+SELECT ec.name AS class, e.name AS entity, pd.name AS parameter, a.name AS alternative,
+       l.entity_id, l.parameter_definition_id, l.alternative_id,
+       l.target_kind, l.target_id,
+       coalesce(s.name, p.name) AS target_name,
+       p.value AS pair_value,
+       r.name AS role,
+       l.valid_from_commit AS linked_at_commit
+FROM value_metadata_link l
+JOIN entity e ON e.id = l.entity_id AND e.valid_to_commit IS NULL
+JOIN entity_class ec ON ec.id = e.entity_class_id AND ec.valid_to_commit IS NULL
+JOIN parameter_definition pd ON pd.id = l.parameter_definition_id AND pd.valid_to_commit IS NULL
+JOIN alternative a ON a.id = l.alternative_id AND a.valid_to_commit IS NULL
+LEFT JOIN source s ON l.target_kind = 'source' AND s.id = l.target_id AND s.valid_to_commit IS NULL
+LEFT JOIN metadata_pair p ON l.target_kind = 'pair' AND p.id = l.target_id AND p.valid_to_commit IS NULL
+LEFT JOIN metadata_role r ON r.id = l.role_id AND r.valid_to_commit IS NULL
+WHERE l.valid_to_commit IS NULL;
+
+-- The live links of the dataset, the entities and the schema objects, by
+-- names. `object_name` is the object's name (an entity's as
+-- `class.entity`, a parameter's as `class.parameter`, a run's id, NULL for
+-- the dataset).
+-- @surface: stable
+CREATE VIEW object_metadata_named AS
+SELECT l.object_type, l.object_id,
+       CASE l.object_type
+         WHEN 'dataset' THEN NULL
+         WHEN 'entity' THEN (SELECT c.name || '.' || e.name FROM entity e
+                             JOIN entity_class c ON c.id = e.entity_class_id AND c.valid_to_commit IS NULL
+                             WHERE e.id = l.object_id AND e.valid_to_commit IS NULL)
+         WHEN 'entity_class' THEN (SELECT name FROM entity_class
+                                   WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'parameter_definition' THEN (SELECT c.name || '.' || d.name FROM parameter_definition d
+                             JOIN entity_class c ON c.id = d.entity_class_id AND c.valid_to_commit IS NULL
+                             WHERE d.id = l.object_id AND d.valid_to_commit IS NULL)
+         WHEN 'alternative' THEN (SELECT name FROM alternative
+                                  WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'scenario' THEN (SELECT name FROM scenario
+                               WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'run' THEN CAST(l.object_id AS VARCHAR)
+         WHEN 'source' THEN (SELECT name FROM source
+                             WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'license' THEN (SELECT name FROM license
+                              WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'parameter_value_list' THEN (SELECT name FROM parameter_value_list
+                                           WHERE id = l.object_id AND valid_to_commit IS NULL)
+         WHEN 'units_of_measure' THEN (SELECT name FROM units_of_measure
+                                       WHERE id = l.object_id AND valid_to_commit IS NULL)
+       END AS object_name,
+       l.target_kind, l.target_id,
+       coalesce(s.name, li.name, p.name) AS target_name,
+       p.value AS pair_value,
+       r.name AS role,
+       l.valid_from_commit AS linked_at_commit
+FROM object_metadata_link l
+LEFT JOIN source s ON l.target_kind = 'source' AND s.id = l.target_id AND s.valid_to_commit IS NULL
+LEFT JOIN license li ON l.target_kind = 'license' AND li.id = l.target_id AND li.valid_to_commit IS NULL
+LEFT JOIN metadata_pair p ON l.target_kind = 'pair' AND p.id = l.target_id AND p.valid_to_commit IS NULL
+LEFT JOIN metadata_role r ON r.id = l.role_id AND r.valid_to_commit IS NULL
+WHERE l.valid_to_commit IS NULL;
+
+-- Dataset-level metadata: exactly what is linked to the dataset.
+-- @surface: stable
+CREATE VIEW dataset_metadata AS
+SELECT target_kind, target_id, target_name, pair_value, role, linked_at_commit
+FROM object_metadata_named
+WHERE object_type = 'dataset';
+
+-- The licenses of every current source.
+-- @surface: stable
+CREATE VIEW source_licenses_named AS
+SELECT s.id AS source_id, s.name AS source, li.id AS license_id, li.name AS license,
+       li.spdx, li.policy IS NOT NULL AS has_policy
+FROM source_license sl
+JOIN source s ON s.id = sl.source_id AND s.valid_to_commit IS NULL
+JOIN license li ON li.id = sl.license_id AND li.valid_to_commit IS NULL
+WHERE sl.valid_to_commit IS NULL;
+
+-- Value -> source -> license: every current value under every license its
+-- linked sources are published under ("all values under license X").
+-- @surface: stable
+CREATE VIEW value_licenses AS
+SELECT v.class, v.entity, v.parameter, v.alternative,
+       v.entity_id, v.parameter_definition_id, v.alternative_id,
+       sl.source, sl.license, sl.spdx
+FROM value_metadata_named v
+JOIN source_licenses_named sl ON v.target_kind = 'source' AND sl.source_id = v.target_id;
+
+-- The current database properties. `well_known` marks the documented user
+-- keys; `owner` is 'core', 'user' or 'tool'.
+-- @surface: stable
+CREATE VIEW database_properties AS
+SELECT key, value, owner,
+       lower(key) IN ('identifier', 'base_iri', 'title', 'description', 'version',
+                      'created', 'homepage', 'language', 'semantic_context',
+                      'conforms_to') AS well_known,
+       valid_from_commit AS set_at_commit
+FROM database_property
+WHERE valid_to_commit IS NULL;
+

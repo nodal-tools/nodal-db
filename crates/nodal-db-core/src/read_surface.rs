@@ -945,6 +945,13 @@ pub(crate) fn prepare_read(
             overlaid: false,
         });
     }
+    // A stale surface may sit on tables of another schema version (a file
+    // made by an older nodal-db): this build's views do not bind to those
+    // tables, and a refresh is refused, so neither an overlay nor the
+    // refresh hint helps. Refuse with SchemaMismatch, naming the file's own
+    // version, before anything is installed. (A current surface implies the
+    // current schema, so the fast path above needs no check.)
+    crate::property::require_current(conn)?;
     let message = if check.status == SurfaceStatus::Newer {
         format!(
             "{}: its read surface ({}) is of a newer contract major than this nodal-db's \

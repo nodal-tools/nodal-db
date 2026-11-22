@@ -304,7 +304,17 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 pub const SCHEMA_VERSION: u32 = 7;
 
 /// Whether a stored `schema_version` text is this build's [`SCHEMA_VERSION`]
-/// (exact decimal text: `"7"`, never `"07"` or `"7.0"`).
+/// (exact decimal text: `"7"`, never `"07"` or `"7.0"`). The one comparison
+/// for every caller, the core's gates and downstream tools alike: a client
+/// that reads the property itself (`SELECT value FROM database_property_current
+/// WHERE key = 'schema_version'`) checks it with this function instead of
+/// comparing against [`SCHEMA_VERSION`] (a `u32`, not the stored text).
+///
+/// ```
+/// use nodal_db_core::compaction::is_current_schema_version;
+/// assert!(is_current_schema_version("7"));
+/// assert!(!is_current_schema_version("0.6-metadata"));
+/// ```
 pub fn is_current_schema_version(found: &str) -> bool {
     found == SCHEMA_VERSION.to_string()
 }

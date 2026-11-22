@@ -364,6 +364,36 @@ fn refinement_class_ids(conn: &Connection) -> Result<std::collections::BTreeSet<
         .unwrap_or_default())
 }
 
+/// Drop the ids of closed classes from [`REFINEMENT_CLASSES_KEY`] at commit
+/// `c`, in the commit that closed them (object deletes, purges, the
+/// template's `drop_class`): the list names current classes only, so a
+/// deleted class leaves no trace a reader could mistake for a live one. A
+/// no-op when nothing changes.
+pub(crate) fn prune_refinement_classes(conn: &Connection, c: i64) -> Result<(), DbError> {
+    let ids = refinement_class_ids(conn)?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut live = std::collections::BTreeSet::new();
+    for id in &ids {
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM entity_class WHERE id = ? AND valid_to_commit IS NULL",
+            params![id],
+            |r| r.get(0),
+        )?;
+        if n > 0 {
+            live.insert(*id);
+        }
+    }
+    if live == ids {
+        Ok(())
+    } else if live.is_empty() {
+        property::clear_core(conn, c, REFINEMENT_CLASSES_KEY)
+    } else {
+        property::set_core(conn, c, REFINEMENT_CLASSES_KEY, &format_class_ids(&live))
+    }
+}
+
 /// Mark (or with `refinement = false`, unmark) `class` as a refinement
 /// class. Every current entity of a refinement class is a refinement link:
 /// its element 1 is the coarse entity and element 2 the fine one, and an

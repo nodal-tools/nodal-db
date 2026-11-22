@@ -572,7 +572,10 @@ meaning. Mark or unmark one with:
 
 The class must have exactly two dimensions. The marks are stored in the
 core property `refinement_classes`, a JSON array of class ids
-(`[12,40]`), so they follow class renames.
+(`[12,40]`), so they follow class renames; deleting or purging a marked
+class removes its id in the same commit. Templates do not carry the mark
+yet: a template can declare the class, and a program or the API marks it
+after the load (a template export does not include it either).
 
 ### Renaming objects and editing descriptions
 
@@ -1117,7 +1120,8 @@ current value per key:
     - `schema_version` (see [Versions and compatibility](versions.md)),
       `db_identity` (the file's identity UUID) and `created_by` (the
       nodal-db build that created the file, e.g.
-      `nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)`);
+      `nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)` for a release build,
+      `(dev)` for a local one);
     - the template stamp (`template_name`, `template_version`,
       `template_content_hash`, `template_migration_step`,
       `template_applied_commit`);

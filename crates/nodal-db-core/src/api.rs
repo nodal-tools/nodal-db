@@ -871,6 +871,11 @@ pub fn commit_change_set(
             &calls,
             purged_vocabulary || deleted_vocabulary,
         )?;
+        // A closed refinement class leaves the core's list in the same
+        // commit (one writer: the core).
+        if purged_vocabulary || deleted_vocabulary {
+            crate::verbs::prune_refinement_classes(conn, commit_id)?;
+        }
         // `tiers` lists the tiers written; the canonicalization noted every
         // value's tier, unchanged ones included.
         report.tiers.retain(|t| buffers.written_tiers.contains(t));

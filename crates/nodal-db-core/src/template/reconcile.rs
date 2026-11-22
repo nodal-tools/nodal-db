@@ -4678,6 +4678,7 @@ fn execute_step(
                 },
                 fx,
             )?;
+            crate::verbs::prune_refinement_classes(conn, c)?;
         }
         MigrationStep::DropValueList { list } => {
             let step_name = format!("drop_value_list {list}");

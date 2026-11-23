@@ -13,5 +13,17 @@ fn main() {
     let commit = std::env::var("NODAL_DB_GIT_COMMIT")
         .map(|c| c.trim().to_string())
         .unwrap_or_default();
+    // A git commit id, abbreviated or full: 7 to 40 lowercase hex digits.
+    // Anything else (a newline would inject `cargo:` directives below) fails
+    // the build.
+    let hex = commit
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !commit.is_empty() && !(hex && (7..=40).contains(&commit.len())) {
+        panic!(
+            "NODAL_DB_GIT_COMMIT must be a git commit id (7 to 40 lowercase hex \
+             digits, e.g. `git rev-parse --short=12 HEAD`), got {commit:?}"
+        );
+    }
     println!("cargo:rustc-env=NODAL_DB_GIT_COMMIT={commit}");
 }

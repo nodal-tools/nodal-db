@@ -1206,13 +1206,155 @@ fn empty_descriptions_absent(t: &mut Template) {
 /// parses through the same call (D1: one loader, both surfaces). Names come
 /// back in NFC ([`nfc_names`]).
 pub fn parse_str(text: &str) -> Result<Template, DbError> {
+    check_yaml_shape(text)?;
     let t: Template = serde_norway::from_str(text)
         .map_err(|e| DbError::Api(format!("template parse error: {e}")))?;
     Ok(nfc_names(&t))
 }
 
+/// The largest template text [`parse_str`] accepts.
+pub const MAX_TEMPLATE_BYTES: usize = 16 << 20;
+/// The deepest flow-collection nesting (`[`/`{`) [`parse_str`] accepts. The
+/// YAML parser's cost grows with the number of tokens times the open flow
+/// levels, so a file of 200 KB nested 100 000 deep took 17 s to reject;
+/// a template needs a handful of levels.
+pub const MAX_FLOW_DEPTH: usize = 64;
+
+/// Refuse a template text larger than [`MAX_TEMPLATE_BYTES`] or nested
+/// deeper than [`MAX_FLOW_DEPTH`] flow levels, before the YAML parser sees
+/// it. A linear scan that follows YAML's own rules for where a flow
+/// collection or a quoted scalar can start (at a node position: after
+/// `[`, `{`, `,`, an indicator `- `, `? `, `: `, a JSON-style `:` after a
+/// quoted key or closed collection, a node property, or the start of a
+/// block-context line), skips quoted scalars, comments and block scalars,
+/// and treats anything else as plain text. Where the scan and the parser
+/// could disagree it errs toward counting a level the parser would not see
+/// (a refusal, never a missed level), and text the parser rejects as
+/// malformed stops it early anyway.
+fn check_yaml_shape(text: &str) -> Result<(), DbError> {
+    if text.len() > MAX_TEMPLATE_BYTES {
+        return Err(DbError::Api(format!(
+            "template parse error: the template is {} bytes, more than the {} MiB a \
+             template may be",
+            text.len(),
+            MAX_TEMPLATE_BYTES >> 20
+        )));
+    }
+    let b = text.as_bytes();
+    let ws = |c: u8| matches!(c, b' ' | b'\t' | b'\r' | b'\n');
+    let mut depth = 0usize;
+    let mut node_start = true;
+    // The previous token was a quoted scalar or a closed flow collection: a
+    // directly following `:` is a JSON-style value indicator.
+    let mut json_key = false;
+    let mut line_indent = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        let next = b.get(i + 1).copied();
+        let at_line_start = i == 0 || b[i - 1] == b'\n';
+        if at_line_start {
+            line_indent = b[i..].iter().take_while(|&&x| x == b' ').count();
+            if depth == 0 {
+                node_start = true;
+                json_key = false;
+            }
+        }
+        match c {
+            b' ' | b'\t' | b'\r' | b'\n' => {}
+            b'#' if i == 0 || ws(b[i - 1]) => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'\'' | b'"' if node_start => {
+                i += 1;
+                while i < b.len() {
+                    match (c, b[i]) {
+                        (b'"', b'\\') => i += 1,
+                        (b'\'', b'\'') if b.get(i + 1) == Some(&b'\'') => i += 1,
+                        (q, x) if q == x => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                node_start = false;
+                json_key = true;
+            }
+            b'[' | b'{' if node_start => {
+                depth += 1;
+                if depth > MAX_FLOW_DEPTH {
+                    return Err(DbError::Api(format!(
+                        "template parse error: flow collections ([...] or {{...}}) nested \
+                         more than {MAX_FLOW_DEPTH} deep"
+                    )));
+                }
+                json_key = false;
+            }
+            b']' | b'}' if depth > 0 => {
+                depth -= 1;
+                node_start = false;
+                json_key = true;
+            }
+            b',' if depth > 0 => {
+                node_start = true;
+                json_key = false;
+            }
+            b':' | b'?' | b'-' if next.is_none_or(ws) || (c == b':' && depth > 0 && json_key) => {
+                node_start = true;
+                json_key = false;
+            }
+            b'!' | b'&' if node_start => {
+                // A node property: the node itself follows.
+                while i < b.len() && !ws(b[i]) && !(depth > 0 && b",[]{}".contains(&b[i])) {
+                    i += 1;
+                }
+                continue;
+            }
+            b'|' | b'>' if node_start && depth == 0 => {
+                // A block scalar: its header line, then every blank or more
+                // indented line is content.
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                while i < b.len() {
+                    let line = &b[i + 1..];
+                    let end = line.iter().position(|&x| x == b'\n').unwrap_or(line.len());
+                    let body = &line[..end];
+                    let indent = body.iter().take_while(|&&x| x == b' ').count();
+                    let blank = body.iter().all(|&x| ws(x));
+                    if !(blank || indent > line_indent) || i + 1 >= b.len() {
+                        break;
+                    }
+                    i += 1 + end;
+                }
+                node_start = false;
+                json_key = false;
+            }
+            _ => {
+                node_start = false;
+                json_key = false;
+            }
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Parse a template file (YAML or JSON — one parser, D1).
 pub fn parse_file(path: &Path) -> Result<Template, DbError> {
+    if let Ok(m) = std::fs::metadata(path) {
+        if m.len() > MAX_TEMPLATE_BYTES as u64 {
+            return Err(DbError::Api(format!(
+                "template parse error: {} is {} bytes, more than the {} MiB a template \
+                 may be",
+                path.display(),
+                m.len(),
+                MAX_TEMPLATE_BYTES >> 20
+            )));
+        }
+    }
     let text = std::fs::read_to_string(path)
         .map_err(|e| DbError::Api(format!("cannot read {}: {e}", path.display())))?;
     parse_str(&text)

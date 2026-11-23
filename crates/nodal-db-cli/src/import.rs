@@ -82,6 +82,17 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     let user = resolve_user(args)?;
     require_db(&args.db)?;
 
+    let size = std::fs::metadata(&args.file)
+        .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?
+        .len();
+    if size > MAX_INPUT_BYTES {
+        bail!(
+            "{}: {size} bytes is more than the importer reads in one file ({} GiB); \
+             split the data into several imports",
+            args.file.display(),
+            MAX_INPUT_BYTES >> 30
+        );
+    }
     let bytes = std::fs::read(&args.file)
         .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?;
     // E1: not an IPC stream — empty file or the IPC *file* (Feather) magic.
@@ -99,6 +110,11 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             args.file.display()
         );
     }
+
+    // Before any decoding: no compressed buffer may declare more decompressed
+    // bytes than the importer allows (arrow reserves the declared size up
+    // front, so a crafted prefix would abort the process).
+    check_decompressed_sizes(&bytes)?;
 
     let raws = split_segments(&bytes)?;
 
@@ -216,14 +232,14 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     if report.commit_id == 0 {
         // Every value equal to the stored one: the core made no commit
         // (skip_unchanged_writes_PLAN D1), so the message is not recorded.
-        println!(
+        say!(
             "imported {}: no changes (nothing committed), {} segment(s), {} value(s) unchanged",
             args.file.display(),
             n_segments,
             report.values_unchanged,
         );
     } else {
-        println!(
+        say!(
             "imported {}: commit {}, {} segment(s), {} value(s) written, {} unchanged, \
              {} row(s) written, axes {} created / {} reused, tiers [{}]",
             args.file.display(),
@@ -240,25 +256,27 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     for w in &report.warnings {
         match &w.kind {
             WarningKind::AutoCreated => {
-                println!(
+                say!(
                     "warning: auto-created {} {:?} (id {})",
-                    w.object_type, w.name, w.id
+                    w.object_type,
+                    w.name,
+                    w.id
                 )
             }
-            WarningKind::TimezoneNormalized { column, tz } => println!(
+            WarningKind::TimezoneNormalized { column, tz } => say!(
                 "warning: timezone-normalized column {column:?} (tz {tz}); \
                  stored as the UTC-µs instants unchanged"
             ),
             // Import never issues deletes, but the match is exhaustive: surface
             // these consistently if the shared write path ever emits one.
             WarningKind::UnknownReferent { key_index, level } => {
-                println!("warning: unknown {level} for delete key {key_index} (skipped)")
+                say!("warning: unknown {level} for delete key {key_index} (skipped)")
             }
             WarningKind::NothingToDelete { key_index } => {
-                println!("warning: nothing to delete for key {key_index} (no live value)")
+                say!("warning: nothing to delete for key {key_index} (no live value)")
             }
             WarningKind::DroppedByDelete { .. } => {
-                println!(
+                say!(
                     "warning: write of {} dropped (a delete in the call covers it)",
                     w.name
                 )
@@ -268,7 +286,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 count,
                 written,
                 stored,
-            } => println!(
+            } => say!(
                 "warning: {count} {what}(s) of {} stored in Unicode NFC, e.g. {written:?} as \
                  {stored:?} (spellings that differ only in normalization are one {what})",
                 w.name
@@ -280,14 +298,14 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 request_index,
                 cells,
                 threshold,
-            } => println!(
+            } => say!(
                 "warning: purge request {request_index} covers {cells} cells (more than \
                  {threshold})"
             ),
         }
     }
     for line in name_folded_lines(&report.warnings) {
-        println!("{line}");
+        say!("{line}");
     }
     Ok(())
 }
@@ -479,6 +497,116 @@ fn split_segments(bytes: &[u8]) -> Result<Vec<RawSegment>> {
     Ok(out)
 }
 
+/// The largest input file the importer reads (it reads the whole file into
+/// memory first).
+const MAX_INPUT_BYTES: u64 = 16 << 30;
+/// The largest decompressed size one compressed buffer may declare: arrow
+/// reserves the declared size before it decompresses, so the prefix, not the
+/// real content, decides the allocation. 2 GiB is more than one column
+/// buffer of a 32-bit-offset Arrow array can address.
+const MAX_DECOMPRESSED_BUFFER: u64 = 2 << 30;
+/// The largest decompressed size all compressed buffers of one file may
+/// declare together.
+const MAX_DECOMPRESSED_TOTAL: u64 = 16 << 30;
+
+/// Walk every IPC message frame of the whole container (all segments; the
+/// frame layout is [`classify_termination`]'s) and refuse (E6) a compressed
+/// record or dictionary batch whose buffers declare more decompressed bytes
+/// than [`MAX_DECOMPRESSED_BUFFER`] each or [`MAX_DECOMPRESSED_TOTAL`]
+/// together. Each compressed buffer starts with its decompressed length as
+/// a little-endian `i64` (`-1`: stored uncompressed). Runs before any
+/// `StreamReader`, so a crafted prefix can never reach arrow's allocation.
+/// Frames it cannot walk are left to the reader, which reports them.
+fn check_decompressed_sizes(bytes: &[u8]) -> Result<()> {
+    const CONT: [u8; 4] = [0xff; 4];
+    let mut pos = 0usize;
+    let mut total: u64 = 0;
+    while pos + 4 <= bytes.len() {
+        let word: [u8; 4] = bytes[pos..pos + 4].try_into().unwrap();
+        let (meta_len, header) = if word == CONT {
+            if pos + 8 > bytes.len() {
+                return Ok(());
+            }
+            (
+                i32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()),
+                8usize,
+            )
+        } else {
+            (i32::from_le_bytes(word), 4usize)
+        };
+        if meta_len == 0 {
+            // An end-of-stream frame; the next segment (if any) follows.
+            pos += header;
+            continue;
+        }
+        let Ok(meta_len) = usize::try_from(meta_len) else {
+            return Ok(());
+        };
+        let Some(meta_end) = pos
+            .checked_add(header + meta_len)
+            .filter(|&e| e <= bytes.len())
+        else {
+            return Ok(());
+        };
+        let Ok(msg) = arrow::ipc::root_as_message(&bytes[pos + header..meta_end]) else {
+            return Ok(());
+        };
+        let Ok(body_len) = usize::try_from(msg.bodyLength()) else {
+            return Ok(());
+        };
+        let Some(body_end) = meta_end.checked_add(body_len).filter(|&e| e <= bytes.len()) else {
+            return Ok(());
+        };
+        let batch = msg
+            .header_as_record_batch()
+            .or_else(|| msg.header_as_dictionary_batch().and_then(|d| d.data()));
+        if let Some(batch) = batch.filter(|b| b.compression().is_some()) {
+            let body = &bytes[meta_end..body_end];
+            for buf in batch.buffers().into_iter().flatten() {
+                let (Ok(off), Ok(len)) =
+                    (usize::try_from(buf.offset()), usize::try_from(buf.length()))
+                else {
+                    continue;
+                };
+                if len < 8 {
+                    continue;
+                }
+                let Some(prefix) = off.checked_add(8).and_then(|end| body.get(off..end)) else {
+                    continue;
+                };
+                let declared = i64::from_le_bytes(prefix.try_into().unwrap());
+                if declared == -1 {
+                    continue;
+                }
+                let declared = u64::try_from(declared).map_err(|_| {
+                    anyhow!(
+                        "E6: a compressed buffer in the IPC message at byte {pos} declares \
+                         a negative decompressed length ({declared})"
+                    )
+                })?;
+                if declared > MAX_DECOMPRESSED_BUFFER {
+                    bail!(
+                        "E6: a compressed buffer in the IPC message at byte {pos} declares \
+                         {declared} decompressed bytes, more than the importer accepts for \
+                         one buffer ({} GiB)",
+                        MAX_DECOMPRESSED_BUFFER >> 30
+                    );
+                }
+                total = total.saturating_add(declared);
+                if total > MAX_DECOMPRESSED_TOTAL {
+                    bail!(
+                        "E6: the compressed buffers of this file declare more than {} GiB \
+                         of decompressed data in total; split the data into several imports",
+                        MAX_DECOMPRESSED_TOTAL >> 30
+                    );
+                }
+            }
+        }
+        pos = body_end;
+    }
+    Ok(())
+}
+
 /// How the byte range a `StreamReader` consumed terminates (§2.2.1).
 enum Termination {
     /// A genuine 8-byte end-of-stream frame (continuation sentinel + zero
@@ -628,13 +756,13 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
     // the namespace are foreign tools' business and ignored silently.
     for key in md.keys() {
         if key.starts_with("nodal:") && !KNOWN_SCHEMA_KEYS.contains(&key.as_str()) {
-            println!("warning: segment {ordinal}: ignoring unknown metadata key {key:?} (E5)");
+            say!("warning: segment {ordinal}: ignoring unknown metadata key {key:?} (E5)");
         }
     }
     for field in schema.fields() {
         for key in field.metadata().keys() {
             if key.starts_with("nodal:") && !KNOWN_FIELD_KEYS.contains(&key.as_str()) {
-                println!(
+                say!(
                     "warning: segment {ordinal}: ignoring unknown metadata key {key:?} \
                      on field {:?} (E5)",
                     field.name()
@@ -808,7 +936,7 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
         }
     }
     if !saw_entity && !saw_value {
-        println!(
+        say!(
             "warning: {tag}: no column named 'entity' or 'value' — columns are \
              interpreted positionally"
         );

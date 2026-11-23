@@ -61,8 +61,8 @@ fn commit_timestamps_are_naive_utc() {
     let (ty, ts, icu_loaded): (String, i64, i64) = with_read(&db, |conn| {
         Ok(conn.query_row(
             "SELECT typeof(\"timestamp\"), epoch_us(\"timestamp\"), \
-                    (SELECT count(*) FROM duckdb_extensions() \
-                     WHERE extension_name = 'icu' AND loaded) \
+                    (SELECT count(*) FROM duckdb_functions() \
+                     WHERE function_name = 'icu_sort_key') \
              FROM commit_log WHERE id = ?",
             [c],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

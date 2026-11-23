@@ -103,10 +103,200 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
 /// docs/dev/engine_rules.md §5 (bug, guard test, how to remove this).
 /// The setting is debug-tagged: if a DuckDB release renames or drops it,
 /// every open fails loudly here, which the upgrade checklist catches.
+///
+/// **Lock-down (engine rule 12, "A file's SQL runs without file, network or
+/// extension access").** A database file carries its own views and macros,
+/// and the core calls some of them by name on every open
+/// (`nodal_read_surface()`, the read macros), so a file from someone else
+/// runs its own SQL inside the core's process. Every core connection is
+/// therefore opened with DuckDB's external access off (no file reads or
+/// writes outside the database itself, no `glob`, no HTTP), extension
+/// autoload and autoinstall off (no downloads), persistent secrets off and
+/// community extensions off, and its configuration is locked right after
+/// the open ([`open_with_retry`]), so no SQL on it can turn any of that back
+/// on. The database file, its WAL and DuckDB's spill directory stay usable.
+/// The one exception is [`Access::Trusted`], an explicit per-call opt-in
+/// for a caller's own query on a file it trusts.
 pub fn core_config(mode: AccessMode) -> Result<Config, duckdb::Error> {
-    Config::default()
+    config_for(mode, Lockdown::Locked)
+}
+
+/// How much of DuckDB's file-system, network and extension machinery a
+/// connection that runs a caller's own SQL may use ([`with_read_retrying_as`],
+/// Python `db.query(..., trusted=)`). Every other core connection is
+/// [`Access::Locked`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Access {
+    /// External access, extension autoload/autoinstall, persistent secrets
+    /// and community extensions off; configuration locked (the default; see
+    /// [`core_config`]).
+    #[default]
+    Locked,
+    /// DuckDB's own defaults (file and network access, extension autoload
+    /// and autoinstall, persistent secrets), configuration not locked. The
+    /// file's own views and macros then also run with that access: only
+    /// for files you trust.
+    Trusted,
+}
+
+/// The lock-down a core open applies ([`config_for`], [`lock_down`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Lockdown<'a> {
+    /// Every core connection: external access off from the config on.
+    Locked,
+    /// The rebuild's temp connection (compaction, extract), which then
+    /// `ATTACH`es the source: DuckDB refuses `allowed_paths` at config time
+    /// and once external access is off, so the connection opens with access
+    /// on (autoload, autoinstall and secrets already off), then allows
+    /// exactly these paths, turns access off and locks, before any SQL of
+    /// the file runs (verified on DuckDB 2.0.0).
+    Attach(&'a str),
+    /// [`Access::Trusted`].
+    Trusted,
+}
+
+/// The [`Config`] of one core open under `lockdown` (see [`core_config`]).
+pub(crate) fn config_for(
+    mode: AccessMode,
+    lockdown: Lockdown<'_>,
+) -> Result<Config, duckdb::Error> {
+    let mut config = Config::default()
         .access_mode(mode)?
-        .with("debug_enable_caching_operators", "false")
+        .with("debug_enable_caching_operators", "false")?;
+    match lockdown {
+        Lockdown::Locked | Lockdown::Attach(_) => {
+            let external = if matches!(lockdown, Lockdown::Locked) {
+                "false"
+            } else {
+                "true"
+            };
+            config = config
+                .with("enable_external_access", external)?
+                .with("autoload_known_extensions", "false")?
+                .with("autoinstall_known_extensions", "false")?
+                .with("allow_persistent_secrets", "false")?
+                .with("allow_community_extensions", "false")?;
+        }
+        Lockdown::Trusted => {}
+    }
+    let limits = resource_limits();
+    if let Some(m) = &limits.memory_limit {
+        config = config.with("memory_limit", m)?;
+    }
+    if let Some(t) = limits.threads {
+        config = config.with("threads", t.to_string())?;
+    }
+    Ok(config)
+}
+
+/// Right after a core open, before any SQL of the file runs: finish the
+/// lock-down of [`config_for`] (the `ATTACH` path's ordered settings) and
+/// lock the configuration. Nothing for [`Lockdown::Trusted`].
+fn lock_down(conn: &Connection, lockdown: Lockdown<'_>) -> Result<(), duckdb::Error> {
+    match lockdown {
+        Lockdown::Trusted => return Ok(()),
+        Lockdown::Locked => {}
+        Lockdown::Attach(src) => {
+            let lit = |p: &str| format!("'{}'", p.replace('\'', "''"));
+            conn.execute_batch(&format!(
+                "SET allowed_paths = [{}, {}]; SET enable_external_access = false",
+                lit(src),
+                lit(&format!("{src}.wal"))
+            ))?;
+        }
+    }
+    conn.execute_batch("SET lock_configuration = true")
+}
+
+/// DuckDB's memory and thread caps for every connection this process opens
+/// ([`set_resource_limits`]). `None` leaves DuckDB's own default (80 % of
+/// RAM, every core; or the SLURM allocation when `SLURM_*` is set).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// A DuckDB `memory_limit` value (`"4GiB"`, `"50%"`).
+    pub memory_limit: Option<String>,
+    /// DuckDB `threads`.
+    pub threads: Option<u64>,
+}
+
+static LIMITS: std::sync::RwLock<ResourceLimits> = std::sync::RwLock::new(ResourceLimits {
+    memory_limit: None,
+    threads: None,
+});
+
+/// Set the [`ResourceLimits`] every later core connection of this process is
+/// opened with (the CLI's `--memory-limit` / `--threads`). Validated by one
+/// in-memory open, so a bad value fails here rather than on the next read.
+pub fn set_resource_limits(limits: ResourceLimits) -> Result<(), DbError> {
+    if limits.threads == Some(0) {
+        return Err(DbError::Api("threads must be at least 1".into()));
+    }
+    let mut probe = Config::default();
+    if let Some(m) = &limits.memory_limit {
+        probe = probe.with("memory_limit", m)?;
+    }
+    if let Some(t) = limits.threads {
+        probe = probe.with("threads", t.to_string())?;
+    }
+    Connection::open_in_memory_with_flags(probe)?;
+    *LIMITS.write().unwrap_or_else(|p| p.into_inner()) = limits;
+    Ok(())
+}
+
+/// The process's current [`ResourceLimits`].
+pub fn resource_limits() -> ResourceLimits {
+    LIMITS.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// A database path as the UTF-8 string DuckDB is given. A non-UTF-8 path is
+/// refused (finding L2): a lossy conversion would name a *different* file
+/// (U+FFFD substituted), e.g. in the rebuild's `ATTACH`.
+pub(crate) fn utf8_path(db_path: &Path) -> Result<&str, DbError> {
+    db_path.to_str().ok_or_else(|| {
+        DbError::Api(format!(
+            "the database path {:?} is not valid UTF-8; rename it (nodal-db \
+             accepts UTF-8 paths only)",
+            db_path.display().to_string()
+        ))
+    })
+}
+
+/// The read-write connection `schema_init` applies the schema on: a new
+/// database only. Any existing entry at the path, or an existing
+/// `<db>.wal`, is refused (finding L1: applying the DDL into someone's
+/// DuckDB file, or half-applying it onto a nodal-db file, writes into a file
+/// that is not new; DuckDB 2.0 cannot open a zero-byte file either).
+/// Locked down like every core connection (engine rule 12), so the schema
+/// SQL cannot reach files either.
+pub(crate) fn open_fresh(db_path: &Path) -> Result<Connection, DbError> {
+    utf8_path(db_path)?;
+    // `symlink_metadata`: a symlink, dangling or not, is an existing entry.
+    if std::fs::symlink_metadata(db_path).is_ok() {
+        return Err(DbError::Api(format!(
+            "refusing to initialize {:?}: it already exists (init creates a new \
+             database; use a new path)",
+            db_path.display().to_string()
+        )));
+    }
+    let mut wal = db_path.as_os_str().to_owned();
+    wal.push(".wal");
+    if std::fs::symlink_metadata(&wal).is_ok() {
+        return Err(DbError::Api(format!(
+            "refusing to initialize {:?}: a write-ahead log {:?} exists next to it \
+             (it would be replayed onto the new database; remove it first)",
+            db_path.display().to_string(),
+            Path::new(&wal).display().to_string()
+        )));
+    }
+    let before = file_stamp(db_path);
+    let conn = Connection::open_with_flags(
+        db_path,
+        config_for(AccessMode::ReadWrite, Lockdown::Locked)?,
+    )?;
+    lock_down(&conn, Lockdown::Locked)?;
+    // The DDL's generated columns and indexes bind `lower()` (engine rule 8).
+    guard_builtins(&conn, db_path, before)?;
+    Ok(conn)
 }
 
 /// Open a connection in the given access mode, retrying with bounded backoff
@@ -117,14 +307,49 @@ pub fn core_config(mode: AccessMode) -> Result<Config, duckdb::Error> {
 /// (it already holds [`path_lock`] for the whole repack and must NOT re-take it
 /// via [`with_read`], which would deadlock the non-reentrant per-path mutex).
 pub(crate) fn open_with_retry(db_path: &Path, mode: AccessMode) -> Result<Connection, DbError> {
+    open_with_retry_as(db_path, mode, Lockdown::Locked)
+}
+
+/// The rebuild's temp connection (compaction, extract): [`open_with_retry`]
+/// read-write, locked down so that it may `ATTACH` exactly `src`
+/// ([`Lockdown::Attach`]; `crate::rebuild::attach_source_ro` uses the same
+/// spelling of the path, [`attach_path`]).
+pub(crate) fn open_for_rebuild(temp: &Path, src: &Path) -> Result<Connection, DbError> {
+    let src = attach_path(src)?;
+    open_with_retry_as(temp, AccessMode::ReadWrite, Lockdown::Attach(&src))
+}
+
+/// The one spelling of a rebuild source's path: absolute (so DuckDB's
+/// `allowed_paths` check and the `ATTACH` see the same string whatever the
+/// working directory) and UTF-8 ([`utf8_path`]).
+pub(crate) fn attach_path(src: &Path) -> Result<String, DbError> {
+    utf8_path(src)?;
+    let abs = std::path::absolute(src).map_err(|e| {
+        DbError::Api(format!(
+            "cannot resolve the path {:?}: {e}",
+            src.display().to_string()
+        ))
+    })?;
+    Ok(utf8_path(&abs)?.to_owned())
+}
+
+/// [`open_with_retry`] under an explicit [`Lockdown`].
+pub(crate) fn open_with_retry_as(
+    db_path: &Path,
+    mode: AccessMode,
+    lockdown: Lockdown<'_>,
+) -> Result<Connection, DbError> {
+    utf8_path(db_path)?;
     let mut backoff = BACKOFF_START;
     for attempt in 1..=MAX_ATTEMPTS {
-        let config = core_config(mode.clone())?;
+        let config = config_for(mode.clone(), lockdown)?;
         let before = file_stamp(db_path);
         match Connection::open_with_flags(db_path, config) {
             Ok(conn) => {
-                // A file must not shadow a built-in (engine rule 8): before
-                // any core SQL runs on it. On a refusal `conn` drops (closes).
+                // The lock-down first (engine rule 12), then the shadowing
+                // guard (engine rule 8): both before any core SQL runs on
+                // the file. On a refusal `conn` drops (closes).
+                lock_down(&conn, lockdown)?;
                 guard_builtins(&conn, db_path, before)?;
                 return Ok(conn);
             }
@@ -883,11 +1108,28 @@ pub fn with_read_retrying<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
 where
     F: Fn(&Connection) -> Result<T, DbError>,
 {
+    with_read_retrying_as(db_path, Access::Locked, f)
+}
+
+/// [`with_read_retrying`] with an explicit [`Access`]: [`Access::Trusted`]
+/// opens the connection with DuckDB's own file, network and extension
+/// access (and an unlocked configuration) for a caller's own query on a
+/// file it trusts (Python `db.query(sql, trusted=True)`). The file's views
+/// and macros, the read-surface check included, then run with that access
+/// too.
+pub fn with_read_retrying_as<T, F>(db_path: &Path, access: Access, f: F) -> Result<T, DbError>
+where
+    F: Fn(&Connection) -> Result<T, DbError>,
+{
     use crate::read_surface::{
         attaches_other_database, install_overlay, is_missing_object, map_read_error, prepare_read,
         ReadScope,
     };
-    with_read_plain(db_path, |conn| {
+    let lockdown = match access {
+        Access::Locked => Lockdown::Locked,
+        Access::Trusted => Lockdown::Trusted,
+    };
+    with_read_plain_as(db_path, lockdown, |conn| {
         let state = prepare_read(conn, db_path, ReadScope::Generic)?;
         match f(conn) {
             Err(e)
@@ -946,12 +1188,19 @@ pub(crate) fn with_read_plain<T, F>(db_path: &Path, f: F) -> Result<T, DbError>
 where
     F: FnOnce(&Connection) -> Result<T, DbError>,
 {
+    with_read_plain_as(db_path, Lockdown::Locked, f)
+}
+
+fn with_read_plain_as<T, F>(db_path: &Path, lockdown: Lockdown<'_>, f: F) -> Result<T, DbError>
+where
+    F: FnOnce(&Connection) -> Result<T, DbError>,
+{
     // Reads serialize too (critique F1): an in-process RO instance open during
     // a write has the same dual-instance hazard as a second writer.
     require_db_file(db_path)?;
     let lock = path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let conn = open_with_retry(db_path, AccessMode::ReadOnly)?;
+    let conn = open_with_retry_as(db_path, AccessMode::ReadOnly, lockdown)?;
     let result = f(&conn);
     // Close regardless of the closure outcome so no RO handle lingers.
     match conn.close() {

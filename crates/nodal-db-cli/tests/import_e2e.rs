@@ -1086,6 +1086,47 @@ fn zstd_compressed_stream_imports() {
     assert_eq!(vals, vec![1.5, 2.5]);
 }
 
+/// A compressed buffer whose 8-byte prefix declares a huge decompressed
+/// length is refused (E6) before arrow reserves that length; it used to
+/// abort the process (`memory allocation of 4611686018427387904 bytes
+/// failed`, SIGABRT). The prefix is forged on a real lz4 stream: the 8
+/// bytes before the first lz4 frame magic.
+#[test]
+fn a_forged_decompressed_length_is_e6_not_an_abort() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let schema = long_schema(segment_metadata("node", "profile", "long", 1));
+    let rows: Vec<(&str, i64, f64)> = (0..64).map(|i| ("n1", i, i as f64)).collect();
+    let batch = long_batch(&schema, &rows);
+    let opts = IpcWriteOptions::default()
+        .try_with_compression(Some(CompressionType::LZ4_FRAME))
+        .expect("lz4 options");
+    let mut buf = Vec::new();
+    {
+        let mut w =
+            StreamWriter::try_new_with_options(&mut buf, &schema, opts).expect("lz4 writer");
+        w.write(&batch).expect("write batch");
+        w.finish().expect("finish stream");
+    }
+    let magic = [0x04, 0x22, 0x4d, 0x18];
+    let at = buf
+        .windows(4)
+        .position(|w| w == magic)
+        .expect("an lz4 frame");
+    buf[at - 8..at].copy_from_slice(&(1i64 << 62).to_le_bytes());
+    let file = write_file(dir.path(), "bomb.arrows", &buf);
+
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("decompressed bytes"), "{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a clean error exit, not an abort"
+    );
+}
+
 /// §7.2: a label dimension without `nodal:label_domain` is E6 naming the field.
 #[test]
 fn label_dimension_without_domain_is_e6() {
@@ -2225,7 +2266,11 @@ fn reimport_of_an_annotated_value_states_keep_or_clear() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--value-metadata"), "{stderr}");
-    let out = import(&db, &v2, &[&args[..], &["--value-metadata", "keep"]].concat());
+    let out = import(
+        &db,
+        &v2,
+        &[&args[..], &["--value-metadata", "keep"]].concat(),
+    );
     assert!(
         out.status.success(),
         "{}",

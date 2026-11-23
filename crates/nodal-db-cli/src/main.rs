@@ -11,9 +11,21 @@
 //! runner lives under `template apply` in v1 (§4.4: `migrate` becomes the
 //! full-chain runner as a later door).
 
+/// `println!` through [`clean`]: every line the CLI prints may carry names
+/// from a database or a file someone else wrote.
+macro_rules! say {
+    ($($t:tt)*) => { println!("{}", $crate::clean(&format!($($t)*))) };
+}
+
+/// `eprintln!` through [`clean`].
+macro_rules! say_err {
+    ($($t:tt)*) => { eprintln!("{}", $crate::clean(&format!($($t)*))) };
+}
+
 mod import;
 mod template;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use anyhow::bail;
@@ -28,8 +40,72 @@ use nodal_db_core::schema_init::EMBEDDED_SCHEMA;
 #[derive(Parser)]
 #[command(name = "nodal-db", about = "nodal_db core CLI", version)]
 struct Cli {
+    /// DuckDB memory limit for every database this command opens, e.g.
+    /// `4GiB` or `25%` (of RAM). Default: 50% of RAM, or DuckDB's own
+    /// sizing under SLURM.
+    #[arg(long, global = true, value_name = "SIZE")]
+    memory_limit: Option<String>,
+    /// DuckDB worker threads per database this command opens. Default: the
+    /// CPU count, at most 8, or DuckDB's own sizing under SLURM.
+    #[arg(long, global = true, value_name = "N")]
+    threads: Option<u64>,
     #[command(subcommand)]
     command: Command,
+}
+
+/// The CLI's default memory limit (DuckDB's own is 80% of RAM).
+const DEFAULT_MEMORY_LIMIT: &str = "50%";
+/// The CLI's default thread cap (DuckDB's own is every core).
+const DEFAULT_MAX_THREADS: u64 = 8;
+
+/// Is a SLURM allocation variable set? DuckDB then sizes itself from it
+/// (`SLURM_CPUS_ON_NODE`, `SLURM_MEM_PER_NODE`), and the CLI keeps that.
+fn slurm(var: &str) -> bool {
+    std::env::var_os(var).is_some_and(|v| !v.is_empty())
+}
+
+/// The CLI's DuckDB caps: the flags, else the defaults above (a shared
+/// machine keeps headroom even when a file is huge or crafted).
+fn resource_limits(cli: &Cli) -> nodal_db_core::conn::ResourceLimits {
+    let memory_limit = cli
+        .memory_limit
+        .clone()
+        .or_else(|| (!slurm("SLURM_MEM_PER_NODE")).then(|| DEFAULT_MEMORY_LIMIT.to_string()));
+    let threads = cli.threads.or_else(|| {
+        (!slurm("SLURM_CPUS_ON_NODE")).then(|| {
+            std::thread::available_parallelism()
+                .map_or(DEFAULT_MAX_THREADS, |n| n.get() as u64)
+                .min(DEFAULT_MAX_THREADS)
+        })
+    });
+    nodal_db_core::conn::ResourceLimits {
+        memory_limit,
+        threads,
+    }
+}
+
+/// `s` with terminal control characters escaped: C0 (but newline and tab),
+/// DEL, C1, and the bidirectional overrides, so a name from someone else's
+/// file cannot move the cursor, retitle the terminal or reorder the line.
+fn clean(s: &str) -> Cow<'_, str> {
+    let bad = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    if !s.chars().any(bad) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.chars()
+            .map(|c| {
+                if bad(c) {
+                    c.escape_unicode().to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+    )
 }
 
 #[derive(Subcommand)]
@@ -51,10 +127,11 @@ enum Command {
         /// Commit author for the template load; defaults to the OS username.
         #[arg(long)]
         user: Option<String>,
-        /// Dev override: apply schema/*.sql from a directory instead of the
-        /// compile-time-embedded schema. Without a value, uses the repo's
-        /// schema/ directory as resolved by the core.
-        #[arg(long, num_args = 0..=1)]
+        /// Development builds only (a release build refuses it): apply
+        /// schema/*.sql from a directory instead of the compile-time-embedded
+        /// schema. Without a value, uses the repo's schema/ directory as
+        /// resolved by the core.
+        #[arg(long, num_args = 0..=1, hide = !cfg!(debug_assertions))]
         schema_dir: Option<Option<PathBuf>>,
     },
     /// Import an Arrow-IPC bulk file into an existing database, atomically
@@ -265,15 +342,25 @@ fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    let result = run(cli);
+    let result = nodal_db_core::conn::set_resource_limits(resource_limits(&cli))
+        .map_err(|e| anyhow::anyhow!("--memory-limit / --threads: {e}"))
+        .and_then(|()| run(cli));
     // The core never prints: a stale read surface met by a read, or a failed
     // refresh before a write, is reported here once per file.
     for n in nodal_db_core::read_surface::take_notices() {
-        eprintln!("warning: {}", n.message);
+        say_err!("warning: {}", n.message);
     }
-    result
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // What `fn main() -> anyhow::Result<()>` printed, escaped: core
+            // error messages quote names from the file.
+            say_err!("Error: {e:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
@@ -287,13 +374,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             // Refuse an existing database (CLI critique F6): the schema applies
             // file-by-file under autocommit, so re-applying onto existing state
-            // fails partway and can leave a mixed state. Only an absent or
-            // zero-byte path (a `touch`ed placeholder) counts as fresh.
-            if std::fs::metadata(&db).map(|m| m.len() > 0).unwrap_or(false) {
+            // fails partway and can leave a mixed state. Only an absent path
+            // counts as fresh (DuckDB 2.0 cannot open a zero-byte file). The
+            // core's init refuses it too; this keeps the CLI's wording.
+            if std::fs::symlink_metadata(&db).is_ok() {
                 bail!(
                     "{}: already exists; refusing to re-apply schema \
                      (init targets a fresh path; use a new file)",
                     db.display()
+                );
+            }
+            // The schema SQL of a directory is arbitrary SQL: a development
+            // override, never something a released binary runs.
+            if schema_dir.is_some() && !cfg!(debug_assertions) {
+                bail!(
+                    "--schema-dir is a development-only override; a release build \
+                     applies only the schema embedded in it"
                 );
             }
             let default_alt = alternative.as_deref();
@@ -314,7 +410,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     default_alt,
                 )?,
             }
-            println!("initialized {}", db.display());
+            say!("initialized {}", db.display());
             if let Some(file) = template {
                 template::load_into(&file, &db, user.as_deref())?;
             }
@@ -367,7 +463,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 if !p.found {
                     bail!("alternative '{name}' not found (no identity row)");
                 }
-                println!(
+                say!(
                     "would erase alternative '{}' (id {}, identity {}):",
                     p.alternative_name,
                     p.alternative_id,
@@ -378,20 +474,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 );
                 for tc in &p.per_table {
-                    println!("  {:<24} {:>10} rows", tc.table, tc.rows);
+                    say!("  {:<24} {:>10} rows", tc.table, tc.rows);
                 }
-                println!(
+                say!(
                     "  total {} rows, ~{} payload bytes (advisory)",
-                    p.rows_total, p.bytes_estimate
+                    p.rows_total,
+                    p.bytes_estimate
                 );
                 for s in &p.referencing_scenarios {
-                    println!(
+                    say!(
                         "  note: scenario '{}' (id {}) loses a rank row",
-                        s.name, s.id
+                        s.name,
+                        s.id
                     );
                 }
                 if !p.referencing_runs.is_empty() {
-                    println!(
+                    say!(
                         "  note: erases the results of run(s) {:?}",
                         p.referencing_runs
                     );
@@ -404,14 +502,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         .iter()
                         .any(|prob| prob.contains(&format!("'{n}'")))
                     {
-                        println!("  expect-present '{n}': present — the erase would proceed");
+                        say!("  expect-present '{n}': present — the erase would proceed");
                     }
                 }
                 for prob in &p.expect_present_problems {
-                    println!("  expect-present PROBLEM: the erase would refuse — {prob}");
+                    say!("  expect-present PROBLEM: the erase would refuse — {prob}");
                 }
                 if note.is_some() {
-                    println!("  (--note is recorded only by an actual erase; ignored in preview)");
+                    say!("  (--note is recorded only by an actual erase; ignored in preview)");
                 }
                 return Ok(());
             }
@@ -431,7 +529,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     Ok(conn.query_row("SELECT count(*) FROM run", [], |r| r.get(0))?)
                 })?;
                 if runs == 0 {
-                    eprintln!(
+                    say_err!(
                         "warning: {} has no `run` provenance rows — this looks like a \
                          curated INPUT database, not a tool-produced output DB. Erase is \
                          mechanism-agnostic and will proceed, but the sanctioned \
@@ -442,14 +540,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let r = erasure::erase_alternative(&db, &key, &opts, &user)?;
             if !r.erased {
-                println!(
+                say!(
                     "nothing to erase: alternative '{name}' (id {}) is already closed with no \
                      data rows (no commit, no marker written)",
                     r.alternative_id
                 );
                 return Ok(());
             }
-            println!(
+            say!(
                 "erased alternative '{name}' (id {}): {} rows across {} tables, \
                  ~{} payload bytes; marker {} at commit {}{}",
                 r.alternative_id,
@@ -465,9 +563,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             );
             for tc in &r.per_table {
-                println!("  {:<24} {:>10} rows", tc.table, tc.rows);
+                say!("  {:<24} {:>10} rows", tc.table, tc.rows);
             }
-            println!("(bytes return to the OS at the next compaction)");
+            say!("(bytes return to the OS at the next compaction)");
             Ok(())
         }
         Command::Extract {
@@ -489,25 +587,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(n) => format!("the state as of commit {n}"),
                 None => format!("the current state (commit {})", r.horizon_commit),
             };
-            println!(
+            say!(
                 "extracted {state} of {} into {}",
                 src.display(),
                 dest.display()
             );
-            println!("  source identity   {}", r.source_identity);
-            println!("  extract identity  {}", r.extract_identity);
-            println!(
+            say!("  source identity   {}", r.source_identity);
+            say!("  extract identity  {}", r.extract_identity);
+            say!(
                 "  horizon commit {}, extract commit {}, horizon marker {}",
-                r.horizon_commit, r.extract_commit, r.marker_id
+                r.horizon_commit,
+                r.extract_commit,
+                r.marker_id
             );
-            println!(
+            say!(
                 "  size {} -> {}; {} rows left out, {} unreferenced axes dropped",
                 mib(r.bytes_source),
                 mib(r.bytes_extract),
                 r.rows_removed,
                 r.axes_dropped
             );
-            println!(
+            say!(
                 "note: the extract has a NEW database identity; as-of reads before commit \
                  {} fail in it (the source keeps the full history)",
                 r.extract_commit
@@ -578,19 +678,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             if preview {
                 let p = nodal_db_core::api::preview_purge(&db, vec![req])?;
                 let p = &p[0];
-                println!(
+                say!(
                     "would close {} object(s), {} row(s):",
-                    p.objects, p.cascade.total_rows
+                    p.objects,
+                    p.cascade.total_rows
                 );
-                println!(
+                say!(
                     "  {:<28} {:>10} rows",
-                    "objects + identity", p.cascade.object_rows
+                    "objects + identity",
+                    p.cascade.object_rows
                 );
                 for tc in &p.cascade.per_table {
-                    println!("  {:<28} {:>10} rows", tc.table, tc.rows);
+                    say!("  {:<28} {:>10} rows", tc.table, tc.rows);
                 }
                 for b in &p.outside_scope {
-                    println!(
+                    say!(
                         "  outside the scope: {} {} of {} ({})",
                         b.count,
                         b.table,
@@ -599,23 +701,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     );
                 }
                 if p.template_stamped {
-                    println!("  closes template vocabulary (needs --allow-on-template)");
+                    say!("  closes template vocabulary (needs --allow-on-template)");
                 }
-                println!(
+                say!(
                     "  long-tier cells + array elements in the scope: {}",
                     p.cells
                 );
                 for w in &p.warnings {
                     if let nodal_db_core::types::WarningKind::PurgeLarge { threshold, .. } = w.kind
                     {
-                        println!(
+                        say!(
                             "  warning: more than {threshold} cells: one long transaction that \
                              holds the write lock (about 10 min and 3.4 GB per 105 M cells \
                              measured)"
                         );
                     }
                 }
-                println!("(an upper bound: nothing is written, so nothing is spared)");
+                say!("(an upper bound: nothing is written, so nothing is spared)");
                 return Ok(());
             }
             let user = import::resolve_user_from(user.as_deref())?;
@@ -631,15 +733,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     cells, threshold, ..
                 } = w.kind
                 {
-                    eprintln!("warning: the purge covered {cells} cells (more than {threshold})");
+                    say_err!("warning: the purge covered {cells} cells (more than {threshold})");
                 }
             }
             let o = &r.purges[0];
             if r.commit_id == 0 {
-                println!("nothing to purge (no commit)");
+                say!("nothing to purge (no commit)");
                 return Ok(());
             }
-            println!(
+            say!(
                 "purged {} object(s), {} row(s) at commit {}{}",
                 o.objects,
                 o.closed_out.total_rows,
@@ -651,7 +753,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             );
             for tc in &o.closed_out.per_table {
-                println!("  {:<28} {:>10} rows", tc.table, tc.rows);
+                say!("  {:<28} {:>10} rows", tc.table, tc.rows);
             }
             Ok(())
         }
@@ -689,10 +791,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(compaction::CompactionTrigger::Requested) | None => "",
             };
             if let Some(w) = &r.warning {
-                eprintln!("warning: {w}");
+                say_err!("warning: {w}");
             }
             if r.kept_original {
-                println!(
+                say!(
                     "{}: compaction ran{why} but did not shrink the file \
                      ({} rebuilt vs {}); original kept",
                     db.display(),
@@ -700,14 +802,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     mib(r.bytes_before)
                 );
             } else if r.swapped {
-                println!(
+                say!(
                     "compacted {}: {} -> {}{why}",
                     db.display(),
                     mib(r.bytes_before),
                     mib(r.bytes_after)
                 );
             } else {
-                println!(
+                say!(
                     "{}: no compaction needed ({}; below the growth and commit thresholds)",
                     db.display(),
                     mib(r.bytes_before)
@@ -722,34 +824,34 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             use nodal_db_core::read_surface::SurfaceStatus;
             if check {
                 let r = nodal_db_core::api::read_surface_status(&db)?;
-                println!("{}", db.display());
-                println!(
+                say!("{}", db.display());
+                say!(
                     "  schema version         {}",
                     r.schema_version.as_deref().unwrap_or("(unreadable)")
                 );
-                println!("  file read surface      {}", r.check.found_label());
-                println!("  this nodal-db          {}", r.check.expected);
-                println!("  status                 {}", r.check.status.as_str());
+                say!("  file read surface      {}", r.check.found_label());
+                say!("  this nodal-db          {}", r.check.expected);
+                say!("  status                 {}", r.check.status.as_str());
                 let code = match r.check.status {
                     SurfaceStatus::Current => 0,
                     SurfaceStatus::Newer => 2,
                     _ => 1,
                 };
                 for n in nodal_db_core::read_surface::take_notices() {
-                    eprintln!("warning: {}", n.message);
+                    say_err!("warning: {}", n.message);
                 }
                 std::process::exit(code);
             }
             let r = nodal_db_core::api::refresh_read_surface(&db, force)?;
             if r.refreshed {
-                println!(
+                say!(
                     "refreshed the read surface of {}: {} -> {}",
                     db.display(),
                     r.check.found_label(),
                     r.check.expected
                 );
             } else if r.check.status == SurfaceStatus::Newer {
-                println!(
+                say!(
                     "{}: read surface {} is newer than this nodal-db's ({}); left alone \
                      (--force downgrades it)",
                     db.display(),
@@ -757,7 +859,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     r.check.expected
                 );
             } else {
-                println!(
+                say!(
                     "{}: read surface {} is current; nothing to do",
                     db.display(),
                     r.check.found_label()

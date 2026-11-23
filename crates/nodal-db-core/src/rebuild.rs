@@ -581,16 +581,20 @@ pub(crate) fn check_catalog(
 
 /// The catalog alias every rebuild attaches its source under. Deliberately
 /// unlikely as a file stem: DuckDB names a database's default catalog after
-/// its file name up to the first dot, so the temp `src.duckdb.compact.1.tmp`
-/// is catalog `src`, and an alias equal to that name made `ATTACH` fail
-/// ("database with name ... already exists"). [`attach_source_ro`] refuses
-/// the remaining collision loudly.
+/// its file name up to the first dot (the rebuild's temp is
+/// `rebuild.duckdb`, catalog `rebuild`; a caller's own temp could be
+/// `src.duckdb...`, catalog `src`), and an alias equal to that name makes
+/// `ATTACH` fail ("database with name ... already exists").
+/// [`attach_source_ro`] refuses the remaining collision loudly.
 pub(crate) const SRC: &str = "nodal_rebuild_source";
 
 /// ATTACH the source read-only on the temp connection, mapping a busy file lock
-/// to [`DbError::Busy`] (same UX as a busy commit).
+/// to [`DbError::Busy`] (same UX as a busy commit). `conn` must come from
+/// [`crate::conn::open_for_rebuild`] for this `src_path`: it is the one
+/// connection allowed to attach exactly this file (engine rule 12); the
+/// path is spelled the same way here ([`crate::conn::attach_path`]).
 pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(), DbError> {
-    // Single-quote-escape the path for the SQL literal.
+    let path = crate::conn::attach_path(src_path)?;
     let current: String = conn.query_row("SELECT current_database()", [], |r| r.get(0))?;
     if current == SRC {
         return Err(DbError::Api(format!(
@@ -599,7 +603,8 @@ pub(crate) fn attach_source_ro(conn: &Connection, src_path: &Path) -> Result<(),
             src_path.display().to_string()
         )));
     }
-    let lit = src_path.display().to_string().replace('\'', "''");
+    // Single-quote-escape the path for the SQL literal.
+    let lit = path.replace('\'', "''");
     let sql = format!("ATTACH '{lit}' AS {SRC} (READ_ONLY)");
     conn.execute_batch(&sql).map_err(|e| {
         if e.to_string().contains("Could not set lock") {
@@ -648,7 +653,8 @@ pub(crate) fn restore_sequences(conn: &Connection) -> Result<(), DbError> {
     // Read from the temp's own catalog (main db).
     let mut stmt = conn.prepare(
         "SELECT table_name, column_name, column_default FROM information_schema.columns \
-         WHERE column_default LIKE 'nextval(%'",
+         WHERE column_default LIKE 'nextval(%' AND table_catalog = current_database() \
+           AND table_schema = 'main'",
     )?;
     let mapping: Vec<(String, String, String)> = stmt
         .query_map([], |r| {
@@ -750,13 +756,99 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+/// 64 unpredictable bits for a temp file name: std's `RandomState` keys are
+/// seeded from the OS's random source, hashed with the time and a counter.
+pub(crate) fn random_tag() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+    if let Ok(t) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        h.write_u128(t.as_nanos());
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// The file name of the database inside a [`create_temp_db`] directory.
+/// DuckDB names a database's catalog after its file name up to the first
+/// dot (`rebuild`), never the rebuild's source alias [`SRC`].
+const TEMP_DB_NAME: &str = "rebuild.duckdb";
+
+/// Create a new private directory `<dir>/<stem>.<pid>.<random>.tmp` and
+/// return the path of a (not yet existing) database file inside it (finding
+/// L3). `mkdir` fails on any existing entry, a planted symlink included,
+/// the random part makes the name unpredictable, and on Unix the directory
+/// is `0700`, so nobody else can plant the database file, its `.wal` or
+/// DuckDB's spill directory (`<db>.tmp`, created next to the file) in it.
+/// The directory sits next to the target, so the final rename or hard link
+/// stays on one filesystem. [`remove_temp`] removes it again.
+pub(crate) fn create_temp_db(dir: &Path, stem: &str) -> Result<PathBuf, DbError> {
+    let mut last = None;
+    for _ in 0..8 {
+        let sub = dir.join(format!(
+            "{stem}.{}.{}.tmp",
+            std::process::id(),
+            random_tag()
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&sub) {
+            Ok(()) => return Ok(sub.join(TEMP_DB_NAME)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => {
+                return Err(DbError::Api(format!(
+                    "cannot create the temp directory {:?}: {e}",
+                    sub.display().to_string()
+                )))
+            }
+        }
+    }
+    Err(DbError::Api(format!(
+        "cannot create a temp directory for {:?} in {:?}: {}",
+        stem,
+        dir.display().to_string(),
+        last.expect("eight attempts ran")
+    )))
+}
+
+/// Remove an abandoned temp entry found by an orphan sweep: a
+/// [`create_temp_db`] directory with everything in it (`remove_dir_all`
+/// never follows a symlink), or a file or symlink of an older build.
+pub(crate) fn remove_orphan(path: &Path) {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let _ = fs::remove_dir_all(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Err(_) => {}
+    }
+}
+
 /// Remove a temp file and its WAL sidecar (abort cleanup).
+///
+/// A [`create_temp_db`] file's private directory goes too, with whatever
+/// DuckDB left in it (its spill directory): only ever the directory this
+/// process created, recognized by the file name inside it.
 pub(crate) fn remove_temp(temp_path: &Path) {
     crate::conn::forget_builtin_guard(temp_path);
     let _ = fs::remove_file(temp_path);
     let mut wal = temp_path.as_os_str().to_os_string();
     wal.push(".wal");
     let _ = fs::remove_file(PathBuf::from(wal));
+    if temp_path.file_name() == Some(std::ffi::OsStr::new(TEMP_DB_NAME)) {
+        let sub = temp_path.parent().filter(|s| {
+            s.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".tmp"))
+        });
+        if let Some(sub) = sub {
+            let _ = fs::remove_dir_all(sub);
+        }
+    }
 }
 
 /// fsync a file's bytes to disk (durability before the rename, §3).

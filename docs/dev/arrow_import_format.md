@@ -97,6 +97,12 @@ under the final name.
 | Buffer compression `ZSTD`, `LZ4_FRAME` | yes |
 | Run-end encoding | **no** (E6) |
 
+Size limits: a file larger than 16 GiB is refused before it is read. A
+compressed buffer starts with its decompressed length (8 bytes); before
+any batch is decoded, the importer refuses (E6) a file in which one
+buffer declares more than 2 GiB, or all buffers together more than
+16 GiB, so a forged length cannot make the reader reserve that memory.
+
 ## Segment metadata
 
 Schema-level metadata on each segment (string keys and values):

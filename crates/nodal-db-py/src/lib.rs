@@ -40,7 +40,7 @@ use pyo3::types::{PyBool, PyDict, PyList};
 
 use nodal_db_core::api;
 use nodal_db_core::compaction;
-use nodal_db_core::conn::with_read_retrying;
+use nodal_db_core::conn::{with_read_retrying_as, Access};
 use nodal_db_core::erasure;
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract;
@@ -377,11 +377,33 @@ impl Database {
     /// lacks, it is run once more through temporary copies of this build's
     /// views (a `ReadSurfaceStaleWarning` is issued once per file). A file of
     /// another contract major is always read through this build's views.
-    fn query<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
+    ///
+    /// The connection is locked down, like every connection nodal-db opens:
+    /// no file access outside the database (`read_csv`, `COPY ... TO`,
+    /// `glob`, `ATTACH`), no network, no extension install or load, no
+    /// persistent secrets, and no `SET`. This is what makes a file from
+    /// someone else safe to open: its own views and macros run on the same
+    /// connection. `trusted=True` opens this one query's connection with
+    /// DuckDB's full access instead. The file's own views and macros then
+    /// also run with full access, so use it only for files you trust;
+    /// otherwise read the result here and do the file I/O on your own
+    /// DuckDB connection.
+    #[pyo3(signature = (sql, *, trusted = false))]
+    fn query<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        trusted: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let path = self.path.clone();
+        let access = if trusted {
+            Access::Trusted
+        } else {
+            Access::Locked
+        };
         let (schema, batches) = py
             .detach(move || {
-                with_read_retrying(&path, |conn| {
+                with_read_retrying_as(&path, access, |conn| {
                     let mut stmt = conn.prepare(&sql)?;
                     let arrow = stmt.query_arrow([])?;
                     let schema = arrow.get_schema();
@@ -1439,8 +1461,11 @@ fn open(path: PathBuf) -> PyResult<Database> {
 
 /// Create a fresh database at `path` and apply the full schema (embedded in
 /// this wheel at build time — same files as `nodal-db init`). Seeds NO
-/// alternative unless `default_alternative` is given. `schema_dir` is the
-/// dev override to apply the schema from a directory instead.
+/// alternative unless `default_alternative` is given. Refuses a path that
+/// already exists and is not an empty file (or has a `.wal` next to it).
+/// `schema_dir` is a development-only override (debug builds of the skin;
+/// a release wheel refuses it) that applies the schema from a directory
+/// instead.
 #[pyfunction]
 #[pyo3(signature = (path, *, default_alternative = None, schema_dir = None))]
 fn init(
@@ -1449,6 +1474,12 @@ fn init(
     default_alternative: Option<String>,
     schema_dir: Option<PathBuf>,
 ) -> PyResult<Database> {
+    if schema_dir.is_some() && !cfg!(debug_assertions) {
+        return Err(ApiError::new_err(
+            "schema_dir= is a development-only override; a release build applies \
+             only the schema embedded in it",
+        ));
+    }
     py.detach(move || {
         match schema_dir {
             Some(dir) => schema_init::init_schema_from_dir_with_default(
@@ -1527,7 +1558,10 @@ fn nodal_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<WriteAndDeleteSameKey>(),
     )?;
     m.add("UndeclaredValueType", py.get_type::<UndeclaredValueType>())?;
-    m.add("ValueMetadataUnstated", py.get_type::<ValueMetadataUnstated>())?;
+    m.add(
+        "ValueMetadataUnstated",
+        py.get_type::<ValueMetadataUnstated>(),
+    )?;
     m.add("SchemaMismatch", py.get_type::<SchemaMismatch>())?;
     m.add("ReadSurfaceStale", py.get_type::<ReadSurfaceStale>())?;
     m.add(

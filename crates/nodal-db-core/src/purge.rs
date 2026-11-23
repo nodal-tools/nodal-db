@@ -345,7 +345,7 @@ pub(crate) struct PurgeCall<'a> {
     pub(crate) touches: &'a CallTouches,
     /// The value keys the call buffered (written or unchanged).
     pub(crate) written: &'a HashSet<(i64, i64, i64)>,
-    pub(crate) retain_override: Option<bool>,
+    pub(crate) retain_content: Option<bool>,
 }
 
 /// Run the call's purges, last in the call, under its commit `c`,
@@ -363,7 +363,7 @@ pub(crate) fn run(
         return Ok(false);
     }
     fill_survivors(conn, call)?;
-    fill_retention(conn, call.retain_override)?;
+    fill_retention(conn, call.retain_content)?;
     for (r, scope) in call.scopes.iter().enumerate() {
         build_request_sets(conn, r, scope)?;
     }
@@ -675,11 +675,11 @@ fn fill_survivors(conn: &Connection, call: &PurgeCall<'_>) -> Result<(), DbError
 }
 
 /// The retention partition `pg_retention(pd_id, retained)`:
-/// every definition's `retain_override.unwrap_or(retain_content)`, read
+/// every definition's `retain_content` option, else its own `retain_content`, read
 /// before any close (from each definition's latest row, so a definition
 /// the same purge closes keeps its retention).
-fn fill_retention(conn: &Connection, retain_override: Option<bool>) -> Result<(), DbError> {
-    let over = match retain_override {
+fn fill_retention(conn: &Connection, retain_content: Option<bool>) -> Result<(), DbError> {
+    let over = match retain_content {
         Some(true) => "TRUE",
         Some(false) => "FALSE",
         None => "NULL",
@@ -2107,7 +2107,7 @@ mod tests {
     use crate::types::{StructuralChange as SC, WriteOptions};
 
     fn class(name: &str, dims: &[&str]) -> SC {
-        SC::CreateEntityClass {
+        SC::CreateClass {
             name: name.into(),
             dims: dims.iter().map(|d| d.to_string()).collect(),
             description: None,

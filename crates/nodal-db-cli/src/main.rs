@@ -7,7 +7,8 @@
 //! close out data; `maintain` compacts a file or refreshes its read
 //! surface; `template` loads, plans, applies and exports templates.
 //!
-//! Exit codes: 0 success, 1 error, 75 busy (the database is locked or the
+//! Exit codes: 0 success, 1 error, 2 usage error (bad arguments, from clap),
+//! 75 busy (the database is locked or the
 //! write-conflict retries ran out: retry later), and for
 //! `maintain refresh-views --check` 3 (stale) and 4 (newer than this
 //! nodal-db).
@@ -43,8 +44,8 @@ use nodal_db_core::schema_init::EMBEDDED_SCHEMA;
     name = "nodal-db",
     about = "nodal-db: create, import into and maintain nodal-db database files",
     version,
-    after_help = "Exit codes: 0 success; 1 error; 75 busy (the database is locked by \
-another process or write conflicts persisted: retry later). \
+    after_help = "Exit codes: 0 success; 1 error; 2 usage error (bad arguments); 75 busy \
+(the database is locked by another process or write conflicts persisted: retry later). \
 `maintain refresh-views --check` also exits 3 (stale) or 4 (newer than this nodal-db)."
 )]
 struct Cli {
@@ -137,8 +138,8 @@ enum Command {
         /// Create one alternative with this name. Without it the file has
         /// no alternative until the first write names one (writes create
         /// missing alternatives); there is no implicit `Base`.
-        #[arg(long)]
-        alternative: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        default_alternative: Option<String>,
         /// Load this template (YAML or JSON IR) right after the schema.
         #[arg(long)]
         template: Option<PathBuf>,
@@ -184,9 +185,14 @@ enum Command {
         /// content-less stub (as if the parameter had retain_content = FALSE).
         /// New versions are written either way; values equal to the stored
         /// ones are not rewritten (and so leave no stub). Applies to all
-        /// segments.
+        /// segments. Without this flag or --retain-content, each parameter's
+        /// own retain_content setting decides.
+        #[arg(long, conflicts_with = "retain_content")]
+        no_retain_content: bool,
+        /// Keep the content of the versions this import replaces, even for
+        /// parameters whose retain_content setting is FALSE.
         #[arg(long)]
-        force_replace: bool,
+        retain_content: bool,
         /// What the new versions of values that carry metadata links keep:
         /// `keep` (their links) or `clear` (none). Required when the import
         /// changes such a value; values without links, new values and
@@ -338,7 +344,7 @@ enum MaintainCommand {
     /// this nodal-db's. Any write with this nodal-db does the same first;
     /// use this for a file that is only read. Data and history are
     /// untouched and no commit is recorded. A current file is left alone,
-    /// and so is a newer one (unless --force). Fails, changing nothing,
+    /// and so is a newer one (unless --allow-downgrade). Fails, changing nothing,
     /// when the refresh cannot run (e.g. a table of yours holds a name the
     /// read surface reserves).
     RefreshViews {
@@ -355,7 +361,7 @@ enum MaintainCommand {
         /// for development only: the newer nodal-db refreshes it back on its
         /// next write).
         #[arg(long, conflicts_with = "check")]
-        force: bool,
+        allow_downgrade: bool,
     },
 }
 
@@ -422,7 +428,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Init {
             db,
-            alternative,
+            default_alternative,
             template,
             user,
             schema_dir,
@@ -447,7 +453,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                      applies only the schema embedded in it"
                 );
             }
-            let default_alt = alternative.as_deref();
+            let default_alt = default_alternative.as_deref();
             match schema_dir {
                 None => nodal_db_core::schema_init::init_schema_from_sources_with_default(
                     &db,
@@ -479,7 +485,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             parameter,
             user,
             message,
-            force_replace,
+            no_retain_content,
+            retain_content,
             value_metadata,
         } => import::run(&import::ImportArgs {
             file,
@@ -489,7 +496,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             parameter,
             user,
             message,
-            force_replace,
+            retain_content: match (retain_content, no_retain_content) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
             value_metadata,
         }),
         Command::EraseAlternative {
@@ -533,7 +544,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 say!(
                     "  total {} rows, ~{} payload bytes (advisory)",
-                    p.rows_total,
+                    p.total_rows,
                     p.bytes_estimate
                 );
                 for s in &p.referencing_scenarios {
@@ -606,7 +617,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 "erased alternative '{name}' (id {}): {} rows across {} tables, \
                  ~{} payload bytes; marker {} at commit {}{}",
                 r.alternative_id,
-                r.rows_total,
+                r.total_rows,
                 r.per_table.len(),
                 r.bytes_estimate,
                 r.marker_id,
@@ -869,7 +880,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Maintain {
-            command: MaintainCommand::RefreshViews { db, check, force },
+            command:
+                MaintainCommand::RefreshViews {
+                    db,
+                    check,
+                    allow_downgrade,
+                },
         } => {
             import::require_db(&db)?;
             use nodal_db_core::read_surface::SurfaceStatus;
@@ -895,7 +911,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 std::process::exit(code);
             }
-            let r = nodal_db_core::api::refresh_read_surface(&db, force)?;
+            let r = nodal_db_core::api::refresh_read_surface(&db, allow_downgrade)?;
             if r.refreshed {
                 say!(
                     "refreshed the read surface of {}: {} -> {}",
@@ -906,7 +922,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } else if r.check.status == SurfaceStatus::Newer {
                 say!(
                     "{}: read surface {} is newer than this nodal-db's ({}); left alone \
-                     (--force downgrades it)",
+                     (--allow-downgrade replaces it)",
                     db.display(),
                     r.check.found_label(),
                     r.check.expected

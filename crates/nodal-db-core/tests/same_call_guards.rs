@@ -161,12 +161,12 @@ fn base_db(dir: &Path, file: &str) -> PathBuf {
         &db,
         ChangeSet {
             structural: vec![
-                SC::CreateEntityClass {
+                SC::CreateClass {
                     name: "node".into(),
                     dims: vec![],
                     description: None,
                 },
-                SC::CreateEntityClass {
+                SC::CreateClass {
                     name: "link".into(),
                     dims: vec!["node".into(), "node".into()],
                     description: None,
@@ -380,7 +380,7 @@ fn create_pair(k: &str, v: &str) -> M {
 fn put_source(r: Ref, rename: Option<&str>) -> M {
     M::PutSource {
         source: r,
-        rename: rename.map(Into::into),
+        new_name: rename.map(Into::into),
         fields: SourceFields::default(),
     }
 }
@@ -388,7 +388,7 @@ fn put_source(r: Ref, rename: Option<&str>) -> M {
 fn put_license(r: Ref, rename: Option<&str>) -> M {
     M::PutLicense {
         license: r,
-        rename: rename.map(Into::into),
+        new_name: rename.map(Into::into),
         fields: LicenseFields::default(),
     }
 }
@@ -396,7 +396,7 @@ fn put_license(r: Ref, rename: Option<&str>) -> M {
 fn put_role(r: Ref, rename: Option<&str>) -> M {
     M::PutRole {
         role: r,
-        rename: rename.map(Into::into),
+        new_name: rename.map(Into::into),
         description: None,
         iri: None,
     }
@@ -435,8 +435,8 @@ fn a_pool_object_created_and_touched_again_in_one_call_is_refused() {
             vec![
                 create_pair("k", "v"),
                 M::RenamePairKey {
-                    from: "k".into(),
-                    to: "k2".into(),
+                    current: "k".into(),
+                    new_name: "k2".into(),
                 },
             ],
         ),

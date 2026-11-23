@@ -26,7 +26,7 @@ use std::time::Instant;
 use duckdb::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
-use nodal_db_core::api::write_parameter;
+use crate::compat::write_parameter;
 use nodal_db_core::compaction::compact;
 use nodal_db_core::duckdb;
 use nodal_db_core::duckdb::Connection;

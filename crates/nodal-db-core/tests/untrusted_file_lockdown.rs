@@ -68,9 +68,9 @@ fn write(db: &Path, v: f64) -> Result<(), DbError> {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .map(|_| ())
 }

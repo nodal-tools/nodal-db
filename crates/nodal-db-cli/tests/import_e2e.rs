@@ -1428,10 +1428,10 @@ fn newer_minor_version_is_attempted() {
     );
 }
 
-/// `--force-replace` reaches the core: the superseded pre-image is stubbed
+/// `--no-retain-content` reaches the core: the superseded pre-image is stubbed
 /// (`content_retained = FALSE`) instead of retained.
 #[test]
-fn force_replace_passes_through_to_core() {
+fn no_retain_content_passes_through_to_core() {
     let dir = tempfile::tempdir().unwrap();
     let db = init_db(dir.path());
     let file = write_file(
@@ -1453,7 +1453,7 @@ fn force_replace_passes_through_to_core() {
     );
     // The second import carries a modified payload: an identical one is an
     // unchanged write, which supersedes nothing and so stubs nothing
-    // (skip_unchanged_writes_PLAN D3(i): --force-replace never versions an
+    // (skip_unchanged_writes_PLAN D3(i): --no-retain-content never versions an
     // unchanged value).
     let changed = write_file(
         dir.path(),
@@ -1473,7 +1473,7 @@ fn force_replace_passes_through_to_core() {
             "Base",
             "--user",
             "tester",
-            "--force-replace",
+            "--no-retain-content",
         ],
     );
     assert!(
@@ -1500,7 +1500,7 @@ fn force_replace_passes_through_to_core() {
 
 /// Re-importing the same file changes nothing (skip_unchanged_writes_PLAN
 /// §6.2): the second import prints "no changes", makes no commit and adds
-/// no history row, with and without `--force-replace` (D3(i)).
+/// no history row, with and without `--no-retain-content` (D3(i)).
 #[test]
 fn reimport_of_the_same_file_commits_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -1526,7 +1526,7 @@ fn reimport_of_the_same_file_commits_nothing() {
         conn.close().unwrap();
         n
     };
-    for extra in [&[][..], &["--force-replace"][..]] {
+    for extra in [&[][..], &["--no-retain-content"][..]] {
         let mut a = args.to_vec();
         a.extend_from_slice(extra);
         let again = import(&db, &file, &a);

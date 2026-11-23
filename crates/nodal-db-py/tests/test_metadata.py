@@ -145,15 +145,15 @@ def test_deletes_and_refusals(db):
 def test_created_by_and_refinement_classes(db):
     created_by = db.database_property("created_by")
     assert created_by.startswith("nodal-db-core " + nodal_db.__version__), created_by
-    db.ensure_entity_class("plant", user="t")
-    db.ensure_entity_class("gen", user="t")
-    db.ensure_entity_class("plant_gen", ["plant", "gen"], user="t")
-    db.set_refinement_class("plant_gen", True, user="t")
+    db.ensure_class("plant", user="t")
+    db.ensure_class("gen", user="t")
+    db.ensure_class("plant_gen", ["plant", "gen"], user="t")
+    db.set_class_refinement("plant_gen", True, user="t")
     cid = one(db, "SELECT id FROM entity_class_current WHERE name = 'plant_gen'")["id"]
     assert db.database_property("refinement_classes") == f"[{cid}]"
     with pytest.raises(nodal_db.ApiError, match="exactly two"):
-        db.set_refinement_class("plant", True, user="t")
-    db.set_refinement_class("plant_gen", False, user="t")
+        db.set_class_refinement("plant", True, user="t")
+    db.set_class_refinement("plant_gen", False, user="t")
     assert db.database_property("refinement_classes") is None
 
 

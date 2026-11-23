@@ -160,9 +160,9 @@ fn write_arrays(db: &Path, n: usize) {
         "Base",
         arrays_batch(n),
         &[],
-        WriteOptions::default(),
         "tester",
         "storage-format test arrays",
+        WriteOptions::default(),
     )
     .expect("array write");
 }

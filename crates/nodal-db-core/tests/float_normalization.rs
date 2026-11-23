@@ -135,9 +135,9 @@ fn write(db: &Path, class: &str, param: &str, batch: RecordBatch) -> Vec<Tier> {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .expect("write")
     .tiers

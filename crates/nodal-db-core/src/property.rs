@@ -324,7 +324,7 @@ pub(crate) fn validate_user_key(key: &str) -> Result<(), DbError> {
 /// that error aborts the transaction, so the fallback query fails too; the
 /// write cycle's gate therefore reads the 0.6 table only and resolves an
 /// older layout after its rollback (`conn::run_txn_once`).
-pub fn schema_versions_any(
+pub(crate) fn schema_versions_any(
     conn: &Connection,
     db: Option<&str>,
     at: Option<i64>,
@@ -361,6 +361,6 @@ pub fn schema_versions_any(
 
 /// The file's current schema version from either layout
 /// ([`schema_versions_any`]); `None` when there is none.
-pub fn schema_version_any(conn: &Connection) -> Result<Option<String>, DbError> {
+pub(crate) fn schema_version_any(conn: &Connection) -> Result<Option<String>, DbError> {
     Ok(schema_versions_any(conn, None, None)?.into_iter().next())
 }

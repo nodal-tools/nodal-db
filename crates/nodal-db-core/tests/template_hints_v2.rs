@@ -120,9 +120,9 @@ fn write_str(db: &Path, class: &str, param: &str, entity: &str, v: &str) {
         "alt",
         string_batch(entity, v),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 }
@@ -135,9 +135,9 @@ fn write_f(db: &Path, class: &str, param: &str, entity: &str, v: f64) {
         "alt",
         float_batch(entity, v),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 }

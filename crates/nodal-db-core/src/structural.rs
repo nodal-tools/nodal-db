@@ -213,7 +213,7 @@ fn apply_one(
             )?;
             (StructuralKind::Entity, id, e)
         }
-        StructuralChange::CreateEntityClass {
+        StructuralChange::CreateClass {
             name,
             dims,
             description,
@@ -222,7 +222,7 @@ fn apply_one(
                 apply_create_entity_class(conn, c, name, dims, description.as_deref(), folds)?;
             (StructuralKind::Class, id, e)
         }
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current,
             new_name,
             description,
@@ -299,7 +299,7 @@ fn apply_one(
     report.structural.push(StructuralOutcome {
         change_index,
         kind,
-        object_id,
+        id: object_id,
         effect,
     });
     Ok(())
@@ -462,8 +462,7 @@ impl CallTouches {
             StructuralChange::CreateEntity { .. } | StructuralChange::RenameEntity { .. } => {
                 self.entities.insert(object_id);
             }
-            StructuralChange::CreateEntityClass { .. }
-            | StructuralChange::RenameEntityClass { .. } => {
+            StructuralChange::CreateClass { .. } | StructuralChange::RenameClass { .. } => {
                 self.classes.insert(object_id);
             }
             StructuralChange::CreateParameter { .. } | StructuralChange::RenameParameter { .. } => {
@@ -535,7 +534,7 @@ fn read_identity(conn: &Connection, table: &str, id: i64) -> Result<IdentityRow,
 // Per-call rename book-keeping (class_param_rename_PLAN §4.5 b/f, §5.2, §6.1)
 // ---------------------------------------------------------------------------
 
-/// What the renames of one `commit_changes` attempt did, for the checks and
+/// What the renames of one `api::commit` attempt did, for the checks and
 /// writes that follow them in the same call. A closure local of the write
 /// transaction (rebuilt on a conflict retry, like the write buffers), so no
 /// id from a rolled-back attempt is reused.
@@ -1077,7 +1076,7 @@ pub(crate) fn refuse_template_stamped_renames(
         .structural
         .iter()
         .filter(|o| o.effect == StructuralEffect::Created)
-        .map(|o| (o.kind, o.object_id))
+        .map(|o| (o.kind, o.id))
         .collect();
     let renames: Vec<TemplateStampedRenameItem> = calls
         .template_candidates
@@ -1349,7 +1348,7 @@ pub(crate) fn apply_rename_scenario(
     Ok((id, e))
 }
 
-/// One `RenameEntityClass` / `RenameParameter` item, as written.
+/// One `RenameClass` / `RenameParameter` item, as written.
 pub(crate) struct VocabRename<'a> {
     pub(crate) change_index: usize,
     pub(crate) current: &'a str,
@@ -1358,7 +1357,7 @@ pub(crate) struct VocabRename<'a> {
     pub(crate) allow_on_template: bool,
 }
 
-/// `RenameEntityClass`: strict resolution,
+/// `RenameClass`: strict resolution,
 /// the swap guard, whole-database uniqueness (self excluded by id), the
 /// shared decision step, then the one `entity_class` revision site, which
 /// carries every other column and holds the same-commit in-place branch. Nothing
@@ -1372,11 +1371,7 @@ pub(crate) fn apply_rename_entity_class(
 ) -> Result<(i64, StructuralEffect), DbError> {
     let (current, new_name) = (r.current, r.new_name);
     let id = find_entity_class(conn, current)?
-        .ok_or_else(|| {
-            DbError::Api(format!(
-                "rename_entity_class: class {current:?} does not exist"
-            ))
-        })?
+        .ok_or_else(|| DbError::Api(format!("rename_class: class {current:?} does not exist")))?
         .noted(folds, "entity_class", current);
     let mut row = read_ec_row(conn, id)?;
     refuse_freed_name(
@@ -1389,7 +1384,7 @@ pub(crate) fn apply_rename_entity_class(
     if let Some(other) = lookup_entity_class(conn, new_name)? {
         if other != id {
             return Err(DbError::Api(format!(
-                "rename_entity_class: {new_name:?} already names a different class"
+                "rename_class: {new_name:?} already names a different class"
             )));
         }
     }
@@ -2057,7 +2052,7 @@ pub(crate) fn check_class_dims(
         Ok(cid)
     } else {
         Err(DbError::Api(format!(
-            "ensure_entity_class: {name:?} already exists with dimensions [{}], not [{}] — \
+            "ensure_class: {name:?} already exists with dimensions [{}], not [{}] — \
              in-place re-dimensioning (reshape) is not supported; create a new class and \
              migrate the data",
             have.join(", "),
@@ -2087,7 +2082,7 @@ pub(crate) fn apply_create_entity_class(
         let id = find_entity_class(conn, d)?
             .ok_or_else(|| {
                 DbError::Api(format!(
-                    "ensure_entity_class: dimension class {d:?} does not exist (create it first)"
+                    "ensure_class: dimension class {d:?} does not exist (create it first)"
                 ))
             })?
             .noted(folds, "entity_class", d);
@@ -2370,7 +2365,7 @@ pub(crate) fn apply_create_parameter(
     let cid = find_entity_class(conn, class)?
         .ok_or_else(|| {
             DbError::Api(format!(
-                "ensure_parameter_definition: class {class:?} not found (create it first)"
+                "ensure_parameter: class {class:?} not found (create it first)"
             ))
         })?
         .noted(folds, "entity_class", class);
@@ -2386,9 +2381,7 @@ pub(crate) fn apply_create_parameter(
         Some(l) => Some(
             find_value_list(conn, l)?
                 .ok_or_else(|| {
-                    DbError::Api(format!(
-                        "ensure_parameter_definition: value_list {l:?} not found"
-                    ))
+                    DbError::Api(format!("ensure_parameter: value_list {l:?} not found"))
                 })?
                 .noted(folds, "parameter_value_list", l),
         ),
@@ -2412,14 +2405,14 @@ pub(crate) fn apply_create_parameter(
                 }),
                 [] => {
                     return Err(DbError::Api(format!(
-                        "ensure_parameter_definition: cannot infer a kind from empty value_list \
+                        "ensure_parameter: cannot infer a kind from empty value_list \
                          {:?} (declare types explicitly)",
                         value_list.unwrap_or("")
                     )))
                 }
                 many => {
                     return Err(DbError::Api(format!(
-                        "ensure_parameter_definition: value_list {:?} members mix kinds {many:?} \
+                        "ensure_parameter: value_list {:?} members mix kinds {many:?} \
                          — declare types explicitly",
                         value_list.unwrap_or("")
                     )))
@@ -2480,7 +2473,7 @@ pub(crate) fn prepare_structural(
     // allowed in either order (the in-transaction swap guard and uniqueness
     // check are unaffected; same for parameters below).
     check_rename_coherence(changes, |ch| match ch {
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current, new_name, ..
         } if current != new_name => Some((fold(current), current, new_name)),
         _ => None,
@@ -2523,7 +2516,7 @@ pub(crate) fn prepare_structural(
     // would leave a live orphan under the same-commit guard. That includes
     // creating it (Create*), or creating an entity, parameter or class under
     // a deleted class (the class cascade skips rows this commit created).
-    // `commit_changes` repeats the create check on the resolved ids.
+    // `api::commit` repeats the create check on the resolved ids.
     let mut del_alts: HashSet<String> = HashSet::new();
     let mut del_classes: HashSet<String> = HashSet::new();
     let mut del_params: HashSet<(String, String)> = HashSet::new();
@@ -2549,7 +2542,7 @@ pub(crate) fn prepare_structural(
                 ObjectKind::Entity => {
                     // Element-tuple-addressed (`ObjectRef::Elements`) entity
                     // deletes are not matched by this name-level guard: the
-                    // resolved-id guard in `commit_changes` (`reaches_created`
+                    // resolved-id guard in `api::commit` (`reaches_created`
                     // over `CallTouches::row_refs`) refuses them, and so every
                     // cascade this name-level check cannot see.
                     if let Some(cls) = &key.class {
@@ -2627,7 +2620,7 @@ pub(crate) fn prepare_structural(
             } if (clash_scen(current) || clash_scen(new_name)) => {
                 return Err(orphan("scenario", current));
             }
-            StructuralChange::RenameEntityClass {
+            StructuralChange::RenameClass {
                 current, new_name, ..
             } => {
                 if clash_class(current) || clash_class(new_name) {
@@ -2668,7 +2661,7 @@ pub(crate) fn prepare_structural(
             StructuralChange::CreateScenario { name, .. } if clash_scen(name) => {
                 return Err(orphan("scenario", name));
             }
-            StructuralChange::CreateEntityClass { name, dims, .. } => {
+            StructuralChange::CreateClass { name, dims, .. } => {
                 if clash_class(name) {
                     return Err(orphan("class", name));
                 }
@@ -2790,11 +2783,11 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             }
             Ok(())
         }
-        StructuralChange::CreateEntityClass { name, dims, .. } => {
+        StructuralChange::CreateClass { name, dims, .. } => {
             require_charset("class", name)?;
             if dims.len() > 4 {
                 return Err(DbError::Api(format!(
-                    "create_entity_class: {} dimensions exceeds the rank cap of 4",
+                    "create_class: {} dimensions exceeds the rank cap of 4",
                     dims.len()
                 )));
             }
@@ -2811,7 +2804,7 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             validate_type_decls("create_parameter", class, name, types)
         }
         // A new name carries the same hygiene floor as a created one.
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current, new_name, ..
         } => {
             require_nonempty("class", current)?;

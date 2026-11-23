@@ -378,7 +378,7 @@ pub(crate) fn segment_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Segment> {
     })
 }
 
-/// Verb type declarations (`ensure_parameter_definition`): a list of
+/// Verb type declarations (`ensure_parameter`): a list of
 /// member dicts `{"kind": str, "dims"?: [{"name": str, "kind": str}]}` —
 /// the IR's `types:` shape 1:1. Validation (legal kinds, dimension rules,
 /// distinguishability) lives in the core verb, not here.
@@ -447,16 +447,17 @@ fn object_kind_from_str(s: &str) -> PyResult<ObjectKind> {
         "parameter" => ObjectKind::Parameter,
         "alternative" => ObjectKind::Alternative,
         "class" => ObjectKind::Class,
+        "scenario" => ObjectKind::Scenario,
         other => {
             return Err(ApiError::new_err(format!(
-                "unknown object kind {other:?} (expected entity/parameter/alternative/class)"
-            )))
+            "unknown object kind {other:?} (expected entity/parameter/alternative/class/scenario)"
+        )))
         }
     })
 }
 
 /// An object-delete key dict: `{"kind": "entity"|"parameter"|"alternative"|
-/// "class", "class": str?, "name": str}` or, for an N-D entity,
+/// "class"|"scenario", "class": str?, "name": str}` or, for an N-D entity,
 /// `"elements": [str, ...]` instead of `"name"`. The exactly-one-of
 /// name/elements rule mirrors the core's `ObjectRef` enum.
 pub(crate) fn object_key_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ObjectDeleteKey> {
@@ -730,12 +731,12 @@ pub(crate) fn structural_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Stru
             new_name: req_str(obj, &op, "new_name")?,
             description: opt_str(obj, "description")?,
         },
-        "create_entity_class" => StructuralChange::CreateEntityClass {
+        "create_class" => StructuralChange::CreateClass {
             name: req_str(obj, &op, "name")?,
             dims: str_list(obj, "dims")?,
             description: opt_str(obj, "description")?,
         },
-        "rename_entity_class" => StructuralChange::RenameEntityClass {
+        "rename_class" => StructuralChange::RenameClass {
             current: req_str(obj, &op, "current")?,
             new_name: req_str(obj, &op, "new_name")?,
             description: opt_str(obj, "description")?,
@@ -959,7 +960,7 @@ fn structural_outcome_to_py<'py>(
     let d = PyDict::new(py);
     d.set_item("change_index", o.change_index)?;
     d.set_item("kind", structural_kind_tag(o.kind))?;
-    d.set_item("object_id", o.object_id)?;
+    d.set_item("id", o.id)?;
     d.set_item("effect", structural_effect_tag(o.effect))?;
     Ok(d)
 }
@@ -1273,13 +1274,13 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
     let op: String = md_req(obj, "metadata item", "op")?.extract()?;
     let o = op.as_str();
     let keys: &[&str] = match o {
-        "put_source" => &["source", "rename", "fields"],
-        "put_license" => &["license", "rename", "fields"],
+        "put_source" => &["source", "new_name", "fields"],
+        "put_license" => &["license", "new_name", "fields"],
         "set_source_licenses" => &["source", "licenses"],
         "create_pair" => &["name", "value"],
         "revise_pair" => &["pair", "value"],
-        "rename_pair_key" => &["from", "to"],
-        "put_role" => &["role", "rename", "description", "iri"],
+        "rename_pair_key" => &["current", "new_name"],
+        "put_role" => &["role", "new_name", "description", "iri"],
         "set_property" => &["key", "value"],
         "delete_source" => &["source", "cascade"],
         "delete_license" => &["license", "cascade"],
@@ -1296,12 +1297,12 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
     Ok(match o {
         "put_source" => MetadataChange::PutSource {
             source: md_ref(&md_req(obj, o, "source")?)?,
-            rename: opt_str(obj, "rename")?,
+            new_name: opt_str(obj, "new_name")?,
             fields: md_fields_source(obj)?,
         },
         "put_license" => MetadataChange::PutLicense {
             license: md_ref(&md_req(obj, o, "license")?)?,
-            rename: opt_str(obj, "rename")?,
+            new_name: opt_str(obj, "new_name")?,
             fields: md_fields_license(obj)?,
         },
         "set_source_licenses" => {
@@ -1323,12 +1324,12 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
             value: md_req(obj, o, "value")?.extract()?,
         },
         "rename_pair_key" => MetadataChange::RenamePairKey {
-            from: md_req(obj, o, "from")?.extract()?,
-            to: md_req(obj, o, "to")?.extract()?,
+            current: md_req(obj, o, "current")?.extract()?,
+            new_name: md_req(obj, o, "new_name")?.extract()?,
         },
         "put_role" => MetadataChange::PutRole {
             role: md_ref(&md_req(obj, o, "role")?)?,
-            rename: opt_str(obj, "rename")?,
+            new_name: opt_str(obj, "new_name")?,
             description: opt_str(obj, "description")?,
             iri: opt_str(obj, "iri")?,
         },
@@ -1520,7 +1521,7 @@ pub(crate) fn erase_preview_to_py<'py>(
     d.set_item("alternative_id", p.alternative_id)?;
     d.set_item("alternative_name", &p.alternative_name)?;
     d.set_item("per_table", table_counts_to_py(py, &p.per_table)?)?;
-    d.set_item("rows_total", p.rows_total)?;
+    d.set_item("total_rows", p.total_rows)?;
     d.set_item("bytes_estimate", p.bytes_estimate)?;
     d.set_item("still_current", p.still_current)?;
     let scen = PyList::empty(py);
@@ -1547,7 +1548,7 @@ pub(crate) fn erase_report_to_py<'py>(
     d.set_item("alternative_id", r.alternative_id)?;
     d.set_item("identity_closed", r.identity_closed)?;
     d.set_item("per_table", table_counts_to_py(py, &r.per_table)?)?;
-    d.set_item("rows_total", r.rows_total)?;
+    d.set_item("total_rows", r.total_rows)?;
     d.set_item("bytes_estimate", r.bytes_estimate)?;
     Ok(d)
 }

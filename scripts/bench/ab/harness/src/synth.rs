@@ -18,7 +18,7 @@ use duckdb::arrow::array::{
 };
 use duckdb::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use duckdb::arrow::record_batch::RecordBatch;
-use nodal_db_core::api::write_parameter;
+use crate::compat::write_parameter;
 use nodal_db_core::conn::with_read;
 use nodal_db_core::duckdb;
 use nodal_db_core::duckdb::{params, Connection};

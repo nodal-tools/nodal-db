@@ -498,8 +498,11 @@ impl Database {
     /// `value_metadata`: what the new versions of values that carry metadata
     /// links keep: "keep", "clear" or {"set": [target, ...]}; required when
     /// the write changes such a value (else `ValueMetadataUnstated`).
+    ///
+    /// `retain_content`: whether the replaced versions keep their content
+    /// (None: the parameter's own setting; see `commit`).
     #[pyo3(signature = (class_name, parameter, alternative, batch, *, user, message = String::new(),
-                        domains = None, force_replace = false, retain_override = None,
+                        domains = None, retain_content = None,
                         expect_commit = None, value_metadata = None))]
     #[allow(clippy::too_many_arguments)]
     fn write_parameter<'py>(
@@ -512,8 +515,7 @@ impl Database {
         user: String,
         message: String,
         domains: Option<HashMap<u8, Vec<String>>>,
-        force_replace: bool,
-        retain_override: Option<bool>,
+        retain_content: Option<bool>,
         expect_commit: Option<i64>,
         value_metadata: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
@@ -521,8 +523,7 @@ impl Database {
         let metadata = metadata_from_py(None, value_metadata)?;
         let path = self.path.clone();
         let opts = WriteOptions {
-            force_replace,
-            retain_override,
+            retain_content,
             expect_commit,
             ..Default::default()
         };
@@ -561,7 +562,7 @@ impl Database {
     ///   (resolved case-insensitively, never auto-created; a missing referent
     ///   is a warning + skip, never an error).
     /// * `object_deletes`: list of dicts `{"kind": "entity"|"parameter"|
-    ///   "alternative"|"class", "class"?: str, "name": str | "elements":
+    ///   "alternative"|"class"|"scenario", "class"?: str, "name": str | "elements":
     ///   [str], "cascade": bool}`.
     /// * `structural`: list of dicts, each keyed on `"op"` (e.g.
     ///   `{"op": "create_scenario", "name": "high_hydro"}`,
@@ -572,8 +573,8 @@ impl Database {
     ///   `rename_alternative`, `create_scenario`, `rename_scenario`,
     ///   `set_scenario_alternatives`, `set_entity_activation`,
     ///   `create_entity`, `rename_entity` (`class`, `current`, `new_name`,
-    ///   `description`?), `create_entity_class` (`name`, `dims`,
-    ///   `description`?), `rename_entity_class` (`current`, `new_name`,
+    ///   `description`?), `create_class` (`name`, `dims`,
+    ///   `description`?), `rename_class` (`current`, `new_name`,
     ///   `description`?, `allow_on_template`?), `create_parameter`,
     ///   `rename_parameter` (`class`, `current`, `new_name`, `description`?,
     ///   `allow_on_template`?) and `set_membership`. A rename keeps the id;
@@ -622,6 +623,11 @@ impl Database {
     ///   metadata links needs a statement, else `ValueMetadataUnstated`.
     /// * `expect_commit`: commit only if the head commit is exactly this id,
     ///   else raise `Stale` with nothing written (see `write_parameter`).
+    /// * `retain_content`: whether the versions this call replaces or
+    ///   closes keep their content in history. None (the default): each
+    ///   parameter's own `retain_content` setting; False: keep none (each
+    ///   closed version stays as a content-less stub); True: keep content
+    ///   even where the parameter says not to.
     /// * `covered_writes`: `"refuse"` (the default) or `"delete_wins"`; see
     ///   below.
     ///
@@ -643,7 +649,7 @@ impl Database {
     /// nothing else changes, nothing is committed.
     #[pyo3(signature = (*, segments = None, structural = None, deletes = None,
                         object_deletes = None, purges = None, metadata = None, user,
-                        message = String::new(), force_replace = false, retain_override = None,
+                        message = String::new(), retain_content = None,
                         expect_commit = None, covered_writes = "refuse",
                         value_metadata = None))]
     #[allow(clippy::too_many_arguments)]
@@ -658,8 +664,7 @@ impl Database {
         metadata: Option<&Bound<'py, PyAny>>,
         user: String,
         message: String,
-        force_replace: bool,
-        retain_override: Option<bool>,
+        retain_content: Option<bool>,
         expect_commit: Option<i64>,
         covered_writes: &str,
         value_metadata: Option<&Bound<'py, PyAny>>,
@@ -688,8 +693,7 @@ impl Database {
         let purges = purge_requests_from_py(purges)?;
         let path = self.path.clone();
         let opts = WriteOptions {
-            force_replace,
-            retain_override,
+            retain_content,
             expect_commit,
             covered_writes,
         };
@@ -769,7 +773,7 @@ impl Database {
     /// `purges` for the request dicts). A purge keeps history and never
     /// shrinks the file. Returns the report; its `"purges"` list has one
     /// outcome per request (`closed_out`, `objects`, `spared`, `unbound`).
-    #[pyo3(signature = (requests, *, user, message = String::new(), retain_override = None,
+    #[pyo3(signature = (requests, *, user, message = String::new(), retain_content = None,
                         expect_commit = None))]
     fn purge<'py>(
         &self,
@@ -777,13 +781,13 @@ impl Database {
         requests: &Bound<'py, PyAny>,
         user: String,
         message: String,
-        retain_override: Option<bool>,
+        retain_content: Option<bool>,
         expect_commit: Option<i64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let reqs = purge_requests_from_py(Some(requests))?;
         let path = self.path.clone();
         let opts = WriteOptions {
-            retain_override,
+            retain_content,
             expect_commit,
             ..Default::default()
         };
@@ -834,6 +838,32 @@ impl Database {
     }
 
     // -- template ----------------------------------------------------------
+
+    /// The database's vocabulary as a template document: YAML, or JSON with
+    /// `json=True` (the CLI's `template export`). Read-only. Anything the
+    /// export cannot represent is reported as a `UserWarning`.
+    #[pyo3(signature = (*, json = false))]
+    fn template_export(&self, py: Python<'_>, json: bool) -> PyResult<String> {
+        let path = self.path.clone();
+        let (text, warnings) = py
+            .detach(move || {
+                let (t, warnings) = tpl::export(&path)?;
+                let text = if json {
+                    tpl::to_json(&t)?
+                } else {
+                    tpl::to_yaml(&t)?
+                };
+                Ok::<_, DbError>((text, warnings))
+            })
+            .map_err(db_err)
+            .and_then(|v| with_notices(py, v))?;
+        for w in warnings {
+            let msg =
+                std::ffi::CString::new(w.replace('\0', " ")).expect("NUL bytes were replaced");
+            PyErr::warn(py, py.get_type::<PyUserWarning>().as_any(), &msg, 1)?;
+        }
+        Ok(text)
+    }
 
     /// Read-only dry run of a template reconcile: parse + validate the
     /// template file, diff it against the database, and return the plan as a
@@ -1051,7 +1081,7 @@ impl Database {
     /// of the coarse entity propagates to the fine one in every scenario.
     /// The class must have exactly two dimensions. Idempotent.
     #[pyo3(signature = (class_name, refinement, *, user))]
-    fn set_refinement_class(
+    fn set_class_refinement(
         &self,
         py: Python<'_>,
         class_name: String,
@@ -1059,7 +1089,7 @@ impl Database {
         user: String,
     ) -> PyResult<()> {
         let path = self.path.clone();
-        py.detach(move || verbs::set_refinement_class(&path, &class_name, refinement, &user))
+        py.detach(move || verbs::set_class_refinement(&path, &class_name, refinement, &user))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))
     }
@@ -1067,10 +1097,10 @@ impl Database {
     /// Drop an orphan value list at runtime. Refuses a list a current
     /// definition still binds — rebind/drop those definitions first.
     /// Idempotent: a missing list is a no-op.
-    #[pyo3(signature = (list, *, user))]
-    fn drop_value_list(&self, py: Python<'_>, list: String, user: String) -> PyResult<()> {
+    #[pyo3(signature = (name, *, user))]
+    fn drop_value_list(&self, py: Python<'_>, name: String, user: String) -> PyResult<()> {
         let path = self.path.clone();
-        py.detach(move || verbs::drop_value_list(&path, &list, &user))
+        py.detach(move || verbs::drop_value_list(&path, &name, &user))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))
     }
@@ -1080,7 +1110,7 @@ impl Database {
     /// dimensions is returned as-is; a mismatch is an error (no in-place
     /// re-dimensioning). Returns the class id.
     #[pyo3(signature = (name, dims = Vec::new(), *, user))]
-    fn ensure_entity_class(
+    fn ensure_class(
         &self,
         py: Python<'_>,
         name: String,
@@ -1088,7 +1118,7 @@ impl Database {
         user: String,
     ) -> PyResult<i64> {
         let path = self.path.clone();
-        py.detach(move || verbs::ensure_entity_class(&path, &name, &dims, &user))
+        py.detach(move || verbs::ensure_class(&path, &name, &dims, &user))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))
     }
@@ -1104,7 +1134,7 @@ impl Database {
     #[pyo3(signature = (class_name, name, *, types = None, value_list = None,
                         description = None, user))]
     #[allow(clippy::too_many_arguments)]
-    fn ensure_parameter_definition(
+    fn ensure_parameter(
         &self,
         py: Python<'_>,
         class_name: String,
@@ -1117,7 +1147,7 @@ impl Database {
         let decls = type_decls_from_py(types)?;
         let path = self.path.clone();
         py.detach(move || {
-            verbs::ensure_parameter_definition(
+            verbs::ensure_parameter(
                 &path,
                 &class_name,
                 &name,
@@ -1157,22 +1187,24 @@ impl Database {
     /// Stamp `template_name` + `template_version` — the public identity
     /// stamp (non-optional in the importer's commit sequence: an unstamped
     /// DB runs ZERO migration spans and quietly reconciles to head). A
-    /// DIFFERENT existing stamp refuses unless `overwrite=True` (mirrors
+    /// DIFFERENT existing stamp refuses unless `allow_overwrite=True` (mirrors
     /// `allow_retarget`'s posture); restamping the identical identity is a
     /// commit-free no-op.
-    #[pyo3(signature = (name, version, *, overwrite = false, user))]
+    #[pyo3(signature = (name, version, *, allow_overwrite = false, user))]
     fn stamp_template_identity(
         &self,
         py: Python<'_>,
         name: String,
         version: String,
-        overwrite: bool,
+        allow_overwrite: bool,
         user: String,
     ) -> PyResult<()> {
         let path = self.path.clone();
-        py.detach(move || verbs::stamp_template_identity(&path, &name, &version, overwrite, &user))
-            .map_err(db_err)
-            .and_then(|v| with_notices(py, v))
+        py.detach(move || {
+            verbs::stamp_template_identity(&path, &name, &version, allow_overwrite, &user)
+        })
+        .map_err(db_err)
+        .and_then(|v| with_notices(py, v))
     }
 
     // -- erasure -----------------------------------------------------------
@@ -1286,20 +1318,20 @@ impl Database {
     /// no commit is recorded, data and history are untouched). Any write
     /// with this nodal-db does the same first, so this is for files you only
     /// read (e.g. at the start of a run). A newer file is left alone unless
-    /// `force=True` (a downgrade; development only). Fails loudly (ApiError)
+    /// `allow_downgrade=True` (development only). Fails loudly (ApiError)
     /// when the refresh cannot run, e.g. a table of yours holds a reserved
     /// read-surface name; `SchemaMismatch` on another schema version.
     /// Returns the status dict of `read_surface_status()` (as before the
     /// refresh) with `refreshed` True when it ran.
-    #[pyo3(signature = (*, force = false))]
+    #[pyo3(signature = (*, allow_downgrade = false))]
     fn refresh_read_surface<'py>(
         &self,
         py: Python<'py>,
-        force: bool,
+        allow_downgrade: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let path = self.path.clone();
         let r = py
-            .detach(move || api::refresh_read_surface(&path, force))
+            .detach(move || api::refresh_read_surface(&path, allow_downgrade))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;
         surface_report_to_py(py, &r)

@@ -370,7 +370,7 @@ pub struct TemplateStampedRenameDetails {
 pub struct TemplateStampedRenameItem {
     /// The item's position in the call's `structural` vec.
     pub change_index: usize,
-    /// `EntityClass` or `Parameter`.
+    /// `Class` or `Parameter`.
     pub kind: StructuralKind,
     /// The parameter's class as written (`None` for a class rename).
     pub class: Option<String>,

@@ -96,9 +96,9 @@ fn write(db: &Path, class: &str, param: &str, alt: &str, batch: RecordBatch) {
         alt,
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "erasure fixture",
+        WriteOptions::default(),
     )
     .expect("write_parameter");
 }
@@ -289,7 +289,7 @@ fn preview_and_erase_end_to_end() {
         assert_eq!(got, Some(expected), "preview count mismatch on {t}");
     }
     assert_eq!(
-        preview.rows_total as usize,
+        preview.total_rows as usize,
         preview.per_table.iter().map(|t| t.rows).sum::<usize>()
     );
 
@@ -316,7 +316,7 @@ fn preview_and_erase_end_to_end() {
         report.per_table, preview.per_table,
         "preview drifted from erase"
     );
-    assert_eq!(report.rows_total, preview.rows_total);
+    assert_eq!(report.total_rows, preview.total_rows);
     assert!(report.marker_id > 0);
 
     // Post-state: zero runA rows anywhere in scope, any validity.
@@ -350,7 +350,7 @@ fn preview_and_erase_end_to_end() {
         (m_kind.as_str(), m_alt, m_at),
         ("alternative", a_id, report.commit_id)
     );
-    assert_eq!(m_rows as u64, report.rows_total);
+    assert_eq!(m_rows as u64, report.total_rows);
     assert_eq!(m_note, "test erase");
     // audit_erasure resolves the marker to the retained identity.
     let (a_name, a_unres): (String, bool) = conn
@@ -594,7 +594,7 @@ fn non_alternative_kinds_and_bad_keys_are_refused() {
     let p = preview_erase_alternative(&db, &alt_key("never_existed"), &EraseOpts::default())
         .expect("preview");
     assert!(!p.found);
-    assert_eq!(p.rows_total, 0);
+    assert_eq!(p.total_rows, 0);
 }
 
 // --- (6) transaction atomicity (acceptance 4) --------------------------------
@@ -1071,7 +1071,7 @@ fn zero_row_erase_closes_identity_without_marker() {
         r.commit_id > pre_commit,
         "the identity close is a real commit"
     );
-    assert_eq!(r.rows_total, 0);
+    assert_eq!(r.total_rows, 0);
     assert_eq!(scalar(&db, "SELECT count(*) FROM erasure_marker"), 0);
     assert_eq!(
         scalar(

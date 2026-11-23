@@ -71,12 +71,18 @@ impl DeclaredType {
 /// semantics land with the history protocol.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WriteOptions {
-    pub force_replace: bool,
-    pub retain_override: Option<bool>,
+    /// Whether the versions this call replaces or closes (value rewrites,
+    /// value and object deletes, purges) keep their content in history.
+    /// `None` (the default): each parameter's own `retain_content`
+    /// setting. `Some(false)`: keep none; each closed version stays only as
+    /// a content-less stub. `Some(true)`: keep content even where the
+    /// parameter says not to. Values equal to the stored ones are not
+    /// rewritten, so they leave no stub either way.
+    pub retain_content: Option<bool>,
     /// Optimistic-concurrency precondition: commit only if the database's
     /// head commit is exactly this id (`conn::TxnOptions::expect_commit`),
     /// else [`crate::error::DbError::Stale`] with nothing written. Honored
-    /// **only by the `api` entry points** (`commit_changes` and its
+    /// **only by the `api` entry points** (`api::commit` and its
     /// wrappers `write_parameter`, `ingest_segments`, `delete_values`,
     /// `commit_structural`, `delete_objects`), which map it into the
     /// transaction. This struct is also passed per value to
@@ -97,7 +103,7 @@ pub struct WriteOptions {
     pub covered_writes: CoveredWrites,
 }
 
-/// The policy for a value write that a delete in the same `commit_changes`
+/// The policy for a value write that a delete in the same `api::commit`
 /// call covers (see [`WriteOptions::covered_writes`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoveredWrites {
@@ -511,7 +517,7 @@ pub enum WarningKind {
     /// and `written`/`stored` the first entry's pair.
     /// `object_type` is the referent's object type (`"class"`,
     /// `"parameter"`, `"alternative"`, `"entity"`, `"scenario"`,
-    /// `"parameter_value_list"`), `name` the segment
+    /// `"value_list"`), `name` the segment
     /// (`class:parameter/alternative`, as written) or empty, and `id` the
     /// first resolved row's id. Not a write by itself. A client that sends
     /// the spellings it loaded never sees one.
@@ -537,12 +543,14 @@ pub enum WarningKind {
 }
 
 /// The object-type tag reports use for a referent table: `"class"` for
-/// `entity_class` and `"parameter"` for `parameter_definition` (the same
-/// tags as [`ObjectKind::tag`]); every other table name is its own tag.
+/// `entity_class`, `"parameter"` for `parameter_definition` (the same tags
+/// as [`ObjectKind::tag`]) and `"value_list"` for `parameter_value_list`;
+/// every other table name is its own tag.
 pub(crate) fn object_type_tag(table: &str) -> &str {
     match table {
         "entity_class" => "class",
         "parameter_definition" => "parameter",
+        "parameter_value_list" => "value_list",
         other => other,
     }
 }
@@ -840,7 +848,7 @@ pub struct ObjectDeleteOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// Structural (non-value) writes — the fourth `commit_changes` channel
+// Structural (non-value) writes — the fourth `api::commit` channel
 // (structural_write_api_plan §2.2). Names, not ids; the core resolves strictly
 // (lookup-only, never auto-created — the opposite of the value path), except
 // the `Create*` ops and the scenario auto-create inside SetScenarioAlternatives.
@@ -855,7 +863,7 @@ pub struct EntityAddr {
 }
 
 /// A sanctioned create/update of a structural (non-value) object, applied inside
-/// `commit_changes`' atomic commit. Removal is
+/// `api::commit`' atomic commit. Removal is
 /// NOT here — it rides `object_deletes` ([`ObjectKind`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StructuralChange {
@@ -941,7 +949,7 @@ pub enum StructuralChange {
     /// Idempotent entity-class create (0-D or N-D). `description` applies on
     /// create only (an existing class is a NoOp that checks the dims and
     /// ignores it); `Some("")` stores no description.
-    CreateEntityClass {
+    CreateClass {
         name: String,
         dims: Vec<String>,
         description: Option<String>,
@@ -959,7 +967,7 @@ pub enum StructuralChange {
     /// classes the template declares, and a renamed declared class blocks
     /// the next reconcile of a changed template. Case-only and
     /// description-only revisions need no flag.
-    RenameEntityClass {
+    RenameClass {
         current: String,
         new_name: String,
         description: Option<String>,
@@ -968,7 +976,7 @@ pub enum StructuralChange {
     },
     /// Versioned rename and/or description revision of one parameter
     /// definition of `class` (addressed by its name at this point of the
-    /// call), with [`StructuralChange::RenameEntityClass`]'s rules; names
+    /// call), with [`StructuralChange::RenameClass`]'s rules; names
     /// are unique per class. Values, defaults, type members and units follow
     /// the id; no value is rewritten.
     RenameParameter {
@@ -1075,7 +1083,7 @@ pub struct StructuralOutcome {
     pub change_index: usize,
     pub kind: StructuralKind,
     /// The affected/created object id (0 where n/a, e.g. a cleared membership).
-    pub object_id: i64,
+    pub id: i64,
     pub effect: StructuralEffect,
 }
 
@@ -1368,15 +1376,15 @@ pub struct LicenseFields {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetadataChange {
     /// Create the source (an unknown `Ref::Name`) or revise it to exactly
-    /// `fields` (and `rename`); `Ref::Id` never creates.
+    /// `fields` (and `new_name`); `Ref::Id` never creates.
     PutSource {
         source: Ref,
-        rename: Option<String>,
+        new_name: Option<String>,
         fields: SourceFields,
     },
     PutLicense {
         license: Ref,
-        rename: Option<String>,
+        new_name: Option<String>,
         fields: LicenseFields,
     },
     /// The exact set of licenses of a source.
@@ -1395,15 +1403,15 @@ pub enum MetadataChange {
         pair: PairRef,
         value: String,
     },
-    /// Re-spell or rename the key of every pair of `from`.
+    /// Re-spell or rename the key of every pair of `current`.
     RenamePairKey {
-        from: String,
-        to: String,
+        current: String,
+        new_name: String,
     },
     /// Create or revise a role.
     PutRole {
         role: Ref,
-        rename: Option<String>,
+        new_name: Option<String>,
         description: Option<String>,
         iri: Option<String>,
     },

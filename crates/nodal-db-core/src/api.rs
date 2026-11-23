@@ -116,9 +116,9 @@ pub fn write_parameter(
     alternative: &str,
     batch: RecordBatch,
     domains: &[LabelDomain],
-    opts: WriteOptions,
     user: &str,
     message: &str,
+    opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
     ingest_segments(
         db,
@@ -240,7 +240,7 @@ pub struct ChangeSet {
 ///   in its scope except exactly what the call itself writes, at each
 ///   scope's own level (see [`crate::types::PurgeScope`]); a row this call
 ///   wrote is never closed, and closed values follow their definition's
-///   retention (`retain_override` included). A request whose cascade
+///   retention (or the call's `retain_content`). A request whose cascade
 ///   reaches objects outside every request's scope refuses the whole call
 ///   unless it sets `allow_outside_scope`. Outcomes land in
 ///   `report.purges`.
@@ -582,7 +582,7 @@ pub fn commit(
                         | StructuralEffect::Renamed
                         | StructuralEffect::Updated
                 );
-                wrote_row.then_some((kind, o.object_id))
+                wrote_row.then_some((kind, o.id))
             })
             .collect();
         // An activation, membership or ranking row this call wrote points
@@ -792,13 +792,9 @@ pub fn commit(
                 scopes: &purge_scopes,
                 touches: &touches,
                 written: &buffers.keys,
-                // A purge keeps content like a value delete: `force_replace`
-                // stubs every closed value (`history::keeps_content`).
-                retain_override: if opts.force_replace {
-                    Some(false)
-                } else {
-                    opts.retain_override
-                },
+                // A purge keeps content like a value delete: the call's
+                // `retain_content` (else each definition's own setting).
+                retain_content: opts.retain_content,
             },
             &mut report,
         )?;
@@ -907,11 +903,11 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
             }
             elements.iter_mut().for_each(|e| n.nfc_in_place(e));
         }
-        StructuralChange::CreateEntityClass { name, dims, .. } => {
+        StructuralChange::CreateClass { name, dims, .. } => {
             n.nfc_in_place(name);
             dims.iter_mut().for_each(|d| n.nfc_in_place(d));
         }
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current, new_name, ..
         } => {
             n.nfc_in_place(current);
@@ -2148,11 +2144,11 @@ fn apply_deletes(
             resolved.push(DeleteResolution::Repeat);
             continue;
         }
-        // Fold the definition's retain_content into retain_override unless
+        // Fold the definition's retain_content into the options unless
         // the caller already overrode it: else a delete on a
         // retain_content=FALSE definition would silently keep the
         // closed-out payload (VMP Part 5).
-        let effective_retain = match opts.retain_override {
+        let effective_retain = match opts.retain_content {
             Some(r) => r,
             None => match retain.get(&pd_id) {
                 Some(&r) => r,
@@ -2164,7 +2160,7 @@ fn apply_deletes(
             },
         };
         let resolved_opts = WriteOptions {
-            retain_override: Some(effective_retain),
+            retain_content: Some(effective_retain),
             ..opts
         };
         resolved.push(DeleteResolution::Key(round.len()));
@@ -2965,12 +2961,12 @@ fn write_prepared(
         )));
     }
 
-    // Fold the definition's retain_content into retain_override unless the
+    // Fold the definition's retain_content into the options unless the
     // caller already overrode it (VMP Part 5 primary retention lever): else a
     // write to a retain_content=FALSE definition would silently keep payloads.
-    let effective_retain = opts.retain_override.unwrap_or(retain_content);
+    let effective_retain = opts.retain_content.unwrap_or(retain_content);
     let resolved_opts = WriteOptions {
-        retain_override: Some(effective_retain),
+        retain_content: Some(effective_retain),
         ..opts
     };
 
@@ -3506,6 +3502,7 @@ pub use crate::read_surface::{read_surface_status, refresh_read_surface, Surface
 /// casts are load-bearing: an empty bound list carries no element type.
 /// Exposed so the plan guard (`tests/point_read_index_scan.rs`) checks the
 /// production text.
+#[doc(hidden)]
 pub const READ_VALUES_SQL: &str = "SELECT * FROM read_values(?, ?, ?::VARCHAR[], ?::VARCHAR[])";
 
 /// Read a few values of one parameter: the current rows of every
@@ -4546,7 +4543,7 @@ pub(crate) fn create_parameter_type(
 
 /// The definition's `retain_content` — the primary retention lever
 /// (default TRUE; FALSE on result classes) that `history::write_value` must see
-/// via `retain_override`, else a FALSE definition silently keeps full payloads.
+/// via `retain_content`, else a FALSE definition silently keeps full payloads.
 fn read_retain_content(conn: &Connection, pd_id: i64) -> Result<bool, DbError> {
     Ok(conn.query_row(
         "SELECT retain_content FROM parameter_definition WHERE cur_id = ?",
@@ -4574,7 +4571,7 @@ mod tests {
             structural: vec![StructuralOutcome {
                 change_index: 0,
                 kind: StructuralKind::Alternative,
-                object_id: 2,
+                id: 2,
                 effect: StructuralEffect::NoOp,
             }],
             object_deletes: vec![ObjectDeleteOutcome {

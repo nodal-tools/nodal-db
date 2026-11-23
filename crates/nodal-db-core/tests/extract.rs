@@ -162,7 +162,7 @@ fn seed_metadata(db: &Path) {
         vec![
             MetadataChange::PutSource {
                 source: name("IEA"),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("World Energy Outlook".into()),
                     issued: Some("2024-10-16".into()),
@@ -171,7 +171,7 @@ fn seed_metadata(db: &Path) {
             },
             MetadataChange::PutLicense {
                 license: name("CC-BY-4.0"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     ..Default::default()
@@ -183,7 +183,7 @@ fn seed_metadata(db: &Path) {
             },
             MetadataChange::PutRole {
                 role: name("primary_source"),
-                rename: None,
+                new_name: None,
                 description: None,
                 iri: Some("http://www.w3.org/ns/prov#hadPrimarySource".into()),
             },
@@ -1671,14 +1671,13 @@ fn t9_asof_refusals() {
         "Base",
         array_batch("n1", 24, 1.0),
         &[],
+        "t",
+        "replace without keeping content",
         WriteOptions {
-            force_replace: true,
-            retain_override: None,
+            retain_content: Some(false),
             expect_commit: None,
             covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         },
-        "t",
-        "replace without keeping content",
     )
     .unwrap();
     let c2 = scalar(&stub_db, "SELECT max(id) FROM \"commit\"");

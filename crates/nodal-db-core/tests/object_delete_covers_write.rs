@@ -1,5 +1,5 @@
 //! A value write and an object delete covering that value in ONE
-//! `commit_changes` call are refused up front (skip_unchanged_writes_PLAN
+//! `commit` call are refused up front (skip_unchanged_writes_PLAN
 //! D10, from the P2 review). The cascade closes only rows older than the
 //! commit, so under the long cell diff it would close the unchanged old
 //! cells and keep the changed cells the write just inserted: a partial

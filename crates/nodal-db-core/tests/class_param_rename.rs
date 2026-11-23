@@ -1,5 +1,5 @@
-//! Class and parameter descriptions and renames (`CreateEntityClass`'s
-//! description, `RenameEntityClass`, `RenameParameter`), the description
+//! Class and parameter descriptions and renames (`CreateClass`'s
+//! description, `RenameClass`, `RenameParameter`), the description
 //! rule shared by every rename op (a stored description is never `""`), and
 //! the empty-description rule of the template IR.
 
@@ -43,7 +43,7 @@ fn qopt(db: &Path, sql: &str) -> Option<String> {
 }
 
 fn class_d(name: &str, description: Option<&str>) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: vec![],
         description: description.map(Into::into),
@@ -51,7 +51,7 @@ fn class_d(name: &str, description: Option<&str>) -> SC {
 }
 
 // ---------------------------------------------------------------------------
-// CreateEntityClass.description (P1)
+// CreateClass.description (P1)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -177,7 +177,7 @@ fn class(name: &str) -> SC {
 }
 
 fn nd_class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -207,7 +207,7 @@ fn entity(class: &str, name: &str) -> SC {
 }
 
 fn ren_class(current: &str, new_name: &str) -> SC {
-    SC::RenameEntityClass {
+    SC::RenameClass {
         current: current.into(),
         new_name: new_name.into(),
         description: None,
@@ -216,7 +216,7 @@ fn ren_class(current: &str, new_name: &str) -> SC {
 }
 
 fn desc_class(current: &str, description: &str) -> SC {
-    SC::RenameEntityClass {
+    SC::RenameClass {
         current: current.into(),
         new_name: current.into(),
         description: Some(description.into()),
@@ -246,7 +246,7 @@ fn desc_param(class: &str, current: &str, description: &str) -> SC {
 
 fn allowed(mut ch: SC) -> SC {
     match &mut ch {
-        SC::RenameEntityClass {
+        SC::RenameClass {
             allow_on_template, ..
         }
         | SC::RenameParameter {
@@ -301,7 +301,7 @@ fn okey(kind: ObjectKind, class: Option<&str>, name: &str) -> (ObjectDeleteKey, 
     )
 }
 
-/// One `commit_changes` call over every channel.
+/// One `commit` call over every channel.
 fn call(
     db: &Path,
     segments: Vec<Segment>,
@@ -375,7 +375,7 @@ fn param_id(db: &Path, name: &str) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// RenameEntityClass / RenameParameter: the basic contract (tests 2-11)
+// RenameClass / RenameParameter: the basic contract (tests 2-11)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -387,7 +387,7 @@ fn class_rename_keeps_the_id_and_history() {
     let r = cs(&db, vec![ren_class("node", "bus")]);
     assert_eq!(r.structural[0].kind, StructuralKind::Class);
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     assert_eq!(class_id(&db, "bus"), id);
     assert_eq!(
         q1(
@@ -422,7 +422,7 @@ fn parameter_rename_keeps_values_and_reads_follow() {
     let r = cs(&db, vec![ren_param("node", "demand", "load")]);
     assert_eq!(r.structural[0].kind, StructuralKind::Parameter);
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, pid);
+    assert_eq!(r.structural[0].id, pid);
     assert_eq!(param_id(&db, "load"), pid);
     assert_eq!(
         q1(
@@ -557,7 +557,7 @@ fn description_only_revision_is_updated_and_clear_maps_before_compare() {
         &db,
         vec![
             desc_class("node", "Buses."),
-            SC::RenameEntityClass {
+            SC::RenameClass {
                 current: "node".into(),
                 new_name: "node".into(),
                 description: None,
@@ -583,7 +583,7 @@ fn description_only_revision_is_updated_and_clear_maps_before_compare() {
     // A rename plus a description in one item: one bump, Renamed.
     let r = cs(
         &db,
-        vec![SC::RenameEntityClass {
+        vec![SC::RenameClass {
             current: "node".into(),
             new_name: "bus".into(),
             description: Some("Buses.".into()),

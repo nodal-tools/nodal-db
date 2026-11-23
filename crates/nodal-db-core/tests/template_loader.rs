@@ -346,9 +346,9 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
         "alt",
         scalar_batch("n1", 2.5),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     // Member 2: datetime-indexed on the SAME definition (multi-type
@@ -360,9 +360,9 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
         "alt",
         datetime_batch("n2", "t", &[1_000_000, 2_000_000], &[1.0, 2.0]),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     // Undeclared shape (label-indexed) rejects at entry, naming the set.
@@ -387,9 +387,9 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
         "alt",
         bad,
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap_err();
     assert!(
@@ -406,9 +406,9 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
         "alt",
         string_batch("u1", "hello"),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     assert!(report
@@ -424,9 +424,9 @@ fn writes_match_declared_members_and_reject_undeclared_shapes() {
         "alt",
         string_batch("u1", "constant_efficiency"),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     assert_audits_empty(&db);

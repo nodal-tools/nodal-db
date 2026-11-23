@@ -77,7 +77,7 @@ pub struct ErasePreview {
     /// Rows that would be removed, per table (any validity; only tables with
     /// ≥ 1 row are listed).
     pub per_table: Vec<TableCount>,
-    pub rows_total: u64,
+    pub total_rows: u64,
     /// Advisory payload estimate (plan weakest-point (b): DuckDB gives no
     /// exact per-row physical size — array cells are counted exactly at
     /// 8 bytes each, other tiers use fixed per-row estimates). Acceptance
@@ -142,7 +142,7 @@ pub struct EraseReport {
     pub per_table: Vec<TableCount>,
     /// Total rows removed across tables — what the marker's `rows_removed`
     /// records. The closed identity row is NOT counted (it is retained).
-    pub rows_total: u64,
+    pub total_rows: u64,
     /// Advisory payload estimate, computed over the rows just before their
     /// DELETE (stored on the marker as `bytes_estimate`).
     pub bytes_estimate: u64,
@@ -176,13 +176,13 @@ pub fn preview_erase_alternative(
         };
         let legs = alternative_erase_legs();
         let mut per_table: Vec<TableCount> = Vec::new();
-        let mut rows_total = 0u64;
+        let mut total_rows = 0u64;
         let mut bytes_estimate = 0u64;
         for leg in &legs {
             let (n, bytes) = leg_scan(conn, leg, resolved.id)?;
             if n > 0 {
                 bytes_estimate += bytes;
-                rows_total += n as u64;
+                total_rows += n as u64;
                 per_table.push(TableCount {
                     table: leg.table.to_string(),
                     rows: n as usize,
@@ -215,7 +215,7 @@ pub fn preview_erase_alternative(
             alternative_id: resolved.id,
             alternative_name: resolved.name,
             per_table,
-            rows_total,
+            total_rows,
             bytes_estimate,
             still_current: resolved.still_current,
             referencing_scenarios,
@@ -317,7 +317,7 @@ pub fn erase_alternative(
         // before its DELETE (the rows are gone after); the DELETE rowcounts
         // are the authoritative counts.
         let mut per_table: Vec<TableCount> = Vec::new();
-        let mut rows_total = 0u64;
+        let mut total_rows = 0u64;
         let mut bytes_estimate = 0u64;
         for leg in &alternative_erase_legs() {
             let (_, bytes) = leg_scan(conn, leg, resolved.id)?;
@@ -327,7 +327,7 @@ pub fn erase_alternative(
             )?;
             if deleted > 0 {
                 bytes_estimate += bytes;
-                rows_total += deleted as u64;
+                total_rows += deleted as u64;
                 per_table.push(TableCount {
                     table: leg.table.to_string(),
                     rows: deleted,
@@ -344,7 +344,7 @@ pub fn erase_alternative(
             std::process::abort();
         }
 
-        if rows_total == 0 {
+        if total_rows == 0 {
             if identity_closed {
                 // Current-but-empty alternative: the identity close is a real
                 // change (commit it), but NOTHING was removed — no marker,
@@ -357,7 +357,7 @@ pub fn erase_alternative(
                     alternative_id: resolved.id,
                     identity_closed: true,
                     per_table: Vec::new(),
-                    rows_total: 0,
+                    total_rows: 0,
                     bytes_estimate: 0,
                 });
             }
@@ -377,7 +377,7 @@ pub fn erase_alternative(
             params![
                 resolved.id,
                 commit_id,
-                rows_total as i64,
+                total_rows as i64,
                 bytes_estimate as i64,
                 note.as_deref()
             ],
@@ -391,7 +391,7 @@ pub fn erase_alternative(
             alternative_id: resolved.id,
             identity_closed,
             per_table,
-            rows_total,
+            total_rows,
             bytes_estimate,
         })
     });

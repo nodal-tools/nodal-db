@@ -102,8 +102,8 @@
 //! the point statements.
 //!
 //! **Retention**: the superseded row (scalar/long close-out, array `_hist` copy)
-//! keeps its content by default (`content_retained = TRUE`). `force_replace`
-//! (or an explicit `retain_override = Some(false)`) writes a stub instead —
+//! keeps its content by default (`content_retained = TRUE`). `retain_content
+//! = Some(false)` writes a stub instead —
 //! `content_retained = FALSE` with the payload columns nulled — so the prior
 //! content is not preserved.
 //!
@@ -141,7 +141,7 @@
 //! `audit_long_value_coherence` checks the shared meta), and a diff appends
 //! its inserted cells, so value rows have no physical-order contract.
 //! Retention plays no part in equality: an unchanged write supersedes
-//! nothing, so `force_replace` stubs nothing, and a cell diff stubs only the
+//! nothing, so `retain_content = Some(false)` stubs nothing, and a cell diff stubs only the
 //! cells it closes. The no-commit rule lives in `api::commit`; a direct
 //! caller of these functions inside its own
 //! `conn::with_write_txn` still commits its (possibly empty) commit row.
@@ -291,10 +291,11 @@ pub(crate) const ARRAY_PREIMAGE: &str = array_preimage!();
 /// [`array_preimage_stub!`] for runtime-built statements.
 pub(crate) const ARRAY_PREIMAGE_STUB: &str = array_preimage_stub!();
 
-/// Should the superseded / pre-image row keep its content? `force_replace`
-/// forces a stub; an explicit `retain_override` otherwise decides; default true.
+/// Should the superseded / pre-image row keep its content? An explicit
+/// `retain_content` decides; default true (the api entry points resolve
+/// `None` to the parameter's own setting before they get here).
 pub(crate) fn keeps_content(opts: &WriteOptions) -> bool {
-    !opts.force_replace && opts.retain_override.unwrap_or(true)
+    opts.retain_content.unwrap_or(true)
 }
 
 /// Write one canonicalized value for `key` at `commit_id`, applying the full
@@ -366,7 +367,7 @@ pub fn write_value(
 
 /// Write several long values at `commit_id` through the set-based long
 /// writer with N > 1 (one grouped probe, one cell diff per key, set-based
-/// close-out and insert), as `api::commit_changes` writes the long values
+/// close-out and insert), as `api::commit` writes the long values
 /// of a call; [`write_value`] is the N = 1 form. Each entry is (key,
 /// canonical long value, binding, options). Keys must be distinct and
 /// every value long-tier, else [`DbError::Internal`] / [`DbError::Api`].
@@ -407,7 +408,7 @@ pub fn write_long_values(
 
 /// Delete the value currently live for `key` at `commit_id`: close-out on the
 /// scalar/long tiers, move-to-`_hist` on the array tier. A no-op
-/// (no live tier) returns a zero outcome. `force_replace`/`retain_override`
+/// (no live tier) returns a zero outcome. `retain_content`
 /// control whether the superseded content is retained.
 pub fn delete_value(
     conn: &Connection,

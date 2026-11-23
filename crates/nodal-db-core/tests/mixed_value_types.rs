@@ -50,7 +50,7 @@ fn declare(db: &Path, types: Vec<TypeDecl>) {
     commit_structural(
         db,
         vec![
-            StructuralChange::CreateEntityClass {
+            StructuralChange::CreateClass {
                 name: "node".into(),
                 dims: vec![],
                 description: None,

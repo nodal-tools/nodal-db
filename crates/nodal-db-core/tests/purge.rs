@@ -78,7 +78,7 @@ fn seg(class: &str, param: &str, alt: &str, b: RecordBatch) -> Segment {
 }
 
 fn class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -1069,7 +1069,7 @@ fn values_retention_follows_the_definition_and_the_override() {
         "t",
         "m",
         WriteOptions {
-            retain_override: Some(false),
+            retain_content: Some(false),
             ..o()
         },
     )
@@ -1099,7 +1099,7 @@ fn values_retention_follows_the_definition_and_the_override() {
         "t",
         "m",
         WriteOptions {
-            retain_override: Some(true),
+            retain_content: Some(true),
             ..o()
         },
     )
@@ -1556,7 +1556,7 @@ fn a_rename_and_a_purge_rewrite_the_documents_once() {
         &db,
         ChangeSet {
             structural: vec![
-                SC::RenameEntityClass {
+                SC::RenameClass {
                     current: "unit".into(),
                     new_name: "gen".into(),
                     description: None,
@@ -1607,7 +1607,7 @@ fn a_rename_and_a_purge_rewrite_the_documents_once() {
     call(
         &db3,
         ChangeSet {
-            structural: vec![SC::RenameEntityClass {
+            structural: vec![SC::RenameClass {
                 current: "unit".into(),
                 new_name: "gen".into(),
                 description: None,
@@ -1818,7 +1818,7 @@ fn force_replace_stubs_purged_values() {
         "t",
         "m",
         WriteOptions {
-            force_replace: true,
+            retain_content: Some(false),
             ..o()
         },
     )

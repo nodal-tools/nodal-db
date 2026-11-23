@@ -114,9 +114,9 @@ fn write(db: &Path, class: &str, param: &str, b: RecordBatch) {
         "Base",
         b,
         &[],
-        WriteOptions::default(),
         "tester",
         "scaling fixture",
+        WriteOptions::default(),
     )
     .unwrap_or_else(|e| panic!("write {class}.{param}: {e}"));
 }

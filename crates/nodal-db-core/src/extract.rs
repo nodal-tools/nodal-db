@@ -933,7 +933,7 @@ fn temp_prefix(dest: &Path) -> Option<String> {
 /// from a crashed run. Best-effort, under the dest's per-path lock. (A
 /// concurrent extract to the SAME dest in another process would lose its
 /// temp here and then fail loudly at publish; it never produces a wrong dest.)
-pub fn sweep_orphan_extract_temps(dest: &Path) {
+pub(crate) fn sweep_orphan_extract_temps(dest: &Path) {
     let dir = parent_dir(dest);
     let Some(prefix) = temp_prefix(dest) else {
         return;
@@ -1018,9 +1018,9 @@ mod tests {
             "Base",
             batch,
             &[],
-            crate::types::WriteOptions::default(),
             "t",
             "",
+            crate::types::WriteOptions::default(),
         )
         .unwrap();
         let check_against = |dest: &Path| -> Result<Option<String>, DbError> {

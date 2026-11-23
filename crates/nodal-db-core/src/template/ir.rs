@@ -1047,7 +1047,7 @@ impl MigrationStep {
 /// Apply `n` (an NFC normalizer) to every dimension name of `types`: they
 /// are names (stored in `parameter_type_dimension`, matched against a
 /// batch's NFC column names), so every declaration path (the template
-/// loader, the structural `CreateParameter`, `ensure_parameter_definition`)
+/// loader, the structural `CreateParameter`, `ensure_parameter`)
 /// stores them in NFC.
 pub(crate) fn nfc_dim_names(types: &mut [TypeDecl], mut n: impl FnMut(&mut String)) {
     for d in types.iter_mut().flat_map(|t| t.dims.iter_mut().flatten()) {
@@ -1055,7 +1055,7 @@ pub(crate) fn nfc_dim_names(types: &mut [TypeDecl], mut n: impl FnMut(&mut Strin
     }
 }
 
-pub fn nfc_names(t: &Template) -> Template {
+pub(crate) fn nfc_names(t: &Template) -> Template {
     fn n(s: &mut String) {
         if let std::borrow::Cow::Owned(x) = crate::text::nfc(s) {
             *s = x;
@@ -1199,7 +1199,7 @@ fn empty_descriptions_absent(t: &mut Template) {
 
 /// Parse a template from YAML 1.2 text. JSON is a YAML subset, so JSON input
 /// parses through the same call. Names come
-/// back in NFC ([`nfc_names`]).
+/// back in NFC (`nfc_names`).
 pub fn parse_str(text: &str) -> Result<Template, DbError> {
     check_yaml_shape(text)?;
     let t: Template = serde_norway::from_str(text)
@@ -2194,7 +2194,7 @@ fn uniform_list_kind(l: &ValueList) -> Result<String, String> {
 /// float; used for duplicate detection and default-vs-list membership).
 /// Delegates to the crate-wide `ScalarValue::identity_string` — ONE scalar
 /// identity encoding shared with the reconcile diff and list matching.
-pub fn canonical_literal_string(l: &Lit, kind: &str) -> String {
+pub(crate) fn canonical_literal_string(l: &Lit, kind: &str) -> String {
     match l.resolve(kind) {
         Ok(v) => v.identity_string(),
         Err(_) => format!("?:{l:?}"),
@@ -2226,7 +2226,7 @@ fn opt(map: &mut Map<String, Value>, key: &str, v: &Option<String>) {
 /// elided): a `types:` block is elidable iff the parameter binds a value
 /// list, the block is a single rank-0 member, and its kind equals the list's
 /// uniform member kind.
-pub fn types_elidable(types: &[TypeDecl], list: Option<&ValueList>) -> bool {
+pub(crate) fn types_elidable(types: &[TypeDecl], list: Option<&ValueList>) -> bool {
     let Some(l) = list else { return false };
     types.len() == 1
         && types[0]
@@ -2257,6 +2257,7 @@ fn type_member_json(ty: &TypeDecl) -> Value {
 /// The canonical, JSON-valued normalized object model (module docs). This is
 /// the hash input AND the round-trip comparator: parse both sides,
 /// compare `normalized_model` outputs.
+#[doc(hidden)]
 pub fn normalized_model(t: &Template) -> Value {
     let t = &nfc_names(t);
     let mut root = Map::new();

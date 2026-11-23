@@ -63,9 +63,9 @@ fn write(db: &Path, entity: &str, v: f64, opts: WriteOptions) -> Result<WriteRep
         "Base",
         scalar_batch(entity, v),
         &[],
-        opts,
         "tester",
         "precondition",
+        opts,
     )
 }
 
@@ -159,7 +159,7 @@ fn none_is_unchecked() {
     write(&db, "n1", 2.0, WriteOptions::default()).expect("no precondition");
 }
 
-/// Plan test 5: Every `commit_changes` wrapper honors the field.
+/// Plan test 5: Every `commit` wrapper honors the field.
 #[test]
 fn every_wrapper_honors_expect_commit() {
     let dir = tempfile::tempdir().unwrap();
@@ -243,7 +243,7 @@ fn every_wrapper_honors_expect_commit() {
             }),
         ),
         (
-            "commit_changes",
+            "commit",
             Box::new(|db: &Path, o| {
                 commit(
                     db,
@@ -359,9 +359,9 @@ fn erasure_between_load_and_save_is_stale() {
         "runA",
         scalar_batch("n1", 3.0),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     let loaded = head_commit(&db).unwrap();

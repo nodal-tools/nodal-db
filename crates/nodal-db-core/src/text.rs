@@ -54,7 +54,7 @@ pub fn nfc(s: &str) -> Cow<'_, str> {
 /// stored description is never the empty string, so `Some("")` means "no
 /// description" (NULL). Exactly the empty string; no trimming. Every
 /// writer of a description column maps through this, and the template IR
-/// applies the same rule on load ([`crate::template::ir::nfc_names`]).
+/// applies the same rule on load (`template::ir::nfc_names`).
 pub fn stored_description(d: Option<&str>) -> Option<&str> {
     d.filter(|s| !s.is_empty())
 }

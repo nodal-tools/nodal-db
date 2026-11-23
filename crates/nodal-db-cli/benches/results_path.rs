@@ -513,9 +513,9 @@ fn ingest_api_dense(db: &Path, n_params: usize, entities: usize) -> IngestResult
                 ALT,
                 batch,
                 &[],
-                WriteOptions::default(),
                 USER,
                 "bench dense",
+                WriteOptions::default(),
             )
             .expect("dense write");
             chunk_ms.push(ms(tc));
@@ -548,9 +548,9 @@ fn ingest_api_long(db: &Path, entities: usize) -> IngestResult {
                 ALT,
                 batch,
                 &[],
-                WriteOptions::default(),
                 USER,
                 "bench long",
+                WriteOptions::default(),
             )
             .expect("long write");
             chunk_ms.push(ms(tc));
@@ -950,9 +950,9 @@ fn phase_bigarray(ctx: &Ctx) {
             ALT,
             b,
             &[],
-            WriteOptions::default(),
             USER,
             "bench big array",
+            WriteOptions::default(),
         )
         .expect("big array write");
         let wall = ms(t);

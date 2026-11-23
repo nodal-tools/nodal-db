@@ -102,9 +102,9 @@ fn write(db: &Path, class: &str, param: &str, alt: &str, b: RecordBatch) -> Writ
         alt,
         b,
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .expect("write")
 }
@@ -483,12 +483,12 @@ fn a_write_refreshes_an_old_file_and_keeps_user_views() {
         "High",
         scalars(&["n1"], 99.0),
         &[],
+        "tester",
+        "",
         WriteOptions {
             expect_commit: Some(head),
             ..WriteOptions::default()
         },
-        "tester",
-        "",
     )
     .expect("expect_commit holds across the refresh");
     assert!(
@@ -714,9 +714,9 @@ fn another_schema_version_is_not_refreshed() {
         "High",
         scalars(&["n1"], 3.0),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     );
     assert_eq!(catalog_sql(&db), cat);
     let e = api::refresh_read_surface(&db, false).unwrap_err();

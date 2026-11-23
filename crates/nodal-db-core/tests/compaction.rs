@@ -49,9 +49,9 @@ fn write_scalar(db: &Path, class: &str, param: &str, alt: &str, entity: &str, v:
         alt,
         scalar_batch(entity, v),
         &[],
-        WriteOptions::default(),
         "tester",
         "compaction test write",
+        WriteOptions::default(),
     )
     .expect("write_parameter");
 }
@@ -914,9 +914,9 @@ fn write_array(db: &Path, entity: &str, vals: &[f64]) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "array write",
+        WriteOptions::default(),
     )
     .expect("write array");
 }

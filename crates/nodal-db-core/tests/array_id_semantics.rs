@@ -53,9 +53,9 @@ fn write_array(db: &Path, entity: &str, vals: &[f64], msg: &str) -> i64 {
         "Base",
         indexed_float_batch(entity, &coords, vals),
         &[],
-        WriteOptions::default(),
         "tester",
         msg,
+        WriteOptions::default(),
     )
     .expect("write")
     .commit_id

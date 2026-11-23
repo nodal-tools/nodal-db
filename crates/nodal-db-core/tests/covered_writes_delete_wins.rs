@@ -1,5 +1,5 @@
 //! `WriteOptions::covered_writes`: a value write that a delete in the same
-//! `commit_changes` call covers (skip_unchanged_writes_PLAN D9: a value
+//! `commit` call covers (skip_unchanged_writes_PLAN D9: a value
 //! delete of the same key; D10: an object delete whose cascade reaches the
 //! value) is refused by default (`CoveredWrites::Refuse`, tested at length
 //! in `object_delete_covers_write.rs` and `write_path_structural.rs`). Under
@@ -42,8 +42,7 @@ use nodal_db_core::types::{
 };
 
 const DELETE_WINS: WriteOptions = WriteOptions {
-    force_replace: false,
-    retain_override: None,
+    retain_content: None,
     expect_commit: None,
     covered_writes: CoveredWrites::DeleteWins,
 };
@@ -959,7 +958,7 @@ fn a_structural_create_and_an_object_delete_of_it_are_refused() {
             (
                 "create class k, delete k",
                 vec![],
-                StructuralChange::CreateEntityClass {
+                StructuralChange::CreateClass {
                     name: "k".into(),
                     dims: vec![],
                     description: None,

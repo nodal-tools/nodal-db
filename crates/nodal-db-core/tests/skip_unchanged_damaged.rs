@@ -2,7 +2,7 @@
 //! rows (skip_unchanged_writes_PLAN critique C3): whatever the stored side
 //! looks like, a write that is not provably equal to it goes ahead. Each
 //! case writes a value, tampers with its stored rows through raw SQL, then
-//! writes the original value again through `commit_changes` and requires a
+//! writes the original value again through `commit` and requires a
 //! real write (a commit, `values_written == 1`, nothing unchanged), for the
 //! point statements (one entity) and the set-based round (three).
 

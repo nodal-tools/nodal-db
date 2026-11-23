@@ -22,9 +22,9 @@ use nodal_db_core::types::{
     ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, WriteOptions,
 };
 use nodal_db_core::verbs::{
-    drop_value_list, ensure_alternative, ensure_entity, ensure_entity_class,
-    ensure_parameter_definition, set_class_active_by_default, set_entity_activation,
-    set_scenario_alternatives, stamp_template_identity,
+    drop_value_list, ensure_alternative, ensure_class, ensure_entity, ensure_parameter,
+    set_class_active_by_default, set_entity_activation, set_scenario_alternatives,
+    stamp_template_identity,
 };
 
 fn fresh_db(dir: &tempfile::TempDir) -> PathBuf {
@@ -184,7 +184,7 @@ fn activation_verbs_write_update_close_and_noop() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
     ensure_alternative(&db, "base", None, "tester").unwrap();
-    ensure_entity_class(&db, "constraint", &[], "tester").unwrap();
+    ensure_class(&db, "constraint", &[], "tester").unwrap();
     ensure_entity(&db, "constraint", Some("c1"), &[], "tester").unwrap();
 
     // Strict resolution: entity/class/alternative must exist.
@@ -239,7 +239,7 @@ fn activation_verbs_write_update_close_and_noop() {
 fn set_class_active_by_default_is_a_versioned_header_update() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    ensure_entity_class(&db, "reserve_cls", &[], "tester").unwrap();
+    ensure_class(&db, "reserve_cls", &[], "tester").unwrap();
     assert_eq!(q1(&db, "SELECT CAST(active_by_default AS BIGINT) FROM entity_class WHERE cur_name = 'reserve_cls'"), 1);
     let n = commits(&db);
     // Equal flag: no commit.
@@ -293,7 +293,7 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
     );
 
     // Bind a definition to the list (§3.5 inference: rank-0 string member).
-    let pd = ensure_parameter_definition(
+    let pd = ensure_parameter(
         &db,
         "cls",
         "is_enabled",
@@ -384,7 +384,7 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
 }
 
 // ---------------------------------------------------------------------------
-// ensure_entity_class / ensure_parameter_definition / ensure_entity (1.3)
+// ensure_class / ensure_parameter / ensure_entity (1.3)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -392,10 +392,10 @@ fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
     // The v58 shape: 0-D flowGroup, then the 3-D carve-out class.
-    let fg = ensure_entity_class(&db, "flowGroup", &[], "tester").unwrap();
-    ensure_entity_class(&db, "unit", &[], "tester").unwrap();
-    ensure_entity_class(&db, "node", &[], "tester").unwrap();
-    let nd = ensure_entity_class(
+    let fg = ensure_class(&db, "flowGroup", &[], "tester").unwrap();
+    ensure_class(&db, "unit", &[], "tester").unwrap();
+    ensure_class(&db, "node", &[], "tester").unwrap();
+    let nd = ensure_class(
         &db,
         "flowGroup__unit__node",
         &["flowGroup".into(), "unit".into(), "node".into()],
@@ -411,12 +411,9 @@ fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
     );
     let n = commits(&db);
     // Idempotent (matching dims): same ids, no commits.
+    assert_eq!(ensure_class(&db, "flowGroup", &[], "tester").unwrap(), fg);
     assert_eq!(
-        ensure_entity_class(&db, "flowGroup", &[], "tester").unwrap(),
-        fg
-    );
-    assert_eq!(
-        ensure_entity_class(
+        ensure_class(
             &db,
             "flowGroup__unit__node",
             &["flowGroup".into(), "unit".into(), "node".into()],
@@ -427,7 +424,7 @@ fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
     );
     assert_eq!(commits(&db), n);
     // Dim mismatch: the reshape door stays shut.
-    let err = ensure_entity_class(
+    let err = ensure_class(
         &db,
         "flowGroup__unit__node",
         &["unit".into(), "node".into()],
@@ -436,17 +433,17 @@ fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
     .unwrap_err();
     assert!(format!("{err}").contains("reshape"));
     // Missing dimension class: strict.
-    assert!(ensure_entity_class(&db, "x__y", &["ghost".into()], "tester").is_err());
+    assert!(ensure_class(&db, "x__y", &["ghost".into()], "tester").is_err());
 }
 
 #[test]
 fn ensure_parameter_definition_types_inference_and_no_widen() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    ensure_entity_class(&db, "solve", &[], "tester").unwrap();
+    ensure_class(&db, "solve", &[], "tester").unwrap();
 
     // Explicitly typed: float + a 1-D labeled map member.
-    let pd = ensure_parameter_definition(
+    let pd = ensure_parameter(
         &db,
         "solve",
         "knob",
@@ -468,7 +465,7 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
     );
     // Existing: returned AS-IS — never re-declared, never widened (D-F4).
     let n = commits(&db);
-    let pd2 = ensure_parameter_definition(
+    let pd2 = ensure_parameter(
         &db,
         "solve",
         "knob",
@@ -513,7 +510,7 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
         &ApplyOptions::default(),
     )
     .unwrap();
-    let pd3 = ensure_parameter_definition(
+    let pd3 = ensure_parameter(
         &db,
         "solve",
         "is_enabled",
@@ -544,8 +541,7 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
     );
 
     // Typeless creation (auto-materializes on first write).
-    let pd4 =
-        ensure_parameter_definition(&db, "solve", "freeform", &[], None, None, "tester").unwrap();
+    let pd4 = ensure_parameter(&db, "solve", "freeform", &[], None, None, "tester").unwrap();
     assert_eq!(
         q1(
             &db,
@@ -555,7 +551,7 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
     );
 
     // Validation: indistinguishable members, bad kinds, missing class/list.
-    assert!(ensure_parameter_definition(
+    assert!(ensure_parameter(
         &db,
         "solve",
         "dup",
@@ -565,7 +561,7 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
         "tester"
     )
     .is_err());
-    assert!(ensure_parameter_definition(
+    assert!(ensure_parameter(
         &db,
         "solve",
         "bad",
@@ -575,27 +571,18 @@ fn ensure_parameter_definition_types_inference_and_no_widen() {
         "tester"
     )
     .is_err());
-    assert!(ensure_parameter_definition(&db, "ghost", "p", &[], None, None, "tester").is_err());
-    assert!(ensure_parameter_definition(
-        &db,
-        "solve",
-        "p",
-        &[],
-        Some("ghost_list"),
-        None,
-        "tester"
-    )
-    .is_err());
+    assert!(ensure_parameter(&db, "ghost", "p", &[], None, None, "tester").is_err());
+    assert!(ensure_parameter(&db, "solve", "p", &[], Some("ghost_list"), None, "tester").is_err());
 }
 
 #[test]
 fn ensure_entity_0d_nd_default_name_and_tuple_guard() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    ensure_entity_class(&db, "flowGroup", &[], "tester").unwrap();
-    ensure_entity_class(&db, "unit", &[], "tester").unwrap();
-    ensure_entity_class(&db, "node", &[], "tester").unwrap();
-    ensure_entity_class(
+    ensure_class(&db, "flowGroup", &[], "tester").unwrap();
+    ensure_class(&db, "unit", &[], "tester").unwrap();
+    ensure_class(&db, "node", &[], "tester").unwrap();
+    ensure_class(
         &db,
         "flowGroup__unit__node",
         &["flowGroup".into(), "unit".into(), "node".into()],
@@ -810,12 +797,12 @@ fn map_batch(entity: &str, pairs: &[(&str, f64)]) -> RecordBatch {
 fn retype_idiom_close_out_recreate_through_existing_verbs() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    ensure_entity_class(&db, "solve", &[], "tester").unwrap();
+    ensure_class(&db, "solve", &[], "tester").unwrap();
     ensure_entity(&db, "solve", Some("s1"), &[], "tester").unwrap();
 
     // The imported state: solver_arguments declared ARRAY-shaped (integer
     // axis), holding values.
-    let old_pd = ensure_parameter_definition(
+    let old_pd = ensure_parameter(
         &db,
         "solve",
         "solver_arguments",
@@ -832,9 +819,9 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
         "base",
         array_batch("s1", &[(1, 2.0), (2, 7.0)]),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 
@@ -850,9 +837,9 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
             position: 1,
             labels: vec!["presolve".into()],
         }],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap_err();
     assert!(format!("{err}").contains("never widens"));
@@ -876,7 +863,7 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
     .unwrap();
     assert_eq!(report.object_deletes.len(), 1);
     // (3) recreate with the 1d_map declaration;
-    let new_pd = ensure_parameter_definition(
+    let new_pd = ensure_parameter(
         &db,
         "solve",
         "solver_arguments",
@@ -901,9 +888,9 @@ fn retype_idiom_close_out_recreate_through_existing_verbs() {
             position: 1,
             labels: vec!["presolve".into(), "threads".into()],
         }],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 
@@ -942,10 +929,10 @@ fn free_text_names_round_trip_through_verbs() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
 
-    let cls = ensure_entity_class(&db, "5week-invest", &[], "tester").unwrap();
+    let cls = ensure_class(&db, "5week-invest", &[], "tester").unwrap();
     assert!(cls > 0);
     ensure_entity(&db, "5week-invest", Some("node with space"), &[], "tester").unwrap();
-    let pd = ensure_parameter_definition(
+    let pd = ensure_parameter(
         &db,
         "5week-invest",
         "ramp__limit",
@@ -985,7 +972,7 @@ fn free_text_names_round_trip_through_verbs() {
 
     // The hygiene floor still rejects a control character (writer stricter than
     // the now-unconstrained DB — the safe direction, never a raw CHECK error).
-    let err = ensure_entity_class(&db, "bad\tname", &[], "tester").unwrap_err();
+    let err = ensure_class(&db, "bad\tname", &[], "tester").unwrap_err();
     assert!(
         format!("{err}").contains("must be non-empty, trimmed, and free of control characters"),
         "control-char name must be refused by the writer, got: {err}"

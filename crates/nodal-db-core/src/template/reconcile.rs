@@ -3193,7 +3193,7 @@ fn rank0_member_id(conn: &Connection, pd_id: i64, kind: &str) -> Result<Option<i
 //     one INSERT per table, two callers, zero drift ---
 
 /// The one `entity_class` create site (loader `CreateClass` + G8
-/// `ensure_entity_class`).
+/// `ensure_class`).
 pub(crate) fn insert_class_row(
     conn: &Connection,
     c: i64,
@@ -3221,7 +3221,7 @@ pub(crate) fn insert_class_row(
 }
 
 /// The one `entity_class_dimension` create site (loader `CreateClassDims` +
-/// G8 `ensure_entity_class`).
+/// G8 `ensure_class`).
 pub(crate) fn insert_class_dim_row(
     conn: &Connection,
     c: i64,
@@ -3241,7 +3241,7 @@ pub(crate) fn insert_class_dim_row(
 }
 
 /// The one `parameter_definition` CREATE site (loader `CreateParameter` +
-/// G8 `ensure_parameter_definition`; revisions go through `revise_pd_row`).
+/// G8 `ensure_parameter`; revisions go through `revise_pd_row`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_definition_row(
     conn: &Connection,

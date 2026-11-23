@@ -250,6 +250,7 @@ pub const COMMIT_BACKSTOP_CAP: u64 = 100;
 /// from ≈560 MiB. The worst-case open-time growth is therefore ≈+70 ms (the
 /// floor) to ≈+110 ms (the cap) over the compacted open. A pure function of
 /// the size the gate already `stat`s: no extra I/O.
+#[doc(hidden)]
 pub fn size_scaled_max_commits(bytes: u64) -> u64 {
     let mib = bytes as f64 / (1024.0 * 1024.0);
     let c_est_ms = 850.0 + 19.7 * mib;
@@ -260,7 +261,7 @@ pub fn size_scaled_max_commits(bytes: u64) -> u64 {
 /// How many commits a failed repack is skipped for by
 /// [`CompactionBackoff`]: `max(5, N/5)` (plan C12), where `N` is the
 /// backstop's effective threshold (the floor when the backstop is off).
-pub fn failure_backoff_commits(n: u64) -> u64 {
+pub(crate) fn failure_backoff_commits(n: u64) -> u64 {
     (n / 5).max(5)
 }
 
@@ -394,7 +395,7 @@ pub fn compact_if_due(
     let Some(n) = policy.max_commits.threshold(current) else {
         return Ok(no_op_report(current));
     };
-    // A `head` of 0 or less is not a head: a `commit_changes` call that
+    // A `head` of 0 or less is not a head: a `api::commit` call that
     // changed nothing reports `commit_id == 0` (skip_unchanged_writes_PLAN
     // D1), and taking it at face value would read as `head < baseline`
     // ("another file") and force a full repack. Read the real head instead.
@@ -754,6 +755,7 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
 ///   the byte size;
 /// - [`CompactionTrigger::Growth`] / [`CompactionTrigger::NoBaseline`]: when
 ///   not smaller.
+#[doc(hidden)]
 pub fn keeps_original(trigger: CompactionTrigger, rebuilt: u64, source: u64) -> bool {
     match trigger {
         CompactionTrigger::Requested => false,
@@ -1009,6 +1011,7 @@ fn temp_prefix(db_path: &Path) -> Option<String> {
 /// match: its name begins `…compaction-baseline`, so `starts_with(prefix)` —
 /// where `prefix` ends in the dot of `…compact.` — is false. The explicit
 /// `compaction-baseline` exclusion below is a second guard.
+#[doc(hidden)]
 pub fn sweep_orphan_temps(db_path: &Path) {
     let dir = parent_dir(db_path);
     let Some(prefix) = temp_prefix(db_path) else {
@@ -1045,6 +1048,7 @@ pub fn sweep_orphan_temps(db_path: &Path) {
 ///
 /// The name is built from the file name's raw bytes, so a non-UTF-8 name
 /// gets its own sidecar (L2), never one shared with another database.
+#[doc(hidden)]
 pub fn baseline_path(db_path: &Path) -> PathBuf {
     let mut name = db_path.file_name().unwrap_or_default().to_os_string();
     name.push(".compaction-baseline");
@@ -1053,6 +1057,7 @@ pub fn baseline_path(db_path: &Path) -> PathBuf {
 
 /// One parsed baseline sidecar ([`baseline_path`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Baseline {
     /// The DB file's byte size right after the last repack.
     pub bytes: u64,
@@ -1064,6 +1069,7 @@ pub struct Baseline {
 /// Read the baseline. A missing / torn / unparseable sidecar yields `None`
 /// (⇒ re-establish on the next gated call) — the sidecar is advisory, never
 /// load-bearing for correctness.
+#[doc(hidden)]
 pub fn read_baseline(db_path: &Path) -> Option<Baseline> {
     let text = fs::read_to_string(baseline_path(db_path)).ok()?;
     parse_baseline(&text)

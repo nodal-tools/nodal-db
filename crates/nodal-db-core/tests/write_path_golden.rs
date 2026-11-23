@@ -1,7 +1,7 @@
 //! Physical-write golden (appender_write_path_PLAN.md D11, narrowed by
 //! critique C12): a fixed, deterministic operation script is driven through
 //! `history::write_value` / `delete_value` (inside `with_write_txn`) and
-//! through `api::commit_changes`, then every row of every value, `_hist` and
+//! through `api::commit`, then every row of every value, `_hist` and
 //! axis table, the `commit` log (without its wall-clock `timestamp`) and the
 //! sequences' counters are rendered **in Rust** and compared with
 //! `tests/fixtures/write_path_golden.txt`.
@@ -264,8 +264,7 @@ fn key(e: i64) -> ValueKey {
 }
 
 const FORCE: WriteOptions = WriteOptions {
-    force_replace: true,
-    retain_override: None,
+    retain_content: Some(false),
     expect_commit: None,
     covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
 };
@@ -816,7 +815,7 @@ fn api_script(db: &Path, log: &mut String) {
     direct_empty_arrays(db, log);
 }
 
-/// One `commit_changes` call, its report logged under `tag`.
+/// One `commit` call, its report logged under `tag`.
 fn api_commit(
     db: &Path,
     tag: &str,
@@ -896,8 +895,7 @@ fn api_scalar_batches(db: &Path, log: &mut String) {
         vec![],
         vec![],
         WriteOptions {
-            force_replace: true,
-            retain_override: None,
+            retain_content: Some(false),
             expect_commit: None,
             covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         },

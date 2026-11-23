@@ -2,7 +2,7 @@
 //!
 //! A write whose stored form equals the current stored value writes
 //! nothing in any tier: no close-out, no insert, no `_hist` row. A
-//! `commit_changes` call (and its wrappers) whose every item is a known
+//! `commit` call (and its wrappers) whose every item is a known
 //! no-op makes no commit (D1): it reports `commit_id == 0` and the head does
 //! not move. The census oracle (critique C2) checks every no-op call shape:
 //! the row count and an order-independent content hash of every base table
@@ -223,7 +223,7 @@ fn assert_noop(db: &Path, what: &str, call: impl FnOnce() -> WriteReport) -> Wri
 
 // --- one identical re-write per tier ------------------------------------------
 
-/// Through `commit_changes`, for one entity (the point statements) and for
+/// Through `commit`, for one entity (the point statements) and for
 /// three (the set-based round), in every tier: the second write is
 /// unchanged, writes no row anywhere and makes no commit.
 #[test]
@@ -724,7 +724,7 @@ fn every_no_op_call_shape_commits_nothing() {
             vec![],
             vec![],
             WriteOptions {
-                force_replace: true,
+                retain_content: Some(false),
                 ..WriteOptions::default()
             },
         )
@@ -852,9 +852,9 @@ fn write_parameter_identical_value() {
             "Base",
             string_batch(&["a"], &[s]),
             &[],
-            WriteOptions::default(),
             "t",
             "m",
+            WriteOptions::default(),
         )
         .unwrap()
     };

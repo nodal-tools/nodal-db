@@ -69,9 +69,9 @@ fn write(db: &Path, entities: &[&str], v: f64) -> Result<(), DbError> {
         "Base",
         scalar(entities, v),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .map(|_| ())
 }
@@ -369,9 +369,9 @@ fn which_writers_re_stamp_the_file() {
             "Base",
             scalar(&["a"], 9.0),
             &[],
-            opts,
             "t",
             "m",
+            opts,
         )
         .is_ok()
     };

@@ -181,15 +181,15 @@ fn every_write_to_an_older_file_is_refused_and_writes_nothing() {
     let db = old_file(dir.path());
     let before = census(&db);
     let retained = WriteOptions {
-        retain_override: Some(true),
+        retain_content: Some(true),
         ..Default::default()
     };
     let stub = WriteOptions {
-        retain_override: Some(false),
+        retain_content: Some(false),
         ..Default::default()
     };
     let force = WriteOptions {
-        force_replace: true,
+        retain_content: Some(false),
         ..Default::default()
     };
     for (name, opts) in [

@@ -49,9 +49,9 @@ fn write(db: &Path, alt: &str, entity: &str, vals: &[i64]) -> i64 {
         alt,
         batch(entity, vals),
         &[],
-        WriteOptions::default(),
         "t",
         "w",
+        WriteOptions::default(),
     )
     .unwrap()
     .commit_id

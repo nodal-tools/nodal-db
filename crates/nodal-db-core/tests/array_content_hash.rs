@@ -146,12 +146,12 @@ fn every_core_row_carries_the_true_hash() {
         // version is a stub, then force_replace (also a stub), then a delete.
         commit(&db, arrays(&ents, pinned));
         let stub = WriteOptions {
-            retain_override: Some(false),
+            retain_content: Some(false),
             ..Default::default()
         };
         commit_opts(&db, arrays(&ents, |k| base(k + 10)), stub);
         let force = WriteOptions {
-            force_replace: true,
+            retain_content: Some(false),
             ..Default::default()
         };
         commit_opts(&db, arrays(&ents, |k| base(k + 20)), force);

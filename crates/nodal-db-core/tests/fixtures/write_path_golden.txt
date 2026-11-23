@@ -71,7 +71,7 @@ WriteReport { commit_id: 9, values_written: 8, rows_written: 8, rows_closed: 1, 
 ## report a4 force replace
 WriteReport { commit_id: 10, values_written: 7, rows_written: 7, rows_closed: 7, axes_created: 0, axes_reused: 0, tiers: [Scalar], warnings: [], object_deletes: [], structural: [] }
 ## report a5 mixed long
-WriteReport { commit_id: 11, values_written: 1, rows_written: 2, rows_closed: 0, axes_created: 1, axes_reused: 0, tiers: [Long], warnings: [], object_deletes: [], structural: [StructuralOutcome { change_index: 0, kind: Parameter, object_id: 8, effect: Created }] }
+WriteReport { commit_id: 11, values_written: 1, rows_written: 2, rows_closed: 0, axes_created: 1, axes_reused: 0, tiers: [Long], warnings: [], object_deletes: [], structural: [StructuralOutcome { change_index: 0, kind: Parameter, id: 8, effect: Created }] }
 ## report a5 mixed array
 WriteReport { commit_id: 12, values_written: 1, rows_written: 1, rows_closed: 0, axes_created: 0, axes_reused: 1, tiers: [Array], warnings: [], object_deletes: [], structural: [] }
 ## report a5 to scalar

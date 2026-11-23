@@ -267,7 +267,7 @@ pub(crate) fn apply_rename_run(
         report.structural.push(StructuralOutcome {
             change_index: first + k,
             kind: StructuralKind::Entity,
-            object_id: id,
+            id,
             effect,
         });
     }

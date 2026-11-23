@@ -193,8 +193,7 @@ fn run_case(path: &std::path::Path) {
 
     for (i, step) in case.steps.iter().enumerate() {
         let opts = WriteOptions {
-            force_replace: step.force_replace,
-            retain_override: None,
+            retain_content: step.force_replace.then_some(false),
             expect_commit: None,
             covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         };

@@ -139,9 +139,9 @@ fn write(db: &Path, class: &str, param: &str, batch: RecordBatch) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "fixture",
+        WriteOptions::default(),
     )
     .expect("write fixture");
 }

@@ -66,9 +66,9 @@ fn write(db: &Path, param: &str, batch: RecordBatch) -> Result<(), nodal_db_core
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "version width",
+        WriteOptions::default(),
     )
     .map(|_| ())
 }

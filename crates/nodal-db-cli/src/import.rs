@@ -63,7 +63,8 @@ pub struct ImportArgs {
     pub parameter: Option<String>,
     pub user: Option<String>,
     pub message: String,
-    pub force_replace: bool,
+    /// `WriteOptions::retain_content`: `--retain-content` / `--no-retain-content`.
+    pub retain_content: Option<bool>,
     pub value_metadata: Option<ValueMetadataArg>,
 }
 
@@ -202,7 +203,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     }
 
     let opts = WriteOptions {
-        force_replace: args.force_replace,
+        retain_content: args.retain_content,
         ..Default::default()
     };
     let n_segments = segments.len();

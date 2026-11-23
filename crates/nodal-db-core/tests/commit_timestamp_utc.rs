@@ -50,9 +50,9 @@ fn commit_timestamps_are_naive_utc() {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "utc",
+        WriteOptions::default(),
     )
     .unwrap()
     .commit_id;

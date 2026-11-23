@@ -573,7 +573,7 @@ fn structural_changes_and_object_deletes_use_nfc_names() {
     // The verbs resolve the NFD spelling to the same alternative.
     let id =
         verbs::ensure_alternative(&db, &format!("alt_{PAA_NFD}"), None, "tester").expect("ensure");
-    assert_eq!(id, again.structural[0].object_id);
+    assert_eq!(id, again.structural[0].id);
 
     // A rename by the NFD spelling of the current name.
     let renamed = commit_structural(
@@ -719,7 +719,7 @@ fn heat_types(dim: &str) -> Vec<template::ir::TypeDecl> {
 
 /// A dimension name DECLARED in NFD (a template, built in code so the
 /// parser's NFC pass is bypassed; a structural `CreateParameter`;
-/// `ensure_parameter_definition`) is stored in NFC, and a batch column of
+/// `ensure_parameter`) is stored in NFC, and a batch column of
 /// either spelling instantiates it.
 #[test]
 fn an_nfd_declared_dimension_name_is_stored_in_nfc_and_matches_both_spellings() {
@@ -744,7 +744,7 @@ fn an_nfd_declared_dimension_name_is_stored_in_nfc_and_matches_both_spellings() 
         let report = commit_structural(
             db,
             vec![
-                StructuralChange::CreateEntityClass {
+                StructuralChange::CreateClass {
                     name: "node".into(),
                     dims: vec![],
                     description: None,
@@ -771,8 +771,8 @@ fn an_nfd_declared_dimension_name_is_stored_in_nfc_and_matches_both_spellings() 
         );
     };
     let by_verb: Declare = |db| {
-        verbs::ensure_entity_class(db, "node", &[], "tester").expect("class");
-        verbs::ensure_parameter_definition(
+        verbs::ensure_class(db, "node", &[], "tester").expect("class");
+        verbs::ensure_parameter(
             db,
             "node",
             "heat",

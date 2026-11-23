@@ -67,7 +67,7 @@ fn names_reach_the_terminal_with_control_characters_escaped() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("names.duckdb");
     let evil = "Evil\u{1b}]0;pwned\u{7}\u{202e}";
-    init(&db, &["--alternative", evil]);
+    init(&db, &["--default-alternative", evil]);
     let out = bin()
         .args(["erase-alternative"])
         .arg(&db)
@@ -94,7 +94,7 @@ fn names_reach_the_terminal_with_control_characters_escaped() {
     // A newline in a name cannot forge a line of the CLI's own output.
     let forged = "x\nerased alternative 'Base'";
     let db2 = dir.path().join("lines.duckdb");
-    init(&db2, &["--alternative", forged]);
+    init(&db2, &["--default-alternative", forged]);
     let out = bin()
         .args(["erase-alternative"])
         .arg(&db2)

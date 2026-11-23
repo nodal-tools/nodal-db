@@ -203,9 +203,9 @@ fn write(db: &Path, class: &str, param: &str, alt: &str, b: RecordBatch, dom: &[
         alt,
         b,
         dom,
-        WriteOptions::default(),
         "tester",
         "point-read fixture",
+        WriteOptions::default(),
     )
     .unwrap_or_else(|e| panic!("write {class}.{param}/{alt}: {e}"));
 }

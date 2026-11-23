@@ -123,7 +123,7 @@ fn src(n: &str) -> Ref {
 fn put_source(n: &str) -> M {
     M::PutSource {
         source: src(n),
-        rename: None,
+        new_name: None,
         fields: SourceFields::default(),
     }
 }
@@ -183,7 +183,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         vec![
             M::PutSource {
                 source: src("IEA"),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("World Energy Outlook".into()),
                     issued: Some("2024-10-16".into()),
@@ -192,7 +192,7 @@ fn sources_and_licenses_create_revise_and_noop() {
             },
             M::PutLicense {
                 license: src("CC-BY-4.0"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     policy: Some(r#"{"@type": "Policy"}"#.into()),
@@ -210,7 +210,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("iea"),
-            rename: None,
+            new_name: None,
             fields: SourceFields {
                 title: Some("World Energy Outlook".into()),
                 issued: Some("2024-10-16".into()),
@@ -230,7 +230,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("IEA"),
-            rename: Some("IEA WEO".into()),
+            new_name: Some("IEA WEO".into()),
             fields: SourceFields::default(),
         }],
     )
@@ -249,7 +249,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("eurostat"),
-            rename: Some("iea weo".into()),
+            new_name: Some("iea weo".into()),
             fields: SourceFields::default(),
         }],
     )
@@ -260,7 +260,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutLicense {
             license: src("x"),
-            rename: None,
+            new_name: None,
             fields: LicenseFields {
                 policy: Some("{not json".into()),
                 ..Default::default()
@@ -273,7 +273,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("y"),
-            rename: None,
+            new_name: None,
             fields: SourceFields {
                 issued: Some("16.10.2024".into()),
                 ..Default::default()
@@ -287,7 +287,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: Ref::Id(999),
-            rename: None,
+            new_name: None,
             fields: SourceFields::default()
         }]
     )
@@ -330,8 +330,8 @@ fn pairs_fold_their_key_and_rename_by_key() {
     let r = meta(
         &db,
         vec![M::RenamePairKey {
-            from: "SOURCE".into(),
-            to: "origin".into(),
+            current: "SOURCE".into(),
+            new_name: "origin".into(),
         }],
     )
     .unwrap();
@@ -689,7 +689,7 @@ fn roles_are_created_on_purpose_and_enter_the_key() {
         vec![
             M::PutRole {
                 role: src("primary_source"),
-                rename: None,
+                new_name: None,
                 description: None,
                 iri: Some("http://www.w3.org/ns/prov#hadPrimarySource".into()),
             },
@@ -823,7 +823,7 @@ fn pool_deletes_judge_the_post_call_state() {
             put_source("S3"),
             M::PutLicense {
                 license: src("MIT"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     ..Default::default()
@@ -895,7 +895,7 @@ fn same_call_rules() {
         vec![
             M::PutSource {
                 source: src("IEA"),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("t".into()),
                     ..Default::default()
@@ -916,7 +916,7 @@ fn same_call_rules() {
         vec![
             M::PutSource {
                 source: Ref::Id(id),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("t".into()),
                     ..Default::default()
@@ -1007,7 +1007,7 @@ fn the_stable_views_name_the_links() {
         vec![
             M::PutLicense {
                 license: src("CC-BY-4.0"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     ..Default::default()
@@ -1120,7 +1120,7 @@ fn renamed_away_names_are_refused_in_metadata_items() {
         new_name: "Main".into(),
         description: None,
     };
-    let class = SC::RenameEntityClass {
+    let class = SC::RenameClass {
         current: "node".into(),
         new_name: "bus".into(),
         description: None,
@@ -1234,7 +1234,7 @@ fn set_source_licenses_and_an_aliased_delete_are_refused() {
             put_source("S"),
             M::PutLicense {
                 license: src("L"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields::default(),
             },
         ],
@@ -1317,7 +1317,7 @@ fn aliased_items_on_one_object_are_refused() {
     let db = fresh(dir.path());
     let lic = |n: &str| M::PutLicense {
         license: src(n),
-        rename: None,
+        new_name: None,
         fields: LicenseFields::default(),
     };
     meta(
@@ -1328,7 +1328,7 @@ fn aliased_items_on_one_object_are_refused() {
             lic("L2"),
             M::PutRole {
                 role: src("r"),
-                rename: None,
+                new_name: None,
                 description: None,
                 iri: None,
             },
@@ -1347,7 +1347,7 @@ fn aliased_items_on_one_object_are_refused() {
     };
     let titled = |r: Ref| M::PutSource {
         source: r,
-        rename: None,
+        new_name: None,
         fields: SourceFields {
             title: Some("t".into()),
             ..Default::default()
@@ -1355,7 +1355,7 @@ fn aliased_items_on_one_object_are_refused() {
     };
     let role = |r: Ref, d: &str| M::PutRole {
         role: r,
-        rename: None,
+        new_name: None,
         description: Some(d.into()),
         iri: None,
     };

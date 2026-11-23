@@ -41,7 +41,7 @@ fn q1(db: &Path, sql: &str) -> i64 {
 }
 
 fn class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -143,12 +143,12 @@ fn derived_name_holder_is_a_noop_with_a_folded_spelling_warned() {
     let id = q1(&db, "SELECT id FROM entity WHERE cur_name = 'u1__n1'");
     let r = ok(&db, vec![nd("unit__node", None, &["u1", "n1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     // Another spelling of the elements derives another spelling of the
     // name: the holder answers, and the fold is reported.
     let r = ok(&db, vec![nd("unit__node", None, &["U1", "N1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     let folded: Vec<(String, String)> = r
         .warnings
         .iter()
@@ -246,7 +246,7 @@ fn two_creates_of_one_tuple_in_a_call() {
     );
     assert_eq!(r.structural[0].effect, SE::Created);
     assert_eq!(r.structural[1].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, r.structural[1].object_id);
+    assert_eq!(r.structural[0].id, r.structural[1].id);
 }
 
 #[test]
@@ -294,7 +294,7 @@ fn a_delete_and_a_re_create_of_a_tuple_in_one_call_is_refused() {
     );
     let m = api_err(r);
     assert!(m.contains("already exist as \"u1__n1\""), "{m}");
-    // The error is not prefixed with a verb's name (`commit_changes` is
+    // The error is not prefixed with a verb's name (`commit` is
     // not `ensure_entity`) and points at the rename.
     assert!(!m.contains("ensure_entity"), "{m}");
     assert!(m.contains("use RenameEntity"), "{m}");
@@ -463,7 +463,7 @@ fn existing_duplicates_are_audited_left_alone_and_block_new_ones() {
     // `name: None` is a NoOp: one holder has the derived name.
     let r = ok(&db, vec![nd("unit__node", None, &["u1", "n1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, orig);
+    assert_eq!(r.structural[0].id, orig);
 }
 
 // ---------------------------------------------------------------------------

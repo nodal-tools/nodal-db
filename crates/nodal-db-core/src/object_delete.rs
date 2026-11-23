@@ -1840,7 +1840,7 @@ pub(crate) fn cascade_scope(
 /// commit created) that this object delete would reach: its target or an
 /// object in its full cascade closure. The same-commit guard never closes a
 /// row this commit created, so such a delete would leave the created object
-/// (or a child of the deleted one) live; `commit_changes` refuses it.
+/// (or a child of the deleted one) live; `api::commit` refuses it.
 pub(crate) fn reaches_created(
     conn: &Connection,
     key: &ObjectDeleteKey,

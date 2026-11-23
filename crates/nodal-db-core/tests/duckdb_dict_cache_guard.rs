@@ -135,9 +135,9 @@ fn fixture(dir: &Path, n_entities: usize) -> std::path::PathBuf {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "fixture",
+        WriteOptions::default(),
     )
     .expect("write fixture");
 

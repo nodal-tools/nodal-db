@@ -1,5 +1,5 @@
 //! The CLI's help text is user documentation: it names the public format
-//! page, describes `--force-replace` correctly, and carries no references
+//! page, describes `--no-retain-content` correctly, and carries no references
 //! into private design documents (section numbers, spec paths, decision ids).
 
 use std::process::Command;
@@ -44,7 +44,7 @@ fn cli_help_has_no_private_spec_refs() {
 }
 
 #[test]
-fn import_help_names_the_format_page_and_describes_force_replace() {
+fn import_help_names_the_format_page_and_describes_retain_content() {
     let text = help(&["import", "--help"]);
     assert!(text.contains(FORMAT_PAGE), "{text}");
     assert!(text.contains("content-less stub"), "{text}");
@@ -77,4 +77,35 @@ fn top_level_help_is_release_ready() {
             "wrapped summary: {line:?}"
         );
     }
+}
+
+/// Exit codes of the argument parser: a usage error (an unknown flag, a
+/// missing argument) is 2, distinct from a runtime error (1); `--help` and
+/// `--version` succeed.
+#[test]
+fn usage_errors_exit_2_and_help_version_exit_0() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nodal-db"))
+            .args(args)
+            .output()
+            .expect("run nodal-db")
+            .status
+            .code()
+    };
+    assert_eq!(run(&["--no-such-flag"]), Some(2));
+    assert_eq!(run(&["init"]), Some(2), "missing argument");
+    assert_eq!(
+        run(&[
+            "import",
+            "f.arrows",
+            "--db",
+            "x",
+            "--retain-content",
+            "--no-retain-content"
+        ]),
+        Some(2)
+    );
+    assert_eq!(run(&["--help"]), Some(0));
+    assert_eq!(run(&["--version"]), Some(0));
+    assert!(help(&["--help"]).contains("2 usage error"));
 }

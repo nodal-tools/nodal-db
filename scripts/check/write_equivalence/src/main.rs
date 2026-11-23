@@ -851,7 +851,7 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
                         alternative_id: 900,
                     };
                     let opts = WriteOptions {
-                        force_replace: *force,
+                        retain_content: force.then_some(false),
                         ..WriteOptions::default()
                     };
                     out.push(match v {
@@ -886,15 +886,15 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
 
         let opts = match r.below(20) {
             0..=2 => WriteOptions {
-                force_replace: true,
+                retain_content: Some(false),
                 ..WriteOptions::default()
             },
             3..=4 => WriteOptions {
-                retain_override: Some(false),
+                retain_content: Some(false),
                 ..WriteOptions::default()
             },
             5 => WriteOptions {
-                retain_override: Some(true),
+                retain_content: Some(true),
                 ..WriteOptions::default()
             },
             _ => WriteOptions::default(),

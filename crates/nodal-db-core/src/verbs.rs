@@ -4,8 +4,8 @@
 //!
 //! **The verbs**: [`ensure_alternative`], [`set_scenario_alternatives`],
 //! [`set_entity_activation`], [`set_class_active_by_default`],
-//! [`set_refinement_class`], [`ensure_entity_class`],
-//! [`ensure_parameter_definition`], [`ensure_entity`],
+//! [`set_class_refinement`], [`ensure_class`],
+//! [`ensure_parameter`], [`ensure_entity`],
 //! [`stamp_template_identity`].
 //!
 //! Every verb is a THIN wrapper over the existing single write paths (each
@@ -15,10 +15,10 @@
 //! duplicated here.
 //!
 //! Deliberately not offered: a re-declare/widen mode on
-//! [`ensure_parameter_definition`] — widening is a reconcile operation, and a
+//! [`ensure_parameter`] — widening is a reconcile operation, and a
 //! mid-chain retype is the **close-out + recreate idiom** through existing
 //! verbs: read the old values → `api::delete_objects` the definition
-//! (versioned close-out, cascade) → `ensure_parameter_definition` with the new
+//! (versioned close-out, cascade) → `ensure_parameter` with the new
 //! declaration → write the converted values. Exercised by the `verbs` test
 //! suite.
 //!
@@ -397,7 +397,7 @@ pub(crate) fn prune_refinement_classes(conn: &Connection, c: i64) -> Result<(), 
 /// [`REFINEMENT_CLASSES_KEY`], keyed by class id, so it follows renames; a
 /// class name has no meaning of its own. Idempotent: no change burns no
 /// commit.
-pub fn set_refinement_class(
+pub fn set_class_refinement(
     db: &Path,
     class: &str,
     refinement: bool,
@@ -410,7 +410,7 @@ pub fn set_refinement_class(
     // The class id, after checking a new refinement class's shape.
     let class_id = |conn: &Connection| -> Result<i64, DbError> {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
-            DbError::Api(format!("set_refinement_class: class {class:?} not found"))
+            DbError::Api(format!("set_class_refinement: class {class:?} not found"))
         })?;
         if refinement {
             let dims: i64 = conn.query_row(
@@ -420,7 +420,7 @@ pub fn set_refinement_class(
             )?;
             if dims != 2 {
                 return Err(DbError::Api(format!(
-                    "set_refinement_class: class {class:?} has {dims} dimension(s); a \
+                    "set_class_refinement: class {class:?} has {dims} dimension(s); a \
                      refinement class has exactly two (coarse, fine)"
                 )));
             }
@@ -434,7 +434,7 @@ pub fn set_refinement_class(
     if noop {
         return Ok(());
     }
-    let msg = format!("set_refinement_class {class} = {refinement}");
+    let msg = format!("set_class_refinement {class} = {refinement}");
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         let cid = class_id(conn)?;
         let mut ids = refinement_class_ids(conn)?;
@@ -514,24 +514,19 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
 /// (by folded class name, in order); a mismatch is a hard error — in-place
 /// re-dimensioning is the deferred reshape door, and v25/v58 are explicitly
 /// create-new / copy / delete-old.
-pub fn ensure_entity_class(
-    db: &Path,
-    name: &str,
-    dims: &[String],
-    user: &str,
-) -> Result<i64, DbError> {
+pub fn ensure_class(db: &Path, name: &str, dims: &[String], user: &str) -> Result<i64, DbError> {
     // Names in NFC (the text rule, `text.rs`).
     let name = &*nfc(name);
     let dims = &nfc_all(dims);
     require_user(user)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "ensure_entity_class: name {name:?} must be non-empty, trimmed, and free of control characters"
+            "ensure_class: name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     if dims.len() > 4 {
         return Err(DbError::Api(format!(
-            "ensure_entity_class: {} dimensions exceeds the rank cap of 4",
+            "ensure_class: {} dimensions exceeds the rank cap of 4",
             dims.len()
         )));
     }
@@ -540,7 +535,7 @@ pub fn ensure_entity_class(
     if let Some(cid) = with_read_plain(db, |conn| lookup_entity_class(conn, name))? {
         return with_read_plain(db, |conn| check_class_dims(conn, name, cid, dims));
     }
-    let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
+    let msg = format!("ensure_class {name} [{}]", dims.join(", "));
     // The shared applier is the one class-create body (invariant 2).
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_entity_class(conn, c, name, dims, None, &mut no_report()).map(|(id, _)| id)
@@ -564,7 +559,7 @@ pub fn ensure_entity_class(
 /// An EXISTING definition is returned **as-is — never re-declared, never
 /// widened** (widening is a reconcile operation; the
 /// sanctioned mid-chain retype is close-out + recreate, module docs).
-pub fn ensure_parameter_definition(
+pub fn ensure_parameter(
     db: &Path,
     class: &str,
     name: &str,
@@ -588,12 +583,12 @@ pub fn ensure_parameter_definition(
     require_name("class", class)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "ensure_parameter_definition: name {name:?} must be non-empty, trimmed, and free of control characters"
+            "ensure_parameter: name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     // Pure member validation (the load-time subset of `ir::validate`'s type
     // rules), shared with the structural channel's prepare (invariant 2).
-    validate_type_decls("ensure_parameter_definition", class, name, types)?;
+    validate_type_decls("ensure_parameter", class, name, types)?;
 
     if let Some(id) = with_read_plain(db, |conn| {
         let Some(cid) = lookup_entity_class(conn, class)? else {
@@ -604,7 +599,7 @@ pub fn ensure_parameter_definition(
         return Ok(id); // exists: as-is, never re-declared (D-F4)
     }
 
-    let msg = format!("ensure_parameter_definition {class}.{name}");
+    let msg = format!("ensure_parameter {class}.{name}");
     // The shared applier is the one definition+type-member create body.
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_parameter(
@@ -711,7 +706,7 @@ pub fn ensure_entity(
 /// (`property::set_core` — the same close-out-then-insert the
 /// reconcile's `StampIdentity` action uses). Guard (mirrors
 /// `allow_retarget`'s posture): a DIFFERENT existing stamp — name (folded) or
-/// version — refuses unless `overwrite` is set. Restamping the identical
+/// version — refuses unless `allow_overwrite` is set. Restamping the identical
 /// identity is an idempotent no-op with no commit. Any actual restamp closes
 /// a stale `template_content_hash` (the certification belongs to the old
 /// identity).
@@ -719,7 +714,7 @@ pub fn stamp_template_identity(
     db: &Path,
     name: &str,
     version: &str,
-    overwrite: bool,
+    allow_overwrite: bool,
     user: &str,
 ) -> Result<(), DbError> {
     // Names in NFC (the text rule, `text.rs`).
@@ -740,7 +735,7 @@ pub fn stamp_template_identity(
         existing: &(Option<String>, Option<String>),
         name: &str,
         version: &str,
-        overwrite: bool,
+        allow_overwrite: bool,
     ) -> Result<bool, DbError> {
         let (db_name, db_version) = existing;
         let same = db_name.as_deref().map(fold) == Some(fold(name))
@@ -758,11 +753,11 @@ pub fn stamp_template_identity(
                     || v.as_deref().map(|x| x != version).unwrap_or(false)
             }
         };
-        if differs && !overwrite {
+        if differs && !allow_overwrite {
             return Err(DbError::Api(format!(
                 "database is already stamped with template {:?} version {:?}; refusing \
                  to restamp as {name:?} version {version:?} — this is an explicit \
-                 opt-in (overwrite), not a default (mirrors allow_retarget)",
+                 opt-in (allow_overwrite), not a default (mirrors allow_retarget)",
                 db_name.as_deref().unwrap_or("<none>"),
                 db_version.as_deref().unwrap_or("<none>"),
             )));
@@ -771,13 +766,13 @@ pub fn stamp_template_identity(
     }
 
     let pre = with_read_plain(db, read_stamp)?;
-    if guard(&pre, name, version, overwrite)? {
+    if guard(&pre, name, version, allow_overwrite)? {
         return Ok(());
     }
     let msg = format!("stamp_template_identity {name} version {version}");
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         let existing = read_stamp(conn)?;
-        if guard(&existing, name, version, overwrite)? {
+        if guard(&existing, name, version, allow_overwrite)? {
             return Ok(()); // raced into the desired stamp
         }
         property::set_core(conn, c, "template_name", name)?;

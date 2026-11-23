@@ -130,10 +130,15 @@ pub(crate) fn reopen_links(
     )?)
 }
 
-/// A value delete (or any closer of whole values): close the links of the
-/// closed `triples`, chunked. Skips every statement on a link-free file.
-/// Returns rows closed (reported apart from the value rows closed).
-pub fn close_value_links(conn: &Connection, c: i64, triples: &[Triple]) -> Result<usize, DbError> {
+/// Close the links of the closed `triples`, chunked (the unit tests' direct
+/// closer; the write path closes links set-based). Skips every statement on
+/// a link-free file. Returns rows closed.
+#[cfg(test)]
+pub(crate) fn close_value_links(
+    conn: &Connection,
+    c: i64,
+    triples: &[Triple],
+) -> Result<usize, DbError> {
     if triples.is_empty() || !has_value_links(conn)? {
         return Ok(0);
     }
@@ -405,13 +410,19 @@ pub(crate) fn nfc_items(items: &mut [MetadataChange]) {
     for it in items {
         match it {
             MetadataChange::PutSource {
-                source: r, rename, ..
+                source: r,
+                new_name: rename,
+                ..
             }
             | MetadataChange::PutLicense {
-                license: r, rename, ..
+                license: r,
+                new_name: rename,
+                ..
             }
             | MetadataChange::PutRole {
-                role: r, rename, ..
+                role: r,
+                new_name: rename,
+                ..
             } => {
                 nfc_ref(r);
                 if let Some(n) = rename {
@@ -426,7 +437,10 @@ pub(crate) fn nfc_items(items: &mut [MetadataChange]) {
             MetadataChange::RevisePair { pair, .. } | MetadataChange::DeletePair { pair, .. } => {
                 nfc_pair(pair)
             }
-            MetadataChange::RenamePairKey { from, to } => {
+            MetadataChange::RenamePairKey {
+                current: from,
+                new_name: to,
+            } => {
                 nfc_s(from);
                 nfc_s(to);
             }
@@ -642,7 +656,7 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
         match it {
             MetadataChange::PutSource {
                 source,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 check_ref("source", source).map_err(err)?;
@@ -656,7 +670,7 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
             }
             MetadataChange::PutLicense {
                 license,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 check_ref("license", license).map_err(err)?;
@@ -689,12 +703,19 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
                 check_pair(pair).map_err(err)?;
                 touch(pair_key(pair))?;
             }
-            MetadataChange::RenamePairKey { from, to } => {
+            MetadataChange::RenamePairKey {
+                current: from,
+                new_name: to,
+            } => {
                 ident("pair key", from).map_err(err)?;
                 ident("pair key", to).map_err(err)?;
                 touch(format!("pairkey:{}", fold(from)))?;
             }
-            MetadataChange::PutRole { role, rename, .. } => {
+            MetadataChange::PutRole {
+                role,
+                new_name: rename,
+                ..
+            } => {
                 check_ref("role", role).map_err(err)?;
                 if let Some(n) = rename {
                     ident("role name", n).map_err(err)?;
@@ -1679,7 +1700,7 @@ fn revise_pair(
     Ok((id, MetadataEffect::Updated))
 }
 
-/// `RenamePairKey`: every live pair of the key `from`, in one item.
+/// `RenamePairKey`: every live pair of the key `current`, in one item.
 /// Returns the pair ids renamed.
 fn rename_pair_key(cx: &mut Ctx<'_>, from: &str, to: &str) -> Result<Vec<i64>, DbError> {
     let mut stmt = cx.conn.prepare(
@@ -2111,7 +2132,7 @@ pub(crate) fn apply_channel(
         let o = match it {
             MetadataChange::PutSource {
                 source,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "source", source)? {
@@ -2127,7 +2148,7 @@ pub(crate) fn apply_channel(
             }
             MetadataChange::PutLicense {
                 license,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "license", license)? {
@@ -2143,7 +2164,7 @@ pub(crate) fn apply_channel(
             }
             MetadataChange::PutRole {
                 role,
-                rename,
+                new_name: rename,
                 description,
                 iri,
             } => {
@@ -2173,7 +2194,10 @@ pub(crate) fn apply_channel(
                 touched.insert((MetadataKind::Pair, id), i);
                 outcome(i, MetadataKind::Pair, id, e)
             }
-            MetadataChange::RenamePairKey { from, to } => {
+            MetadataChange::RenamePairKey {
+                current: from,
+                new_name: to,
+            } => {
                 let mut stmt =
                     conn.prepare("SELECT id FROM metadata_pair WHERE cur_name = lower(?)")?;
                 let held: Vec<i64> = stmt

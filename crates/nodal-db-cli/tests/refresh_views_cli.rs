@@ -216,7 +216,7 @@ fn a_locked_database_exits_75() {
     // This test process holds DuckDB's file lock; the CLI child cannot open.
     let holder = Connection::open(&db).unwrap();
     for args in [
-        &["maintain", "refresh-views", "--force"][..],
+        &["maintain", "refresh-views", "--allow-downgrade"][..],
         &["purge", "--scope", "values", "--user", "t"],
     ] {
         let out = bin().args(args).arg(&db).output().unwrap();

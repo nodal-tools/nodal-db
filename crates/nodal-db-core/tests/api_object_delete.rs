@@ -1,7 +1,7 @@
 //! End-to-end tests for ALTERNATIVE object deletion (object_delete plan §6,
 //! P1). A fresh schema DB seeds `Base` explicitly (`init_schema_with_default`,
 //! decision D3); values are written through the public write path; alternatives
-//! are deleted through the new `commit_changes`/`delete_objects` entry. These
+//! are deleted through the new `commit`/`delete_objects` entry. These
 //! exercise the RESTRICT report, the cascade close-out (incl. array →
 //! `value_array_hist`), lookup-only resolution, as-of retention, monotonic
 //! versioning + clean tiling, idempotent re-delete ⇒ NotFound, whole-invocation
@@ -191,9 +191,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         alt,
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("scalar");
     write_parameter(
@@ -203,9 +203,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         alt,
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("array");
     write_parameter(
@@ -215,9 +215,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         alt,
         long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
         &[],
-        o(),
         "t",
         "l",
+        o(),
     )
     .expect("long");
     // node_2 (a distinct entity, in Base) so membership has two members.
@@ -228,9 +228,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         "Base",
         scalar_batch("node_2", 5.0),
         &[],
-        o(),
         "t",
         "n2",
+        o(),
     )
     .expect("node_2");
 
@@ -651,9 +651,9 @@ fn combined_atomicity_one_commit() {
         "altA",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "a1",
+        o(),
     )
     .expect("a1");
     write_parameter(
@@ -663,9 +663,9 @@ fn combined_atomicity_one_commit() {
         "altA",
         scalar_batch("node_2", 2.0),
         &[],
-        o(),
         "t",
         "a2",
+        o(),
     )
     .expect("a2");
     seed_full_deps(&db, "altB");
@@ -836,9 +836,9 @@ fn run_referencing_deleted_alternative_not_flagged() {
         "results",
         scalar_batch("solver_x", 1.0),
         &[],
-        o(),
         "t",
         "seed",
+        o(),
     )
     .expect("seed");
     exec(
@@ -902,9 +902,9 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
         "altA",
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "pa",
+        o(),
     )
     .expect("profile altA");
     write_parameter(
@@ -914,9 +914,9 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
         "altB",
         array_batch("node_1", &[0, 1, 2], &[4.0, 5.0, 6.0]),
         &[],
-        o(),
         "t",
         "pb",
+        o(),
     )
     .expect("profile altB");
 
@@ -1141,9 +1141,9 @@ fn param_bare_delete_no_dependents() {
         "altA",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("seed class");
     exec(
@@ -1376,9 +1376,9 @@ fn param_combined_atomicity_one_commit() {
         "altA",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "k1",
+        o(),
     )
     .expect("keep");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
@@ -1549,9 +1549,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("scalar");
     write_parameter(
@@ -1561,9 +1561,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
         &[],
-        o(),
         "t",
         "l",
+        o(),
     )
     .expect("long");
     write_parameter(
@@ -1573,9 +1573,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("array");
     write_parameter(
@@ -1585,9 +1585,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_2", 5.0),
         &[],
-        o(),
         "t",
         "n2",
+        o(),
     )
     .expect("node_2");
 
@@ -1771,9 +1771,9 @@ fn entity_bare_delete_no_dependents() {
         "Base",
         scalar_batch("solo", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("solo");
     delete_objects(&db, vec![], "t", "noop", o()).ok();
@@ -1994,9 +1994,9 @@ fn seed_nd_link(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_a", 1.0),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("node_a");
     write_parameter(
@@ -2006,9 +2006,9 @@ fn seed_nd_link(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_b", 2.0),
         &[],
-        o(),
         "t",
         "b",
+        o(),
     )
     .expect("node_b");
     exec(
@@ -2270,9 +2270,9 @@ fn entity_cascade_cycle_is_safe() {
         "Base",
         scalar_batch("seed", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("seed");
     // Two 1-D `pair` entities that contain EACH OTHER (p1 ∈ p2, p2 ∈ p1).
@@ -2401,9 +2401,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("scalar node_1");
     write_parameter(
@@ -2413,9 +2413,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_2", 2.0),
         &[],
-        o(),
         "t",
         "s2",
+        o(),
     )
     .expect("scalar node_2");
     write_parameter(
@@ -2425,9 +2425,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
         &[],
-        o(),
         "t",
         "l",
+        o(),
     )
     .expect("long node_1");
     write_parameter(
@@ -2437,9 +2437,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("array node_1");
 
@@ -2834,9 +2834,9 @@ fn class_combined_atomicity_one_commit() {
         "Base",
         scalar_batch("g1", 1.0),
         &[],
-        o(),
         "t",
         "g1",
+        o(),
     )
     .expect("g1");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
@@ -2957,9 +2957,9 @@ fn class_b2_cycle_is_safe() {
         "Base",
         scalar_batch("seed", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("seed");
     // Classes `ca` and `cb` type a dimension on EACH OTHER (mutual B2).
@@ -3007,9 +3007,9 @@ fn seed_gap_class(db: &std::path::Path) {
         "Base",
         scalar_batch("node_a", 1.0),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("node_a");
     write_parameter(
@@ -3019,9 +3019,9 @@ fn seed_gap_class(db: &std::path::Path) {
         "Base",
         scalar_batch("node_b", 2.0),
         &[],
-        o(),
         "t",
         "b",
+        o(),
     )
     .expect("node_b");
     exec(
@@ -3124,9 +3124,9 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
         "victim",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s1",
+        o(),
     )
     .expect("s1");
     write_parameter(
@@ -3136,9 +3136,9 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
         "victim",
         scalar_batch("node_2", 2.0),
         &[],
-        o(),
         "t",
         "s2",
+        o(),
     )
     .expect("s2");
     let alt_id = count(

@@ -1372,7 +1372,10 @@ makes a large operation slower, not impossible.
 
 Other inputs are bounded too: the importer refuses an Arrow-IPC file
 larger than 16 GiB or one whose compressed buffers claim more than
-2 GiB each, or 16 GiB in total, once decompressed (E6), and a template
+2 GiB each, or 16 GiB in total, once decompressed, one whose dictionary
+columns and dense rows would decode to more than 16 GiB, and entity
+names or labels longer than 64 KiB (all E6). These limits are the
+importer's own, separate from `--memory-limit`. A template
 larger than 16 MiB or with flow collections (`[…]`, `{…}`) nested more
 than 64 deep is refused before it is parsed.
 

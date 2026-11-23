@@ -160,6 +160,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     // Unicode too or Ä/ä-aliased targets slip past — critique F3).
     let mut targets: HashSet<(String, String, String)> = HashSet::new();
     let mut segments: Vec<Segment> = Vec::with_capacity(raws.len());
+    let mut budget = DecodeBudget::default();
     for (raw, meta) in raws.iter().zip(&metas) {
         let alternative = effective_alternative(raw.ordinal, meta, args)?;
         assert_flags(raw.ordinal, meta, args)?;
@@ -176,7 +177,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 alternative
             );
         }
-        let batches = normalize_segment(raw, meta)?;
+        let batches = normalize_segment(raw, meta, &mut budget)?;
         segments.push(Segment {
             class: meta.class.clone(),
             parameter: meta.parameter.clone(),
@@ -863,7 +864,11 @@ fn assert_flags(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<()>
 // interpretive: dictionary decode, s/ms→µs upcast, dense→long expansion.
 // ---------------------------------------------------------------------------
 
-fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch>> {
+fn normalize_segment(
+    raw: &RawSegment,
+    meta: &SegMeta,
+    budget: &mut DecodeBudget,
+) -> Result<Vec<RecordBatch>> {
     let ordinal = raw.ordinal;
     let tag = format!("segment {ordinal} ({}:{})", meta.class, meta.parameter);
 
@@ -887,7 +892,7 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
             raw.batches
                 .iter()
                 .map(|b| {
-                    let r = normalize_long_batch(&tag, b, row_offset);
+                    let r = normalize_long_batch(&tag, b, row_offset, budget);
                     row_offset += b.num_rows();
                     r
                 })
@@ -896,7 +901,7 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
         Form::Dense => raw
             .batches
             .iter()
-            .map(|b| expand_dense_batch(&tag, b))
+            .map(|b| expand_dense_batch(&tag, b, budget))
             .collect(),
     }
 }
@@ -944,6 +949,113 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
     Ok(())
 }
 
+/// The most decoded bytes one import may produce from dictionary columns and
+/// the dense expansion together (the same total as
+/// [`MAX_DECOMPRESSED_TOTAL`]): the importer holds every decoded batch until
+/// the one commit.
+const MAX_DECODED_TOTAL: u64 = MAX_DECOMPRESSED_TOTAL;
+/// The longest entity name or label the importer accepts, in bytes.
+pub(crate) const MAX_NAME_BYTES: usize = 64 << 10;
+
+/// The running decoded-size account of one import ([`MAX_DECODED_TOTAL`]).
+#[derive(Default)]
+struct DecodeBudget {
+    used: u64,
+}
+
+impl DecodeBudget {
+    fn charge(&mut self, tag: &str, what: &str, bytes: u64) -> Result<()> {
+        self.used = self.used.saturating_add(bytes);
+        if self.used > MAX_DECODED_TOTAL {
+            bail!(
+                "E6: {tag}: decoding {what:?} would bring the import to more than {} GiB \
+                 of decoded data (dictionary values repeated by their keys, or dense rows \
+                 expanded); split the data into several imports",
+                MAX_DECODED_TOTAL >> 30
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The size a dictionary column decodes to: for string or binary values the
+/// bytes of the value each key references (plus an offset per row), else
+/// the value width per row. Computed from the keys and the dictionary,
+/// without decoding. Returns `(decoded bytes, longest referenced value)`.
+fn dictionary_decoded_bytes(col: &ArrayRef) -> (u64, u64) {
+    use arrow::array::AsArray;
+    let Some(dict) = col.as_any_dictionary_opt() else {
+        return (0, 0);
+    };
+    let rows = dict.len() as u64;
+    let values = dict.values();
+    if values.is_empty() {
+        return (0, 0);
+    }
+    let lens: Option<Vec<u64>> = match values.data_type() {
+        DataType::Utf8 => Some(
+            values
+                .as_string::<i32>()
+                .offsets()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).max(0) as u64)
+                .collect(),
+        ),
+        DataType::LargeUtf8 => Some(
+            values
+                .as_string::<i64>()
+                .offsets()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).max(0) as u64)
+                .collect(),
+        ),
+        DataType::Binary => Some(
+            values
+                .as_binary::<i32>()
+                .offsets()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).max(0) as u64)
+                .collect(),
+        ),
+        _ => None,
+    };
+    match lens {
+        Some(lens) => {
+            let (mut total, mut longest) = (0u64, 0u64);
+            for &k in &dict.normalized_keys() {
+                total = total.saturating_add(lens[k] + 8);
+                longest = longest.max(lens[k]);
+            }
+            (total, longest)
+        }
+        None => {
+            let width = values.get_array_memory_size() as u64 / values.len() as u64;
+            (rows.saturating_mul(width.max(8)), 0)
+        }
+    }
+}
+
+/// Refuse (E6) a string in an entity or label column longer than
+/// [`MAX_NAME_BYTES`].
+fn check_name_lengths(tag: &str, what: &str, col: &ArrayRef) -> Result<()> {
+    if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
+        let longest = s
+            .offsets()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).max(0) as usize)
+            .max()
+            .unwrap_or(0);
+        if longest > MAX_NAME_BYTES {
+            bail!(
+                "E6: {tag}: {what} holds a string of {longest} bytes; names and labels may \
+                 be at most {} KiB",
+                MAX_NAME_BYTES >> 10
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Decode a dictionary-encoded column to its plain value type (§2.4); reject
 /// run-end encoding (forbidden in 1.0, MUST-reject).
 ///
@@ -951,7 +1063,17 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
 /// is the dictionary's own value type, so the value cast is the identity, and
 /// unpacking is a `take` by keys that errors on an out-of-range key rather
 /// than nulling it. A NULL key decodes to NULL, which is the cell's meaning.
-fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, ArrayRef)> {
+///
+/// The decoded size is charged to `budget` BEFORE the cast: a dictionary
+/// lets a few bytes of keys reference one long value millions of times, so
+/// the decoded column can be far larger than anything the file declares.
+fn decode_encodings(
+    tag: &str,
+    field: &Field,
+    col: &ArrayRef,
+    name_column: bool,
+    budget: &mut DecodeBudget,
+) -> Result<(Field, ArrayRef)> {
     match field.data_type() {
         DataType::RunEndEncoded(_, _) => bail!(
             "E6: {tag}: column {:?} is run-end encoded — not supported in format \
@@ -959,6 +1081,16 @@ fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, 
             field.name()
         ),
         DataType::Dictionary(_, value_type) => {
+            let (decoded, longest) = dictionary_decoded_bytes(col);
+            if name_column && longest > MAX_NAME_BYTES as u64 {
+                bail!(
+                    "E6: {tag}: column {:?} holds a string of {longest} bytes; names and \
+                     labels may be at most {} KiB",
+                    field.name(),
+                    MAX_NAME_BYTES >> 10
+                );
+            }
+            budget.charge(tag, field.name(), decoded)?;
             let plain = cast(col, value_type).map_err(|e| {
                 anyhow!(
                     "E6: {tag}: cannot decode dictionary column {:?}: {e}",
@@ -1080,7 +1212,12 @@ fn upcast_ts_checked(
 /// Field metadata is preserved throughout. A NaN VALUE is a legal stored value
 /// (§5.3.1) — the core canonicalizes it; only NaN axis/coordinate floats are
 /// rejected, and no dimension column here is float.
-fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Result<RecordBatch> {
+fn normalize_long_batch(
+    tag: &str,
+    batch: &RecordBatch,
+    row_offset: usize,
+    budget: &mut DecodeBudget,
+) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 2 {
         bail!("E6: {tag}: long form needs at least (entity, value) columns, got {ncols}");
@@ -1093,7 +1230,13 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
     let mut fields: Vec<Field> = Vec::with_capacity(ncols);
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(ncols);
     for i in 0..ncols {
-        let (field, col) = decode_encodings(tag, batch.schema().field(i), batch.column(i))?;
+        let (field, col) = decode_encodings(
+            tag,
+            batch.schema().field(i),
+            batch.column(i),
+            i < ncols - 1,
+            budget,
+        )?;
         let (field, col) = if i == 0 {
             (field, col) // entity column: the core validates Utf8 + nulls
         } else {
@@ -1132,6 +1275,11 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
                 (field, col)
             }
         };
+        if i == 0 {
+            check_name_lengths(tag, "the entity column", &col)?;
+        } else if i < ncols - 1 {
+            check_name_lengths(tag, &format!("label dimension {:?}", field.name()), &col)?;
+        }
         // §7.2: a label dimension without nodal:label_domain is E6.
         if i > 0
             && i < ncols - 1
@@ -1189,7 +1337,11 @@ enum DimKind {
     Label,
 }
 
-fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
+fn expand_dense_batch(
+    tag: &str,
+    batch: &RecordBatch,
+    budget: &mut DecodeBudget,
+) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 3 {
         bail!(
@@ -1206,7 +1358,24 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
     let mut fields: Vec<Field> = Vec::with_capacity(ncols);
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(ncols);
     for i in 0..ncols {
-        let (f, c) = decode_encodings(tag, batch.schema().field(i), batch.column(i))?;
+        let (f, c) = decode_encodings(
+            tag,
+            batch.schema().field(i),
+            batch.column(i),
+            i == 0,
+            budget,
+        )?;
+        if i == 0 {
+            check_name_lengths(tag, "the entity column", &c)?;
+        } else if let Some(list) = c.as_any().downcast_ref::<ListArray>() {
+            if i < ncols - 1 {
+                check_name_lengths(
+                    tag,
+                    &format!("label dimension {:?}", f.name()),
+                    list.values(),
+                )?;
+            }
+        }
         fields.push(f);
         cols.push(c);
     }
@@ -1364,6 +1533,27 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             payload.push(vals.value(k));
         }
 
+        // Every expanded cell (one per payload value; the expansion checks
+        // the shape) copies the entity name and its labels: charge that
+        // before the expansion allocates it (a long name times a long payload).
+        let labels: u64 = dim_lists
+            .iter()
+            .map(|l| {
+                l.iter()
+                    .map(|c| match c {
+                        Coord::Label(s) => s.len() as u64,
+                        _ => 0,
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .sum();
+        let per_cell = ent.len() as u64 + labels + 8 * (rank as u64 + 1) + 24;
+        budget.charge(
+            tag,
+            "the dense expansion",
+            per_cell.saturating_mul(payload.len() as u64),
+        )?;
         // Row-major expansion via the core helper (§6.3) — the same law as
         // reconstruct, by construction.
         let expanded = expand_dense_row(&dim_lists, &payload).map_err(|e| {

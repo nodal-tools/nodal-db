@@ -106,7 +106,7 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
                 ..Default::default()
             };
             let p = tpl::plan_with(&db, &t, &opts).map_err(anyhow::Error::from)?;
-            print!("{}", crate::clean(&p.to_string()));
+            print!("{}", crate::clean_text(&p.to_string()));
             Ok(())
         }
         TemplateCommand::Apply {
@@ -145,6 +145,12 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
                         t.template.version,
                         path.display()
                     );
+                }
+                // The export is data: written to a pipe or a file it stays
+                // byte-exact. On a terminal, controls the serializers leave
+                // as they are (C1, bidi overrides) are escaped.
+                None if std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+                    print!("{}", crate::clean_text(&text))
                 }
                 None => print!("{text}"),
             }

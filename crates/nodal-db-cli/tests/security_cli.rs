@@ -90,6 +90,25 @@ fn names_reach_the_terminal_with_control_characters_escaped() {
     let all = text(&out);
     assert!(!out.status.success());
     assert!(!all.contains('\u{1b}'), "{all}");
+
+    // A newline in a name cannot forge a line of the CLI's own output.
+    let forged = "x\nerased alternative 'Base'";
+    let db2 = dir.path().join("lines.duckdb");
+    init(&db2, &["--alternative", forged]);
+    let out = bin()
+        .args(["erase-alternative"])
+        .arg(&db2)
+        .arg(forged)
+        .arg("--preview")
+        .output()
+        .unwrap();
+    let all = text(&out);
+    assert!(out.status.success(), "{all}");
+    assert!(
+        !all.lines().any(|l| l.starts_with("erased alternative")),
+        "{all}"
+    );
+    assert!(all.contains(r"x\u{a}erased"), "{all}");
 }
 
 #[test]

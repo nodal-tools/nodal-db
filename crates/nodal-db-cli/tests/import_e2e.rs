@@ -1127,6 +1127,89 @@ fn a_forged_decompressed_length_is_e6_not_an_abort() {
     );
 }
 
+/// A dictionary-encoded entity column: `rows` keys all referencing one
+/// `name_len`-byte value, zstd-compressed (the review's `dictbomb.py`).
+fn dict_bomb(dir: &Path, name_len: usize, rows: usize) -> PathBuf {
+    let md = segment_metadata("node", "profile", "long", 1);
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new(
+                "entity",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                false,
+            ),
+            Field::new("step", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ],
+        md,
+    ));
+    let keys = arrow::array::Int32Array::from(vec![0; rows]);
+    let values = Arc::new(StringArray::from(vec!["n".repeat(name_len)]));
+    let entity = DictionaryArray::<Int32Type>::try_new(keys, values).unwrap();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(entity) as ArrayRef,
+            Arc::new(Int64Array::from_iter_values(0..rows as i64)) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0; rows])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let opts = IpcWriteOptions::default()
+        .try_with_compression(Some(CompressionType::ZSTD))
+        .unwrap();
+    let mut buf = Vec::new();
+    {
+        let mut w = StreamWriter::try_new_with_options(&mut buf, &schema, opts).unwrap();
+        w.write(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    write_file(dir, &format!("dict_{name_len}_{rows}.arrows"), &buf)
+}
+
+/// A dictionary column decodes to far more than the file declares (a few KB
+/// of keys referencing one long name): the decoded size is charged against
+/// the import's 16 GiB budget before the decode, and refused (E6) instead of
+/// being allocated (it used to reach 8 GiB from 6 KB and get OOM-killed).
+#[test]
+fn a_dictionary_bomb_is_e6_before_it_is_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    // 270 000 rows x 64 KiB = 17.7 GB decoded.
+    let file = dict_bomb(dir.path(), 64 << 10, 270_000);
+    assert!(std::fs::metadata(&file).unwrap().len() < 1 << 20);
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("of decoded data"), "{stderr}");
+}
+
+/// Entity names and labels are capped at 64 KiB (before a dictionary is
+/// decoded, and on plain columns).
+#[test]
+fn a_name_longer_than_64_kib_is_e6() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = init_db(dir.path());
+    let file = dict_bomb(dir.path(), (64 << 10) + 1, 3);
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("at most 64 KiB"));
+
+    let schema = long_schema(segment_metadata("node", "profile", "long", 1));
+    let long = "m".repeat((64 << 10) + 1);
+    let batch = long_batch(&schema, &[(long.as_str(), 0, 1.0)]);
+    let mut buf = Vec::new();
+    {
+        let mut w = StreamWriter::try_new(&mut buf, &schema).unwrap();
+        w.write(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let file = write_file(dir.path(), "plain_long.arrows", &buf);
+    let out = import(&db, &file, &["--alternative", "Base", "--user", "tester"]);
+    assert_error_leaves_db_untouched(&db, &out, "E6");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("at most 64 KiB"));
+}
+
 /// §7.2: a label dimension without `nodal:label_domain` is E6 naming the field.
 #[test]
 fn label_dimension_without_domain_is_e6() {

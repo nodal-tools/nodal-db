@@ -84,12 +84,24 @@ fn resource_limits(cli: &Cli) -> nodal_db_core::conn::ResourceLimits {
     }
 }
 
-/// `s` with terminal control characters escaped: C0 (but newline and tab),
-/// DEL, C1, and the bidirectional overrides, so a name from someone else's
-/// file cannot move the cursor, retitle the terminal or reorder the line.
+/// One line of CLI output with terminal control characters escaped: every
+/// C0 control (newline and tab included: a name must not start a line that
+/// looks like the CLI's own), DEL, C1, and the bidirectional overrides, so a
+/// name from someone else's file cannot move the cursor, retitle the
+/// terminal, forge a line or reorder one.
 fn clean(s: &str) -> Cow<'_, str> {
+    escape_controls(s, false)
+}
+
+/// [`clean`] for multi-line text the CLI lays out itself (a template plan,
+/// an export on a terminal): newlines and tabs stay.
+fn clean_text(s: &str) -> Cow<'_, str> {
+    escape_controls(s, true)
+}
+
+fn escape_controls(s: &str, keep_lines: bool) -> Cow<'_, str> {
     let bad = |c: char| {
-        (c.is_control() && c != '\n' && c != '\t')
+        (c.is_control() && !(keep_lines && (c == '\n' || c == '\t')))
             || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
     };
     if !s.chars().any(bad) {
@@ -355,9 +367,17 @@ fn main() -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            // What `fn main() -> anyhow::Result<()>` printed, escaped: core
-            // error messages quote names from the file.
-            say_err!("Error: {e:?}");
+            // What `fn main() -> anyhow::Result<()>` printed, with each
+            // message escaped on its own line: core error messages quote
+            // names from the file.
+            say_err!("Error: {e}");
+            let causes: Vec<String> = e.chain().skip(1).map(|c| c.to_string()).collect();
+            if !causes.is_empty() {
+                eprintln!("\nCaused by:");
+                for c in causes {
+                    say_err!("    {c}");
+                }
+            }
             std::process::ExitCode::FAILURE
         }
     }

@@ -1247,18 +1247,31 @@ fn check_yaml_shape(text: &str) -> Result<(), DbError> {
     // The previous token was a quoted scalar or a closed flow collection: a
     // directly following `:` is a JSON-style value indicator.
     let mut json_key = false;
-    let mut line_indent = 0usize;
+    // Block context, the current line: where it starts, and the indentation
+    // a block scalar on it must exceed (its parent node's): the column of a
+    // `- ` entry indicator for `- |`, else the column of the mapping key
+    // (the line's indent, or the first column after the last `- `).
+    let mut line_start = 0usize;
+    let mut key_col = 0usize;
+    let mut last_dash: Option<usize> = None;
+    let mut after_dash = false;
     let mut i = 0usize;
     while i < b.len() {
         let c = b[i];
         let next = b.get(i + 1).copied();
         let at_line_start = i == 0 || b[i - 1] == b'\n';
         if at_line_start {
-            line_indent = b[i..].iter().take_while(|&&x| x == b' ').count();
+            line_start = i;
+            key_col = b[i..].iter().take_while(|&&x| x == b' ').count();
+            last_dash = None;
+            after_dash = false;
             if depth == 0 {
                 node_start = true;
                 json_key = false;
             }
+        }
+        if !ws(c) && c != b'|' && c != b'>' {
+            after_dash = false;
         }
         match c {
             b' ' | b'\t' | b'\r' | b'\n' => {}
@@ -1302,6 +1315,18 @@ fn check_yaml_shape(text: &str) -> Result<(), DbError> {
                 json_key = false;
             }
             b':' | b'?' | b'-' if next.is_none_or(ws) || (c == b':' && depth > 0 && json_key) => {
+                if c == b'-' && depth == 0 {
+                    let col = i - line_start;
+                    last_dash = Some(col);
+                    key_col = col
+                        + 1
+                        + b[i + 1..].iter().take_while(|&&x| x == b' ').count();
+                    after_dash = true;
+                    node_start = true;
+                    json_key = false;
+                    i += 1;
+                    continue;
+                }
                 node_start = true;
                 json_key = false;
             }
@@ -1313,19 +1338,30 @@ fn check_yaml_shape(text: &str) -> Result<(), DbError> {
                 continue;
             }
             b'|' | b'>' if node_start && depth == 0 => {
-                // A block scalar: its header line, then every blank or more
-                // indented line is content.
+                // A block scalar: its header line, then its content, YAML's
+                // way: the content indentation `m` is the first non-blank
+                // line's, and must exceed the parent's (`parent`); content
+                // runs while lines are blank or indented at least `m`. A
+                // first line not past `parent` means an empty scalar.
+                let parent = match (after_dash, last_dash) {
+                    (true, Some(d)) => d,
+                    _ => key_col,
+                };
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
                 }
-                while i < b.len() {
+                let mut m: Option<usize> = None;
+                while i + 1 < b.len() {
                     let line = &b[i + 1..];
                     let end = line.iter().position(|&x| x == b'\n').unwrap_or(line.len());
                     let body = &line[..end];
                     let indent = body.iter().take_while(|&&x| x == b' ').count();
                     let blank = body.iter().all(|&x| ws(x));
-                    if !(blank || indent > line_indent) || i + 1 >= b.len() {
-                        break;
+                    if !blank {
+                        let need = *m.get_or_insert(indent);
+                        if need <= parent || indent < need {
+                            break;
+                        }
                     }
                     i += 1 + end;
                 }

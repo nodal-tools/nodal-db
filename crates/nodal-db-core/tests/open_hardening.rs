@@ -193,6 +193,31 @@ fn deep_flow_nesting_is_refused_before_the_parser() {
     );
     parse_str(&tricks).expect_err("the nesting after the tricks is counted");
 
+    // A block scalar's content ends where the indentation drops below its
+    // first content line's (the review's bypass: `- - |` content at column 3,
+    // then a sibling entry at column 2 that the scan took for content).
+    for (open, close) in [("[", "]"), ("{a: ", "}"), ("[a, ", "]")] {
+        let n = 100_000;
+        let text = format!(
+            "- - |\n   x\n  - {}{}\n",
+            open.repeat(n),
+            close.repeat(n)
+        );
+        let t = Instant::now();
+        let e = parse_str(&text).expect_err(open);
+        assert!(e.to_string().contains("nested more than"), "{open}: {e}");
+        assert!(t.elapsed() < Duration::from_secs(2), "{open}: {:?}", t.elapsed());
+    }
+    for text in [
+        "a:\n  - |\n    x\n  - [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[",
+        "a: |\n  x\nb:\n  - - |\n     y\n    - [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[",
+        "- |\n x\n- [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[",
+        "-   |\n    x\n  [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[",
+    ] {
+        let e = parse_str(text).expect_err(text);
+        assert!(e.to_string().contains("nested more than"), "{text:?}: {e}");
+    }
+
     // Ordinary flow lists, quoted brackets, comments and block scalars with
     // brackets do not count against the cap.
     let ok = "a: [1, [2, [3]]]\nb: {c: [d, e]}\nf: 'x [[[[ y'\ng: \"z {{{{\"\n# [[[[[[\nh: |\n  [[[[[[[[\n  ((\ni: it's [ok]\n";

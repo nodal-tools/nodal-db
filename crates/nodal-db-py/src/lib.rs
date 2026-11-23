@@ -1462,7 +1462,7 @@ fn open(path: PathBuf) -> PyResult<Database> {
 /// Create a fresh database at `path` and apply the full schema (embedded in
 /// this wheel at build time — same files as `nodal-db init`). Seeds NO
 /// alternative unless `default_alternative` is given. Refuses a path that
-/// already exists and is not an empty file (or has a `.wal` next to it).
+/// already exists (any entry, an empty file included) or has a `.wal` next to it.
 /// `schema_dir` is a development-only override (debug builds of the skin;
 /// a release wheel refuses it) that applies the schema from a directory
 /// instead.

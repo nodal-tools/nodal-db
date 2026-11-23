@@ -40,7 +40,7 @@
 //!
 //! Every DB write goes through the one canonicalization pipeline (CLAUDE.md
 //! invariant 2): lane (a) calls `api::write_parameter`, lane (b) drives the
-//! `import` verb (`api::ingest_segments`). The row-group phase copies an
+//! `import` verb (`api::write_segments`). The row-group phase copies an
 //! already-written table into a *scratch* raw-DuckDB file for reading only;
 //! it never writes a nodal-db database. Data is deterministic (splitmix64,
 //! fixed seed); `scripts/bench/raw_duckdb_layout.py` generates bit-identical

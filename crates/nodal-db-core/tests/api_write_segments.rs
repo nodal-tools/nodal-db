@@ -1,4 +1,4 @@
-//! Multi-segment ingest (`api::ingest_segments`, specs/arrow_ipc_bulk_format.md
+//! Multi-segment ingest (`api::write_segments`, specs/arrow_ipc_bulk_format.md
 //! §9.2 OPEN-Q3-6): all segments run in ONE atomic, conflict-retried
 //! transaction with ONE commit row — all-or-nothing.
 
@@ -9,7 +9,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{ingest_segments, read_parameter, Segment};
+use nodal_db_core::api::{read_parameter, write_segments, Segment};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::WriteOptions;
 
@@ -76,7 +76,7 @@ fn count(db: &std::path::Path, sql: &str) -> i64 {
 #[test]
 fn two_segments_commit_under_one_commit_row() {
     let (_dir, db) = fresh_db();
-    let report = ingest_segments(
+    let report = write_segments(
         &db,
         vec![
             seg("node", "demand", "Base", scalar_batch("n1", 1.0)),
@@ -123,7 +123,7 @@ fn two_segments_commit_under_one_commit_row() {
 #[test]
 fn failing_late_segment_rolls_back_the_whole_ingest() {
     let (_dir, db) = fresh_db();
-    let err = ingest_segments(
+    let err = write_segments(
         &db,
         vec![
             seg("node", "demand", "Base", scalar_batch("n1", 1.0)),
@@ -201,7 +201,7 @@ fn thousand_entity_segment_ingests_correctly() {
     )
     .unwrap();
 
-    let report = ingest_segments(
+    let report = write_segments(
         &db,
         vec![seg("unit", "flow", "Base", batch)],
         "tester",
@@ -248,7 +248,7 @@ fn thousand_entity_segment_ingests_correctly() {
 #[test]
 fn duplicate_case_aliased_target_is_rejected_before_db_work() {
     let (_dir, db) = fresh_db();
-    let err = ingest_segments(
+    let err = write_segments(
         &db,
         vec![
             seg("node", "Flow", "Base", scalar_batch("n1", 1.0)),
@@ -276,7 +276,7 @@ fn duplicate_case_aliased_target_is_rejected_before_db_work() {
 fn ingest_into_missing_path_errors_without_creating_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("missing.duckdb");
-    let err = ingest_segments(
+    let err = write_segments(
         &db,
         vec![seg("node", "demand", "Base", scalar_batch("n1", 1.0))],
         "tester",
@@ -305,7 +305,7 @@ fn ingest_into_uninitialized_db_is_api_error() {
             .unwrap();
         conn.close().unwrap();
     }
-    let err = ingest_segments(
+    let err = write_segments(
         &db,
         vec![seg("node", "demand", "Base", scalar_batch("n1", 1.0))],
         "tester",

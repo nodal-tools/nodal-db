@@ -83,7 +83,7 @@ pub struct WriteOptions {
     /// head commit is exactly this id (`conn::TxnOptions::expect_commit`),
     /// else [`crate::error::DbError::Stale`] with nothing written. Honored
     /// **only by the `api` entry points** (`api::commit` and its
-    /// wrappers `write_parameter`, `ingest_segments`, `delete_values`,
+    /// wrappers `write_parameter`, `write_segments`, `delete_values`,
     /// `commit_structural`, `delete_objects`), which map it into the
     /// transaction. This struct is also passed per value to
     /// `history::write_value` / `delete_value`, where the field means

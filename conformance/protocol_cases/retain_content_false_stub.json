@@ -1,5 +1,5 @@
 {
-  "name": "force_replace writes a retention stub (content_retained = FALSE, payload nulled)",
+  "name": "retain_content false writes a retention stub (content_retained = FALSE, payload nulled)",
   "key": [15, 25, 35],
   "steps": [
     {
@@ -12,7 +12,7 @@
     },
     {
       "op": { "scalar_float": { "v": 4.0 } },
-      "force_replace": true,
+      "retain_content": false,
       "expect": {
         "scalar": [
           { "version": 1, "valid_to_step": 2, "retained": false, "v_float": null },

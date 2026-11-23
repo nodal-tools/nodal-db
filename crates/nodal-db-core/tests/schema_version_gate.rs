@@ -196,7 +196,7 @@ fn every_write_to_an_older_file_is_refused_and_writes_nothing() {
         ("default", WriteOptions::default()),
         ("retained", retained),
         ("stub", stub),
-        ("force_replace", force),
+        ("no_retain", force),
     ] {
         // New keys in every tier, replaces in every tier, and the tier
         // transitions: a scalar over the array p, an array over the long.

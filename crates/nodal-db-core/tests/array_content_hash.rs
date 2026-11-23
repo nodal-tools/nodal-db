@@ -143,7 +143,7 @@ fn every_core_row_carries_the_true_hash() {
         commit(&db, arrays(&ents, base));
         assert_live_hashes(&db, &ents, base);
         // A changed rewrite (retained pre-image), then one whose superseded
-        // version is a stub, then force_replace (also a stub), then a delete.
+        // version is a stub, then retain_content = Some(false) (also a stub), then a delete.
         commit(&db, arrays(&ents, pinned));
         let stub = WriteOptions {
             retain_content: Some(false),

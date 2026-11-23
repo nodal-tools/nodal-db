@@ -19,7 +19,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::test_hooks::{inject_conflicts, without_resolve_cache};
-use nodal_db_core::api::{commit, ingest_segments, ChangeSet, DeleteKey, Segment};
+use nodal_db_core::api::{commit, write_segments, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{StructuralChange, WarningKind, WriteOptions, WriteReport};
@@ -132,7 +132,7 @@ fn dump(db: &Path) -> String {
 /// later segments), mixes scalar and series values, and runs a structural
 /// change and a delete in the same save.
 fn workload(db: &Path) -> Vec<Result<WriteReport, String>> {
-    let seed = ingest_segments(
+    let seed = write_segments(
         db,
         vec![
             seg("unit", "capacity", "Base", scalar(&["u1", "u2"], 10.0)),
@@ -182,7 +182,7 @@ fn workload(db: &Path) -> Vec<Result<WriteReport, String>> {
     .map_err(|e| e.to_string());
     // A cached definition whose later segment's batch matches none of its
     // declared members: the same error, with or without the cache.
-    let mismatch = ingest_segments(
+    let mismatch = write_segments(
         db,
         vec![
             seg("unit", "capacity", "alt_a", scalar(&["u1"], 20.0)),
@@ -248,11 +248,11 @@ fn a_conflict_retry_rebuilds_the_cache() {
             seg("grid", "loss", "alt_y", series(&["g2"], 30, 4.0)),
         ]
     };
-    let report_ref = ingest_segments(&reference, segments(), "t", "m", WriteOptions::default())
+    let report_ref = write_segments(&reference, segments(), "t", "m", WriteOptions::default())
         .expect("reference");
 
     inject_conflicts(1);
-    let report = ingest_segments(&retried, segments(), "t", "m", WriteOptions::default())
+    let report = write_segments(&retried, segments(), "t", "m", WriteOptions::default())
         .expect("the retry commits");
     inject_conflicts(0);
 
@@ -318,7 +318,7 @@ fn injected_conflicts_exhaust_the_retry_budget() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(dir.path(), "exhaust.duckdb");
     inject_conflicts(5);
-    let err = ingest_segments(
+    let err = write_segments(
         &db,
         vec![seg("grid", "flow", "Base", scalar(&["g1"], 1.0))],
         "t",

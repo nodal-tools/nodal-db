@@ -8,7 +8,7 @@
 //!   - 100 000 single-parameter scalars
 //!
 //! Everything is built THROUGH the core write path (`api::write_parameter` →
-//! `ingest_segments` → canon → tier → axis dedup → history) — dogfooding the
+//! `write_segments` → canon → tier → axis dedup → history) — dogfooding the
 //! writer is the point, and the build wall time IS the bulk-write benchmark
 //! number recorded in RESULTS.md. No SQL bypasses the canonicalization
 //! pipeline (CLAUDE.md invariant 2).

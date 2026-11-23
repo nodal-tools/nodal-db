@@ -1161,9 +1161,9 @@ def test_template_stamped_rename_is_typed_and_resendable(db):
     assert isinstance(e, nodal_db.ApiError)
     assert (e.template_name, e.template_version) == ("flextool", "40")
     assert e.renames == [
-        {"change_index": 0, "kind": "class", "class_name": None,
+        {"change_index": 0, "kind": "class", "class": None,
          "current": "node", "new_name": "bus"},
-        {"change_index": 1, "kind": "parameter", "class_name": "bus",
+        {"change_index": 1, "kind": "parameter", "class": "bus",
          "current": "demand", "new_name": "load"},
     ]
     # The client asks its user, then resends the allowed items flagged.

@@ -74,7 +74,7 @@ pub enum TemplateCommand {
     /// Re-emit the template IR from a loaded database (semantic round-trip:
     /// export and source compare equal under the normalized object model).
     Export {
-        #[arg(long)]
+        /// The database to export from.
         db: PathBuf,
         /// Output file; stdout when omitted.
         #[arg(long)]

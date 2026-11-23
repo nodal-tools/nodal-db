@@ -17,7 +17,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{ingest_segments, Segment};
+use nodal_db_core::api::{write_segments, Segment};
 use nodal_db_core::canon::{CanonError, LabelDomain};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
@@ -82,7 +82,7 @@ fn seg(parameter: &str, batch: RecordBatch, domains: Vec<LabelDomain>) -> Segmen
 }
 
 fn ingest(db: &std::path::Path, segments: Vec<Segment>) -> Result<(), DbError> {
-    ingest_segments(db, segments, "tester", "", WriteOptions::default()).map(|_| ())
+    write_segments(db, segments, "tester", "", WriteOptions::default()).map(|_| ())
 }
 
 #[test]

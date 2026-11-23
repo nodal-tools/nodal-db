@@ -13,7 +13,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{ingest_segments, Segment};
+use nodal_db_core::api::{write_segments, Segment};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::text::nfc;
 use nodal_db_core::types::{fold, WarningKind, WriteOptions};
@@ -113,7 +113,7 @@ fn random_cased_names_resolve_as_the_fold_predicts() {
         by_fold.insert(fold(&n), n.clone());
         first.push(n);
     }
-    ingest_segments(
+    write_segments(
         &db,
         vec![segment(&first)],
         "t",
@@ -161,7 +161,7 @@ fn random_cased_names_resolve_as_the_fold_predicts() {
         second.push(n);
     }
     assert!(variants > 50, "only {variants} case variants drawn");
-    let report = ingest_segments(
+    let report = write_segments(
         &db,
         vec![segment(&second)],
         "t",

@@ -43,7 +43,7 @@ after every call; as-of values at every call boundary). The arms must
 match line for line, except that an as-of row may be a content-less
 stub in one arm and carry content in the other: the arms version
 different spans. OLD re-versions an identical write (with
---force-replace it stubs the identical old version; without, it keeps
+no content retained it stubs the identical old version; without, it keeps
 that version's content) and rewrites a whole long value for one changed
 cell, NEW keeps one row across an identical write and the unchanged
 cells across a cell diff, so a later stub covers a longer span in NEW

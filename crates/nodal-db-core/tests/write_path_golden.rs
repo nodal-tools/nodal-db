@@ -851,7 +851,7 @@ fn api_scalar_batches(db: &Path, log: &mut String) {
     let o = WriteOptions::default();
     // a4: four scalar segments in one commit: a replace of n1 plus new n4,
     // n5 (auto-created), a new parameter over n1 and n4, a string and a bool
-    // segment. Then the same keys again under force_replace (stub
+    // segment. Then the same keys again under retain_content = Some(false) (stub
     // close-outs).
     api_commit(
         db,
@@ -1087,9 +1087,9 @@ fn create_unretained_parameter(db: &Path, name: &str) {
 fn api_long_array_delete_batches(db: &Path, log: &mut String) {
     let o = WriteOptions::default();
     // b1 prep: diverge the per-cell versions of lp/n1 and lp/n2. n1: two
-    // cells (pos0 v1, pos1 v1), one cell under force_replace (pos0 v2, pos1
+    // cells (pos0 v1, pos1 v1), one cell under retain_content = Some(false) (pos0 v2, pos1
     // closed as a stub), three cells (pos0 v3, pos1 v2, pos2 v1). n2: three
-    // cells, then one cell under force_replace (pos1, pos2 closed as stubs).
+    // cells, then one cell under retain_content = Some(false) (pos1, pos2 closed as stubs).
     api_commit(
         db,
         "b1 prep v1",
@@ -1162,7 +1162,7 @@ fn api_long_array_delete_batches(db: &Path, log: &mut String) {
         log,
     );
 
-    // b2: the same parameters under force_replace (stub close-outs; grid/n1
+    // b2: the same parameters under retain_content = Some(false) (stub close-outs; grid/n1
     // moves to other positions, so (0,0) stays dead); then a
     // retain_content = FALSE long parameter written twice.
     api_commit(
@@ -1343,7 +1343,7 @@ fn api_long_array_delete_batches(db: &Path, log: &mut String) {
 
     // b5: a multi-key array segment with replaced (n1, n4) and new (n7, n6)
     // keys, carrying a canonical NaN, -0.0 (canon normalizes it) and a
-    // one-element array; then a force_replace round (stub `_hist` rows).
+    // one-element array; then a retain_content = Some(false) round (stub `_hist` rows).
     api_commit(
         db,
         "b5 arrays",

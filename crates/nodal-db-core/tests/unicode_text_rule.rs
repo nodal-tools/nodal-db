@@ -25,7 +25,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_structural, delete_objects, delete_values, ingest_segments, read_parameter, read_values,
+    commit_structural, delete_objects, delete_values, read_parameter, read_values, write_segments,
     DeleteKey, Segment,
 };
 use nodal_db_core::axis::{dedup_or_insert, AxisCache};
@@ -134,7 +134,7 @@ fn seg(class: &str, parameter: &str, alternative: &str, batch: RecordBatch) -> S
 }
 
 fn ingest(db: &std::path::Path, segments: Vec<Segment>) -> Result<WriteReport, DbError> {
-    ingest_segments(db, segments, "tester", "", WriteOptions::default())
+    write_segments(db, segments, "tester", "", WriteOptions::default())
 }
 
 fn col_str(batch: &RecordBatch, name: &str) -> Vec<String> {

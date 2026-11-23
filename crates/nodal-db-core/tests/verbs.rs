@@ -388,7 +388,7 @@ fn drop_value_list_closes_orphan_refuses_bound_and_noops_missing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
+fn ensure_class_0d_and_nd_idempotent_with_dim_guard() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
     // The v58 shape: 0-D flowGroup, then the 3-D carve-out class.
@@ -437,7 +437,7 @@ fn ensure_entity_class_0d_and_nd_idempotent_with_dim_guard() {
 }
 
 #[test]
-fn ensure_parameter_definition_types_inference_and_no_widen() {
+fn ensure_parameter_types_inference_and_no_widen() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
     ensure_class(&db, "solve", &[], "tester").unwrap();

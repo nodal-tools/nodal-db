@@ -4,7 +4,7 @@
 //! conflict-retried commit, through name resolution (missing referents are
 //! auto-created and reported), the declared-type lookup, `canon` → `tier` →
 //! axis dedup → the `history` protocol. [`write_parameter`],
-//! [`ingest_segments`] and [`delete_values`] are wrappers over it.
+//! [`write_segments`] and [`delete_values`] are wrappers over it.
 //! [`read_parameter`] reads a written parameter back through the SQL views.
 //!
 //! ## Batch column contract (logical-long)
@@ -103,7 +103,7 @@ pub struct Segment {
 ///
 /// `user` / `message` stamp the `commit` row this call creates.
 ///
-/// A thin single-segment wrapper over [`ingest_segments`]:
+/// A thin single-segment wrapper over [`write_segments`]:
 /// the per-parameter body is shared, the transaction shape is identical.
 /// It carries no metadata statement: rewriting a value that has metadata
 /// links fails with [`DbError::ValueMetadataUnstated`]; use
@@ -120,7 +120,7 @@ pub fn write_parameter(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    ingest_segments(
+    write_segments(
         db,
         vec![Segment {
             class: class.to_string(),
@@ -145,8 +145,9 @@ pub fn write_parameter(
 /// once, up front; on a write-write conflict `conn::with_write_txn_retrying`
 /// re-executes the whole multi-segment closure against a fresh transaction and
 /// a fresh `commit` row, so no DB state read before the conflict is reused.
-/// `opts` applies to every segment (`--force-replace` is container-wide).
-pub fn ingest_segments(
+/// `opts` applies to every segment (for `nodal-db import`, its retention
+/// flags apply to the whole container).
+pub fn write_segments(
     db: &Path,
     segments: Vec<Segment>,
     user: &str,
@@ -205,7 +206,7 @@ pub struct ChangeSet {
 
 /// Commit a [`ChangeSet`] in ONE atomic, conflict-retried transaction
 /// under one `commit` row. This is the write entry point: every other write
-/// function ([`write_parameter`], [`ingest_segments`], [`delete_values`],
+/// function ([`write_parameter`], [`write_segments`], [`delete_values`],
 /// the verbs, template apply) and the Python skin go through it, so the
 /// canonicalization pipeline exists once. A save is never split into
 /// several calls: a failed second call would leave the first half

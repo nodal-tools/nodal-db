@@ -226,7 +226,9 @@ fn template_stamped_rename_err(
             let item = PyDict::new(py);
             let _ = item.set_item("change_index", r.change_index);
             let _ = item.set_item("kind", structural_kind_tag(r.kind));
-            let _ = item.set_item("class_name", r.class);
+            // A dict key, not an attribute: "class" (as in the structural
+            // item it echoes) is fine here, unlike `err.class`.
+            let _ = item.set_item("class", r.class);
             let _ = item.set_item("current", r.current);
             let _ = item.set_item("new_name", r.new_name);
             let _ = renames.append(item);

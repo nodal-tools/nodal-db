@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 license = "EUPL-1.2"
 license-files = ["LICENSE"]
 authors = [{ name = "Nodal-Tools" }]
-maintainers = [{ name = "jkiviluo", email = "juha.kiviluoma@nodal-tools.fi" }]
+maintainers = [{ name = "Juha Kiviluoma", email = "juha.kiviluoma@nodal-tools.fi" }]
 keywords = ["duckdb", "database", "versioned data", "modelling", "arrow"]
 classifiers = [
     "Development Status :: 3 - Alpha",

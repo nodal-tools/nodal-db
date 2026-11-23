@@ -215,8 +215,8 @@ create_exception!(
      next apply of a changed template, so such renames are refused by default; \
      nothing was written. Attributes: `template_name`, `template_version` \
      (None when not stamped) and `renames`, a list of dicts (`change_index`, \
-     `kind` - \"class\" or \"parameter\" - `class_name` (None for a \
-     class), `current`, `new_name`), one per refused item. Ask the user, then \
+     `kind` - \"class\" or \"parameter\" - `class` (None for a \
+     class rename), `current`, `new_name`), one per refused item. Ask the user, then \
      resend the allowed items with \"allow_on_template\": True. Case-only \
      renames and description-only revisions need no flag. A subclass of \
      ApiError, so `except ApiError` still catches it."

@@ -282,7 +282,7 @@ fn a_normal_file_is_listed_once_until_it_changes() {
 /// (their own connections, or a cycle that wrote nothing or failed).
 #[test]
 fn which_writers_re_stamp_the_file() {
-    use nodal_db_core::api::{commit_structural, ingest_segments, Segment};
+    use nodal_db_core::api::{commit_structural, write_segments, Segment};
     use nodal_db_core::conn::builtin_guard_own_writes;
     use nodal_db_core::erasure::{erase_alternative, EraseOpts};
     use nodal_db_core::types::{ObjectDeleteKey, ObjectKind, ObjectRef, StructuralChange};
@@ -312,7 +312,7 @@ fn which_writers_re_stamp_the_file() {
         batches: vec![scalar(&["b"], 1.0)],
         domains: Vec::new(),
     };
-    let import = || ingest_segments(&db, vec![seg()], "t", "m", WriteOptions::default()).is_ok();
+    let import = || write_segments(&db, vec![seg()], "t", "m", WriteOptions::default()).is_ok();
     assert_eq!(
         after(&db, &import),
         (true, true, false),

@@ -1803,9 +1803,9 @@ fn a_large_scope_warns_and_proceeds() {
     });
 }
 
-/// `force_replace` stubs every value a purge closes, as for a value delete.
+/// `retain_content: Some(false)` stubs every value a purge closes, as for a value delete.
 #[test]
-fn force_replace_stubs_purged_values() {
+fn retain_content_false_stubs_purged_values() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(&dir);
     let r = purge(

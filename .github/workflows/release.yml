@@ -16,7 +16,9 @@ name: Release
 #
 # Every build uses the Rust toolchain of the workspace's `rust-version`
 # (RUST_TOOLCHAIN below; keep the two equal) and the committed Cargo.lock
-# (`--locked`). Third-party actions are pinned by commit SHA (the version in
+# (`--locked`, except the sdist build: see test-sdist). dtolnay/rust-toolchain
+# is pinned by the SHA of its branch named after that version; dependabot
+# cannot follow it (branches, no tags), so bump it with rust-version. Third-party actions are pinned by commit SHA (the version in
 # the comment); .github/dependabot.yml proposes updates.
 #
 # PyPI uses trusted publishing (no token): the PyPI project `nodal-db` has a
@@ -163,13 +165,13 @@ jobs:
           cd crates/nodal-db-py/tests
           /tmp/venv/bin/python -m pytest -q
 
-  # The sdist built from scratch into a wheel (pinned toolchain, locked
-  # dependencies) and smoke-tested, so a source install works too.
+  # The sdist built from scratch into a wheel (pinned toolchain) and
+  # smoke-tested, so a source install works too.
   test-sdist:
     needs: sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11)
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98 (the branch named after the workspace rust-version)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -179,9 +181,11 @@ jobs:
         with:
           name: sdist
           path: dist
+      # No --locked here: the sdist carries only the core and the Python
+      # crate but the workspace's full Cargo.lock (with the CLI's
+      # dependencies), so a locked resolve of the sdist fails. The lock still
+      # pins every version the sdist uses; cargo only drops unused entries.
       - name: build a wheel from the sdist alone and import it
-        env:
-          MATURIN_PEP517_ARGS: --locked
         run: |
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install dist/*.tar.gz
@@ -231,7 +235,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11)
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98 (the branch named after the workspace rust-version)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: build

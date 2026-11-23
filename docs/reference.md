@@ -289,7 +289,7 @@ every database a command opens.
 | `template load FILE --db DB [--user] [--message]` | Load a template into a new database |
 | `template plan FILE --db DB [--recreate-removed]` | Print what an apply would do, and the commit id to pin it to |
 | `template apply FILE --db DB [--user] [--message] [--expect-commit N] [--recreate-removed]` | Apply a template; `--expect-commit` refuses unless the database is at the planned commit |
-| `template export --db DB [--out FILE] [--json]` | Write the database's template (YAML, or JSON) |
+| `template export DB [--out FILE] [--json]` | Write the database's template (YAML, or JSON) |
 
 Exit codes: 0 success, 1 error, 2 usage error (bad arguments), 75 busy
 (retry later); `maintain refresh-views --check` exits 0 up to date, 3

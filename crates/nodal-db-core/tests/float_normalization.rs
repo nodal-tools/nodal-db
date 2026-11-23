@@ -16,7 +16,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{ingest_segments, read_parameter, write_parameter, Segment};
+use nodal_db_core::api::{read_parameter, write_parameter, write_segments, Segment};
 use nodal_db_core::axis::{dedup_or_insert, AxisCache};
 use nodal_db_core::canon::{canonicalize, CanonicalValue};
 use nodal_db_core::conn::with_write_txn;
@@ -331,7 +331,7 @@ fn array_min_max_follow_duckdb_order_and_pass_the_audit() {
     assert_eq!(get("negzero").1.to_bits(), 0, "v_min is +0.0, never -0.0");
 }
 
-/// One ingest_segments call with a scalar and an array segment: both go
+/// One write_segments call with a scalar and an array segment: both go
 /// through the shared per-segment body.
 #[test]
 fn batched_multi_segment_storage_is_canonical() {
@@ -344,7 +344,7 @@ fn batched_multi_segment_storage_is_canonical() {
         batches: vec![batch],
         domains: vec![],
     };
-    ingest_segments(
+    write_segments(
         &db,
         vec![
             seg(

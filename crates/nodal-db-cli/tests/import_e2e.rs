@@ -1494,7 +1494,7 @@ fn no_retain_content_passes_through_to_core() {
     conn.close().unwrap();
     assert_eq!(
         stubs, 1,
-        "force-replace must stub the pre-image, proving pass-through"
+        "--no-retain-content must stub the pre-image, proving pass-through"
     );
 }
 

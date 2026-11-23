@@ -715,9 +715,9 @@ fn every_no_op_call_shape_commits_nothing() {
         )
     });
     assert_eq!(r.values_unchanged, 1);
-    // force_replace stubs superseded rows only: an unchanged write
+    // retain_content = Some(false) stubs superseded rows only: an unchanged write
     // supersedes nothing, so it is still a no-op (D3(i)).
-    assert_noop(&db, "force_replace", || {
+    assert_noop(&db, "retain_content false", || {
         commit_with(
             &db,
             vec![seg("s", scalar_batch(&["a"], &[1.0]))],

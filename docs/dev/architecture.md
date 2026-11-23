@@ -197,7 +197,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `conn` | Connection discipline: open-work-close, a per-path in-process lock, bounded-backoff retry, write transactions that stamp the commit row. |
 | `axis` | Content-verified axis deduplication (the hash narrows, byte equality decides). |
 | `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; one set-based writer per tier and the set-based delete (rounds per commit). |
-| `api` | The public write/read surface: `commit`, `write_parameter`, `ingest_segments`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `read_values`, `db_identity`. |
+| `api` | The public write/read surface: `commit`, `write_parameter`, `write_segments`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `read_values`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
 | `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, entity / class / parameter creation, and class / parameter renames and description revisions (with the per-call rename checks and the rewrite of the name-keyed template documents). |
 | `verbs` | Idempotent single-purpose write verbs (`ensure_entity`, `set_scenario_alternatives`, …) used by template migration programs and importers; thin wrappers over the `structural` and `api` paths. |
@@ -210,7 +210,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 `crates/nodal-db-cli/src/`: `main` (verb dispatch), `template` (the
 `template` subcommands), and `import`, the Arrow-IPC reader. `import` is
 a *thin structural adapter*: it decodes the container, upcasts
-timestamps, expands dense segments and makes one `ingest_segments`
+timestamps, expands dense segments and makes one `write_segments`
 call. It never canonicalizes anything itself.
 
 The core re-exports its `duckdb` crate (and thus `duckdb::arrow`) so
@@ -626,8 +626,8 @@ once to read it (the CLI's `--if-needed`, Python's
 `compact(if_needed=True)`). A failed repack updates nothing, so a
 per-save caller holds a `compaction::CompactionBackoff`, which skips the
 gate for `max(5, N/5)` commits after a failure instead of retrying a
-1-9 s repack on every save. `compact_if_needed` is the byte gate alone,
-kept for compatibility.
+1-9 s repack on every save. `CommitBackstop::Off` in the policy leaves
+the byte gate alone.
 
 **Clustering order.** The copy sorts every versioned table by
 `(valid_to_commit IS NULL) DESC, valid_to_commit, <keys>,
@@ -652,7 +652,7 @@ measured by `benches/compaction_size.rs`.
 its checkpoint and close, so its WAL is empty) is compared with the
 source's, both measured as the file plus its WAL
 (`compaction::keeps_original`). The growth and no-baseline triggers
-(`compact_if_due`, `compact_if_needed`) keep the original when the
+(`compact_if_due`) keep the original when the
 rebuild is not smaller. The commit-count backstop keeps it only when the
 rebuild is strictly larger: the backstop exists to reset the per-commit
 open cost, which barely shows in the byte size, so an equal-size rebuild

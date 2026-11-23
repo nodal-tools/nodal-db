@@ -270,7 +270,7 @@ do either.
     that your code links against the same Arrow version as the core.
     `api::commit(db_path, ChangeSet { .. }, user, message, opts)` combines
     writes, deletions, structural changes, purges and metadata in one
-    commit; `write_parameter`, `ingest_segments` and `delete_values` are
+    commit; `write_parameter`, `write_segments` and `delete_values` are
     convenience wrappers over it.
 
 #### Values of several types for one parameter
@@ -664,7 +664,7 @@ database; parameter names are unique within their class.
   an `ApiError` subclass). nodal-db cannot tell which classes and
   parameters the template declares, so the refusal covers all of them.
   The error lists every refused item (`change_index`, `kind` — `class`
-  or `parameter` —, the parameter's class (`class_name` in Python),
+  or `parameter` —, `class` (the parameter's class),
   `current`, `new_name`) so a client can ask its user once; to go ahead,
   resend the allowed items with `allow_on_template: true`
   (`"allow_on_template": True` in Python). Case-only renames,

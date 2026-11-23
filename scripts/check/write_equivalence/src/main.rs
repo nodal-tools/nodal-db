@@ -46,7 +46,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use nodal_db_core::api::{commit as api_commit, DeleteKey, Segment, ChangeSet};
+mod compat;
+
+use compat::{commit_changes, opts_no_retain, opts_retain};
+use nodal_db_core::api::{DeleteKey, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::{CanonicalValue, LabelDomain};
 use nodal_db_core::conn::with_write_txn;
@@ -755,13 +758,22 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
         &PARAMS[0],
         &["ασ".to_string()],
     );
-    let rep = api_commit(&db, ChangeSet { segments: vec![Segment {
+    let rep = commit_changes(
+        &db,
+        vec![Segment {
             class: "node".into(),
             parameter: "sc_f".into(),
             alternative: "Base".into(),
             batches: vec![setup],
             domains: vec![],
-        }], ..ChangeSet::default() }, "r", "setup", WriteOptions::default());
+        }],
+        vec![],
+        vec![],
+        vec![],
+        "r",
+        "setup",
+        WriteOptions::default(),
+    );
     g.commit();
     writeln!(
         log,
@@ -769,7 +781,16 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
         result_text(&rep, |r| report_text(r, mode))
     )
     .unwrap();
-    let rep = api_commit(&db, ChangeSet { structural: vec![mixed], ..ChangeSet::default() }, "r", "mixed", WriteOptions::default());
+    let rep = commit_changes(
+        &db,
+        vec![],
+        vec![mixed],
+        vec![],
+        vec![],
+        "r",
+        "mixed",
+        WriteOptions::default(),
+    );
     writeln!(
         log,
         "## setup mixed {}",
@@ -850,9 +871,10 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
                         parameter_definition_id: 900,
                         alternative_id: 900,
                     };
-                    let opts = WriteOptions {
-                        retain_content: force.then_some(false),
-                        ..WriteOptions::default()
+                    let opts = if *force {
+                        opts_no_retain()
+                    } else {
+                        WriteOptions::default()
                     };
                     out.push(match v {
                         Some(v) => write_value(conn, c, key, v, &mut cache, &opts, None)?,
@@ -885,18 +907,9 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
         }
 
         let opts = match r.below(20) {
-            0..=2 => WriteOptions {
-                retain_content: Some(false),
-                ..WriteOptions::default()
-            },
-            3..=4 => WriteOptions {
-                retain_content: Some(false),
-                ..WriteOptions::default()
-            },
-            5 => WriteOptions {
-                retain_content: Some(true),
-                ..WriteOptions::default()
-            },
+            0..=2 => opts_no_retain(),
+            3..=4 => opts_retain(Some(false)),
+            5 => opts_retain(Some(true)),
             _ => WriteOptions::default(),
         };
         // A structural create now and then (it runs before the segments).
@@ -1065,7 +1078,16 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
             g.rollback();
             continue;
         }
-        let rep = api_commit(&db, ChangeSet { segments, structural, deletes, ..ChangeSet::default() }, "r", &format!("c{ci}"), opts);
+        let rep = commit_changes(
+            &db,
+            segments,
+            structural,
+            deletes,
+            vec![],
+            "r",
+            &format!("c{ci}"),
+            opts,
+        );
         if rep.is_ok() {
             g.commit();
         } else {

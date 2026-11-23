@@ -30,28 +30,36 @@ exactly that id, else they raise `Stale` with nothing written.
 
 | Method | What it does |
 |---|---|
-| `commit(*, segments, structural, deletes, object_deletes, purges, metadata, user, message, force_replace, retain_override, expect_commit, covered_writes, value_metadata)` | The one save: every channel in one atomic commit. All channels are optional; at least one must be non-empty. |
-| `write_parameter(class_name, parameter, alternative, batch, *, user, message, domains, force_replace, retain_override, expect_commit, value_metadata)` | Write one parameter's values for one alternative. |
+| `commit(*, segments, structural, deletes, object_deletes, purges, metadata, user, message, retain_content, expect_commit, covered_writes, value_metadata)` | The one save: every channel in one atomic commit. All channels are optional; at least one must be non-empty. |
+| `write_parameter(class_name, parameter, alternative, batch, *, user, message, domains, retain_content, expect_commit, value_metadata)` | Write one parameter's values for one alternative. |
 | `commit_structural(changes, *, user, message, expect_commit)` | Structural changes only. |
 | `delete_values(keys, *, user, message, expect_commit)` | Delete values by `(class, parameter, alternative, entity)` tuples. |
-| `purge(requests, *, user, message, retain_override, expect_commit)` | Purges only. |
+| `purge(requests, *, user, message, retain_content, expect_commit)` | Purges only. |
 | `template_apply(template_path, *, user, message, programs, expect_commit, allow_retarget, allow_downgrade, recreate_removed)` | Apply a template (migration chain, then the additive diff). |
 | `ensure_alternative(name, *, description, user)` | Create an alternative if absent; returns its id. |
-| `ensure_entity_class(name, dims=[], *, user)` | Create a class (0-D or N-D) if absent; returns its id. |
-| `ensure_parameter_definition(class_name, name, *, types, value_list, description, user)` | Create a parameter definition if absent; returns its id. |
+| `ensure_class(name, dims=[], *, user)` | Create a class (0-D or N-D) if absent; returns its id. |
+| `ensure_parameter(class_name, name, *, types, value_list, description, user)` | Create a parameter definition if absent; returns its id. |
 | `ensure_entity(class_name, name=None, elements=[], *, user)` | Create an entity (0-D by name, N-D by elements) if absent; returns its id. |
 | `set_scenario_alternatives(scenario, alternatives, *, user)` | Replace a scenario's alternative ranking. |
 | `set_entity_activation(class_name, entity, alternative, active, *, user)` | Set (`True`/`False`) or clear (`None`) an entity's activation in an alternative. |
 | `set_class_active_by_default(class_name, active_by_default, *, user)` | Set a class's default activation. |
-| `set_refinement_class(class_name, refinement, *, user)` | Mark or unmark a two-dimensional class as a refinement class. |
-| `drop_value_list(list, *, user)` | Drop a value list that no definition binds. |
-| `stamp_template_identity(name, version, *, overwrite=False, user)` | Record `template_name` and `template_version`; a different existing stamp needs `overwrite=True`. |
+| `set_class_refinement(class_name, refinement, *, user)` | Mark or unmark a two-dimensional class as a refinement class. |
+| `drop_value_list(name, *, user)` | Drop a value list that no definition binds. |
+| `stamp_template_identity(name, version, *, allow_overwrite=False, user)` | Record `template_name` and `template_version`; a different existing stamp needs `allow_overwrite=True`. |
 | `erase_alternative(alternative, *, user, note, expect_present)` | Physically remove one alternative's data, with an erasure marker. |
 | `extract(dest, *, user, as_of, note)` | Write a history-free copy into a new file. |
 | `compact(*, if_needed, growth, max_commits)` | Rewrite the file densely packed. |
-| `refresh_read_surface(*, force=False)` | Replace an older read surface with this build's. |
+| `refresh_read_surface(*, allow_downgrade=False)` | Replace an older read surface with this build's; `allow_downgrade=True` also replaces a newer one (development only). |
 
 The `ensure_*` and `set_*` methods make no commit when nothing changes.
+
+`retain_content` decides what the versions a call replaces or closes
+keep: `None` (the default) follows each parameter's own
+`retain_content` setting, `False` keeps no content (each replaced
+version stays in history only as a content-less stub), and `True` keeps
+the content even where the parameter's setting says not to. New
+versions are written either way, and values equal to the stored ones
+are not rewritten.
 
 ### Reading and previews
 
@@ -68,7 +76,8 @@ The `ensure_*` and `set_*` methods make no commit when nothing changes.
 | `preview_object_deletes(keys)` | What object deletes would close or be blocked by. |
 | `preview_erase_alternative(alternative, *, expect_present)` | Row counts and a size estimate of an erase. |
 | `template_plan(template_path, *, recreate_removed=False)` | The plan a `template_apply` would run, as a dict. |
-| `path()` | The file path of the handle. |
+| `template_export(*, json=False)` | The database's template document as a string: YAML, or JSON with `json=True`. |
+| `path` | The file path of the handle (a read-only property). |
 
 ### Exceptions
 
@@ -117,7 +126,7 @@ dicts in Python; the Rust types are in `nodal_db_core::types`.
 |---|---|
 | `segments` | `{"class", "parameter", "alternative", "batch", "domains"?}`; `batch` is an Arrow batch or table, or a list of them (one per value type) |
 | `deletes` | `(class, parameter, alternative, entity)` |
-| `object_deletes` | `{"kind": "entity" \| "parameter" \| "alternative" \| "class", "class"?, "name" \| "elements", "cascade": bool}` |
+| `object_deletes` | `{"kind": "entity" \| "parameter" \| "alternative" \| "class" \| "scenario", "class"?, "name" \| "elements", "cascade": bool}` |
 
 ### Structural changes (`structural`, keyed on `"op"`)
 
@@ -129,9 +138,9 @@ dicts in Python; the Rust types are in `nodal_db_core::types`.
 | `rename_scenario` | `current`, `new_name`, `description`? |
 | `set_scenario_alternatives` | `scenario`, `alternatives` (ranked list) |
 | `set_entity_activation` | `class`, `entity`, `alternative`, `active` (`True`/`False`; `None` clears) |
-| `create_entity_class` | `name`, `dims` (class names), `description`? |
-| `rename_entity_class` | `current`, `new_name`, `description`?, `allow_on_template`? |
-| `create_parameter` | `class`, `name`, `types`? (list of type dicts, as `ensure_parameter_definition`), `value_list`?, `description`? |
+| `create_class` | `name`, `dims` (class names), `description`? |
+| `rename_class` | `current`, `new_name`, `description`?, `allow_on_template`? |
+| `create_parameter` | `class`, `name`, `types`? (list of type dicts, as `ensure_parameter`), `value_list`?, `description`? |
 | `rename_parameter` | `class`, `current`, `new_name`, `description`?, `allow_on_template`? |
 | `create_entity` | `class`, `name`? and/or `elements`?, `description`? |
 | `rename_entity` | `class`, `current`, `new_name`, `description`? |
@@ -152,13 +161,13 @@ Scopes and their filters: `values` (`class`, `parameter`, `alternative`),
 
 | `op` | Keys |
 |---|---|
-| `put_source` | `source`, `rename`?, `fields`? (`title`, `issued`, …) |
-| `put_license` | `license`, `rename`?, `fields`? (`title`, `path`, `spdx`, `policy`) |
+| `put_source` | `source`, `new_name`?, `fields`? (`title`, `issued`, …) |
+| `put_license` | `license`, `new_name`?, `fields`? (`title`, `path`, `spdx`, `policy`) |
 | `set_source_licenses` | `source`, `licenses` |
 | `create_pair` | `name`, `value` |
 | `revise_pair` | `pair` (`[name, value]`), `value` |
-| `rename_pair_key` | `from`, `to` |
-| `put_role` | `role`, `rename`?, `description`?, `iri`? |
+| `rename_pair_key` | `current`, `new_name` |
+| `put_role` | `role`, `new_name`?, `description`?, `iri`? |
 | `set_property` | `key`, `value` (`None` clears) |
 | `delete_source` / `delete_license` / `delete_pair` | `source` / `license` / `pair`, `cascade`? |
 | `delete_role` | `role` |
@@ -177,6 +186,12 @@ Clearing differs by channel: a description is cleared with
 `description: ""`, a property with `set_property` and `value: None`, and
 a `put_*` revises a record to exactly the fields given (fields left out
 are cleared).
+
+The rule for omitted fields: in the rename and `set_*` items a field
+that is `None` or left out means "leave as is"; it means "clear" only
+where the tables above say so (`active`, `included`, a property's
+`value`). A `put_*` item is a full replace: the fields it leaves out are
+cleared.
 
 ## Reports
 
@@ -212,7 +227,7 @@ the call's list for that channel:
 
 | Outcome | Fields |
 |---|---|
-| structural | `change_index`, `kind`, `object_id`, `effect` |
+| structural | `change_index`, `kind`, `id`, `effect` |
 | object delete | `key_index`, `kind`, `status`, then `closed_out` (`deleted`) or `blockers` (`restricted`) |
 | purge | `request_index`, `closed_out`, `objects`, `spared`, `unbound` |
 | metadata | `item_index`, `kind`, `id`, `effect`, `links_closed`, `blockers` |
@@ -242,7 +257,7 @@ Structural outcomes use `created`, `renamed`, `updated`, `no_op` and
 Every warning has `kind`, `object_type`, `name` and `id`, plus the extra
 keys of its kind. `object_type` names what the warning is about: `class`,
 `parameter`, `alternative`, `entity`, `scenario`, `parameter_type`,
-`parameter_value_list`, or a group (`value`, `column`, `segment`,
+`value_list`, or a group (`value`, `column`, `segment`,
 `structural`, `purge`, `value_metadata_link`, `object_metadata_link`).
 
 | `kind` | Extra keys | When |
@@ -264,16 +279,19 @@ every database a command opens.
 
 | Command | What it does |
 |---|---|
-| `init DB [--alternative NAME] [--template FILE] [--user NAME]` | Create a new database; optionally seed an alternative and load a template (`--user` is the template load's author) |
-| `import FILE --db DB [--alternative] [--class] [--parameter] [--user] [--message] [--force-replace] [--value-metadata keep\|clear]` | Import an Arrow-IPC bulk file in one commit; `--class` / `--parameter` assert that every segment targets them |
+| `init DB [--default-alternative NAME] [--template FILE] [--user NAME]` | Create a new database; optionally create an alternative and load a template (`--user` is the template load's author) |
+| `import FILE --db DB [--alternative] [--class] [--parameter] [--user] [--message] [--retain-content \| --no-retain-content] [--value-metadata keep\|clear]` | Import an Arrow-IPC bulk file in one commit; `--class` / `--parameter` assert that every segment targets them; `--no-retain-content` keeps replaced versions only as content-less stubs, `--retain-content` keeps their content even where the parameter's setting says not to (neither: the parameter's setting) |
 | `purge DB --scope SCOPE [filters] [--preview] …` | Close out everything in one scope |
 | `erase-alternative DB NAME [--preview] [--note] [--expect-present NAME] [--user]` | Physically remove one alternative's data |
 | `extract SRC DEST [--as-of N] [--note] [--user]` | Write a history-free copy into a new file |
 | `maintain compact DB [--if-needed [--growth F] [--max-commits N]]` | Rewrite the file densely packed |
-| `maintain refresh-views DB [--check \| --force]` | Replace an older read surface; `--check` only reports; `--force` also replaces a newer one (development only) |
+| `maintain refresh-views DB [--check \| --allow-downgrade]` | Replace an older read surface; `--check` only reports; `--allow-downgrade` also replaces a newer one (development only) |
 | `template load FILE --db DB [--user] [--message]` | Load a template into a new database |
 | `template plan FILE --db DB [--recreate-removed]` | Print what an apply would do, and the commit id to pin it to |
 | `template apply FILE --db DB [--user] [--message] [--expect-commit N] [--recreate-removed]` | Apply a template; `--expect-commit` refuses unless the database is at the planned commit |
 | `template export --db DB [--out FILE] [--json]` | Write the database's template (YAML, or JSON) |
 
-Exit codes are in [Using nodal-db](usage.md#cli-exit-codes).
+Exit codes: 0 success, 1 error, 2 usage error (bad arguments), 75 busy
+(retry later); `maintain refresh-views --check` exits 0 up to date, 3
+stale or 4 newer. Details are in
+[Using nodal-db](usage.md#cli-exit-codes).

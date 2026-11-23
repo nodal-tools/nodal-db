@@ -429,7 +429,7 @@ Notes on the table:
   copy the whole pre-image to `value_array_hist` anyway.
 - **History can be kept without content.** When the parameter
   definition has `retain_content` set to false, or with the
-  `force_replace` write option (or `retain_override` set to false), the
+  `retain_content` write option set to false, the
   superseded version is kept only as a stub: its version and commit edges remain, its payload
   does not. This suits regenerated data such as model results.
 - **Storage size.** DuckDB compresses column data automatically; how

@@ -69,6 +69,6 @@ major changes.
   compaction, and read-surface refresh.
 - **Bulk import** of Arrow-IPC files (`nodal-db import`), atomic in one
   commit.
-- **CLI exit codes**: 0 success, 1 error, 75 busy (retry later);
-  `maintain refresh-views --check` also exits 3 (stale) or 4 (newer than
-  this nodal-db).
+- **CLI exit codes**: 0 success, 1 error, 2 usage error (bad
+  arguments), 75 busy (retry later); `maintain refresh-views --check`
+  also exits 3 (stale) or 4 (newer than this nodal-db).

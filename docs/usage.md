@@ -62,7 +62,7 @@ The examples below call the CLI as `nodal-db`; put
 === "CLI"
 
     ```bash
-    nodal-db init demo.duckdb --alternative Base
+    nodal-db init demo.duckdb --default-alternative Base
     ```
 
     ```text
@@ -89,7 +89,7 @@ The examples below call the CLI as `nodal-db`; put
 
 `init` creates a new file: in the CLI, Python and Rust alike it refuses
 a path that already exists (any file, an empty one included) or that has
-a `.wal` file next to it. The `--alternative` option creates an initial
+a `.wal` file next to it. The `--default-alternative` option creates an initial
 alternative; without it, the database starts with no alternatives and one
 is created on the first write that names it.
 
@@ -98,7 +98,7 @@ parameters, pass it at creation time (the examples below start without
 one, so the template load does not shift their commit numbers):
 
 ```bash
-nodal-db init demo.duckdb --alternative Base --template model.yaml
+nodal-db init demo.duckdb --default-alternative Base --template model.yaml
 ```
 
 A minimal template:
@@ -198,8 +198,8 @@ do either.
 
     ```text
     imported base.arrows: commit 2, 2 segment(s), 4 value(s) written, 0 unchanged, 4 row(s) written, axes 1 created / 1 reused, tiers [array, scalar]
-    warning: auto-created entity_class "node" (id 1)
-    warning: auto-created parameter_definition "demand" (id 1)
+    warning: auto-created class "node" (id 1)
+    warning: auto-created parameter "demand" (id 1)
     warning: auto-created entity "north" (id 1)
     ...
     ```
@@ -261,8 +261,8 @@ do either.
     let report = api::write_parameter(
         db_path, "unit", "capacity", "Base", batch,
         &[],                      // label-dimension ordinal domains
-        WriteOptions::default(),
         "alice", "initial capacities",
+        WriteOptions::default(),
     )?;
     ```
 
@@ -307,8 +307,8 @@ changes: the `domains` argument wins over field metadata at the same
 position.
 
 ```python
-db.ensure_entity_class("node", user="alice")
-db.ensure_parameter_definition(
+db.ensure_class("node", user="alice")
+db.ensure_parameter(
     "node", "level", types=[{"kind": "float"}, {"kind": "string"}],
     user="alice")
 north = pa.record_batch({"entity": ["north"], "value": [12.0]})
@@ -349,9 +349,9 @@ report["commit_id"], report["values_unchanged"]   # (0, 1)
 
 Use `head_commit` when you need the commit the data is current at. A
 call that changes at least one value commits as usual, and only the
-changed values get the new commit. `--force-replace` (or
-`force_replace`) only decides what the replaced versions keep; it does
-not make the core rewrite unchanged values. A call may not write a
+changed values get the new commit. `--no-retain-content` (or
+`retain_content=False`) only decides what the replaced versions keep; it
+does not make the core rewrite unchanged values. A call may not write a
 value and delete the same value; the core refuses it before writing
 anything, as `DbError::WriteAndDeleteSameKey` in Rust /
 `nodal_db.WriteAndDeleteSameKey` in Python (both subclasses of
@@ -581,12 +581,12 @@ meaning. Mark or unmark one with:
 === "Python"
 
     ```python
-    db.set_refinement_class("plant_generator", True, user="alice")
+    db.set_class_refinement("plant_generator", True, user="alice")
     ```
 
 === "Rust"
 
-    `verbs::set_refinement_class(db_path, "plant_generator", true, "alice")`.
+    `verbs::set_class_refinement(db_path, "plant_generator", true, "alice")`.
 
 The class must have exactly two dimensions. The marks are stored in the
 core property `refinement_classes`, a JSON array of class ids
@@ -598,9 +598,9 @@ after the load (a template export does not include it either).
 ### Renaming objects and editing descriptions
 
 Five structural changes rename an object or revise its description:
-`RenameAlternative`, `RenameScenario`, `RenameEntityClass`,
+`RenameAlternative`, `RenameScenario`, `RenameClass`,
 `RenameParameter` and `RenameEntity` (Python ops `rename_alternative`,
-`rename_scenario`, `rename_entity_class`, `rename_parameter`,
+`rename_scenario`, `rename_class`, `rename_parameter`,
 `rename_entity`). Each takes the object's `current` name, a `new_name`
 and an optional `description`; `RenameParameter` and `RenameEntity` also
 take the `class` the parameter or entity belongs to. Entities have rules
@@ -608,7 +608,7 @@ of their own as well: see [Renaming entities](#renaming-entities).
 
 ```python
 db.commit_structural([
-    {"op": "rename_entity_class", "current": "node", "new_name": "bus"},
+    {"op": "rename_class", "current": "node", "new_name": "bus"},
     {"op": "rename_parameter", "class": "bus", "current": "demand",
      "new_name": "load", "description": "Hourly load, MW"},
 ], user="alice")
@@ -637,7 +637,7 @@ database; parameter names are unique within their class.
   database (creates and templates follow the same rule). The same name
   with no description change, or `""` on an object with no description,
   is `NoOp`; a call of only no-ops makes no commit (`commit_id` 0).
-  `CreateEntityClass` and `CreateEntity` (Python `create_entity_class`,
+  `CreateClass` and `CreateEntity` (Python `create_class`,
   `create_entity`) also take a `description`, applied only when the
   class or entity is created: a create of an existing one is a `NoOp`
   that keeps the stored description (when one call creates the same
@@ -891,9 +891,9 @@ duplicates](#n-d-entities-elements-names-and-duplicates)); use `RenameEntity`. T
   existing definition changes nothing.
 
 Rows the call itself writes are never closed, and closed values follow
-their definition's retention (`retain_content`, or the call's
-`retain_override`; `force_replace` keeps no content, as for a value
-delete). Structural rows and parameter defaults are always
+their definition's retention (the parameter's `retain_content`, unless
+the call's `retain_content` option overrides it: `False` keeps no
+content, `True` keeps it, as for a value delete). Structural rows and parameter defaults are always
 kept in history.
 
 **Reach outside the scope.** A request whose cascade would close objects
@@ -1786,8 +1786,9 @@ code:
 
 | Code | Meaning |
 |---|---|
-| 0 | success |
-| 1 | an error: a bad argument, a missing or refused file, a refused write. The message says what |
+| 0 | success (also `--help` and `--version`) |
+| 1 | an error: a missing or refused file, a refused write, a bad value the command checks itself. The message says what |
+| 2 | a usage error: an unknown option, a missing argument or a value the argument parser rejects. Nothing was run |
 | 75 | busy, retryable: the database is locked by another process, or a write conflict outlasted the retry budget (any command; for `import` this is error class E9). Nothing was written; run the command again later |
 
 `nodal-db maintain refresh-views DB --check` reports instead of failing:

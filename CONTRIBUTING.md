@@ -28,6 +28,9 @@ You need:
 - [`just`](https://github.com/casey/just) for the task recipes in
   `justfile`, and [`maturin`](https://www.maturin.rs) to build the
   Python skin.
+- On Windows, a checkout with git symlinks enabled (`git config
+  core.symlinks true`, with Developer Mode on): `crates/nodal-db-core/schema`
+  and each crate's `LICENSE` are symlinks.
 - Optionally [`sccache`](https://github.com/mozilla/sccache): with it,
   rebuilding the bundled DuckDB in a new target directory takes seconds
   instead of minutes.

@@ -1,0 +1,49 @@
+{
+  "axis": {
+    "body": {
+      "positions": [
+        {
+          "clauses": [
+            [
+              {
+                "range_end": 4,
+                "range_start": 1,
+                "unit": "M"
+              },
+              {
+                "range_end": 5,
+                "range_start": 1,
+                "unit": "WD"
+              }
+            ],
+            [
+              {
+                "range_end": 10,
+                "range_start": 9,
+                "unit": "M"
+              }
+            ]
+          ],
+          "ordinal": 1
+        },
+        {
+          "clauses": [
+            [
+              {
+                "range_end": 17,
+                "range_start": 9,
+                "unit": "h"
+              }
+            ]
+          ],
+          "ordinal": 2
+        }
+      ],
+      "type": "TimePattern"
+    },
+    "length": 2
+  },
+  "description": "time_pattern axis with an intersection: position 1 is (M1-4 AND WD1-5) OR M9-10 (rendered M1-4;WD1-5,M9-10), position 2 a single term (clause 0)",
+  "expected_canonical_hex": "0c00000074696d655f7061747465726e010200000000010000000200000002000000010000004d010004000200000057440100050001000000010000004d09000a00020000000100000001000000010000006809001100",
+  "expected_hash_u64": 6823454078051848601
+}

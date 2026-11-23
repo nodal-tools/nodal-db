@@ -695,7 +695,7 @@ fn foreign_schema_version(conn: &Connection) -> Result<Option<String>, DbError> 
         )
         .optional()?;
     let found = found.unwrap_or_default();
-    Ok((found != crate::compaction::SCHEMA_VERSION).then_some(found))
+    Ok((!crate::compaction::is_current_schema_version(&found)).then_some(found))
 }
 
 /// The write cycle's refusal of a file of another schema version.

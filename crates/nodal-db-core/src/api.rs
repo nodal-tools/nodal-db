@@ -21,7 +21,7 @@
 //!
 //! The **library decides the tier** (VMP Part 6): callers never pick scalar /
 //! array / long. Ordinal domains for label dimensions arrive by the in-process
-//! `domains` arg and/or Arrow field metadata `spinal:label_domain` (a JSON array
+//! `domains` arg and/or Arrow field metadata `nodal:label_domain` (a JSON array
 //! of the ordered labels) — decision D, both channels.
 //!
 //! ## Concurrency contract
@@ -871,6 +871,11 @@ pub fn commit_change_set(
             &calls,
             purged_vocabulary || deleted_vocabulary,
         )?;
+        // A closed refinement class leaves the core's list in the same
+        // commit (one writer: the core).
+        if purged_vocabulary || deleted_vocabulary {
+            crate::verbs::prune_refinement_classes(conn, commit_id)?;
+        }
         // `tiers` lists the tiers written; the canonicalization noted every
         // value's tier, unchanged ones included.
         report.tiers.retain(|t| buffers.written_tiers.contains(t));
@@ -2645,7 +2650,7 @@ fn prepare_segment(seg: &Segment, mut seg_names: Normalized) -> Result<PreparedS
     // one position, a domain belongs to the dimension the FIRST group with
     // a label dimension there has (matched by the name fold); a group whose
     // label dimension at that position has another name does not get it
-    // and keeps its own `spinal:label_domain` field metadata, if any. The
+    // and keeps its own `nodal:label_domain` field metadata, if any. The
     // alternative — the argument applying to every group — would give one
     // dimension's labels to another and shadow the metadata the other
     // batch carries for exactly that purpose. A single-group segment is
@@ -3706,7 +3711,7 @@ pub(crate) fn parse_index_kind(s: &str) -> Result<IndexKind, DbError> {
 }
 
 /// Merge the caller's label domains with any carried in Arrow field metadata
-/// (`spinal:label_domain` = a JSON array of the ordered labels) for a label
+/// (`nodal:label_domain` = a JSON array of the ordered labels) for a label
 /// dimension the arg did not cover (decision D — both channels).
 fn effective_domains(
     batch: &RecordBatch,
@@ -3723,10 +3728,10 @@ fn effective_domains(
             continue;
         }
         let field = batch.schema().field(i + 1).clone();
-        if let Some(js) = field.metadata().get("spinal:label_domain") {
+        if let Some(js) = field.metadata().get("nodal:label_domain") {
             let labels: Vec<String> = serde_json::from_str(js).map_err(|e| {
                 DbError::Api(format!(
-                    "bad spinal:label_domain metadata on {:?}: {e}",
+                    "bad nodal:label_domain metadata on {:?}: {e}",
                     field.name()
                 ))
             })?;

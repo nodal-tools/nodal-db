@@ -4,7 +4,7 @@
 This is the "second canonicalizer for validation" the conformance suite is
 designed around (CLAUDE.md invariant 2; VMP Part 3): it re-derives every
 `conformance/encoding_vectors/*.json` vector's canonical byte string AND its
-XXH3-64/seed-0 content hash *from the spec* (`specs/canonical_encoding.md`),
+XXH3-64/seed-0 content hash *from the spec* (`docs/dev/canonical_encoding.md`),
 sharing NO code with the Rust encoder. Two independent implementations that
 agree byte- and hash-for-hash is the whole point — a spec-divergent edit to the
 Rust encoder that also regenerated its own goldens would still fail here.
@@ -141,12 +141,18 @@ def _body(body: dict) -> bytes:
                 out += _u8(0x01) + _double(yp)
         return out
     if t == "TimePattern":
+        # §7.7: per position the ordinal, the clause count, then per clause
+        # its term count and terms (terms of a clause intersect, clauses union).
         out = b""
         for p in body["positions"]:
-            terms = p["terms"]
-            out += _i32(p["ordinal"]) + _u32(len(terms))
-            for term in terms:
-                out += _string(term["unit"]) + _i16(term["range_start"]) + _i16(term["range_end"])
+            clauses = p["clauses"]
+            out += _i32(p["ordinal"]) + _u32(len(clauses))
+            for clause in clauses:
+                if not clause:
+                    raise ValueError("a time-pattern clause must have at least one term")
+                out += _u32(len(clause))
+                for term in clause:
+                    out += _string(term["unit"]) + _i16(term["range_start"]) + _i16(term["range_end"])
         return out
     raise ValueError(f"unknown body type {t!r}")
 

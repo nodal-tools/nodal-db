@@ -1283,6 +1283,7 @@ const VIEW_SWEEP_EXCLUSIONS: &[(&str, &str)] = &[
         "dataset_version",
         "the commit cookie counts runA's write/erase commits",
     ),
+    ("commit_log", "the log holds runA's write/erase commits"),
     ("audit_erasure", "the marker inventory IS the difference"),
     (
         "audit_health",

@@ -42,19 +42,19 @@ fn arrow_versions_unify(
     b
 }
 
-/// Schema-level metadata keys this reader knows (§4.1); any other `spinal:`
+/// Schema-level metadata keys this reader knows (§4.1); any other `nodal:`
 /// key is warn-and-ignore (E5, §3.2).
 const KNOWN_SCHEMA_KEYS: [&str; 7] = [
-    "spinal:format",
-    "spinal:format_version",
-    "spinal:segment_count",
-    "spinal:class",
-    "spinal:parameter",
-    "spinal:alternative",
-    "spinal:form",
+    "nodal:format",
+    "nodal:format_version",
+    "nodal:segment_count",
+    "nodal:class",
+    "nodal:parameter",
+    "nodal:alternative",
+    "nodal:form",
 ];
 /// Field-level metadata keys this reader knows (§7.1).
-const KNOWN_FIELD_KEYS: [&str; 1] = ["spinal:label_domain"];
+const KNOWN_FIELD_KEYS: [&str; 1] = ["nodal:label_domain"];
 
 pub struct ImportArgs {
     pub file: PathBuf,
@@ -116,7 +116,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     for m in &metas {
         if m.version != first_version {
             bail!(
-                "E3: segments disagree on spinal:format_version ({}.{} vs {}.{})",
+                "E3: segments disagree on nodal:format_version ({}.{} vs {}.{})",
                 first_version.0,
                 first_version.1,
                 m.version.0,
@@ -125,7 +125,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         }
         if m.segment_count != first_count {
             bail!(
-                "E10: segments disagree on spinal:segment_count ({first_count} vs {})",
+                "E10: segments disagree on nodal:segment_count ({first_count} vs {})",
                 m.segment_count
             );
         }
@@ -133,7 +133,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     if first_count != raws.len() as u64 {
         bail!(
             "E10: container holds {} segment(s) but every segment declares \
-             spinal:segment_count = {first_count} — truncation or mis-assembly suspected",
+             nodal:segment_count = {first_count} — truncation or mis-assembly suspected",
             raws.len()
         );
     }
@@ -166,7 +166,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             parameter: meta.parameter.clone(),
             alternative,
             batches,
-            // Domains ride exclusively in `spinal:label_domain` field metadata
+            // Domains ride exclusively in `nodal:label_domain` field metadata
             // (§7.1) — the in-process arg is empty by spec.
             domains: vec![],
         });
@@ -573,20 +573,20 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
     let md = schema.metadata();
 
     // E2: format id.
-    match md.get("spinal:format").map(String::as_str) {
-        Some("spinal-db-bulk") => {}
+    match md.get("nodal:format").map(String::as_str) {
+        Some("nodal-db-bulk") => {}
         Some(other) => {
-            bail!("E2: segment {ordinal}: spinal:format is {other:?}, expected \"spinal-db-bulk\"")
+            bail!("E2: segment {ordinal}: nodal:format is {other:?}, expected \"nodal-db-bulk\"")
         }
-        None => bail!("E2: segment {ordinal}: spinal:format metadata key is missing"),
+        None => bail!("E2: segment {ordinal}: nodal:format metadata key is missing"),
     }
 
     // E3: version (MAJOR.MINOR; reader supports major 1, any minor — §3.2).
     let ver = md
-        .get("spinal:format_version")
-        .ok_or_else(|| anyhow!("E3: segment {ordinal}: spinal:format_version is missing"))?;
+        .get("nodal:format_version")
+        .ok_or_else(|| anyhow!("E3: segment {ordinal}: nodal:format_version is missing"))?;
     let version = parse_version(ver)
-        .map_err(|e| anyhow!("E3: segment {ordinal}: bad spinal:format_version {ver:?}: {e}"))?;
+        .map_err(|e| anyhow!("E3: segment {ordinal}: bad nodal:format_version {ver:?}: {e}"))?;
     if version.0 != 1 {
         bail!(
             "E3: segment {ordinal}: format version {ver} has major {} but this reader \
@@ -597,43 +597,43 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
 
     // Required keys (E4) + segment_count value sanity (E10).
     let count_raw = md
-        .get("spinal:segment_count")
-        .ok_or_else(|| anyhow!("E4: segment {ordinal}: spinal:segment_count is missing"))?;
+        .get("nodal:segment_count")
+        .ok_or_else(|| anyhow!("E4: segment {ordinal}: nodal:segment_count is missing"))?;
     let segment_count: u64 = match count_raw.parse() {
         Ok(n) if n >= 1 => n,
         _ => bail!(
-            "E10: segment {ordinal}: spinal:segment_count {count_raw:?} is not a positive integer"
+            "E10: segment {ordinal}: nodal:segment_count {count_raw:?} is not a positive integer"
         ),
     };
     let class = md
-        .get("spinal:class")
-        .ok_or_else(|| anyhow!("E4: segment {ordinal}: spinal:class is missing"))?
+        .get("nodal:class")
+        .ok_or_else(|| anyhow!("E4: segment {ordinal}: nodal:class is missing"))?
         .clone();
     let parameter = md
-        .get("spinal:parameter")
-        .ok_or_else(|| anyhow!("E4: segment {ordinal}: spinal:parameter is missing"))?
+        .get("nodal:parameter")
+        .ok_or_else(|| anyhow!("E4: segment {ordinal}: nodal:parameter is missing"))?
         .clone();
-    let form = match md.get("spinal:form").map(String::as_str) {
+    let form = match md.get("nodal:form").map(String::as_str) {
         Some("long") => Form::Long,
         Some("dense") => Form::Dense,
         Some(other) => bail!(
-            "E4: segment {ordinal} ({class}:{parameter}): unknown spinal:form {other:?} \
+            "E4: segment {ordinal} ({class}:{parameter}): unknown nodal:form {other:?} \
              (this reader supports long | dense; a newer format minor version may add forms)"
         ),
-        None => bail!("E4: segment {ordinal} ({class}:{parameter}): spinal:form is missing"),
+        None => bail!("E4: segment {ordinal} ({class}:{parameter}): nodal:form is missing"),
     };
-    let alternative = md.get("spinal:alternative").cloned();
+    let alternative = md.get("nodal:alternative").cloned();
 
-    // E5 (warning, not error): unknown spinal:-namespaced keys; keys outside
+    // E5 (warning, not error): unknown nodal:-namespaced keys; keys outside
     // the namespace are foreign tools' business and ignored silently.
     for key in md.keys() {
-        if key.starts_with("spinal:") && !KNOWN_SCHEMA_KEYS.contains(&key.as_str()) {
+        if key.starts_with("nodal:") && !KNOWN_SCHEMA_KEYS.contains(&key.as_str()) {
             println!("warning: segment {ordinal}: ignoring unknown metadata key {key:?} (E5)");
         }
     }
     for field in schema.fields() {
         for key in field.metadata().keys() {
-            if key.starts_with("spinal:") && !KNOWN_FIELD_KEYS.contains(&key.as_str()) {
+            if key.starts_with("nodal:") && !KNOWN_FIELD_KEYS.contains(&key.as_str()) {
                 println!(
                     "warning: segment {ordinal}: ignoring unknown metadata key {key:?} \
                      on field {:?} (E5)",
@@ -681,7 +681,7 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
             // stores (the text rule, `nodal_db_core::text`).
             if fold_name(m) != fold_name(f) {
                 bail!(
-                    "E4: segment {ordinal} ({}:{}): spinal:alternative {m:?} conflicts with \
+                    "E4: segment {ordinal} ({}:{}): nodal:alternative {m:?} conflicts with \
                      --alternative {f:?} (neither takes precedence: they must match, case-insensitively)",
                     meta.class,
                     meta.parameter
@@ -692,7 +692,7 @@ fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> R
         (Some(m), None) => Ok(m.clone()),
         (None, Some(f)) => Ok(f.clone()),
         (None, None) => bail!(
-            "E4: segment {ordinal} ({}:{}): no alternative — neither spinal:alternative \
+            "E4: segment {ordinal} ({}:{}): no alternative — neither nodal:alternative \
              metadata nor --alternative was given",
             meta.class,
             meta.parameter
@@ -1004,14 +1004,14 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
                 (field, col)
             }
         };
-        // §7.2: a label dimension without spinal:label_domain is E6.
+        // §7.2: a label dimension without nodal:label_domain is E6.
         if i > 0
             && i < ncols - 1
             && field.data_type() == &DataType::Utf8
-            && !field.metadata().contains_key("spinal:label_domain")
+            && !field.metadata().contains_key("nodal:label_domain")
         {
             bail!(
-                "E6: {tag}: label dimension {:?} has no spinal:label_domain field \
+                "E6: {tag}: label dimension {:?} has no nodal:label_domain field \
                  metadata (required on every label dimension)",
                 field.name()
             );
@@ -1094,7 +1094,7 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
         })?;
 
     // Dimension columns: List<T> with T per §5.2 (ns rejected, s/ms upcast);
-    // label dims must carry spinal:label_domain on the OUTER field (§7.3).
+    // label dims must carry nodal:label_domain on the OUTER field (§7.3).
     let mut dim_kinds: Vec<DimKind> = Vec::with_capacity(rank);
     for d in 0..rank {
         let field = &fields[d + 1];
@@ -1117,9 +1117,9 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             },
             DataType::Int64 => DimKind::Int,
             DataType::Utf8 => {
-                if !field.metadata().contains_key("spinal:label_domain") {
+                if !field.metadata().contains_key("nodal:label_domain") {
                     bail!(
-                        "E6: {tag}: label dimension {:?} has no spinal:label_domain field \
+                        "E6: {tag}: label dimension {:?} has no nodal:label_domain field \
                          metadata (required on the outer list field of every label \
                          dimension)",
                         field.name()

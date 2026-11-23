@@ -540,22 +540,22 @@ fn direct_value(r: &mut Rng, g: &Gen) -> CanonicalValue {
                 properties: AxisProperties::default(),
                 body: AxisBody::TimePattern {
                     positions: vec![
-                        TimePatternPos {
-                            ordinal: 0,
-                            terms: vec![TimePatternTerm {
+                        TimePatternPos::union_of(
+                            0,
+                            vec![TimePatternTerm {
                                 unit: "M".into(),
                                 range_start: 1,
                                 range_end: 6,
                             }],
-                        },
-                        TimePatternPos {
-                            ordinal: 1,
-                            terms: vec![TimePatternTerm {
+                        ),
+                        TimePatternPos::union_of(
+                            1,
+                            vec![TimePatternTerm {
                                 unit: "h".into(),
                                 range_start: 1,
                                 range_end: 8,
                             }],
-                        },
+                        ),
                     ],
                 },
             };

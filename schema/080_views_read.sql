@@ -81,10 +81,14 @@ UNION ALL
 SELECT a.id, a.kind, l.pos, l.ordinal, NULL, NULL, NULL, l.label, NULL, NULL
 FROM axis a JOIN axis_label l ON l.axis_id = a.id
 UNION ALL
--- time patterns: terms of one position render as one unioned pattern text
+-- time patterns: one pattern text per position, the terms of a clause
+-- joined by ';' (intersection) and the clauses by ',' (union)
 SELECT a.id, a.kind, t.pos, any_value(t.ordinal), NULL, NULL, NULL,
-       string_agg(t.unit || t.range_start || '-' || t.range_end, ',' ORDER BY t.term_no), NULL, NULL
-FROM axis a JOIN axis_time_pattern t ON t.axis_id = a.id
+       string_agg(t.clause_text, ',' ORDER BY t.clause_no), NULL, NULL
+FROM axis a JOIN (
+  SELECT axis_id, pos, clause_no, any_value(ordinal) AS ordinal,
+         string_agg(unit || range_start || '-' || range_end, ';' ORDER BY term_no) AS clause_text
+  FROM axis_time_pattern GROUP BY axis_id, pos, clause_no) t ON t.axis_id = a.id
 GROUP BY a.id, a.kind, t.pos
 UNION ALL
 -- materialized (irregular) float
@@ -136,9 +140,12 @@ FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
 JOIN (SELECT * FROM axis_label WHERE axis_id IN (SELECT axis_id FROM ax)) l ON l.axis_id = a.id
 UNION ALL
 SELECT a.id, a.kind, t.pos, any_value(t.ordinal), NULL, NULL, NULL,
-       string_agg(t.unit || t.range_start || '-' || t.range_end, ',' ORDER BY t.term_no), NULL, NULL
+       string_agg(t.clause_text, ',' ORDER BY t.clause_no), NULL, NULL
 FROM (SELECT * FROM axis WHERE id IN (SELECT axis_id FROM ax)) a
-JOIN (SELECT * FROM axis_time_pattern WHERE axis_id IN (SELECT axis_id FROM ax)) t ON t.axis_id = a.id
+JOIN (SELECT axis_id, pos, clause_no, any_value(ordinal) AS ordinal,
+             string_agg(unit || range_start || '-' || range_end, ';' ORDER BY term_no) AS clause_text
+      FROM axis_time_pattern WHERE axis_id IN (SELECT axis_id FROM ax)
+      GROUP BY axis_id, pos, clause_no) t ON t.axis_id = a.id
 GROUP BY a.id, a.kind, t.pos
 UNION ALL
 SELECT a.id, a.kind, f.pos, f.pos, NULL, NULL, NULL, NULL, NULL, f.coord

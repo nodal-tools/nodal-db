@@ -6,7 +6,7 @@
 //!   timestamps), never the internal axis positions.
 //! - A label domain that repeats a label is refused before any value is
 //!   canonicalized, whichever channel carried it (the in-process arg or the
-//!   `spinal:label_domain` field metadata).
+//!   `nodal:label_domain` field metadata).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,12 +40,12 @@ fn commits(db: &std::path::Path) -> i64 {
 }
 
 /// Rank-1 label batch `(entity, mode, value)`; `domain` (if any) rides in
-/// the `spinal:label_domain` field metadata.
+/// the `nodal:label_domain` field metadata.
 fn label_batch(rows: &[(&str, &str, f64)], domain: Option<&[&str]>) -> RecordBatch {
     let mut mode = Field::new("mode", DataType::Utf8, false);
     if let Some(d) = domain {
         mode = mode.with_metadata(HashMap::from([(
-            "spinal:label_domain".to_string(),
+            "nodal:label_domain".to_string(),
             serde_json::to_string(d).unwrap(),
         )]));
     }
@@ -176,7 +176,7 @@ fn a_null_row_does_not_make_a_duplicate() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity", DataType::Utf8, false),
         Field::new("mode", DataType::Utf8, false).with_metadata(HashMap::from([(
-            "spinal:label_domain".to_string(),
+            "nodal:label_domain".to_string(),
             "[\"a\"]".to_string(),
         )])),
         Field::new("value", DataType::Float64, true),

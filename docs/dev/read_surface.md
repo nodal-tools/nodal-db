@@ -49,8 +49,8 @@ other names, for example a prefix of your tool's.
 - **Hold connections per operation: open, query, close.** DuckDB's file
   lock covers readers too: an idle read-only connection (a notebook, a
   GUI tab) blocks every writer until it closes. To notice new commits,
-  poll `dataset_version` (or `SELECT max(id) FROM "commit"`) with a short
-  read. See [connection discipline](../usage.md#connection-discipline).
+  poll `dataset_version` (or `SELECT max(id) FROM commit_log`) with a
+  short read. See [connection discipline](../usage.md#connection-discipline).
 - **Row order is unspecified** for every object: add an `ORDER BY`. The
   order of a stable object's **existing** columns is guaranteed, but new
   columns may be appended at the end in any revision: tolerate extra
@@ -138,7 +138,36 @@ These hold for every stable object with value columns (`value_cells`,
   history stubs).
 - Types: the generated reference lists each column's DuckDB type. The
   stable objects use `BIGINT`, `INTEGER`, `SMALLINT`, `DOUBLE`,
-  `BOOLEAN`, `VARCHAR`, `TIMESTAMP` and the lists `DOUBLE[]`, `BIGINT[]`.
+  `BOOLEAN`, `VARCHAR`, `TIMESTAMP` and the lists `DOUBLE[]`, `BIGINT[]`;
+  the `content_hash` mirrors use `UBIGINT` (an engine without unsigned
+  64-bit integers holds the same 64 bits as a signed `BIGINT`; compare
+  hashes for equality only, [Canonical encoding §2](canonical_encoding.md)).
+- Timestamps are naive (`TIMESTAMP`, no time zone). Commit times
+  (`commit_log.timestamp`) are UTC.
+- **Quote the names that are SQL keywords.** The base table `commit`,
+  the columns `user` and `timestamp` (`commit_log`) and `values`
+  (`read_parameter_dense`, `value_array_asof_for`, the `value_array`
+  mirrors) are keywords in SQL. DuckDB accepts most of them unquoted,
+  other engines do not (in PostgreSQL an unquoted `user` is the session
+  user, a silent wrong answer). Write `"commit"`, `"user"`,
+  `"timestamp"` and `"values"`.
+
+## The commit log
+
+`commit_log` (stable) lists every commit of the file, one row each:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `BIGINT` | the commit id: the validity edge every versioned row cites (`valid_from_commit`, `valid_to_commit`). Increasing in commit order; not necessarily dense. |
+| `timestamp` | `TIMESTAMP` | when the commit was written, naive UTC, microseconds |
+| `user` | `VARCHAR` | the author the writer gave |
+| `message` | `VARCHAR` | the commit message, or NULL |
+
+The log is append-only: no operation changes or removes a row, erasure
+included (an erasure records an `erasure_marker` row in its own commit).
+A history-free extract starts a new log in a new file. Order history by
+`id`, never by `timestamp`: the clock of the writing machine can go
+backwards.
 
 ## Versions and old files
 
@@ -146,9 +175,11 @@ The read surface lives **inside each database file**: `init` writes the
 views and macros of the nodal-db that creates the file, and the file
 keeps them. `nodal_read_surface()` says which:
 
-- `contract_major` increases with every breaking change, before the
-  encoding freeze too (it starts at `0`; from the freeze on, a bump is a
-  breaking release): a stable object, column or parameter removed or
+- `contract_major` increases with every breaking change. It was `0`
+  during development and is `1` from release 0.1.0 (whose schema change
+  widened the `version` columns). Through 0.x a bump is announced in the
+  release notes; from 1.0.0 on it needs a major release
+  ([Versions and compatibility](../versions.md)). Breaking changes are: a stable object, column or parameter removed or
   renamed, a stable column's type or position changed, a documented
   semantics changed (case sensitivity, the NULL conventions, the
   alternative default), or a mirror removed or renamed while its table

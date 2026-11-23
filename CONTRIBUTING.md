@@ -94,7 +94,8 @@ branch as soon as its DDL changes.
 
 ## Unicode version bumps
 Names and index labels are stored in NFC under **Unicode 16.0.0**, the
-version the canonical encoding pins (spec `canonical_encoding.md`
+version the canonical encoding pins
+([`docs/dev/canonical_encoding.md`](docs/dev/canonical_encoding.md)
 §3.4.1.1). Three things hold it: the exact
 `unicode-normalization = "=0.1.24"` pin (the crate's tables;
 `tests/text_nfc.rs` asserts the version), the vendored data in
@@ -353,6 +354,19 @@ whole pipeline catches a slowdown or a wrong result.
 
 ## PR checklist
 To be defined with the first release process.
+
+## Release builds
+A release or CI build of the CLI or the Python wheel sets
+`NODAL_DB_GIT_COMMIT` to the commit it builds, so every file it creates
+records it in the `created_by` property:
+
+```bash
+NODAL_DB_GIT_COMMIT=$(git rev-parse --short=12 HEAD) cargo build --release -p nodal-db-cli
+NODAL_DB_GIT_COMMIT=$(git rev-parse --short=12 HEAD) maturin build --release   # in crates/nodal-db-py
+```
+
+Without it (every local build) the value is `nodal-db-core <version> (dev)`.
+The core's `build.rs` only reads the variable; it never runs git.
 
 ## Docs
 The documentation site is built with [Zensical](https://zensical.org) from

@@ -1,7 +1,8 @@
 # Array-tier reconstruction conformance fixtures
 
 Language-neutral fixtures for the array (dense) tier's **flat `DOUBLE[]` payload
-→ logical long table** mapping, as pinned by `specs/reconstruction.md`. Any
+→ logical long table** mapping (row-major, as the array payload is in
+[`docs/dev/canonical_encoding.md`](../../docs/dev/canonical_encoding.md) §9). Any
 implementation (the Rust core, the SQL read view, a future engine skin) MUST
 reproduce `expected` exactly. Authoritative runner:
 `crates/nodal-db-core/tests/reconstruction_fixtures.rs`; Rust implementation:
@@ -9,8 +10,7 @@ reproduce `expected` exactly. Authoritative runner:
 
 The canonical layout is **row-major in declared-dimension order** (C order: the
 last declared dimension varies fastest). The non-square shapes (2×3, 2×3×2)
-exist to catch a column-major (Julia/Fortran) transpose bug — see
-`specs/reconstruction.md` §3.
+exist to catch a column-major (Julia/Fortran) transpose bug.
 
 ## Fixture schema
 

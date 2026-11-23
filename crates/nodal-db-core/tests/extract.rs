@@ -599,6 +599,7 @@ const T1_EXCLUDED_VIEWS: &[&str] = &[
     "axis_parametric",        // rendering helper over every axis: the same (asserted)
     "axis_position_stored",   // rendering helper over every axis: the same (asserted)
     "dataset_version",        // E (asserted)
+    "commit_log",             // the log gains E (asserted through dataset_version)
     "database_property_current", // the identity row differs (asserted)
     "database_properties",    // the identity row differs (as the mirror)
     "value_timeline",         // history view: only the surviving versions (asserted)
@@ -707,7 +708,7 @@ fn t1_head_extract_reads_identically() {
         scalar(&dest, "SELECT version FROM dataset_version"),
         report.extract_commit
     );
-    let md = "SELECT * FROM database_property_current WHERE lower(key) <> 'db_identity'";
+    let md = "SELECT * FROM database_property_current WHERE lower(key) NOT IN ('db_identity', 'created_by')";
     assert_eq!(fingerprint(&fx.db, md), fingerprint(&dest, md));
     // M5: the user and tool keys survive a history-free extract (the
     // identity does not).
@@ -929,8 +930,8 @@ fn t4_t5_marker_identity_and_log() {
     assert_eq!((h, at), (src_max, r.extract_commit));
     assert_eq!(cont, src_id);
     assert_eq!(note, "slim copy");
-    // rows_removed = Σ source rows − Σ carried rows (E's commit, identity row
-    // and marker are not "carried").
+    // rows_removed = Σ source rows − Σ carried rows (E's commit, identity and
+    // created_by rows and marker are not "carried").
     let tables = strings(&fx.db, ALL_TABLES_SQL);
     let total = |db: &Path| -> i64 {
         tables
@@ -938,11 +939,11 @@ fn t4_t5_marker_identity_and_log() {
             .map(|t| scalar(db, &format!("SELECT count(*) FROM \"{t}\"")))
             .sum()
     };
-    let expected = total(&fx.db) - (total(&dest) - 3);
+    let expected = total(&fx.db) - (total(&dest) - 4);
     assert_eq!(removed, expected);
     assert_eq!(r.rows_removed as i64, expected);
     let carried: u64 = r.rows_per_table.iter().map(|(_, n)| n).sum();
-    assert_eq!(carried as i64, total(&dest) - 3);
+    assert_eq!(carried as i64, total(&dest) - 4);
 
     let conn = Connection::open(&dest).unwrap();
     let (kind, unresolved, cont2): (String, bool, String) = conn
@@ -1469,10 +1470,10 @@ fn assert_asof_equal(src: &Path, dest: &Path, n: i64) {
             (
                 format!(
                     "SELECT * EXCLUDE (valid_to_commit) FROM {m}({n}) \
-                     WHERE lower(key) <> 'db_identity'"
+                     WHERE lower(key) NOT IN ('db_identity', 'created_by')"
                 ),
                 "SELECT * EXCLUDE (valid_to_commit) FROM database_property_current \
-                 WHERE lower(key) <> 'db_identity'"
+                 WHERE lower(key) NOT IN ('db_identity', 'created_by')"
                     .to_string(),
             )
         } else {

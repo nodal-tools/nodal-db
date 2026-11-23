@@ -27,6 +27,6 @@
 -- hash of the surface DDL, one row.
 -- @surface: stable
 CREATE MACRO nodal_read_surface() AS TABLE
-SELECT CAST(0 AS INTEGER) AS contract_major,
-       CAST(6 AS INTEGER) AS revision,
-       CAST('f5358582effb5828' AS VARCHAR) AS ddl_hash;
+SELECT CAST(1 AS INTEGER) AS contract_major,
+       CAST(7 AS INTEGER) AS revision,
+       CAST('1e59743482889a2a' AS VARCHAR) AS ddl_hash;

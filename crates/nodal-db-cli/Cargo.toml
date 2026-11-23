@@ -1,6 +1,6 @@
 [package]
 name = "nodal-db-cli"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "EUPL-1.2"
 publish = false

@@ -20,7 +20,7 @@ CREATE TABLE entity_class (
   display_order     INTEGER,                         -- authored template order (#691)
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -41,7 +41,7 @@ CREATE TABLE class_set (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -54,7 +54,7 @@ CREATE TABLE class_set_member (
   member_class_id   BIGINT NOT NULL,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_s BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN class_set_id END) VIRTUAL,
   cur_c BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN member_class_id END) VIRTUAL
@@ -72,7 +72,7 @@ CREATE TABLE entity_class_dimension (
   dimension_class_set_id BIGINT,
   valid_from_commit      BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit        BIGINT REFERENCES commit(id),
-  version                SMALLINT NOT NULL DEFAULT 1,
+  version                INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   CHECK ((dimension_class_id IS NULL) <> (dimension_class_set_id IS NULL)),
   cur_c BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_class_id END) VIRTUAL,
@@ -88,7 +88,7 @@ CREATE TABLE entity (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_cls  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_class_id END) VIRTUAL,
@@ -115,7 +115,7 @@ CREATE TABLE entity_element (
   element_entity_id BIGINT NOT NULL,   -- may itself be an N-D entity (Decision 5 resolution of #2364)
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_e BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL,
   cur_p TINYINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN position END) VIRTUAL
@@ -127,13 +127,13 @@ CREATE UNIQUE INDEX one_current_entity_element ON entity_element (cur_e, cur_p);
 -- (Decision 7).
 CREATE TABLE entity_location (
   entity_id         BIGINT NOT NULL,
-  lat               DOUBLE,
-  lon               DOUBLE,
-  alt               DOUBLE,
-  shape             VARCHAR,   -- geometry document (e.g. GeoJSON); interpretation is client-layer
+  lat               DOUBLE,    -- latitude, decimal degrees, WGS 84 (EPSG:4326), north positive
+  lon               DOUBLE,    -- longitude, decimal degrees, WGS 84 (EPSG:4326), east positive
+  alt               DOUBLE,    -- altitude, metres above the WGS 84 ellipsoid (as in GeoJSON)
+  shape             VARCHAR,   -- geometry document (e.g. GeoJSON, whose coordinates are WGS 84 too); interpretation is client-layer
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_e BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL
 );

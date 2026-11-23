@@ -1470,3 +1470,36 @@ def test_purge_on_a_template_is_typed_and_recreate_removed_converges(db, tmp_pat
     out = db.template_apply(str(tpl), user="t", recreate_removed=True)
     assert out["converged"]
     assert one_value(db, "SELECT count(*) FROM entity_class WHERE cur_name = 'unit'") == 1
+
+
+def test_reads_of_a_real_older_schema_file_are_schema_mismatch(tmp_path):
+    # A real 0.6-metadata file, built from the frozen DDL of that schema
+    # (crates/nodal-db-core/tests/fixtures/schema_0_6): db.query and the named
+    # reads raise SchemaMismatch naming its version, never a binder error from
+    # this build's views.
+    duckdb = pytest.importorskip(
+        "duckdb",
+        reason="python 'duckdb' package missing — install the declared test "
+        "deps (pip install 'nodal-db[test]')",
+    )
+    fixture = os.path.join(os.path.dirname(__file__), "..", "..", "nodal-db-core",
+                           "tests", "fixtures", "schema_0_6")
+    path = str(tmp_path / "old.duckdb")
+    con = duckdb.connect(path)
+    try:
+        for name in sorted(os.listdir(fixture)):
+            if name.endswith(".sql"):
+                with open(os.path.join(fixture, name), encoding="utf-8") as f:
+                    con.execute(f.read())
+    finally:
+        con.close()
+    db = nodal_db.open(path)
+    for what, call in [
+        ("query", lambda: db.query("SELECT count(*) FROM run")),
+        ("read_parameter", lambda: db.read_parameter("node", "demand", "Base")),
+        ("read_values", lambda: db.read_values("node", "demand", ["a"])),
+    ]:
+        with pytest.raises(nodal_db.SchemaMismatch) as ei:
+            call()
+        assert ei.value.found == "0.6-metadata", what
+        assert "Binder" not in str(ei.value), what

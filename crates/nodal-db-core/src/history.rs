@@ -717,7 +717,7 @@ pub(crate) fn write_definition_default(
             pd_id,
             parameter_type_id,
             commit_id,
-            version as i16,
+            stored_version(i64::from(version), "default value")?,
             vc.kind,
             vc.f,
             vc.i,
@@ -1157,7 +1157,7 @@ pub const ARRAY_PAYLOAD_SQL: &str = "SELECT array_id, values, values_int IS NULL
 #[derive(Clone, Copy, Debug)]
 struct ArrayMeta {
     array_id: i64,
-    version: u16,
+    version: u32,
     pt: Option<i64>,
     axis: [Option<i64>; 4],
     vmin: Option<f64>,
@@ -1173,7 +1173,7 @@ impl ArrayMeta {
     fn read(r: &duckdb::Row, o: usize) -> duckdb::Result<ArrayMeta> {
         Ok(ArrayMeta {
             array_id: r.get(o)?,
-            version: r.get::<_, i32>(o + 1)? as u16,
+            version: r.get::<_, u32>(o + 1)?,
             pt: r.get(o + 2)?,
             axis: [r.get(o + 3)?, r.get(o + 4)?, r.get(o + 5)?, r.get(o + 6)?],
             vmin: r.get(o + 7)?,
@@ -1294,7 +1294,7 @@ const SCALAR_INSERT_SQL: &str = "INSERT INTO value_scalar \
         valid_from_commit, version, content_retained, value_kind, \
         v_float, v_int, v_bool, v_str, v_datetime, v_dur_months, v_dur_micros) \
      SELECT unnest(?::BIGINT[]), unnest(?::BIGINT[]), unnest(?::BIGINT[]), unnest(?::BIGINT[]), \
-       ?, unnest(?::SMALLINT[]), TRUE, unnest(?::VARCHAR[]), \
+       ?, unnest(?::INTEGER[]), TRUE, unnest(?::VARCHAR[]), \
        unnest(?::DOUBLE[]), unnest(?::BIGINT[]), unnest(?::BOOLEAN[]), unnest(?::VARCHAR[]), \
        make_timestamp(unnest(?::BIGINT[])), unnest(?::INTEGER[]), unnest(?::BIGINT[])";
 
@@ -1319,23 +1319,23 @@ type Triple = (i64, i64, i64);
 struct ScalarProbe {
     max_version: Option<i64>,
     current: i64,
-    row: Option<(u16, CurRow)>,
+    row: Option<(u32, CurRow)>,
 }
 
 impl ScalarProbe {
     /// Fold one probe row: version at `o`, current flag at `o + 1`, the
     /// comparison block from `o + 2`.
     fn push(&mut self, r: &duckdb::Row, o: usize) -> duckdb::Result<()> {
-        let version: i32 = r.get(o)?;
+        let version: u32 = r.get(o)?;
         let cur: i64 = r.get(o + 1)?;
         self.max_version = Some(
             self.max_version
-                .map_or(version as i64, |m| m.max(version as i64)),
+                .map_or(i64::from(version), |m| m.max(i64::from(version))),
         );
         if cur > 0 {
             self.current += cur;
             self.row = if self.current == 1 {
-                Some((version as u16, CurRow::read(r, o + 2, 1)?))
+                Some((version, CurRow::read(r, o + 2, 1)?))
             } else {
                 None
             };
@@ -1442,7 +1442,7 @@ fn write_scalar_round(
     // columns) for the unchanged check (skip_unchanged_writes_PLAN §3.1).
     let mut max_version: HashMap<Triple, i64> = HashMap::new();
     let mut live: HashMap<Triple, Live> = HashMap::new();
-    let mut current: HashMap<Triple, (u16, CurRow)> = HashMap::new();
+    let mut current: HashMap<Triple, (u32, CurRow)> = HashMap::new();
     let probed = w.iter().filter(|s| !s.entity_minted).map(|s| &s.key);
     if single && probed.clone().next().is_some() {
         let k = &w[0].key;
@@ -1480,8 +1480,8 @@ fn write_scalar_round(
                 if cur > 0 {
                     live.insert(t, Live::Scalar);
                 }
-                if let Some(v) = r.get::<_, Option<i32>>(5)? {
-                    current.insert(t, (v as u16, CurRow::read(r, 6, cur)?));
+                if let Some(v) = r.get::<_, Option<u32>>(5)? {
+                    current.insert(t, (v, CurRow::read(r, 6, cur)?));
                 }
             }
         }
@@ -1506,7 +1506,7 @@ fn write_scalar_round(
     // nothing: no close-out, no insert (skip_unchanged_writes_PLAN §2.1). A
     // key live in another tier is always a change (the tier is a function
     // of the content). ---
-    let unchanged: Vec<Option<u16>> = w
+    let unchanged: Vec<Option<u32>> = w
         .iter()
         .map(|s| {
             let t = triple(&s.key);
@@ -1570,16 +1570,15 @@ fn write_scalar_round(
 
     // --- Insert the changed keys: every column built in one pass through
     // the one encoder. ---
-    let mut versions: Vec<i16> = Vec::with_capacity(n);
+    let mut versions: Vec<i32> = Vec::with_capacity(n);
     let mut cols = ScalarColumns::default();
     for (s, same) in w.iter().zip(&unchanged) {
         if let Some(v) = same {
-            versions.push(*v as i16);
+            versions.push(stored_version(i64::from(*v), "scalar batch")?);
             continue;
         }
         let v = max_version.get(&triple(&s.key)).copied().unwrap_or(0) + 1;
-        let v = i16::try_from(v)
-            .map_err(|_| DbError::Internal(format!("scalar batch: version {v} out of range")))?;
+        let v = stored_version(v, "scalar batch")?;
         versions.push(v);
         cols.push(s, v);
     }
@@ -1594,7 +1593,7 @@ fn write_scalar_round(
             Some(v) => unchanged_outcome(Tier::Scalar, *v, (0, 0), 0),
             None => WriteOutcome {
                 tier: Some(Tier::Scalar),
-                version: version as u16,
+                version: api_version(version),
                 rows_written: 1,
                 rows_closed,
                 ..WriteOutcome::default()
@@ -1612,7 +1611,7 @@ struct ScalarColumns {
     p: Vec<i64>,
     a: Vec<i64>,
     pt: Vec<Option<i64>>,
-    version: Vec<i16>,
+    version: Vec<i32>,
     kind: Vec<&'static str>,
     f: Vec<Option<f64>>,
     i: Vec<Option<i64>>,
@@ -1624,7 +1623,7 @@ struct ScalarColumns {
 }
 
 impl ScalarColumns {
-    fn push(&mut self, w: &ScalarWrite, version: i16) {
+    fn push(&mut self, w: &ScalarWrite, version: i32) {
         self.e.push(w.key.entity_id);
         self.p.push(w.key.parameter_definition_id);
         self.a.push(w.key.alternative_id);
@@ -1674,7 +1673,7 @@ impl ScalarColumns {
             list(clip(&self.a, &r), |&v| Value::BigInt(v)),
             opt_list(clip(&self.pt, &r), |&v| Value::BigInt(v)),
             Value::BigInt(c),
-            list(clip(&self.version, &r), |&v| Value::SmallInt(v)),
+            list(clip(&self.version, &r), |&v| Value::Int(v)),
             list(clip(&self.kind, &r), |&v| Value::Text(v.to_string())),
             opt_list(clip(&self.f, &r), |&v| Value::Double(v)),
             opt_list(clip(&self.i, &r), |&v| Value::BigInt(v)),
@@ -1733,7 +1732,7 @@ fn write_array(
     live_array_id: Option<i64>,
     retained: bool,
     pt_id: Option<i64>,
-) -> Result<(u16, usize, usize), DbError> {
+) -> Result<(u32, usize, usize), DbError> {
     debug_assert_eq!(
         hash,
         array_payload_hash(vals),
@@ -1753,7 +1752,10 @@ fn write_array(
         // Replace the current row in place (bump version, new payload), keyed
         // by its array_id, which is never updated. Both payload columns are set
         // so a stale values_int can't break the XOR.
-        let mut p: Vec<Value> = vec![Value::BigInt(c), Value::SmallInt(version as i16)];
+        let mut p: Vec<Value> = vec![
+            Value::BigInt(c),
+            Value::Int(stored_version(i64::from(version), "array write")?),
+        ];
         p.push(pt_id.map(Value::BigInt).unwrap_or(Value::Null));
         push_axis4(&mut p, axis_ids);
         p.push(payload);
@@ -1779,7 +1781,7 @@ fn write_array(
             Value::BigInt(key.alternative_id),
             pt_id.map(Value::BigInt).unwrap_or(Value::Null),
             Value::BigInt(c),
-            Value::SmallInt(version as i16),
+            Value::Int(stored_version(i64::from(version), "array write")?),
         ];
         push_axis4(&mut p, axis_ids);
         p.push(payload);
@@ -1819,8 +1821,23 @@ fn copy_array_preimage(
     Ok(conn.prepare_cached(sql)?.execute(params![c, array_id])?)
 }
 
-fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u16, DbError> {
-    let v: i32 = conn
+/// A version for the INTEGER `version` column: `v` must be in
+/// `1..=i32::MAX`. Checked, so a key with more versions than the column holds
+/// fails loudly instead of wrapping (the SMALLINT column of schema 0.6 wrapped
+/// silently at 32 768 on the array path).
+pub(crate) fn stored_version(v: i64, what: &str) -> Result<i32, DbError> {
+    i32::try_from(v).ok().filter(|v| *v >= 1).ok_or_else(|| {
+        DbError::Internal(format!("{what}: version {v} out of range (1..=2147483647)"))
+    })
+}
+
+/// A stored version (from [`stored_version`], so `>= 1`) as the API's `u32`.
+fn api_version(v: i32) -> u32 {
+    u32::try_from(v).unwrap_or(0)
+}
+
+fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u32, DbError> {
+    let v: i64 = conn
         .prepare_cached(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM ( \
                 SELECT version FROM value_array \
@@ -1840,7 +1857,7 @@ fn next_version_array(conn: &Connection, key: &ValueKey) -> Result<u16, DbError>
             ],
             |r| r.get(0),
         )?;
-    Ok(v as u16)
+    Ok(api_version(stored_version(v, "array write")?))
 }
 
 /// One key of a set-based array write (the array counterpart of
@@ -1894,7 +1911,7 @@ const ARRAY_UPDATE_SQL: &str =
        parameter_type_id = u.pt, axis1_id = u.a1, axis2_id = u.a2, axis3_id = u.a3, \
        axis4_id = u.a4, values = u.vals, values_int = NULL, v_min = u.mn, v_max = u.mx, \
        content_hash = u.h \
-     FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::SMALLINT[]) AS version, \
+     FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::INTEGER[]) AS version, \
              unnest(?::BIGINT[]) AS pt, unnest(?::BIGINT[]) AS a1, unnest(?::BIGINT[]) AS a2, \
              unnest(?::BIGINT[]) AS a3, unnest(?::BIGINT[]) AS a4, \
              unnest(?::DOUBLE[][]) AS vals, unnest(?::DOUBLE[]) AS mn, \
@@ -1911,7 +1928,7 @@ const ARRAY_INSERT_SQL: &str = "INSERT INTO value_array \
        u.vals, NULL, u.mn, u.mx, u.h \
      FROM (SELECT unnest(?::BIGINT[]) AS id, unnest(?::BIGINT[]) AS e, \
              unnest(?::BIGINT[]) AS p, unnest(?::BIGINT[]) AS a, unnest(?::BIGINT[]) AS pt, \
-             unnest(?::SMALLINT[]) AS version, unnest(?::BIGINT[]) AS a1, \
+             unnest(?::INTEGER[]) AS version, unnest(?::BIGINT[]) AS a1, \
              unnest(?::BIGINT[]) AS a2, unnest(?::BIGINT[]) AS a3, unnest(?::BIGINT[]) AS a4, \
              unnest(?::DOUBLE[][]) AS vals, unnest(?::DOUBLE[]) AS mn, \
              unnest(?::DOUBLE[]) AS mx, unnest(?::UBIGINT[]) AS h) u";
@@ -2033,7 +2050,7 @@ fn write_array_round(
         }
     }
     let equal = array_payloads_equal(conn, &cands)?;
-    let unchanged: Vec<Option<u16>> = w
+    let unchanged: Vec<Option<u32>> = w
         .iter()
         .map(|a| match live.get(&triple(&a.key)) {
             Some(&(Live::Array(id), _)) if equal.contains(&id) => meta.get(&id).map(|m| m.version),
@@ -2051,11 +2068,11 @@ fn write_array_round(
     }
 
     // --- Versions and the UPDATE / INSERT split by the precedence tier. ---
-    let mut versions: Vec<i16> = Vec::with_capacity(n);
+    let mut versions: Vec<i32> = Vec::with_capacity(n);
     for a in w {
         let v = max_version.get(&triple(&a.key)).copied().unwrap_or(0) + 1;
         versions
-            .push(i16::try_from(v).map_err(|_| {
+            .push(stored_version(v, "array batch").map_err(|_| {
                 DbError::Internal(format!("array batch: version {v} out of range"))
             })?);
     }
@@ -2123,7 +2140,7 @@ fn write_array_round(
             Some(v) => unchanged_outcome(Tier::Array, *v, (a.axes_created, a.axes_reused), 0),
             None => WriteOutcome {
                 tier: Some(Tier::Array),
-                version: version as u16,
+                version: api_version(version),
                 rows_written: 1,
                 rows_closed,
                 axes_created: a.axes_created,
@@ -2144,7 +2161,7 @@ fn array_cols(
     w: &[ArrayWrite],
     h: &[u64],
     idx: &[usize],
-    versions: &[i16],
+    versions: &[i32],
     key: bool,
 ) -> Vec<Value> {
     let col = |f: &dyn Fn(&ArrayWrite) -> Option<i64>| -> Value {
@@ -2157,9 +2174,9 @@ fn array_cols(
         p.push(col(&|a| Some(a.key.parameter_definition_id)));
         p.push(col(&|a| Some(a.key.alternative_id)));
         p.push(col(&|a| a.parameter_type_id));
-        p.push(list(idx, |&i| Value::SmallInt(versions[i])));
+        p.push(list(idx, |&i| Value::Int(versions[i])));
     } else {
-        p.push(list(idx, |&i| Value::SmallInt(versions[i])));
+        p.push(list(idx, |&i| Value::Int(versions[i])));
         p.push(col(&|a| a.parameter_type_id));
     }
     for d in 0..4 {
@@ -2387,7 +2404,7 @@ struct ProbeCell {
     /// The current cell's payload ([`LongCells::pack`]), when `cur` is
     /// [`CUR_CMP`].
     payload: u64,
-    version: u16,
+    version: u32,
     cur: u8,
 }
 
@@ -2473,7 +2490,7 @@ impl LongCells {
     fn push(
         &mut self,
         pos: [i32; 4],
-        version: u16,
+        version: u32,
         current: Option<(CellMeta, Option<StoredCell>)>,
     ) {
         let (cur, payload) = match current {
@@ -2696,7 +2713,9 @@ impl<'a> ProbeCols<'a> {
             self.pos[2].value(r),
             self.pos[3].value(r),
         ];
-        let version = self.version.value(r) as u16;
+        // INTEGER >= 1 by construction; a negative stored version (direct
+        // SQL) reads as 0, which only makes the next version 1.
+        let version = u32::try_from(self.version.value(r)).unwrap_or(0);
         if self.flag.value(r) == 0 {
             cells.push(pos, version, None);
             return;
@@ -2772,7 +2791,7 @@ struct LongDiff {
     /// New cells to insert (changed or added): the row index into the
     /// value's rows and the cell's version (its position's max + 1, or 1),
     /// in position order.
-    insert: Vec<(u32, u16)>,
+    insert: Vec<(u32, u32)>,
     /// Current cells left as they are (equal to the new cell).
     kept: usize,
     /// Their positions while there are at most [`LONG_INSERT_CHUNK`]
@@ -2780,7 +2799,7 @@ struct LongDiff {
     /// of a one-key close-out ([`LONG_CLOSE_EXCEPT_SQL`]).
     keep: Option<Vec<[i32; 4]>>,
     /// The highest version among the kept cells.
-    kept_version: u16,
+    kept_version: u32,
     /// Every current cell is closed: the close-out is the key-level
     /// statement (the whole-value path, or a diff that changed every cell;
     /// the same rows either way).
@@ -2840,6 +2859,8 @@ impl LongDiff {
                         if c.cur != CUR_NONE {
                             d.close.push(c.pos);
                         }
+                        // Saturates at u32::MAX; `LongColumns::push`
+                        // refuses anything above i32::MAX, so this never wraps.
                         d.insert.push((r, c.version.saturating_add(1)));
                     }
                     i += 1;
@@ -2862,7 +2883,7 @@ impl LongDiff {
 
     /// The version a write of this diff reports: the highest version among
     /// the key's current cells after it.
-    fn version(&self) -> u16 {
+    fn version(&self) -> u32 {
         self.insert
             .iter()
             .map(|&(_, v)| v)
@@ -3345,7 +3366,7 @@ impl LongKeys {
 #[derive(Default)]
 struct LongColumns {
     k: Vec<i32>,
-    version: Vec<i16>,
+    version: Vec<i32>,
     pos: [Vec<i32>; 4],
     dt: [Vec<Option<i64>>; 4],
     num: [Vec<Option<i64>>; 4],
@@ -3367,19 +3388,19 @@ impl LongColumns {
         &mut self,
         rows: &[crate::types::LongRow],
         axes: &[CanonicalAxis],
-        inserts: &[(u32, u16)],
+        inserts: &[(u32, u32)],
         k: i32,
-    ) -> Result<u16, DbError> {
-        let mut max_version = 0u16;
+    ) -> Result<u32, DbError> {
+        let mut max_version = 0u32;
         for &(r, version) in inserts {
             let row = &rows[r as usize];
             let pos = pad4_pos(&row.positions);
-            let v16 = i16::try_from(version).map_err(|_| {
+            let v32 = stored_version(i64::from(version), "long batch").map_err(|_| {
                 DbError::Internal(format!("long batch: version {version} out of range"))
             })?;
             max_version = max_version.max(version);
             self.k.push(k);
-            self.version.push(v16);
+            self.version.push(v32);
             // Per-dimension index accelerators, derived from the bound axis at
             // the cell's position (audited by audit_index_accelerator; never
             // authoritative). NULL beyond the declared rank.
@@ -3457,7 +3478,7 @@ impl LongColumns {
     fn params(&self, r: std::ops::Range<usize>) -> Vec<Value> {
         let mut p: Vec<Value> = Vec::with_capacity(22);
         p.push(list(clip(&self.k, &r), |&v| Value::Int(v)));
-        p.push(list(clip(&self.version, &r), |&v| Value::SmallInt(v)));
+        p.push(list(clip(&self.version, &r), |&v| Value::Int(v)));
         for d in 0..4 {
             p.push(list(clip(&self.pos[d], &r), |&v| Value::Int(v)));
         }
@@ -3499,7 +3520,7 @@ const LONG_INSERT_SQL: &str = "INSERT INTO value_long \
        u.i1_dt, u.i1_num, u.i2_dt, u.i2_num, u.i3_dt, u.i3_num, u.i4_dt, u.i4_num, \
        u.value_kind, u.v_float, u.v_int, u.v_bool, u.v_str, u.v_datetime, \
        u.v_dur_months, u.v_dur_micros \
-     FROM (SELECT unnest(?::INTEGER[]) AS k, unnest(?::SMALLINT[]) AS version, \
+     FROM (SELECT unnest(?::INTEGER[]) AS k, unnest(?::INTEGER[]) AS version, \
        unnest(?::INTEGER[]) AS i1_pos, unnest(?::INTEGER[]) AS i2_pos, \
        unnest(?::INTEGER[]) AS i3_pos, unnest(?::INTEGER[]) AS i4_pos, \
        make_timestamp(unnest(?::BIGINT[])) AS i1_dt, unnest(?::BIGINT[]) AS i1_num, \
@@ -3918,7 +3939,7 @@ impl CurRow {
 
 /// An unchanged write's outcome: the current tier and version, nothing
 /// written or closed.
-fn unchanged_outcome(tier: Tier, version: u16, axes: (usize, usize), cells: usize) -> WriteOutcome {
+fn unchanged_outcome(tier: Tier, version: u32, axes: (usize, usize), cells: usize) -> WriteOutcome {
     WriteOutcome {
         tier: Some(tier),
         version,
@@ -4160,7 +4181,7 @@ mod tests {
         let mut keys = LongKeys::default();
         let mut cols = LongColumns::default();
         let k = keys.push(&w).unwrap();
-        let inserts: Vec<(u32, u16)> = (0..n as u32).map(|r| (r, 1)).collect();
+        let inserts: Vec<(u32, u32)> = (0..n as u32).map(|r| (r, 1)).collect();
         cols.push_cells(w.rows(), &w.value.axes, &inserts, k)
             .unwrap();
         (keys, cols)

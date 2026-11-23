@@ -1,7 +1,7 @@
 # Value canonical-encoding conformance vectors
 
 Language-neutral test vectors for the **value** canonical byte encoding and its
-64-bit content hash (`specs/canonical_encoding.md` §9, OPEN-7). Any
+64-bit content hash ([`docs/dev/canonical_encoding.md`](../../docs/dev/canonical_encoding.md) §9). Any
 implementation MUST reproduce `expected_canonical_hex` and `expected_hash_u64`
 byte-for-byte. Runners:
 
@@ -10,7 +10,7 @@ byte-for-byte. Runners:
   re-derives the same bytes and XXH3-64/seed-0 hash from the spec, sharing no
   code with Rust (run in CI by `crates/nodal-db-core/tests/python_oracle.rs`).
 
-OPEN-7 (jkiviluo, 2026-08-17): the value encoding folds in the identity **key**
+The value encoding (spec §9.6) folds in the identity **key**
 (entity/parameter/alternative) and the position/**shape** (axis content hashes +
 per-cell long positions), then the measure component-wise / populated-columns-
 only (§9.4). Value equality = same key + shape + measure.

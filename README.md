@@ -8,6 +8,18 @@ energy-system modelling. Documentation:
 <https://nodal-tools.github.io/nodal-db/> (sources in `docs/`); see
 `CONTRIBUTING.md` for development setup.
 
+## Versions and compatibility
+
+Release 0.1.0 is the first public release; the 0.x releases are for test
+users. A release carries four versions: the package version (semver,
+shared by the crates, the `nodal-db` CLI and the `nodal-db` Python
+package), the schema version of the files it writes (an integer, now
+`7`), the read-surface contract (`SELECT * FROM nodal_read_surface()`)
+and the bulk import format version (`1.0`). Through 0.x a new schema
+version means re-creating files (init + import, no migrations);
+migrations start at 1.0.0. Details:
+[Versions and compatibility](docs/versions.md).
+
 ## Testing tiers
 
 Managed with [`just`](https://github.com/casey/just); recipes in `justfile`.
@@ -84,12 +96,12 @@ The schema exposes read macros and audit views rather than raw tables — prefer
 these:
 
 ```sql
-SHOW TABLES;                                    -- everything (36 tables, 66 views, macros)
+SHOW TABLES;                                    -- every table and view
 SELECT * FROM read_parameter('<class>', '<parameter>');  -- values, any tier, all alternatives
 SELECT * FROM value_rows;                        -- current values as long rows
 SELECT * FROM value_cells;                       -- array/long cells expanded
 SELECT * FROM audit_health;                      -- integrity + maintenance health, one row
-SELECT * FROM "commit" ORDER BY id;              -- the write/version history (user, message, time)
+SELECT * FROM commit_log ORDER BY id;            -- the write/version history (user, message, UTC time)
 ```
 
 Note: `cargo test` builds throwaway DBs in tempdirs (gone after the run) — use

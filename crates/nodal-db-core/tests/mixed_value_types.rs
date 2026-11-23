@@ -658,7 +658,7 @@ fn indexed(name: &str, kind: &str) -> TypeDecl {
 }
 
 /// A rank-1 batch for `entity` over dimension `dim` (its column, typed by
-/// `index`), with optional `spinal:label_domain` field metadata.
+/// `index`), with optional `nodal:label_domain` field metadata.
 fn dim_batch(
     entity: &str,
     dim: &str,
@@ -671,7 +671,7 @@ fn dim_batch(
     if let Some(labels) = metadata_domain {
         let js = serde_json::to_string(labels).unwrap();
         field = field.with_metadata(std::collections::HashMap::from([(
-            "spinal:label_domain".to_string(),
+            "nodal:label_domain".to_string(),
             js,
         )]));
     }

@@ -734,10 +734,25 @@ def main():
     comp_cls = new_class("component")
     plant_1 = new_entity(plant_cls, "plant_1")
     gen_1 = new_entity(comp_cls, "gen_1")
-    realizes_cls = new_class("realizes_plant")  # reserved-name marker prefix
+    realizes_cls = new_class("plant_refinement")
     con.execute("INSERT INTO entity_class_dimension (entity_class_id, position,"
                 " dimension_class_id, valid_from_commit) VALUES (?, 1, ?, ?), (?, 2, ?, ?)",
                 [realizes_cls, plant_cls, c2, realizes_cls, comp_cls, c2])
+    # a refinement class is one the core lists (never a name rule); the
+    # core writes the list in exactly this form
+    insert("database_property", "key, value, owner, valid_from_commit",
+           ["refinement_classes", f"[{realizes_cls}]", "core", c2])
+    # a class merely NAMED like the old marker prefix is not one
+    decoy_cls = new_class("realizes_decoy")
+    con.execute("INSERT INTO entity_class_dimension (entity_class_id, position,"
+                " dimension_class_id, valid_from_commit) VALUES (?, 1, ?, ?), (?, 2, ?, ?)",
+                [decoy_cls, plant_cls, c2, decoy_cls, comp_cls, c2])
+    gen_2 = new_entity(comp_cls, "gen_2")
+    d_link = new_entity(decoy_cls, "plant_1__gen_2")
+    insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
+           [d_link, 1, plant_1, c2])
+    insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
+           [d_link, 2, gen_2, c2])
     r_link = new_entity(realizes_cls, "plant_1__gen_1")
     insert("entity_element", "entity_id, position, element_entity_id, valid_from_commit",
            [r_link, 1, plant_1, c2])
@@ -1080,6 +1095,8 @@ def main():
           ra1.get(plant_1) == (False, "own"), str(ra1.get(plant_1)))
     check("realizes: deactivation propagates coarse->fine (gen_1 inactive in s1)",
           ra1.get(gen_1) == (False, "propagated"), str(ra1.get(gen_1)))
+    check("realizes: a class named 'realizes_…' but not listed does not propagate (gen_2)",
+          ra1.get(gen_2) == (True, "default"), str(ra1.get(gen_2)))
     ra0 = {e: a for e, a in allrows(
         "SELECT entity_id, active FROM entity_activation_resolved WHERE scenario_id = ?", s0)}
     check("realizes: fine stays active where coarse is active (gen_1 on in s0)",
@@ -1250,6 +1267,7 @@ def main():
           one("SELECT value FROM database_property_current WHERE lower(key) = 'schema_version'")[0]
           == schema_build.SCHEMA_VERSION)
     boot = allrows("SELECT key, owner, valid_from_commit FROM database_property"
+                   " WHERE valid_from_commit = (SELECT min(id) FROM commit)"
                    " ORDER BY key")
     check("bootstrap: exactly the two core properties at the bootstrap commit",
           [(k, o) for k, o, _ in boot] == [("db_identity", "core"), ("schema_version", "core")]
@@ -1281,11 +1299,16 @@ def main():
         "property: an unknown owner tag rejected",
         "INSERT INTO database_property (key, value, owner, valid_from_commit)"
         " VALUES ('title', 'x', 'admin', ?)", [c3])
+    expect_constraint(
+        "property: a key in the reserved 'nodal:' namespace stored as owner 'tool' rejected",
+        "INSERT INTO database_property (key, value, owner, valid_from_commit)"
+        " VALUES ('Nodal:future', 'x', 'tool', ?)", [c3])
     con.execute("BEGIN")
     con.execute("INSERT INTO database_property (key, value, owner, valid_from_commit)"
-                " VALUES ('title', 'T', 'user', ?), ('flextool:frozen', '1', 'tool', ?)", [c3, c3])
+                " VALUES ('title', 'T', 'user', ?), ('flextool:frozen', '1', 'tool', ?),"
+                " ('nodal:future', '1', 'core', ?)", [c3, c3, c3])
     con.execute("ROLLBACK")
-    check("property: user and tool keys with matching owners accepted", True)
+    check("property: user, tool and 'nodal:' core keys with matching owners accepted", True)
 
     # ---- metadata link CHECKs and keys
     expect_constraint(
@@ -1303,7 +1326,14 @@ def main():
     expect_constraint(
         "object link: an unknown object type rejected",
         "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
-        " valid_from_commit) VALUES ('commit', 1, 'pair', 1, ?)", [c3])
+        " valid_from_commit) VALUES ('axis', 1, 'pair', 1, ?)", [c3])
+    con.execute("BEGIN")
+    con.execute("INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id,"
+                " valid_from_commit) VALUES ('commit', 1, 'pair', 1, ?), ('list_value', 1, 'pair', 1, ?),"
+                " ('class_set', 1, 'pair', 1, ?), ('display_mode', 1, 'pair', 1, ?)", [c3] * 4)
+    con.execute("ROLLBACK")
+    check("object link: the reserved object types commit, list_value, class_set and"
+          " display_mode are accepted by the DDL", True)
     expect_constraint(
         "value link: a license target rejected (values reach licenses through sources)",
         "INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id,"
@@ -1666,24 +1696,35 @@ def main():
     c6 = new_commit(con, "F10: time-pattern indexed parameter")
     ax_tp = nextval(con, "seq_axis")
     con.execute("INSERT INTO axis (id, kind, length, content_hash)"
-                " VALUES (?, 'time_pattern', 2, 45)", [ax_tp])
-    for pos, ordv, terms in [(0, 1, [("M", 1, 6), ("h", 1, 24)]), (1, 2, [("M", 7, 12)])]:
-        for tno, (u, a, b) in enumerate(terms, start=1):
-            con.execute("INSERT INTO axis_time_pattern VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        [ax_tp, pos, ordv, tno, u, a, b])
+                " VALUES (?, 'time_pattern', 3, 45)", [ax_tp])
+    # (term, clause) per position: terms of a clause intersect, clauses union
+    # (position 2 is Spine's M1-4;WD1-5,M9-10).
+    for pos, ordv, terms in [(0, 1, [("M", 1, 6, 0), ("h", 1, 24, 1)]),
+                             (1, 2, [("M", 7, 12, 0)]),
+                             (2, 3, [("M", 1, 4, 0), ("WD", 1, 5, 0), ("M", 9, 10, 1)])]:
+        for tno, (u, a, b, cl) in enumerate(terms, start=1):
+            con.execute("INSERT INTO axis_time_pattern (axis_id, pos, ordinal, term_no, clause_no,"
+                        " unit, range_start, range_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        [ax_tp, pos, ordv, tno, cl, u, a, b])
     fee = new_pd(node, "seasonal_fee")
-    for pos, v in [(0, 10.0), (1, 20.0)]:
+    for pos, v in [(0, 10.0), (1, 20.0), (2, 30.0)]:
         write_long_cell(con, c6, node_a, fee, base, [ax_tp], [pos], "float", "v_float", v)
     con.execute("COMMIT")
     r = dict(allrows("SELECT idx1_text, v_float FROM read_parameter('node', 'seasonal_fee')"))
-    check("F10: time-pattern cells render as unioned pattern text",
-          r == {"M1-6,h1-24": 10.0, "M7-12": 20.0}, str(r))
+    check("F10: time-pattern cells render clauses with ',' and their terms with ';'",
+          r == {"M1-6,h1-24": 10.0, "M7-12": 20.0, "M1-4;WD1-5,M9-10": 30.0}, str(r))
     expect_constraint(
         "F10: out-of-range pattern term h17-26 rejected (#1569)",
-        "INSERT INTO axis_time_pattern VALUES (?, 1, 2, 2, 'h', 17, 26)", [ax_tp])
+        "INSERT INTO axis_time_pattern (axis_id, pos, ordinal, term_no, clause_no, unit,"
+        " range_start, range_end) VALUES (?, 1, 2, 2, 0, 'h', 17, 26)", [ax_tp])
     expect_constraint(
         "F10: unknown pattern unit 'q' rejected",
-        "INSERT INTO axis_time_pattern VALUES (?, 1, 2, 2, 'q', 1, 2)", [ax_tp])
+        "INSERT INTO axis_time_pattern (axis_id, pos, ordinal, term_no, clause_no, unit,"
+        " range_start, range_end) VALUES (?, 1, 2, 2, 0, 'q', 1, 2)", [ax_tp])
+    expect_constraint(
+        "F10: negative clause number rejected",
+        "INSERT INTO axis_time_pattern (axis_id, pos, ordinal, term_no, clause_no, unit,"
+        " range_start, range_end) VALUES (?, 1, 2, 2, -1, 'h', 1, 2)", [ax_tp])
 
     # ---- F10 gap: default-value fallback in completeness
     before = one("SELECT count(*) FROM audit_missing_required_value WHERE entity = 'node_c'")[0]

@@ -2,7 +2,7 @@
 """The oracle's own NFC (Unicode Normalization Form C), Unicode 16.0.0.
 
 An independent implementation of UAX #15 for the conformance oracle
-(spec `canonical_encoding.md` §3.4.1.1): it normalizes with the vendored
+(`docs/dev/canonical_encoding.md` §3.4.1.1): it normalizes with the vendored
 table `conformance/unicode/nfc_table_16.0.0.txt` and its own code, never
 with CPython's `unicodedata` (whose Unicode version is the interpreter's:
 15.0.0 on Python 3.12) and never with the core (`nodal_db`): the oracle is

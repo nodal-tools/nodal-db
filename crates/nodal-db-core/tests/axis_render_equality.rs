@@ -708,7 +708,8 @@ fn raw_sql_additions(db: &Path) {
           (VALUES (0, TIMESTAMP '2025-01-01', TIMESTAMP '2026-01-01', 2025.0),
                   (1, TIMESTAMP '2026-01-01', TIMESTAMP '2027-01-01', NULL),
                   (2, TIMESTAMP '2027-01-01', TIMESTAMP '2030-01-01', 2028.5)) v(p, s, e, y) WHERE k = 0;
-        INSERT INTO axis_time_pattern SELECT id, p, o, t, u, a, b FROM sx,
+        INSERT INTO axis_time_pattern (axis_id, pos, ordinal, term_no, clause_no, unit, range_start, range_end)
+          SELECT id, p, o, t, t - 1, u, a, b FROM sx,
           (VALUES (0, 1, 1, 'M', 1, 3), (0, 1, 2, 'h', 1, 12), (1, 0, 1, 'WD', 6, 7)) v(p, o, t, u, a, b) WHERE k = 1;
         INSERT INTO axis_integer SELECT id, p, n FROM sx,
           (VALUES (0, -100), (1, 3), (2, 4), (3, 99999999999)) v(p, n) WHERE k = 2;

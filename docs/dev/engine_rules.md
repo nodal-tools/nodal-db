@@ -641,3 +641,34 @@ is stored in NFC and matches by either spelling; NFD labels read back in NFC; st
 write order) and `crates/nodal-db-core/tests/text_nfc.rs` (the crate's
 tables against the vendored Unicode 16.0.0 data for every code point,
 and `text::nfc` against the official NormalizationTest).
+
+## 11. Types and names stay portable to other engines
+
+**Rule.** The file format is DuckDB's, but its contents are kept
+expressible in other SQL engines:
+
+- **No new unsigned columns.** The three `content_hash` columns
+  (`axis`, `value_array`, `value_array_hist`) are the only `UBIGINT`s.
+  An engine without an unsigned 64-bit type stores the same 64 bits as a
+  signed `BIGINT` (two's complement: `v ≥ 2^63` becomes `v − 2^64`).
+  Hashes are compared for equality only: never order, range-filter or
+  aggregate them, in the core or in a view. The conformance vectors keep
+  them as decimal `u64`
+  ([Canonical encoding §2](canonical_encoding.md)).
+- **No new identifiers that are SQL keywords.** The table `commit` and
+  the columns `user`, `timestamp` and `values` predate this rule and
+  stay. DuckDB accepts them unquoted in most places, so the DDL and some
+  core SQL do not quote them; SQL meant for readers (docs, examples,
+  error hints) quotes them (`"commit"`, `"user"`, `"timestamp"`,
+  `"values"`), and the read-surface docs tell readers to.
+  In PostgreSQL an unquoted `user` is the session user (a silent wrong
+  answer) and `values` must be quoted.
+
+**Why.** A mirror of a file in another engine (an export, a server
+copy) should need a type map, not a redesign. The hashes are write-path
+accelerators that can be recomputed, so the bit-cast costs nothing;
+equality is the only operation that survives the signed reinterpretation
+unchanged.
+
+**Guards.** None automated: a review rule for DDL changes. The vectors
+in `conformance/` pin the hash values as unsigned decimals.

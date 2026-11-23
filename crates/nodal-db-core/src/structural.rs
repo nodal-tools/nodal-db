@@ -34,7 +34,7 @@ use crate::entity_tuple::{element_names, TupleIndex};
 use crate::error::{DbError, TemplateStampedRenameDetails, TemplateStampedRenameItem};
 use crate::object_delete::find_element;
 use crate::property;
-use crate::template::ir::{normalize_audit_rules, AuditRules};
+use crate::template::ir::{normalize_audit_rules, parse_audit_rules_doc};
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
     insert_class_dim_row, insert_class_row, insert_definition_row,
@@ -979,7 +979,7 @@ pub(crate) fn rewrite_name_documents(
     }
 
     if let Some(doc) = audit_rules {
-        if let Ok(mut rules) = serde_json::from_str::<AuditRules>(&doc) {
+        if let Ok(mut rules) = parse_audit_rules_doc(&doc) {
             let mut changed = false;
             // Removals, on the pre-call names.
             if !removed.is_empty() {

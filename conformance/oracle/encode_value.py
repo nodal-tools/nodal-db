@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Independent second oracle for the VALUE canonical encoding (spec §9, OPEN-7).
+"""Independent second oracle for the VALUE canonical encoding (spec §9).
 
 Sibling of `encode_axis.py`: it re-derives every `conformance/value_vectors/
 *.json` vector's canonical byte string AND its XXH3-64/seed-0 hash *from the
-spec* (`specs/canonical_encoding.md` §9), sharing NO code with the Rust
+spec* (`docs/dev/canonical_encoding.md` §9), sharing NO code with the Rust
 `encode_value`. Two independent implementations agreeing byte- and hash-for-hash
 is the point (CLAUDE.md invariant 2).
 
-The value encoding (OPEN-7, jkiviluo 2026-08-17) folds in the identity KEY and
+The value encoding (spec §9.6) folds in the identity KEY and
 the position/shape (axis content hashes + per-cell positions), then the measure
 component-wise / populated-columns-only (§9.4).
 

@@ -2,7 +2,7 @@
 //!
 //! Pure, deterministic, and free of any `duckdb` use: this module is the one
 //! canonicalizer's serialization half (`CLAUDE.md` invariant 2). It implements
-//! `specs/canonical_encoding.md` to the byte — two independent implementations
+//! `docs/dev/canonical_encoding.md` to the byte — two independent implementations
 //! that feed the same canonical content MUST produce identical bytes and thus
 //! identical hashes. The machine-checkable oracle is
 //! `conformance/encoding_vectors/*.json`, driven by `tests/encoding_vectors.rs`.
@@ -60,12 +60,27 @@ pub struct TimePatternTerm {
     pub range_end: i16,
 }
 
-/// One `time_pattern` position: a set of terms that union together (spec §7.7).
-/// `ordinal` is a property of the position, read from `term_no = 1` (M4).
+/// One `time_pattern` position (spec §7.7): a union of clauses, each clause
+/// an intersection of one or more terms (`M1-4;WD1-5,M9-10` is two clauses:
+/// months 1-4 AND weekdays 1-5, OR months 9-10). Stored as one
+/// `axis_time_pattern` row per term, `term_no` 1..n over the position and
+/// `clause_no` 0..k-1 over its clauses. `ordinal` is a property of the
+/// position, read from `term_no = 1` (M4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimePatternPos {
     pub ordinal: i32,
-    pub terms: Vec<TimePatternTerm>,
+    pub clauses: Vec<Vec<TimePatternTerm>>,
+}
+
+impl TimePatternPos {
+    /// A position that is a union of single terms, one clause per term (the
+    /// only shape before clauses existed; a single term is clause 0).
+    pub fn union_of(ordinal: i32, terms: Vec<TimePatternTerm>) -> TimePatternPos {
+        TimePatternPos {
+            ordinal,
+            clauses: terms.into_iter().map(|t| vec![t]).collect(),
+        }
+    }
 }
 
 /// The kind body (spec §7). The variant fixes both the kind tag (§5.1) and the
@@ -104,6 +119,11 @@ pub enum EncodeError {
     /// contrast, canonicalize NaN — see [`NanPolicy`].)
     #[error("NaN is not allowed as an index coordinate")]
     NanForbidden,
+    /// A time-pattern clause with no terms (spec §7.7): a clause is the
+    /// intersection of one or more terms, so an empty one has no meaning and
+    /// no stored form.
+    #[error("a time-pattern clause must have at least one term")]
+    EmptyTimePatternClause,
 }
 
 impl CanonicalAxis {
@@ -326,11 +346,17 @@ pub fn encode_axis(axis: &CanonicalAxis) -> Result<Vec<u8>, EncodeError> {
             );
             for p in positions {
                 out.extend_from_slice(&p.ordinal.to_le_bytes());
-                out.extend_from_slice(&(p.terms.len() as u32).to_le_bytes());
-                for t in &p.terms {
-                    push_string(&mut out, &t.unit);
-                    out.extend_from_slice(&t.range_start.to_le_bytes());
-                    out.extend_from_slice(&t.range_end.to_le_bytes());
+                out.extend_from_slice(&(p.clauses.len() as u32).to_le_bytes());
+                for clause in &p.clauses {
+                    if clause.is_empty() {
+                        return Err(EncodeError::EmptyTimePatternClause);
+                    }
+                    out.extend_from_slice(&(clause.len() as u32).to_le_bytes());
+                    for t in clause {
+                        push_string(&mut out, &t.unit);
+                        out.extend_from_slice(&t.range_start.to_le_bytes());
+                        out.extend_from_slice(&t.range_end.to_le_bytes());
+                    }
                 }
             }
         }

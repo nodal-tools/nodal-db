@@ -2181,6 +2181,7 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
         };
         doc.remove("parameter_groups");
         doc.remove("parameter_group_membership");
+        doc.insert("version".into(), Value::from(ir::DOCUMENT_VERSION));
         if let Value::Object(sub) = &desired_presentation {
             for (k, v) in sub {
                 doc.insert(k.clone(), v.clone());
@@ -4677,6 +4678,7 @@ fn execute_step(
                 },
                 fx,
             )?;
+            crate::verbs::prune_refinement_classes(conn, c)?;
         }
         MigrationStep::DropValueList { list } => {
             let step_name = format!("drop_value_list {list}");

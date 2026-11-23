@@ -6,8 +6,11 @@
 //! through the retained `SELECT *` pre-image copy, while the stub form,
 //! which names `content_hash`, failed).
 //!
-//! The fixture is a current file relabelled `0.4-array-id`: the gate reads
-//! only the version, so the label is what it decides on.
+//! The fixture is a current file relabelled `0.6-metadata`, the last of the
+//! labelled pre-release versions (the version is a plain integer since the
+//! pre-0.1.0 format freeze): the gate reads only the version, so the label
+//! is what it decides on, and an older string-versioned file is refused by
+//! name.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +27,7 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WriteOptions, WriteReport};
 
-const OLD: &str = "0.4-array-id";
+const OLD: &str = "0.6-metadata";
 
 fn batch(entities: &[&str], t: Option<&[i64]>, vals: ArrayRef) -> RecordBatch {
     let mut fields = vec![Field::new("entity", DataType::Utf8, false)];
@@ -155,7 +158,8 @@ fn assert_refused(what: &str, r: Result<impl std::fmt::Debug, DbError>) {
             message,
         }) => {
             assert_eq!(found, OLD, "{what}");
-            assert_eq!(expected, SCHEMA_VERSION, "{what}");
+            assert_eq!(expected, SCHEMA_VERSION.to_string(), "{what}");
+            assert!(message.contains("\"0.6-metadata\""), "{what}: {message}");
             assert!(message.contains("write refused"), "{what}: {message}");
         }
         other => panic!("{what}: expected SchemaMismatch, got {other:?}"),
@@ -355,4 +359,120 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
         )
         .map(|_| ()),
     );
+}
+
+/// A REAL file of the last labelled schema (`0.6-metadata`), built from that
+/// schema's frozen DDL (`tests/fixtures/schema_0_6/`, the numbered files of
+/// main @ acfefa1, applied in order as its `schema/build.py` did), with an
+/// alternative, a class, an entity and a scalar value written in its own
+/// layout. Its tables and its read surface are both the old ones, so this
+/// build's views do not bind to it.
+fn real_0_6_file(dir: &Path) -> PathBuf {
+    let db = dir.join("real_0_6.duckdb");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schema_0_6");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&fixture)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "sql"))
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 17, "the frozen 0.6 schema");
+    let conn = Connection::open(&db).unwrap();
+    for f in files {
+        conn.execute_batch(&std::fs::read_to_string(f).unwrap())
+            .unwrap();
+    }
+    conn.execute_batch(
+        "INSERT INTO alternative (id, name, valid_from_commit)
+           VALUES (nextval('seq_alternative'), 'Base', 1);
+         INSERT INTO entity_class (id, name, valid_from_commit)
+           VALUES (nextval('seq_entity_class'), 'node', 1);
+         INSERT INTO entity (id, entity_class_id, name, valid_from_commit)
+           SELECT nextval('seq_entity'), id, 'a', 1 FROM entity_class;
+         INSERT INTO parameter_definition (id, entity_class_id, name, valid_from_commit)
+           SELECT nextval('seq_parameter_definition'), id, 'demand', 1 FROM entity_class;
+         INSERT INTO value_scalar (entity_id, parameter_definition_id, alternative_id,
+             valid_from_commit, version, value_kind, v_float)
+           SELECT e.id, p.id, a.id, 1, 1, 'float', 1.5
+           FROM entity e, parameter_definition p, alternative a;",
+    )
+    .unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM database_property WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, OLD);
+    conn.close().unwrap();
+    db
+}
+
+/// Reads and erasure of a real older-schema file are refused with
+/// `SchemaMismatch` naming its version, never a binder error from this
+/// build's views (which reference columns the old tables lack, e.g.
+/// `axis_time_pattern.clause_no`), and never the advice to refresh the
+/// views (a refresh of another schema version is refused too).
+#[test]
+fn reads_and_erasure_of_a_real_older_schema_file_are_refused_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = real_0_6_file(dir.path());
+    let refused = |what: &str, r: Result<(), DbError>| match r {
+        Err(DbError::SchemaMismatch { found, message, .. }) => {
+            assert_eq!(found, OLD, "{what}");
+            assert!(!message.contains("Binder"), "{what}: {message}");
+            assert!(!message.contains("refresh-views"), "{what}: {message}");
+        }
+        other => panic!("{what}: expected SchemaMismatch, got {other:?}"),
+    };
+    refused(
+        "generic read",
+        nodal_db_core::conn::with_read(&db, |c| {
+            Ok(c.query_row("SELECT count(*) FROM run", [], |r| r.get::<_, i64>(0))?)
+        })
+        .map(|_| ()),
+    );
+    refused(
+        "retrying generic read",
+        nodal_db_core::conn::with_read_retrying(&db, |c| {
+            Ok(c.query_row("SELECT count(*) FROM value_rows", [], |r| {
+                r.get::<_, i64>(0)
+            })?)
+        })
+        .map(|_| ()),
+    );
+    refused(
+        "read_parameter",
+        nodal_db_core::api::read_parameter(&db, "node", "demand", "Base").map(|_| ()),
+    );
+    refused(
+        "read_values",
+        nodal_db_core::api::read_values(&db, "node", "demand", &["a"], None).map(|_| ()),
+    );
+    refused(
+        "erase_alternative",
+        nodal_db_core::erasure::erase_alternative(
+            &db,
+            &nodal_db_core::types::ObjectDeleteKey {
+                kind: nodal_db_core::types::ObjectKind::Alternative,
+                class: None,
+                target: nodal_db_core::types::ObjectRef::Name("Base".into()),
+            },
+            &nodal_db_core::erasure::EraseOpts::default(),
+            "tester",
+        )
+        .map(|_| ()),
+    );
+    refused(
+        "write",
+        commit(&db, vec![scalar("b", 2.0)], WriteOptions::default()).map(|_| ()),
+    );
+    // Nothing was installed or changed.
+    let conn = Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM value_scalar", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+    conn.close().unwrap();
 }

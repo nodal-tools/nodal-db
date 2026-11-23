@@ -144,12 +144,12 @@ do either.
 
     def segment(sink, cls, param, batch, n_segments):
         meta = {
-            "spinal:format": "spinal-db-bulk",
-            "spinal:format_version": "1.0",
-            "spinal:segment_count": str(n_segments),
-            "spinal:class": cls,
-            "spinal:parameter": param,
-            "spinal:form": "long",
+            "nodal:format": "nodal-db-bulk",
+            "nodal:format_version": "1.0",
+            "nodal:segment_count": str(n_segments),
+            "nodal:class": cls,
+            "nodal:parameter": param,
+            "nodal:form": "long",
         }
         schema = batch.schema.with_metadata(meta)
         with pa.ipc.new_stream(sink, schema) as w:   # one complete stream per segment
@@ -172,11 +172,6 @@ do either.
         segment(f, "node", "demand", demand, 2)
         segment(f, "unit", "capacity", capacity, 2)
     ```
-
-    !!! note
-        The metadata keys keep the `spinal:` prefix and the format name
-        `spinal-db-bulk` from the project's earlier name. They are part
-        of the frozen v1.0 format.
 
     Import it as one commit:
 
@@ -289,7 +284,7 @@ Label domains given by position (the `domains` argument) apply to the
 dimension that the first group with a label dimension at that position
 has. A group whose label dimension at that position has another name
 does not get that domain; give it its own in the column's
-`spinal:label_domain` field metadata. In a segment of one group nothing
+`nodal:label_domain` field metadata. In a segment of one group nothing
 changes: the `domains` argument wins over field metadata at the same
 position.
 
@@ -548,6 +543,39 @@ precedence.
     values, such as `CreateScenario` and `SetScenarioAlternatives`.
 
 The CLI has no scenario commands; use Python or Rust, or a template.
+
+#### Refinement links
+
+A refinement link says that two entities are the same real thing at two
+resolutions, for example a power plant of an energy-system model and the
+generator that represents it in a grid model. The link is an ordinary
+entity of a 2-D class whose element 1 is the coarse entity and element 2
+the fine one, and the class is marked as a **refinement class**. Then an
+explicit deactivation of the coarse entity (its own `entity_alternative`
+row) also switches off the fine one, in every scenario, unless the fine
+entity has its own row: `entity_activation_resolved` reports it as
+`active_source = 'propagated'`, and `realizes_edge` lists the
+(coarse, fine) pairs.
+
+A class is a refinement class only when it is marked; its name has no
+meaning. Mark or unmark one with:
+
+=== "Python"
+
+    ```python
+    db.set_refinement_class("plant_generator", True, user="alice")
+    ```
+
+=== "Rust"
+
+    `verbs::set_refinement_class(&db, "plant_generator", true, "alice")`.
+
+The class must have exactly two dimensions. The marks are stored in the
+core property `refinement_classes`, a JSON array of class ids
+(`[12,40]`), so they follow class renames; deleting or purging a marked
+class removes its id in the same commit. Templates do not carry the mark
+yet: a template can declare the class, and a program or the API marks it
+after the load (a template export does not include it either).
 
 ### Renaming objects and editing descriptions
 
@@ -1088,12 +1116,28 @@ physically; sources, licenses and pairs stay, with their history.
 Single-valued facts about the database live in `database_property`, one
 current value per key:
 
-- **core** keys the core writes (`schema_version`, `db_identity`, the
-  template stamp, `presentation`, `audit_rules`); a save cannot set them;
+- **core** keys the core writes; a save cannot set them:
+    - `schema_version` (see [Versions and compatibility](versions.md)),
+      `db_identity` (the file's identity UUID) and `created_by` (the
+      nodal-db build that created the file, e.g.
+      `nodal-db-core 0.1.0 (git 1a2b3c4d5e6f)` for a release build,
+      `(dev)` for a local one);
+    - the template stamp (`template_name`, `template_version`,
+      `template_content_hash`, `template_migration_step`,
+      `template_applied_commit`);
+    - `refinement_classes` (see [Refinement links](#refinement-links));
+    - `presentation` and `audit_rules`: JSON documents the core and the
+      editor share (parameter groups; conditional requirements). Their
+      shape is internal to nodal-db and may change in 0.x; each carries a
+      `"version"` member (now `1`) that changes when the shape does;
+    - every key that starts with `nodal:` (in any case), a namespace
+      reserved for future core keys;
 - **tool** keys `<tool>:<name>` a tool owns (e.g. `flextool:frozen`).
-  Every key with a `:` after its first character is a tool key, so a
-  CURIE-style key such as `dct:title` is owned by a tool named `dct`;
-  use the plain documented keys below for the dataset's own facts;
+  Every key with a `:` after its first character is a tool key, except
+  the reserved `nodal:` keys, so a CURIE-style key such as `dct:title`
+  is owned by a tool named `dct`; use the plain documented keys below for
+  the dataset's own facts. A tool uses its own name as the prefix (as
+  FlexTool does with `flextool:`);
 - **user** keys, everything else. Documented keys, with their crosswalk:
 
 | Key | Meaning | DCAT / Dublin Core / Frictionless |
@@ -1595,6 +1639,9 @@ writer. The conformance vectors in `conformance/` define them; any
 implementation that touches canonical data must reproduce them exactly.
 
 ### Reading: SQL is the interface
+
+Which versions a file and a build carry, and what a new release means
+for existing files, is on [Versions and compatibility](versions.md).
 
 Read through the views and table macros (`schema/070_*.sql` to
 `schema/130_*.sql`), not the base tables. The base-table layout is not a

@@ -360,13 +360,13 @@ fn seg_metadata(
     form: &str,
 ) -> HashMap<String, String> {
     HashMap::from([
-        ("spinal:format".into(), "spinal-db-bulk".into()),
-        ("spinal:format_version".into(), "1.0".into()),
-        ("spinal:segment_count".into(), n_segments.to_string()),
-        ("spinal:class".into(), class.to_string()),
-        ("spinal:parameter".into(), parameter.to_string()),
-        ("spinal:alternative".into(), ALT.into()),
-        ("spinal:form".into(), form.to_string()),
+        ("nodal:format".into(), "nodal-db-bulk".into()),
+        ("nodal:format_version".into(), "1.0".into()),
+        ("nodal:segment_count".into(), n_segments.to_string()),
+        ("nodal:class".into(), class.to_string()),
+        ("nodal:parameter".into(), parameter.to_string()),
+        ("nodal:alternative".into(), ALT.into()),
+        ("nodal:form".into(), form.to_string()),
     ])
 }
 

@@ -15,7 +15,7 @@ CREATE TABLE units_of_measure (
                                -- "capacity is a power, not an energy"; cold, inert (fitness 2b/T1.2)
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -33,7 +33,7 @@ CREATE TABLE parameter_value_list (
   description       VARCHAR,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_name VARCHAR GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN lower(name) END) VIRTUAL
@@ -57,7 +57,7 @@ CREATE TABLE list_value (
   v_dur_months INTEGER, v_dur_micros BIGINT,       -- duration pair (VMP Part 1, critique #9)
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_l  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_value_list_id END) VIRTUAL,
@@ -83,7 +83,7 @@ CREATE TABLE parameter_definition (
   retain_content          BOOLEAN NOT NULL DEFAULT TRUE,   -- FALSE = superseded rows become stubs (VMP Part 5)
   valid_from_commit       BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit         BIGINT REFERENCES commit(id),
-  version                 SMALLINT NOT NULL DEFAULT 1,
+  version                 INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id   BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL,
   cur_cls  BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_class_id END) VIRTUAL,
@@ -101,7 +101,7 @@ CREATE TABLE entity_parameter_unit (
   unit_id                 BIGINT NOT NULL,
   valid_from_commit       BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit         BIGINT REFERENCES commit(id),
-  version                 SMALLINT NOT NULL DEFAULT 1,
+  version                 INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_e BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN entity_id END) VIRTUAL,
   cur_p BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_definition_id END) VIRTUAL
@@ -117,13 +117,19 @@ CREATE TABLE parameter_type (
   parameter_definition_id BIGINT NOT NULL,
   value_kind              VARCHAR NOT NULL,
   rank                    TINYINT NOT NULL DEFAULT 0 CHECK (rank BETWEEN 0 AND 4),  -- rank cap = 4 (VMP binding decision)
-  aggregation             VARCHAR CHECK (aggregation IN ('point', 'mean', 'sum')),
-                          -- reserved cell_methods-style semantics slot; NULL = 'point' (VMP Part 7)
+  aggregation             VARCHAR CHECK (aggregation IN ('point', 'sum', 'mean',
+                            'maximum', 'maximum_absolute_value', 'median', 'mid_range',
+                            'minimum', 'minimum_absolute_value', 'mean_absolute_value',
+                            'mean_of_upper_decile', 'mode', 'range', 'root_mean_square',
+                            'standard_deviation', 'sum_of_squares', 'variance')),
+                          -- reserved semantics slot, not written yet; NULL = 'point'.
+                          -- The methods of CF cell_methods (CF conventions 1.11,
+                          -- Appendix E), so CF-style data fits without a schema change.
   expected_tier           VARCHAR CHECK (expected_tier IN ('array', 'long')),
                           -- audit-only, never enforcement (critique #8): surfaces raggedness at write time
   valid_from_commit       BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit         BIGINT REFERENCES commit(id),
-  version                 SMALLINT NOT NULL DEFAULT 1,
+  version                 INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_id BIGINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN id END) VIRTUAL
 );
@@ -141,7 +147,7 @@ CREATE TABLE parameter_type_dimension (
   kind              VARCHAR NOT NULL,
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),
-  version           SMALLINT NOT NULL DEFAULT 1,
+  version           INTEGER  NOT NULL DEFAULT 1,
   CHECK (valid_to_commit IS NULL OR valid_to_commit > valid_from_commit),  -- span coherence (critique F2)
   cur_t BIGINT  GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN parameter_type_id END) VIRTUAL,
   cur_p TINYINT GENERATED ALWAYS AS (CASE WHEN valid_to_commit IS NULL THEN position END) VIRTUAL

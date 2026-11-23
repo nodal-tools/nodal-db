@@ -796,7 +796,7 @@ pub(crate) fn refresh_before_write(conn: &Connection, db_path: &Path) {
         if !check.is_stale() {
             return None;
         }
-        if schema_version_on(conn)? != SCHEMA_VERSION {
+        if !crate::compaction::is_current_schema_version(&schema_version_on(conn)?) {
             return None;
         }
         let key = canonical_path_key(db_path);
@@ -875,7 +875,7 @@ pub fn refresh_read_surface(db: &Path, force: bool) -> Result<SurfaceReport, DbE
                 db.display().to_string()
             )));
         };
-        if found != SCHEMA_VERSION {
+        if !crate::compaction::is_current_schema_version(&found) {
             return Err(DbError::SchemaMismatch {
                 message: format!(
                     "refresh-views refused: database schema version {found:?} is not this \
@@ -945,6 +945,13 @@ pub(crate) fn prepare_read(
             overlaid: false,
         });
     }
+    // A stale surface may sit on tables of another schema version (a file
+    // made by an older nodal-db): this build's views do not bind to those
+    // tables, and a refresh is refused, so neither an overlay nor the
+    // refresh hint helps. Refuse with SchemaMismatch, naming the file's own
+    // version, before anything is installed. (A current surface implies the
+    // current schema, so the fast path above needs no check.)
+    crate::property::require_current(conn)?;
     let message = if check.status == SurfaceStatus::Newer {
         format!(
             "{}: its read surface ({}) is of a newer contract major than this nodal-db's \

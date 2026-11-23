@@ -308,7 +308,7 @@ fn write_run(conn: &Connection, c: i64, view: &View) -> Result<(), DbError> {
             "INSERT INTO entity \
                (id, entity_class_id, name, description, valid_from_commit, version) \
              SELECT unnest(?1::BIGINT[]), unnest(?2::BIGINT[]), unnest(?3::VARCHAR[]), \
-                    unnest(?4::VARCHAR[]), ?5, unnest(?6::SMALLINT[])",
+                    unnest(?4::VARCHAR[]), ?5, unnest(?6::INTEGER[])",
             params![
                 list(&older, &|_, id| Value::BigInt(id)),
                 list(&older, &|r, _| Value::BigInt(r.cid)),

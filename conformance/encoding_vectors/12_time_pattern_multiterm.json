@@ -3,36 +3,42 @@
     "body": {
       "positions": [
         {
-          "ordinal": 1,
-          "terms": [
-            {
-              "range_end": 3,
-              "range_start": 1,
-              "unit": "M"
-            },
-            {
-              "range_end": 17,
-              "range_start": 9,
-              "unit": "h"
-            }
-          ]
+          "clauses": [
+            [
+              {
+                "range_end": 3,
+                "range_start": 1,
+                "unit": "M"
+              }
+            ],
+            [
+              {
+                "range_end": 17,
+                "range_start": 9,
+                "unit": "h"
+              }
+            ]
+          ],
+          "ordinal": 1
         },
         {
-          "ordinal": 2,
-          "terms": [
-            {
-              "range_end": 5,
-              "range_start": 1,
-              "unit": "WD"
-            }
-          ]
+          "clauses": [
+            [
+              {
+                "range_end": 5,
+                "range_start": 1,
+                "unit": "WD"
+              }
+            ]
+          ],
+          "ordinal": 2
         }
       ],
       "type": "TimePattern"
     },
     "length": 2
   },
-  "description": "time_pattern axis: two positions, first has 2 terms (union), constant per-pos ordinal; terms ascending term_no",
-  "expected_canonical_hex": "0c00000074696d655f7061747465726e0102000000000100000002000000010000004d01000300010000006809001100020000000100000002000000574401000500",
-  "expected_hash_u64": 13316759017218111449
+  "description": "time_pattern axis: two positions, the first a union of two single-term clauses (M1-3,h9-17), constant per-pos ordinal; clauses ascending clause_no",
+  "expected_canonical_hex": "0c00000074696d655f7061747465726e010200000000010000000200000001000000010000004d010003000100000001000000680900110002000000010000000100000002000000574401000500",
+  "expected_hash_u64": 3876903460386240796
 }

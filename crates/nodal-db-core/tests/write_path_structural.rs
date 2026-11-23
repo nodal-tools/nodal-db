@@ -608,15 +608,17 @@ fn materialized_axes_across_a_chunk_round_trip() {
             properties: AxisProperties::default(),
             body: AxisBody::TimePattern {
                 positions: (0..3)
-                    .map(|i| TimePatternPos {
-                        ordinal: i,
-                        terms: (1..=(i + 1) as i16)
-                            .map(|m| TimePatternTerm {
-                                unit: "M".into(),
-                                range_start: m,
-                                range_end: m,
-                            })
-                            .collect(),
+                    .map(|i| {
+                        TimePatternPos::union_of(
+                            i,
+                            (1..=(i + 1) as i16)
+                                .map(|m| TimePatternTerm {
+                                    unit: "M".into(),
+                                    range_start: m,
+                                    range_end: m,
+                                })
+                                .collect(),
+                        )
                     })
                     .collect(),
             },

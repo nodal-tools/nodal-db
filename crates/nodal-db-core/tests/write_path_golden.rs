@@ -200,10 +200,7 @@ fn time_pattern(positions: Vec<Vec<TimePatternTerm>>) -> CanonicalAxis {
             positions: positions
                 .into_iter()
                 .enumerate()
-                .map(|(i, terms)| TimePatternPos {
-                    ordinal: i as i32,
-                    terms,
-                })
+                .map(|(i, terms)| TimePatternPos::union_of(i as i32, terms))
                 .collect(),
         },
     )

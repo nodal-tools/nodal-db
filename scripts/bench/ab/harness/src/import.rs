@@ -54,15 +54,25 @@ pub fn build_ipc_dense(path: &Path, entities: usize) {
         false,
     ));
     let val_item = Arc::new(Field::new("item", DataType::Float64, false));
-    let md = std::collections::HashMap::from([
-        ("spinal:format".to_string(), "spinal-db-bulk".to_string()),
-        ("spinal:format_version".into(), "1.0".into()),
-        ("spinal:segment_count".into(), "1".into()),
-        ("spinal:class".into(), IPC_CLASS.into()),
-        ("spinal:parameter".into(), IPC_PARAM.into()),
-        ("spinal:alternative".into(), "Base".into()),
-        ("spinal:form".into(), "dense".into()),
-    ]);
+    // The container is built once and imported by both arms, and a baseline
+    // may predate the pre-0.1.0 key rename (`spinal:*` / `spinal-db-bulk` to
+    // `nodal:*` / `nodal-db-bulk`). Each importer ignores the other prefix's
+    // keys, so writing both sets keeps the metric comparable across it. Bench
+    // input only: the format itself has one spelling.
+    let mut md = std::collections::HashMap::new();
+    for (prefix, format) in [("nodal", "nodal-db-bulk"), ("spinal", "spinal-db-bulk")] {
+        for (k, v) in [
+            ("format", format),
+            ("format_version", "1.0"),
+            ("segment_count", "1"),
+            ("class", IPC_CLASS),
+            ("parameter", IPC_PARAM),
+            ("alternative", "Base"),
+            ("form", "dense"),
+        ] {
+            md.insert(format!("{prefix}:{k}"), v.to_string());
+        }
+    }
     let schema = Arc::new(
         Schema::new(vec![
             Field::new("entity", DataType::Utf8, false),

@@ -409,6 +409,8 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
             )));
         }
         crate::property::insert_core(conn, e, "db_identity", &extract_identity)?;
+        // A new file: it names the build that made it, not the source's.
+        crate::property::insert_core(conn, e, "created_by", &crate::schema_init::created_by())?;
         let marker: i64 = conn.query_row(
             "INSERT INTO erasure_marker \
                (kind, horizon_commit, at_commit, continuation_db, rows_removed, \
@@ -469,7 +471,7 @@ fn preflight_source(conn: &Connection) -> Result<String, DbError> {
             "extract refused: the source does not look like a nodal-db database ({e})"
         ))
     })?;
-    if versions.len() != 1 || versions[0] != SCHEMA_VERSION {
+    if versions.len() != 1 || !crate::compaction::is_current_schema_version(&versions[0]) {
         return Err(DbError::SchemaMismatch {
             message: format!(
                 "extract refused: source schema_version {versions:?} != current \
@@ -531,7 +533,7 @@ fn preflight_as_of(
         )));
     }
     let versions = crate::property::schema_versions_any(conn, Some(SRC), Some(n))?;
-    if versions.len() != 1 || versions[0] != SCHEMA_VERSION {
+    if versions.len() != 1 || !crate::compaction::is_current_schema_version(&versions[0]) {
         return Err(DbError::SchemaMismatch {
             message: format!(
                 "as-of extract refused: the schema_version valid at commit {n} is \
@@ -673,9 +675,10 @@ impl Sel<'_> {
             Selection::Versioned => {
                 let main_list = self.versioned_list(table);
                 let live = self.live("t");
-                // The source identity is replaced by the extract's own at E.
+                // The source identity and creator are replaced by the
+                // extract's own at E.
                 let extra = if table == "database_property" {
-                    " AND lower(t.\"key\") <> 'db_identity'"
+                    " AND lower(t.\"key\") NOT IN ('db_identity', 'created_by')"
                 } else {
                     ""
                 };

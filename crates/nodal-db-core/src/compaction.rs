@@ -289,11 +289,35 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// column on the same two tables (0.5, skip-unchanged P3) — bump; the
 /// metadata tables replacing `metadata` / `entity_metadata` /
 /// `parameter_value_metadata` and the `database_property` table (this
-/// version) — bump.
+/// version) — bump; the pre-0.1.0 format freeze (7: plain integer versions
+/// from here on, `version INTEGER`, time-pattern clauses, the `nodal:` core
+/// namespace and the new core keys, wider CHECK lists) — bump.
 /// Consequence of a bump (erasure_compaction_plan §9 step
-/// 1): existing dev DBs refuse compaction until re-inited/re-imported —
-/// pre-freeze, re-init IS the migration story.
-pub const SCHEMA_VERSION: &str = "0.6-metadata";
+/// 1): existing files refuse writes and compaction until re-created
+/// (init + import) — through 0.x, re-creating IS the migration story.
+///
+/// **Shape:** a plain integer that rises by one per format change (stored
+/// as its decimal text in the `schema_version` property, compared exactly).
+/// 7 follows the six labelled pre-release versions `0.1`..`0.6-metadata`;
+/// a file carrying one of those (or any other text) is refused with
+/// [`crate::error::DbError::SchemaMismatch`] naming its own version.
+pub const SCHEMA_VERSION: u32 = 7;
+
+/// Whether a stored `schema_version` text is this build's [`SCHEMA_VERSION`]
+/// (exact decimal text: `"7"`, never `"07"` or `"7.0"`). The one comparison
+/// for every caller, the core's gates and downstream tools alike: a client
+/// that reads the property itself (`SELECT value FROM database_property_current
+/// WHERE key = 'schema_version'`) checks it with this function instead of
+/// comparing against [`SCHEMA_VERSION`] (a `u32`, not the stored text).
+///
+/// ```
+/// use nodal_db_core::compaction::is_current_schema_version;
+/// assert!(is_current_schema_version("7"));
+/// assert!(!is_current_schema_version("0.6-metadata"));
+/// ```
+pub fn is_current_schema_version(found: &str) -> bool {
+    found == SCHEMA_VERSION.to_string()
+}
 
 /// Default byte-growth watermark for [`compact_if_needed`]: repack once the DB
 /// file has grown to at least this multiple of its size right after the last
@@ -569,7 +593,7 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     // R2: hard-error on any schema mismatch BEFORE building a temp or copying —
     // a named-column INSERT..SELECT against a differently-shaped source would
     // silently drop/misfill columns.
-    if src_version != SCHEMA_VERSION {
+    if !is_current_schema_version(&src_version) {
         return Err(DbError::SchemaMismatch {
             message: format!(
                 "compaction refused: source schema_version {src_version:?} != current \

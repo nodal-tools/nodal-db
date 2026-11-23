@@ -4,12 +4,15 @@
 //! A key's `owner` is a function of its spelling, CHECKed by the DDL
 //! (`schema/001_meta.sql`), so the DDL is the one classifier and
 //! [`owner_of`] mirrors it:
-//!   - **core** keys ([`CORE_KEYS`]): the schema version, the DB identity, the
-//!     template stamp, the `presentation` document and `audit_rules`. Only
-//!     the core writes them ([`set_core`], [`clear_core`], [`insert_core`]);
-//!     the metadata channel refuses them. A new core key is a schema change
-//!     (the CHECK list) with a `SCHEMA_VERSION` bump;
-//!   - **tool** keys: `<tool>:<name>`, both parts non-empty;
+//!   - **core** keys ([`CORE_KEYS`]): the schema version, the DB identity,
+//!     `created_by`, the template stamp, the `presentation` document,
+//!     `audit_rules` and `refinement_classes`, and every key of the reserved
+//!     namespace [`CORE_NAMESPACE`] (`nodal:`). Only the core writes them
+//!     ([`set_core`], [`clear_core`], [`insert_core`]); the metadata channel
+//!     refuses them. A new core key goes into `nodal:`, which needs no DDL
+//!     change (the bare names are the closed list of 0.1.0);
+//!   - **tool** keys: `<tool>:<name>`, both parts non-empty, any tool name
+//!     but `nodal`;
 //!   - **user** keys: everything else ([`WELL_KNOWN_USER_KEYS`] are
 //!     documented, not validated).
 //!
@@ -25,6 +28,7 @@ use crate::types::fold;
 pub const CORE_KEYS: &[&str] = &[
     "schema_version",
     "db_identity",
+    "created_by",
     "template_name",
     "template_version",
     "template_content_hash",
@@ -32,7 +36,13 @@ pub const CORE_KEYS: &[&str] = &[
     "template_applied_commit",
     "presentation",
     "audit_rules",
+    "refinement_classes",
 ];
+
+/// The namespace reserved for future core keys: any key starting with
+/// `nodal:` (any case) is core-owned, so a new core key needs no DDL change,
+/// and no tool may be called `nodal`.
+pub const CORE_NAMESPACE: &str = "nodal:";
 
 /// Documented user keys with a conventional meaning (not validated): a
 /// persistent identifier (DOI), an IRI root that survives an extract (unlike
@@ -74,7 +84,7 @@ impl Owner {
 /// The owner of `key`, as the DDL's CHECKs classify it.
 pub fn owner_of(key: &str) -> Owner {
     let folded = fold(key);
-    if CORE_KEYS.contains(&folded.as_str()) {
+    if CORE_KEYS.contains(&folded.as_str()) || folded.starts_with(CORE_NAMESPACE) {
         Owner::Core
     } else if key.find(':').is_some_and(|i| i > 0) {
         Owner::Tool
@@ -115,7 +125,7 @@ pub fn read_all(conn: &Connection) -> Result<Vec<(String, String, String)>, DbEr
 /// with a raw catalog error (template plan, purge preview, property reads).
 pub(crate) fn require_current(conn: &Connection) -> Result<(), DbError> {
     match schema_version_any(conn)? {
-        Some(found) if found != crate::compaction::SCHEMA_VERSION => {
+        Some(found) if !crate::compaction::is_current_schema_version(&found) => {
             let expected = crate::compaction::SCHEMA_VERSION;
             Err(DbError::SchemaMismatch {
                 message: format!(
@@ -139,7 +149,7 @@ fn older_layout(conn: &Connection, e: duckdb::Error) -> DbError {
         return e.into();
     }
     match schema_version_any(conn) {
-        Ok(Some(found)) if found != crate::compaction::SCHEMA_VERSION => {
+        Ok(Some(found)) if !crate::compaction::is_current_schema_version(&found) => {
             let expected = crate::compaction::SCHEMA_VERSION;
             DbError::SchemaMismatch {
                 message: format!(

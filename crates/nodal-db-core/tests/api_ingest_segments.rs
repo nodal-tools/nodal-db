@@ -375,10 +375,13 @@ fn write_error_on_other_schema_version_names_the_version() {
         panic!("expected a SchemaMismatch error, got {err:?}")
     };
     assert_eq!(found, "0.3-test");
-    assert_eq!(expected, nodal_db_core::compaction::SCHEMA_VERSION);
+    assert_eq!(expected, &nodal_db_core::compaction::SCHEMA_VERSION.to_string());
     assert_eq!(m, &err.to_string());
     assert!(m.contains("\"0.3-test\""), "{m}");
-    assert!(m.contains(nodal_db_core::compaction::SCHEMA_VERSION), "{m}");
+    assert!(
+        m.contains(&nodal_db_core::compaction::SCHEMA_VERSION.to_string()),
+        "{m}"
+    );
     assert!(
         !m.contains("no_such_column"),
         "refused before the closure ran: {m}"
@@ -396,7 +399,7 @@ fn write_error_on_other_schema_version_names_the_version() {
         conn.execute(
             "UPDATE database_property SET value = ? \
              WHERE lower(key) = 'schema_version' AND valid_to_commit IS NULL",
-            [nodal_db_core::compaction::SCHEMA_VERSION],
+            [nodal_db_core::compaction::SCHEMA_VERSION.to_string()],
         )
         .unwrap();
         conn.close().unwrap();

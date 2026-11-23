@@ -13,7 +13,7 @@ VALUES ('nodal_db', 'bootstrap: schema creation');
 
 -- Must match SCHEMA_VERSION in build.py (asserted after every build — F10).
 INSERT INTO database_property (key, value, owner, valid_from_commit)
-VALUES ('schema_version', '0.6-metadata', 'core', currval('seq_commit'));
+VALUES ('schema_version', '7', 'core', currval('seq_commit'));
 
 -- DB-identity UUID (specs/schema_interop.md §9): minted ONCE here — the
 -- only writer — and stable for the lifetime of the database. Output DBs stamp

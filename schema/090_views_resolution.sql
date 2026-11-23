@@ -152,33 +152,33 @@ WITH RECURSIVE flat(group_entity_id, member_entity_id) AS (
 )
 SELECT * FROM flat;
 
--- Membership resolution, pass 2: propagate activation over
--- resolved membership. An entity's own entity_alternative row always wins
--- (rank-resolved, last-wins); absent it, deactivation propagates
--- recursively from any containing group — deactivation-wins on overlap; a
--- member's own row is a barrier to propagation through it. Absent both,
--- the class's active_by_default applies (which is why clients must not
--- write rows restating the default, #3010).
--- Refinement edges (Decision 13, multifidelity_entity_linking §7): the same
--- real thing at two resolutions (ESM plant -> its power-system components).
--- A `realizes` link is an ordinary 2-D relationship entity (position 1 =
--- coarse, position 2 = fine); its class is self-marking by the reserved name
--- prefix `realizes` (marker convention, zero schema change). Structural and
--- scenario-independent (current rows only) — it does NOT read
--- entity_activation_resolved, so there is no view cycle. This is a structural
--- resolution, never a value transform: capacity->P_max stays tool-side
--- (invariant 2). Bags are left free (not guarded) — the dedicated typed
--- class is the marker.
+-- Refinement edges: (coarse, fine) entity pairs that are the same real thing
+-- at two resolutions, from the links of the refinement classes. (Decision
+-- 13, multifidelity_entity_linking §7: an ESM plant -> its power-system
+-- components.) A refinement link is an ordinary 2-D relationship entity (position 1 =
+-- coarse, position 2 = fine) of a REFINEMENT CLASS: a class listed in the
+-- core property `refinement_classes` (a JSON array of entity_class ids,
+-- ascending, e.g. `[12,40]`), which only the core writes
+-- (`verbs::set_refinement_class`; Python `db.set_refinement_class`). A
+-- class name means nothing here (0.x before the format freeze used the name
+-- prefix `realizes`). Structural and scenario-independent (current rows
+-- only): it does NOT read entity_activation_resolved, so there is no view
+-- cycle. This is a structural resolution, never a value transform:
+-- capacity->P_max stays tool-side (invariant 2).
+-- The list is parsed without the json extension: the core writes it in
+-- exactly this canonical form (digits and commas inside brackets).
 -- @surface: stable
 CREATE VIEW realizes_edge AS
 SELECT ee1.element_entity_id AS coarse_id,
        ee2.element_entity_id AS fine_id
 FROM entity r
 JOIN entity_class ec ON ec.id = r.entity_class_id AND ec.valid_to_commit IS NULL
-                    AND lower(ec.name) LIKE 'realizes%'
 JOIN entity_element ee1 ON ee1.entity_id = r.id AND ee1.position = 1 AND ee1.valid_to_commit IS NULL
 JOIN entity_element ee2 ON ee2.entity_id = r.id AND ee2.position = 2 AND ee2.valid_to_commit IS NULL
-WHERE r.valid_to_commit IS NULL;
+WHERE r.valid_to_commit IS NULL
+  AND ec.id IN (SELECT TRY_CAST(unnest(string_split(trim(value, '[]'), ',')) AS BIGINT)
+                FROM database_property
+                WHERE lower(key) = 'refinement_classes' AND valid_to_commit IS NULL);
 
 -- @surface: internal
 CREATE VIEW entity_activation_own AS
@@ -207,6 +207,13 @@ SELECT sc.id, re.coarse_id, re.fine_id
 FROM realizes_edge re
 CROSS JOIN scenario sc WHERE sc.valid_to_commit IS NULL;
 
+-- Membership resolution, pass 2: propagate activation over
+-- resolved membership and refinement edges. An entity's own entity_alternative row always wins
+-- (rank-resolved, last-wins); absent it, deactivation propagates
+-- recursively from any containing group — deactivation-wins on overlap; a
+-- member's own row is a barrier to propagation through it. Absent both,
+-- the class's active_by_default applies (which is why clients must not
+-- write rows restating the default, #3010).
 -- @surface: stable
 CREATE VIEW entity_activation_resolved AS
 WITH RECURSIVE deact(scenario_id, entity_id) AS (

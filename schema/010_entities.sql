@@ -129,7 +129,7 @@ CREATE TABLE entity_location (
   entity_id         BIGINT NOT NULL,
   lat               DOUBLE,    -- latitude, decimal degrees, WGS 84 (EPSG:4326), north positive
   lon               DOUBLE,    -- longitude, decimal degrees, WGS 84 (EPSG:4326), east positive
-  alt               DOUBLE,    -- altitude, metres above the WGS 84 ellipsoid (as in GeoJSON)
+  alt               DOUBLE,    -- altitude, metres above mean sea level; optional (height above ground belongs in parameters, e.g. hub height)
   shape             VARCHAR,   -- geometry document (e.g. GeoJSON, whose coordinates are WGS 84 too); interpretation is client-layer
   valid_from_commit BIGINT NOT NULL REFERENCES commit(id),
   valid_to_commit   BIGINT REFERENCES commit(id),

@@ -1499,6 +1499,12 @@ The `nodal_spine_import` package in `python/` imports a Spine Toolbox
 database into a new nodal-db file. It needs `spinedb_api` and the
 `nodal_db` package installed, and `python/` on the Python path:
 
+**Compatibility note.** nodal-db renders time-pattern positions with `;`
+for AND within a clause and `,` for OR between clauses (for example
+`M1-4;WD1-5,M9-10`). This matches the time-pattern notation used by Spine
+Toolbox databases. (Time-pattern values are not imported yet; the
+importer reports them.)
+
 ```python
 from nodal_spine_import import SpineImporter, Profile
 

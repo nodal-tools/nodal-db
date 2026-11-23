@@ -103,8 +103,9 @@ The DDL files form layers, each building on the ones before:
   `"user"`, `"timestamp"`, `"values"`).
 - **`version` is an `INTEGER`** (1, 2, … per key).
 - **Locations.** `entity_location.lat` and `lon` are decimal degrees in
-  WGS 84 (EPSG:4326), north and east positive; `alt` is metres above the
-  WGS 84 ellipsoid, as in GeoJSON. `shape` is a geometry document (for
+  WGS 84 (EPSG:4326), north and east positive; `alt` is optional and is metres above
+  mean sea level (heights above ground, such as a hub height, belong in
+  parameters). `shape` is a geometry document (for
   example GeoJSON) the core stores but does not interpret.
 - **Reserved tables.** `run` (production provenance) has no write API
   yet; its columns may change when one is designed. The object types

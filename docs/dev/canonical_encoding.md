@@ -666,8 +666,7 @@ read; this invariant forecloses that.
 
 7.7.5. **Rendering.** Read views (and `idxN_text`) render a position as
 text: the terms of a clause are joined with `;`, and the clauses with
-`,` (`,` = union, `;` = intersection, the syntax Spine Toolbox uses for
-time patterns). Each term renders as `<unit><range_start>-<range_end>`.
+`,` (`,` = union, `;` = intersection). Each term renders as `<unit><range_start>-<range_end>`.
 For example, `M1-4;WD1-5,M9-10` is (months 1–4 AND weekdays 1–5) OR
 months 9–10.
 

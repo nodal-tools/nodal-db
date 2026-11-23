@@ -198,15 +198,15 @@ fn deep_flow_nesting_is_refused_before_the_parser() {
     // then a sibling entry at column 2 that the scan took for content).
     for (open, close) in [("[", "]"), ("{a: ", "}"), ("[a, ", "]")] {
         let n = 100_000;
-        let text = format!(
-            "- - |\n   x\n  - {}{}\n",
-            open.repeat(n),
-            close.repeat(n)
-        );
+        let text = format!("- - |\n   x\n  - {}{}\n", open.repeat(n), close.repeat(n));
         let t = Instant::now();
         let e = parse_str(&text).expect_err(open);
         assert!(e.to_string().contains("nested more than"), "{open}: {e}");
-        assert!(t.elapsed() < Duration::from_secs(2), "{open}: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "{open}: {:?}",
+            t.elapsed()
+        );
     }
     for text in [
         "a:\n  - |\n    x\n  - [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[",

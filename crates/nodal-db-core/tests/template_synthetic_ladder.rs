@@ -691,9 +691,9 @@ fn write_f(db: &Path, class: &str, param: &str, entity: &str, v: f64) {
         "alt",
         float_batch(entity, v),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 }
@@ -706,9 +706,9 @@ fn write_s(db: &Path, class: &str, param: &str, entity: &str, v: &str) {
         "alt",
         string_batch(entity, v),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 }
@@ -765,9 +765,9 @@ fn registry(calls: &Arc<AtomicUsize>) -> MigrationRegistry {
                 &alt,
                 float_batch(&ent, v * 100.0),
                 &[],
-                WriteOptions::default(),
                 user,
                 "synth v8: scale backfill",
+                WriteOptions::default(),
             )?;
         }
         Ok(())
@@ -798,9 +798,9 @@ fn registry(calls: &Arc<AtomicUsize>) -> MigrationRegistry {
                 "alt",
                 float_batch(&a, hubs as f64),
                 &[],
-                WriteOptions::default(),
                 user,
                 "synth v18: hub count",
+                WriteOptions::default(),
             )?;
         }
         Ok(())

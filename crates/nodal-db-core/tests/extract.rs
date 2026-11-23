@@ -23,7 +23,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_change_set, commit_structural, db_identity, delete_objects, delete_values, DeleteKey,
+    commit, commit_structural, db_identity, delete_objects, delete_values, DeleteKey,
 };
 use nodal_db_core::compaction::compact;
 use nodal_db_core::erasure::{erase_alternative, EraseOpts};
@@ -31,8 +31,9 @@ use nodal_db_core::error::DbError;
 use nodal_db_core::extract::{extract, ExtractOpts, ExtractReport};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
-    Action, LicenseFields, LinkSpec, MetadataChange, ObjectDeleteKey, PairRef, Ref, RoleSel,
-    Scope, SourceFields, Subject, Target, ValueAddr, ObjectDeleteOpts, ObjectKind, ObjectRef, StructuralChange, WriteOptions,
+    Action, LicenseFields, LinkSpec, MetadataChange, ObjectDeleteKey, ObjectDeleteOpts, ObjectKind,
+    ObjectRef, PairRef, Ref, RoleSel, Scope, SourceFields, StructuralChange, Subject, Target,
+    ValueAddr, WriteOptions,
 };
 use nodal_db_core::verbs::stamp_template_identity;
 
@@ -93,7 +94,7 @@ fn long_batch(entity: &str, coords: &[i64], vals: &[i64]) -> RecordBatch {
 
 /// A metadata-only commit (the metadata channel).
 fn meta(db: &Path, items: Vec<MetadataChange>) {
-    commit_change_set(
+    commit(
         db,
         nodal_db_core::api::ChangeSet {
             metadata: items,
@@ -108,7 +109,7 @@ fn meta(db: &Path, items: Vec<MetadataChange>) {
 
 /// A value write whose new versions keep their metadata links.
 fn write_keep(db: &Path, class: &str, param: &str, alt: &str, batch: RecordBatch) {
-    commit_change_set(
+    commit(
         db,
         nodal_db_core::api::ChangeSet {
             segments: vec![nodal_db_core::api::Segment {
@@ -136,10 +137,12 @@ fn write_keep(db: &Path, class: &str, param: &str, alt: &str, batch: RecordBatch
 /// Base demand values keep theirs over the churn's new versions).
 fn seed_metadata(db: &Path) {
     let name = |s: &str| Ref::Name(s.into());
-    let pair = || Target::Pair(PairRef::Pair {
-        name: "keyword".into(),
-        value: "grid".into(),
-    });
+    let pair = || {
+        Target::Pair(PairRef::Pair {
+            name: "keyword".into(),
+            value: "grid".into(),
+        })
+    };
     let link = |t: Target, role: Option<&str>| LinkSpec {
         target: t,
         role: role.map_or(RoleSel::NoRole, |r| RoleSel::Named(r.into())),
@@ -159,7 +162,7 @@ fn seed_metadata(db: &Path) {
         vec![
             MetadataChange::PutSource {
                 source: name("IEA"),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("World Energy Outlook".into()),
                     issued: Some("2024-10-16".into()),
@@ -168,7 +171,7 @@ fn seed_metadata(db: &Path) {
             },
             MetadataChange::PutLicense {
                 license: name("CC-BY-4.0"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     ..Default::default()
@@ -180,7 +183,7 @@ fn seed_metadata(db: &Path) {
             },
             MetadataChange::PutRole {
                 role: name("primary_source"),
-                rename: None,
+                new_name: None,
                 description: None,
                 iri: Some("http://www.w3.org/ns/prov#hadPrimarySource".into()),
             },
@@ -569,7 +572,10 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
         .expect("erase runA");
         assert!(r.erased);
         // The erase removed runA's links physically (value and object).
-        let runa = scalar(&db, "SELECT max(id) FROM alternative WHERE lower(name) = 'runa'");
+        let runa = scalar(
+            &db,
+            "SELECT max(id) FROM alternative WHERE lower(name) = 'runa'",
+        );
         assert_eq!(
             scalar(
                 &db,
@@ -595,15 +601,15 @@ fn churned_source_with(dir: &Path, erase: bool) -> Fixture {
 /// The non-audit views every comparison covers, minus the documented
 /// exclusions (each asserted separately in T1).
 const T1_EXCLUDED_VIEWS: &[&str] = &[
-    "axis_position",          // only the carried axes (asserted restricted)
-    "axis_parametric",        // rendering helper over every axis: the same (asserted)
-    "axis_position_stored",   // rendering helper over every axis: the same (asserted)
-    "dataset_version",        // E (asserted)
-    "commit_log",             // the log gains E (asserted through dataset_version)
+    "axis_position",             // only the carried axes (asserted restricted)
+    "axis_parametric",           // rendering helper over every axis: the same (asserted)
+    "axis_position_stored",      // rendering helper over every axis: the same (asserted)
+    "dataset_version",           // E (asserted)
+    "commit_log",                // the log gains E (asserted through dataset_version)
     "database_property_current", // the identity row differs (asserted)
-    "database_properties",    // the identity row differs (as the mirror)
-    "value_timeline",         // history view: only the surviving versions (asserted)
-    "history_untrusted_span", // history view (asserted)
+    "database_properties",       // the identity row differs (as the mirror)
+    "value_timeline",            // history view: only the surviving versions (asserted)
+    "history_untrusted_span",    // history view (asserted)
 ];
 
 fn non_audit_views(db: &Path) -> Vec<String> {
@@ -727,13 +733,22 @@ fn t1_head_extract_reads_identically() {
         );
     }
     assert_ne!(
-        string(&dest, "SELECT value FROM database_properties WHERE key = 'db_identity'"),
-        string(&fx.db, "SELECT value FROM database_properties WHERE key = 'db_identity'")
+        string(
+            &dest,
+            "SELECT value FROM database_properties WHERE key = 'db_identity'"
+        ),
+        string(
+            &fx.db,
+            "SELECT value FROM database_properties WHERE key = 'db_identity'"
+        )
     );
     // The metadata is really there (the view comparison above is not
     // vacuous): live value links over kept versions, the dataset's source
     // and license, a source under its license.
-    assert_eq!(scalar(&dest, "SELECT count(*) FROM value_metadata_named"), 3);
+    assert_eq!(
+        scalar(&dest, "SELECT count(*) FROM value_metadata_named"),
+        3
+    );
     assert_eq!(scalar(&dest, "SELECT count(*) FROM dataset_metadata"), 2);
     assert_eq!(scalar(&dest, "SELECT count(*) FROM value_licenses"), 2);
     assert_eq!(
@@ -744,7 +759,10 @@ fn t1_head_extract_reads_identically() {
         4,
         "the Base demand links were kept over three new versions"
     );
-    assert_eq!(scalar(&dest, "SELECT count(*) FROM audit_value_link_version"), 0);
+    assert_eq!(
+        scalar(&dest, "SELECT count(*) FROM audit_value_link_version"),
+        0
+    );
     // value_timeline: the scalar and array legs carry the surviving
     // versions verbatim. The long leg is value-level change spans derived
     // from the cells (skip_unchanged_writes_PLAN §4.3), clipped at the
@@ -1653,14 +1671,13 @@ fn t9_asof_refusals() {
         "Base",
         array_batch("n1", 24, 1.0),
         &[],
+        "t",
+        "replace without keeping content",
         WriteOptions {
-            force_replace: true,
-            retain_override: None,
+            retain_content: Some(false),
             expect_commit: None,
             covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         },
-        "t",
-        "replace without keeping content",
     )
     .unwrap();
     let c2 = scalar(&stub_db, "SELECT max(id) FROM \"commit\"");

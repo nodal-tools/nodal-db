@@ -10,20 +10,36 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+# Rust: every job uses the workspace rust-version (1.98) through
+# dtolnay/rust-toolchain, pinned by the SHA of its `1.98` branch. Dependabot
+# cannot follow that action (it has branches, no release tags): bump the
+# SHA, the branch comment and the toolchain together with rust-version.
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98 (the branch named after the workspace rust-version)
+        with:
+          toolchain: "1.98"   # the workspace rust-version
 
       # duckdb-rs compiles bundled DuckDB from source (minutes); cache it.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # The project venv (.venv, deps in dev-requirements.txt) is needed by
       # both halves: `cargo test` shells out to the conformance oracles via
       # .venv/bin/python (tests/python_oracle.rs), and the smoke suite runs
       # on its pinned DuckDB. Same setup as `just venv`.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -37,13 +53,69 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace
 
-      # Quick gate, half 2: schema smoke (expects 223/223), on the venv's
-      # DuckDB pinned to the line the schema is verified on (2.0.0).
+      # Quick gate, half 2: the schema smoke suite, on the
+      # venv's DuckDB pinned to the line the schema is verified on (2.0.0).
       - name: schema smoke test
         run: .venv/bin/python schema/smoke_test.py
 
       # The A/B perf gate's tool tests (stdlib unittest: statistics,
       # verdicts, exit codes, cache keys on a temp repository). No builds
-      # and no benchmarks: the gate itself is local-only (ab_ratio_gates D3).
+      # and no benchmarks: the gate itself is local-only.
       - name: perf-gate tool tests
         run: python -m unittest discover -s scripts/bench/ab/tests
+
+  # Formatting, lints and the API docs: rustdoc warnings (broken intra-doc
+  # links, public docs pointing at private items) fail the build.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98 (the branch named after the workspace rust-version)
+        with:
+          toolchain: "1.98"   # the workspace rust-version
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+  # What ships to Python users: the wheel built by maturin, installed into a
+  # clean venv, then the skin's pytest suite and the Spine importer's tests
+  # (python/tests) against the installed package.
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98 (the branch named after the workspace rust-version)
+        with:
+          toolchain: "1.98"   # the workspace rust-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/nodal-db-py
+          rust-toolchain: "1.98"
+          args: --release --locked --out ../../dist
+      - name: test venv
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl pytest "duckdb==2.0.0"
+          # The Spine importer's tests need spinedb_api.
+          /tmp/venv/bin/pip install "spinedb_api>=0.36.8,<0.37"
+      - name: skin tests
+        working-directory: crates/nodal-db-py/tests
+        run: /tmp/venv/bin/python -m pytest -q
+      - name: Spine importer tests
+        run: /tmp/venv/bin/python -m pytest -q python/tests

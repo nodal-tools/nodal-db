@@ -1,5 +1,5 @@
 //! Database properties: the single-valued `database_property` table, the one
-//! writer of its rows (invariant 2: one writer per table).
+//! writer of its rows (one writer per table).
 //!
 //! A key's `owner` is a function of its spelling, CHECKed by the DDL
 //! (`schema/001_meta.sql`), so the DDL is the one classifier and
@@ -8,7 +8,7 @@
 //!     `created_by`, the template stamp, the `presentation` document,
 //!     `audit_rules` and `refinement_classes`, and every key of the reserved
 //!     namespace [`CORE_NAMESPACE`] (`nodal:`). Only the core writes them
-//!     ([`set_core`], [`clear_core`], [`insert_core`]); the metadata channel
+//!     (`set_core`, `clear_core`, `insert_core`); the metadata channel
 //!     refuses them. A new core key goes into `nodal:`, which needs no DDL
 //!     change (the bare names are the closed list of 0.1.0);
 //!   - **tool** keys: `<tool>:<name>`, both parts non-empty, any tool name
@@ -324,7 +324,7 @@ pub(crate) fn validate_user_key(key: &str) -> Result<(), DbError> {
 /// that error aborts the transaction, so the fallback query fails too; the
 /// write cycle's gate therefore reads the 0.6 table only and resolves an
 /// older layout after its rollback (`conn::run_txn_once`).
-pub fn schema_versions_any(
+pub(crate) fn schema_versions_any(
     conn: &Connection,
     db: Option<&str>,
     at: Option<i64>,
@@ -361,6 +361,6 @@ pub fn schema_versions_any(
 
 /// The file's current schema version from either layout
 /// ([`schema_versions_any`]); `None` when there is none.
-pub fn schema_version_any(conn: &Connection) -> Result<Option<String>, DbError> {
+pub(crate) fn schema_version_any(conn: &Connection) -> Result<Option<String>, DbError> {
     Ok(schema_versions_any(conn, None, None)?.into_iter().next())
 }

@@ -13,7 +13,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, delete_values, DeleteKey, Segment};
+use nodal_db_core::api::{commit, delete_values, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::erasure::{erase_alternative, EraseOpts};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
@@ -33,18 +33,18 @@ fn batch(entities: &[&str], vals: &[f64]) -> RecordBatch {
 }
 
 fn write(db: &Path, param: &str, alt: &str, entities: &[&str], vals: &[f64]) {
-    commit_changes(
+    commit(
         db,
-        vec![Segment {
-            class: "node".into(),
-            parameter: param.into(),
-            alternative: alt.into(),
-            batches: vec![batch(entities, vals)],
-            domains: vec![],
-        }],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![Segment {
+                class: "node".into(),
+                parameter: param.into(),
+                alternative: alt.into(),
+                batches: vec![batch(entities, vals)],
+                domains: vec![],
+            }],
+            ..ChangeSet::default()
+        },
         "t",
         "w",
         WriteOptions::default(),
@@ -153,20 +153,26 @@ fn a_value_delete_closes_the_values_links() {
     clean(&db);
 }
 
-fn delete(db: &Path, kind: ObjectKind, class: Option<&str>, name: &str, cascade: bool) -> ObjectDeleteResult {
-    let r = commit_changes(
+fn delete(
+    db: &Path,
+    kind: ObjectKind,
+    class: Option<&str>,
+    name: &str,
+    cascade: bool,
+) -> ObjectDeleteResult {
+    let r = commit(
         db,
-        vec![],
-        vec![],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind,
-                class: class.map(str::to_string),
-                target: ObjectRef::Name(name.into()),
-            },
-            ObjectDeleteOpts { cascade },
-        )],
+        ChangeSet {
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind,
+                    class: class.map(str::to_string),
+                    target: ObjectRef::Name(name.into()),
+                },
+                ObjectDeleteOpts { cascade },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "obj",
         WriteOptions::default(),
@@ -196,7 +202,10 @@ fn links_never_block_a_delete_and_close_with_their_object() {
     // An entity with values: the values block, the links are not listed.
     match delete(&db, ObjectKind::Entity, Some("node"), "a", false) {
         ObjectDeleteResult::Restricted { blockers } => {
-            assert!(blockers.iter().all(|b| !b.table.contains("metadata")), "{blockers:?}");
+            assert!(
+                blockers.iter().all(|b| !b.table.contains("metadata")),
+                "{blockers:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -270,9 +279,9 @@ fn erasing_an_alternative_removes_its_links() {
 #[test]
 fn the_raw_value_writer_refuses_an_annotated_value() {
     use nodal_db_core::axis::AxisCache;
+    use nodal_db_core::canon::CanonicalValue;
     use nodal_db_core::conn::with_write_txn;
     use nodal_db_core::history::write_value;
-    use nodal_db_core::canon::CanonicalValue;
     use nodal_db_core::types::{ScalarValue, ShapedData, Tier, ValueKey, ValueKind};
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path());
@@ -312,7 +321,10 @@ fn the_raw_value_writer_refuses_an_annotated_value() {
     });
     let err = r.expect_err("refused");
     assert!(
-        matches!(err, nodal_db_core::error::DbError::ValueMetadataUnstated { count: 1, .. }),
+        matches!(
+            err,
+            nodal_db_core::error::DbError::ValueMetadataUnstated { count: 1, .. }
+        ),
         "{err}"
     );
 }

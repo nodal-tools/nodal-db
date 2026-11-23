@@ -159,7 +159,7 @@ SELECT * FROM flat;
 -- coarse, position 2 = fine) of a REFINEMENT CLASS: a class listed in the
 -- core property `refinement_classes` (a JSON array of entity_class ids,
 -- ascending, e.g. `[12,40]`), which only the core writes
--- (`verbs::set_refinement_class`; Python `db.set_refinement_class`). A
+-- (`verbs::set_class_refinement`; Python `db.set_class_refinement`). A
 -- class name means nothing here (0.x before the format freeze used the name
 -- prefix `realizes`). Structural and scenario-independent (current rows
 -- only): it does NOT read entity_activation_resolved, so there is no view

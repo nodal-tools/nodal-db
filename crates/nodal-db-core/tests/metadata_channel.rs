@@ -1,4 +1,4 @@
-//! The metadata channel of `commit_change_set` (`ChangeSet::metadata`):
+//! The metadata channel of `commit` (`ChangeSet::metadata`):
 //! the pool (sources, licenses, pairs, roles, properties), object and value
 //! links, the keep / set / clear statements for new value versions and the
 //! refusal of an unstated one, pool deletes on the post-call state, and the
@@ -12,9 +12,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{
-    commit_change_set, database_properties, database_property, ChangeSet, Segment,
-};
+use nodal_db_core::api::{commit, database_properties, database_property, ChangeSet, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
@@ -61,7 +59,7 @@ fn seg(param: &str, b: RecordBatch) -> Segment {
 }
 
 fn run(db: &Path, set: ChangeSet) -> Result<WriteReport, DbError> {
-    commit_change_set(db, set, "t", "m", WriteOptions::default())
+    commit(db, set, "t", "m", WriteOptions::default())
 }
 
 fn meta(db: &Path, items: Vec<M>) -> Result<WriteReport, DbError> {
@@ -125,7 +123,7 @@ fn src(n: &str) -> Ref {
 fn put_source(n: &str) -> M {
     M::PutSource {
         source: src(n),
-        rename: None,
+        new_name: None,
         fields: SourceFields::default(),
     }
 }
@@ -185,7 +183,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         vec![
             M::PutSource {
                 source: src("IEA"),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("World Energy Outlook".into()),
                     issued: Some("2024-10-16".into()),
@@ -194,7 +192,7 @@ fn sources_and_licenses_create_revise_and_noop() {
             },
             M::PutLicense {
                 license: src("CC-BY-4.0"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     policy: Some(r#"{"@type": "Policy"}"#.into()),
@@ -212,7 +210,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("iea"),
-            rename: None,
+            new_name: None,
             fields: SourceFields {
                 title: Some("World Energy Outlook".into()),
                 issued: Some("2024-10-16".into()),
@@ -232,14 +230,17 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("IEA"),
-            rename: Some("IEA WEO".into()),
+            new_name: Some("IEA WEO".into()),
             fields: SourceFields::default(),
         }],
     )
     .unwrap();
     assert_eq!(r.metadata[0].effect, MetadataEffect::Renamed);
     assert_eq!(
-        q(&db, "SELECT version FROM source WHERE valid_to_commit IS NULL"),
+        q(
+            &db,
+            "SELECT version FROM source WHERE valid_to_commit IS NULL"
+        ),
         2
     );
     // A rename onto another source's name is a clean error.
@@ -248,7 +249,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("eurostat"),
-            rename: Some("iea weo".into()),
+            new_name: Some("iea weo".into()),
             fields: SourceFields::default(),
         }],
     )
@@ -259,7 +260,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutLicense {
             license: src("x"),
-            rename: None,
+            new_name: None,
             fields: LicenseFields {
                 policy: Some("{not json".into()),
                 ..Default::default()
@@ -272,7 +273,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: src("y"),
-            rename: None,
+            new_name: None,
             fields: SourceFields {
                 issued: Some("16.10.2024".into()),
                 ..Default::default()
@@ -286,7 +287,7 @@ fn sources_and_licenses_create_revise_and_noop() {
         &db,
         vec![M::PutSource {
             source: Ref::Id(999),
-            rename: None,
+            new_name: None,
             fields: SourceFields::default()
         }]
     )
@@ -319,15 +320,18 @@ fn pairs_fold_their_key_and_rename_by_key() {
         .iter()
         .any(|w| matches!(w.kind, WarningKind::NameFolded { .. })));
     assert_eq!(
-        q(&db, "SELECT count(*) FROM metadata_pair WHERE name = 'Source'"),
+        q(
+            &db,
+            "SELECT count(*) FROM metadata_pair WHERE name = 'Source'"
+        ),
         2,
         "the existing key spelling is stored"
     );
     let r = meta(
         &db,
         vec![M::RenamePairKey {
-            from: "SOURCE".into(),
-            to: "origin".into(),
+            current: "SOURCE".into(),
+            new_name: "origin".into(),
         }],
     )
     .unwrap();
@@ -376,7 +380,10 @@ fn user_and_tool_properties_and_the_core_refusal() {
     };
     let r = meta(
         &db,
-        vec![set("title", Some("Nordic grid")), set("flextool:frozen", Some("1"))],
+        vec![
+            set("title", Some("Nordic grid")),
+            set("flextool:frozen", Some("1")),
+        ],
     )
     .unwrap();
     assert_eq!(r.metadata[0].effect, MetadataEffect::Created);
@@ -385,17 +392,31 @@ fn user_and_tool_properties_and_the_core_refusal() {
         Some("Nordic grid")
     );
     let all = database_properties(&db).unwrap();
-    assert!(all.iter().any(|p| p.key == "flextool:frozen" && p.owner == "tool"));
-    assert!(all.iter().any(|p| p.key == "schema_version" && p.owner == "core"));
+    assert!(all
+        .iter()
+        .any(|p| p.key == "flextool:frozen" && p.owner == "tool"));
+    assert!(all
+        .iter()
+        .any(|p| p.key == "schema_version" && p.owner == "core"));
     // Clear, then the version continues.
     let r = meta(&db, vec![set("title", None)]).unwrap();
     assert_eq!(r.metadata[0].effect, MetadataEffect::Cleared);
     meta(&db, vec![set("title", Some("again"))]).unwrap();
     assert_eq!(
-        q(&db, "SELECT max(version) FROM database_property WHERE key = 'title'"),
+        q(
+            &db,
+            "SELECT max(version) FROM database_property WHERE key = 'title'"
+        ),
         2
     );
-    for bad in ["schema_version", "Template_Name", ":x", "tool:", " title", "a: b"] {
+    for bad in [
+        "schema_version",
+        "Template_Name",
+        ":x",
+        "tool:",
+        " title",
+        "a: b",
+    ] {
         let e = meta(&db, vec![set(bad, Some("v"))]).unwrap_err();
         assert!(matches!(e, DbError::Api(_)), "{bad}: {e}");
     }
@@ -407,7 +428,12 @@ fn an_annotated_value_rewrite_needs_a_statement() {
     let db = annotated(dir.path());
     let before = q(&db, "SELECT max(id) FROM commit");
     // Changing a: refused, nothing written.
-    let e = write(&db, vec![seg("p", scalar(&["a", "b"], &[5.0, 6.0]))], vec![]).unwrap_err();
+    let e = write(
+        &db,
+        vec![seg("p", scalar(&["a", "b"], &[5.0, 6.0]))],
+        vec![],
+    )
+    .unwrap_err();
     match &e {
         DbError::ValueMetadataUnstated { count, sample, .. } => {
             assert_eq!(*count, 1);
@@ -418,7 +444,12 @@ fn an_annotated_value_rewrite_needs_a_statement() {
     assert_eq!(q(&db, "SELECT max(id) FROM commit"), before);
     // Not refused: an unchanged write of a, a change of the link-free b, a
     // new value c, another parameter.
-    write(&db, vec![seg("p", scalar(&["a", "b", "c"], &[1.0, 7.0, 8.0]))], vec![]).unwrap();
+    write(
+        &db,
+        vec![seg("p", scalar(&["a", "b", "c"], &[1.0, 7.0, 8.0]))],
+        vec![],
+    )
+    .unwrap();
     write(&db, vec![seg("q", scalar(&["a"], &[1.0]))], vec![]).unwrap();
     assert_eq!(live_links(&db), 1);
     // Keep: a new version keeps the link (closed and reopened, version 2).
@@ -430,7 +461,10 @@ fn an_annotated_value_rewrite_needs_a_statement() {
     .unwrap();
     assert_eq!(r.value_links.kept, 1);
     assert_eq!(
-        q(&db, "SELECT version FROM value_metadata_link WHERE valid_to_commit IS NULL"),
+        q(
+            &db,
+            "SELECT version FROM value_metadata_link WHERE valid_to_commit IS NULL"
+        ),
         2
     );
     // As of the first commit, the first version's link.
@@ -655,7 +689,7 @@ fn roles_are_created_on_purpose_and_enter_the_key() {
         vec![
             M::PutRole {
                 role: src("primary_source"),
-                rename: None,
+                new_name: None,
                 description: None,
                 iri: Some("http://www.w3.org/ns/prov#hadPrimarySource".into()),
             },
@@ -690,7 +724,13 @@ fn roles_are_created_on_purpose_and_enter_the_key() {
     .unwrap();
     assert_eq!(r.metadata[0].effect, MetadataEffect::NoOp);
     // A role in use is restricted.
-    let r = meta(&db, vec![M::DeleteRole { role: src("primary_source") }]).unwrap();
+    let r = meta(
+        &db,
+        vec![M::DeleteRole {
+            role: src("primary_source"),
+        }],
+    )
+    .unwrap();
     assert_eq!(r.metadata[0].effect, MetadataEffect::Restricted);
     clean(&db);
 }
@@ -742,7 +782,13 @@ fn pool_deletes_judge_the_post_call_state() {
     )
     .unwrap();
     assert_eq!(r.metadata[1].effect, MetadataEffect::Deleted);
-    assert_eq!(q(&db, "SELECT count(*) FROM source WHERE valid_to_commit IS NULL"), 0);
+    assert_eq!(
+        q(
+            &db,
+            "SELECT count(*) FROM source WHERE valid_to_commit IS NULL"
+        ),
+        0
+    );
     clean(&db);
     // A cascade closes the links; a keep in the same call does not reopen
     // them.
@@ -777,7 +823,7 @@ fn pool_deletes_judge_the_post_call_state() {
             put_source("S3"),
             M::PutLicense {
                 license: src("MIT"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     ..Default::default()
@@ -814,7 +860,10 @@ fn pool_deletes_judge_the_post_call_state() {
     .unwrap();
     assert_eq!(r.metadata[0].effect, MetadataEffect::Deleted);
     assert_eq!(
-        q(&db, "SELECT count(*) FROM source_license WHERE valid_to_commit IS NULL"),
+        q(
+            &db,
+            "SELECT count(*) FROM source_license WHERE valid_to_commit IS NULL"
+        ),
         0
     );
     clean(&db);
@@ -846,7 +895,7 @@ fn same_call_rules() {
         vec![
             M::PutSource {
                 source: src("IEA"),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("t".into()),
                     ..Default::default()
@@ -867,7 +916,7 @@ fn same_call_rules() {
         vec![
             M::PutSource {
                 source: Ref::Id(id),
-                rename: None,
+                new_name: None,
                 fields: SourceFields {
                     title: Some("t".into()),
                     ..Default::default()
@@ -884,7 +933,10 @@ fn same_call_rules() {
     // Two statements of one scope.
     let e = meta(
         &db,
-        vec![stmt(Scope::Save, Action::Keep), stmt(Scope::Save, Action::Clear)],
+        vec![
+            stmt(Scope::Save, Action::Keep),
+            stmt(Scope::Save, Action::Clear),
+        ],
     )
     .unwrap_err();
     assert!(e.to_string().contains("second keep"), "{e}");
@@ -922,9 +974,9 @@ fn same_call_rules() {
         }],
     )
     .unwrap();
-    let e = commit_change_set(&db, set(), "t", "m", WriteOptions::default()).unwrap_err();
+    let e = commit(&db, set(), "t", "m", WriteOptions::default()).unwrap_err();
     assert!(e.to_string().contains("deleted by this call"), "{e}");
-    let r = commit_change_set(
+    let r = commit(
         &db,
         set(),
         "t",
@@ -955,7 +1007,7 @@ fn the_stable_views_name_the_links() {
         vec![
             M::PutLicense {
                 license: src("CC-BY-4.0"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields {
                     spdx: true,
                     ..Default::default()
@@ -1002,11 +1054,17 @@ fn the_stable_views_name_the_links() {
         "node.a/p/Base -> IEA"
     );
     assert_eq!(
-        qs(&db, "SELECT target_name || '=' || pair_value FROM dataset_metadata"),
+        qs(
+            &db,
+            "SELECT target_name || '=' || pair_value FROM dataset_metadata"
+        ),
         "keyword=grid"
     );
     assert_eq!(
-        qs(&db, "SELECT entity || ' under ' || license FROM value_licenses"),
+        qs(
+            &db,
+            "SELECT entity || ' under ' || license FROM value_licenses"
+        ),
         "a under CC-BY-4.0"
     );
     assert_eq!(
@@ -1020,10 +1078,16 @@ fn the_stable_views_name_the_links() {
     // As of the first commits, the value's link already existed under its
     // names; before it, nothing.
     assert_eq!(
-        q(&db, &format!("SELECT count(*) FROM value_metadata_asof_named({first})")),
+        q(
+            &db,
+            &format!("SELECT count(*) FROM value_metadata_asof_named({first})")
+        ),
         1
     );
-    assert_eq!(q(&db, "SELECT count(*) FROM value_metadata_asof_named(1)"), 0);
+    assert_eq!(
+        q(&db, "SELECT count(*) FROM value_metadata_asof_named(1)"),
+        0
+    );
     assert_eq!(q(&db, "SELECT count(*) FROM audit_license_non_spdx"), 0);
     clean(&db);
 }
@@ -1056,7 +1120,7 @@ fn renamed_away_names_are_refused_in_metadata_items() {
         new_name: "Main".into(),
         description: None,
     };
-    let class = SC::RenameEntityClass {
+    let class = SC::RenameClass {
         current: "node".into(),
         new_name: "bus".into(),
         description: None,
@@ -1136,7 +1200,7 @@ fn renamed_away_names_are_refused_in_metadata_items() {
     ];
     for (rename, item) in cases {
         for covered in [CoveredWrites::Refuse, CoveredWrites::DeleteWins] {
-            let e = commit_change_set(
+            let e = commit(
                 &db,
                 ChangeSet {
                     structural: vec![rename.clone()],
@@ -1170,7 +1234,7 @@ fn set_source_licenses_and_an_aliased_delete_are_refused() {
             put_source("S"),
             M::PutLicense {
                 license: src("L"),
-                rename: None,
+                new_name: None,
                 fields: LicenseFields::default(),
             },
         ],
@@ -1235,7 +1299,10 @@ fn a_target_scope_set_annotates_only_its_target() {
         1
     );
     assert_eq!(
-        q(&db, "SELECT count(*) FROM value_metadata_named WHERE parameter = 'q'"),
+        q(
+            &db,
+            "SELECT count(*) FROM value_metadata_named WHERE parameter = 'q'"
+        ),
         0
     );
     clean(&db);
@@ -1250,7 +1317,7 @@ fn aliased_items_on_one_object_are_refused() {
     let db = fresh(dir.path());
     let lic = |n: &str| M::PutLicense {
         license: src(n),
-        rename: None,
+        new_name: None,
         fields: LicenseFields::default(),
     };
     meta(
@@ -1261,7 +1328,7 @@ fn aliased_items_on_one_object_are_refused() {
             lic("L2"),
             M::PutRole {
                 role: src("r"),
-                rename: None,
+                new_name: None,
                 description: None,
                 iri: None,
             },
@@ -1272,10 +1339,15 @@ fn aliased_items_on_one_object_are_refused() {
         ],
     )
     .unwrap();
-    let id = |t: &str| q(&db, &format!("SELECT id FROM {t} WHERE valid_to_commit IS NULL"));
+    let id = |t: &str| {
+        q(
+            &db,
+            &format!("SELECT id FROM {t} WHERE valid_to_commit IS NULL"),
+        )
+    };
     let titled = |r: Ref| M::PutSource {
         source: r,
-        rename: None,
+        new_name: None,
         fields: SourceFields {
             title: Some("t".into()),
             ..Default::default()
@@ -1283,7 +1355,7 @@ fn aliased_items_on_one_object_are_refused() {
     };
     let role = |r: Ref, d: &str| M::PutRole {
         role: r,
-        rename: None,
+        new_name: None,
         description: Some(d.into()),
         iri: None,
     };

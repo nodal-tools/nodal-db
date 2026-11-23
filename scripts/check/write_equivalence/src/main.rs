@@ -46,7 +46,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use nodal_db_core::api::{commit_changes, DeleteKey, Segment};
+mod compat;
+
+use compat::{commit_changes, opts_no_retain, opts_retain};
+use nodal_db_core::api::{DeleteKey, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::{CanonicalValue, LabelDomain};
 use nodal_db_core::conn::with_write_txn;
@@ -868,9 +871,10 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
                         parameter_definition_id: 900,
                         alternative_id: 900,
                     };
-                    let opts = WriteOptions {
-                        force_replace: *force,
-                        ..WriteOptions::default()
+                    let opts = if *force {
+                        opts_no_retain()
+                    } else {
+                        WriteOptions::default()
                     };
                     out.push(match v {
                         Some(v) => write_value(conn, c, key, v, &mut cache, &opts, None)?,
@@ -903,18 +907,9 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
         }
 
         let opts = match r.below(20) {
-            0..=2 => WriteOptions {
-                force_replace: true,
-                ..WriteOptions::default()
-            },
-            3..=4 => WriteOptions {
-                retain_override: Some(false),
-                ..WriteOptions::default()
-            },
-            5 => WriteOptions {
-                retain_override: Some(true),
-                ..WriteOptions::default()
-            },
+            0..=2 => opts_no_retain(),
+            3..=4 => opts_retain(Some(false)),
+            5 => opts_retain(Some(true)),
             _ => WriteOptions::default(),
         };
         // A structural create now and then (it runs before the segments).

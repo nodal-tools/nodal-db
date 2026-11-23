@@ -13,7 +13,7 @@ Mechanics
    observed in stored values; value-less definitions typeless), value-list
    bindings, descriptions, and literal scalar defaults — and ``template_apply``
    it onto a fresh nodal DB. Loading vocabulary through the one template
-   loader keeps invariant 2 intact (no second vocabulary-write path) and
+   loader keeps one write path for vocabulary (the core's) and
    stamps ``template_name``/``template_version`` in the same stroke.
 4. Write sections through the skin, one commit (group) per section:
    alternatives -> scenarios -> entities -> activation (ALL classes' rows,
@@ -23,7 +23,7 @@ Mechanics
    verification no-op, since the bootstrap template already stamped).
 5. Emit a LOUD residue report: unconsumed constructs, unflattenable values,
    ambiguous member picks, and the `parameter_type_list` drift table
-   ("declared X, observed Y — chain will repair"). Zero silent drops.
+   ("declared X, observed Y — imported as observed"). Zero silent drops.
    A key repeated within one map level (or a repeated time stamp) keeps its
    LAST entry and is reported as a warning in ``duplicate_keys`` (and
    logged), at every map level. Keys are compared as nodal-db stores them,
@@ -448,7 +448,7 @@ def flatten_value(parsed, residue: list, where: str, duplicates=None,
             for (_, ts), leaf in last_wins(keys, [float(x) for x in v.values], idx_tuple):
                 add(kinds + ["datetime"], names + ["time"], idx_tuple + (ts,), leaf)
         elif isinstance(v, spinedb_api.TimePattern):
-            residue.append(f"{where}: time_pattern value not flattenable (long-input door closed)")
+            residue.append(f"{where}: time_pattern value not imported (time-pattern values are not supported yet)")
         else:
             add(kinds, names, idx_tuple, v)
 
@@ -468,7 +468,7 @@ class ImportReport:
     template_name: str = ""
     template_version: str = ""
     counts: dict = field(default_factory=dict)
-    #: "declared {..}, observed {..} — chain will repair" rows.
+    #: "declared {..}, observed {..} — imported as observed" rows.
     drift_table: list = field(default_factory=list)
     #: loud residue: unconsumed constructs / unflattenable values / ambiguous
     #: member picks — counted and named, zero silent drops.
@@ -826,7 +826,7 @@ class SpineImporter:
                     if mismatch:
                         rep.drift_table.append(
                             f"{key[0]}.{key[1]}: declared {decl_desc}, observed "
-                            f"{obs_desc} — chain will repair"
+                            f"{obs_desc} — imported as observed"
                         )
             rep.counts["parameter_type_list rows (drift metadata only)"] = len(declared_types)
 
@@ -871,7 +871,7 @@ class SpineImporter:
             # opens; the dominant bottleneck). They are the same shared
             # appliers the structural channel drives, so accumulating them as
             # StructuralChange dicts and sending them through ONE
-            # commit_changes(structural=[…]) produces a logically identical DB
+            # commit(structural=[…]) produces a logically identical DB
             # (same rows, same resolved state) — only the commit count differs.
             #
             # Ordering inside the vec (items apply sequentially in one txn; a
@@ -949,7 +949,7 @@ class SpineImporter:
             structural = (
                 alt_changes + entity_changes + scenario_changes + activation_changes
             )
-            repd = db.commit_changes(
+            repd = db.commit(
                 structural=structural, user=self.user,
                 message="spine import: structural (alternatives, entities, "
                         "scenarios, activation)",
@@ -1010,7 +1010,7 @@ class SpineImporter:
                 if domains:
                     seg["domains"] = domains
                 segments.append(seg)
-            # commit_changes refuses duplicate targets within one call —
+            # commit refuses duplicate targets within one call —
             # partition same-target segments into sequential waves (distinct
             # entities per wave by construction above, so nothing clobbers).
             waves: list[list] = []
@@ -1031,7 +1031,7 @@ class SpineImporter:
             total_written = 0
             total_unchanged = 0
             for i, wave in enumerate(waves):
-                repd = db.commit_changes(
+                repd = db.commit(
                     segments=wave, user=self.user,
                     message=f"spine import: values ({i + 1}/{len(waves)})",
                 )
@@ -1051,7 +1051,7 @@ class SpineImporter:
             # ---- metadata (one final commit, the metadata channel) --------
             items = self._metadata_items(src, entities, db)
             if items:
-                repm = db.commit_changes(
+                repm = db.commit(
                     metadata=items, user=self.user, message="spine import: metadata",
                 )
                 rep.commits.append(("metadata", repm.get("commit_id")))

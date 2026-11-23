@@ -1,5 +1,5 @@
 //! End-to-end tests for the sanctioned delete + combined write/delete path
-//! (`api::delete_values` / `api::commit_changes`, delete design
+//! (`api::delete_values` / `api::commit`, delete design
 //! `specs/api_delete_design.md`). Each test builds a fresh schema DB via
 //! `init_schema`, writes through the public write path, and deletes through the
 //! new entry — exercising lookup-only name resolution (no auto-create), the
@@ -15,7 +15,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, delete_values, read_parameter, write_parameter, DeleteKey, Segment,
+    commit, delete_values, read_parameter, write_parameter, ChangeSet, DeleteKey, Segment,
 };
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WarningKind, WriteOptions};
@@ -194,9 +194,9 @@ fn scalar_delete_removes_current_and_stays_as_of_queryable() {
         "scen_a",
         scalar_batch("node_1", 42.5),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("write");
     let c_write = w.commit_id;
@@ -283,9 +283,9 @@ fn retain_false_delete_stubs_and_is_not_recoverable_as_of() {
         "Base",
         scalar_batch("u1", 7.0),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("write");
     let c_write = w.commit_id;
@@ -322,9 +322,9 @@ fn delete_missing_value_warns_nothing_to_delete() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("write");
     // First delete closes it out.
@@ -400,15 +400,15 @@ fn unknown_referent_warns_with_level_and_skips() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("write");
 
     for (key, level) in [
-        (dk("nope", "demand", "Base", "node_1"), "entity_class"),
-        (dk("node", "nope", "Base", "node_1"), "parameter_definition"),
+        (dk("nope", "demand", "Base", "node_1"), "class"),
+        (dk("node", "nope", "Base", "node_1"), "parameter"),
         (dk("node", "demand", "nope", "node_1"), "alternative"),
         (dk("node", "demand", "Base", "nope"), "entity"),
     ] {
@@ -447,9 +447,9 @@ fn unknown_key_skipped_other_keys_applied() {
         "Base",
         scalar_batch2(&["a", "b"], &[1.0, 2.0]),
         &[],
-        o(),
         "t",
         "w",
+        o(),
     )
     .expect("write");
 
@@ -492,9 +492,9 @@ fn multi_key_delete_is_one_commit() {
         "Base",
         scalar_batch2(&["a", "b"], &[1.0, 2.0]),
         &[],
-        o(),
         "t",
         "w",
+        o(),
     )
     .expect("write");
     let before = count(&db, "SELECT count(*) FROM commit");
@@ -525,7 +525,7 @@ fn multi_key_delete_is_one_commit() {
     audit_clean(&db);
 }
 
-/// combined `commit_changes`: a write + a delete in one call ⇒ both applied
+/// combined `commit`: a write + a delete in one call ⇒ both applied
 /// under ONE commit row.
 #[test]
 fn combined_write_and_delete_one_commit() {
@@ -538,24 +538,24 @@ fn combined_write_and_delete_one_commit() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "seed",
+        o(),
     )
     .expect("seed");
     let before = count(&db, "SELECT count(*) FROM commit");
 
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("node_2", 9.0))], // write
-        vec![],                                                           // no structural
-        vec![dk("node", "demand", "Base", "node_1")],                     // delete
-        vec![],                                                           // no object deletes
+        ChangeSet { segments: vec![seg("node", "demand", "Base", scalar_batch("node_2", 9.0))], structural: // write
+        vec![], deletes: // no structural
+        vec![dk("node", "demand", "Base", "node_1")], object_deletes: // delete
+        vec![], ..ChangeSet::default() }, // no object deletes
         "t",
         "atomic save",
         o(),
     )
-    .expect("commit_changes");
+    .expect("commit");
 
     assert_eq!(
         count(&db, "SELECT count(*) FROM commit") - before,
@@ -597,31 +597,32 @@ fn combined_error_rolls_back_whole_invocation() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "seed",
+        o(),
     )
     .expect("seed");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![
-            // seg 1 overwrites node_1/demand → CLOSES version 1, writes version 2.
-            seg("node", "demand", "Base", scalar_batch("node_1", 2.0)),
-            // seg 2 fails at canonicalization (MissingDomain) mid-transaction.
-            seg(
-                "node",
-                "level_param",
-                "Base",
-                undomained_label_batch("node_1"),
-            ),
-        ],
-        vec![], // no structural
-        // queued delete, never reached (another key: a value written and
-        // deleted in one call is rejected up front, D9)
-        vec![dk("node", "demand", "Base", "node_2")],
-        vec![], // no object deletes
+        ChangeSet {
+            segments: vec![
+                // seg 1 overwrites node_1/demand → CLOSES version 1, writes version 2.
+                seg("node", "demand", "Base", scalar_batch("node_1", 2.0)),
+                // seg 2 fails at canonicalization (MissingDomain) mid-transaction.
+                seg(
+                    "node",
+                    "level_param",
+                    "Base",
+                    undomained_label_batch("node_1"),
+                ),
+            ],
+            // queued delete, never reached (another key: a value written and
+            // deleted in one call is rejected up front)
+            deletes: vec![dk("node", "demand", "Base", "node_2")],
+            ..ChangeSet::default()
+        },
         "t",
         "must roll back",
         o(),
@@ -670,9 +671,9 @@ fn write_delete_rewrite_monotonic_scalar() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("v1");
     audit_clean(&db);
@@ -692,9 +693,9 @@ fn write_delete_rewrite_monotonic_scalar() {
         "Base",
         scalar_batch("node_1", 2.0),
         &[],
-        o(),
         "t",
         "v2",
+        o(),
     )
     .expect("v2");
     audit_clean(&db);
@@ -728,9 +729,9 @@ fn write_delete_rewrite_monotonic_array() {
         "Base",
         indexed_float_batch("node_1", "step", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("v1");
     assert_eq!(
@@ -755,9 +756,9 @@ fn write_delete_rewrite_monotonic_array() {
         "Base",
         indexed_float_batch("node_1", "step", &[0, 1, 2], &[4.0, 5.0, 6.0]),
         &[],
-        o(),
         "t",
         "v2",
+        o(),
     )
     .expect("v2");
     audit_clean(&db);
@@ -797,9 +798,9 @@ fn write_delete_rewrite_monotonic_long() {
         "Base",
         indexed_int_batch("node_1", "step", &[10, 20, 30], &[100, 200, 300]),
         &[],
-        o(),
         "t",
         "v1",
+        o(),
     )
     .expect("v1");
     assert_eq!(w.tiers, vec![nodal_db_core::types::Tier::Long], "long tier");
@@ -820,9 +821,9 @@ fn write_delete_rewrite_monotonic_long() {
         "Base",
         indexed_int_batch("node_1", "step", &[10, 20, 30], &[111, 222, 333]),
         &[],
-        o(),
         "t",
         "v2",
+        o(),
     )
     .expect("v2");
     audit_clean(&db);
@@ -904,9 +905,9 @@ fn identical_keys_are_deduped() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "w",
+        o(),
     )
     .expect("write");
 
@@ -945,9 +946,9 @@ fn array_delete_then_rewrite_mints_new_array_id() {
             "Base",
             indexed_float_batch("node_1", "step", &[0, 1, 2], vals),
             &[],
-            o(),
             "t",
             msg,
+            o(),
         )
         .expect("write");
     };

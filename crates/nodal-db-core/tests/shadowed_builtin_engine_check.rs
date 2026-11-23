@@ -39,9 +39,9 @@ fn write(db: &std::path::Path) -> Result<(), DbError> {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .map(|_| ())
 }

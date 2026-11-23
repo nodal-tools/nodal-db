@@ -19,7 +19,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::test_hooks::{inject_conflicts, without_resolve_cache};
-use nodal_db_core::api::{commit_changes, ingest_segments, DeleteKey, Segment};
+use nodal_db_core::api::{commit, write_segments, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{StructuralChange, WarningKind, WriteOptions, WriteReport};
@@ -105,7 +105,9 @@ fn dump(db: &Path) -> String {
     for t in tables {
         let src = match t.as_str() {
             "commit" => "(SELECT * EXCLUDE (timestamp) FROM commit)".to_string(),
-            "database_property" => "(SELECT * FROM database_property WHERE lower(key) <> 'db_identity')".to_string(),
+            "database_property" => {
+                "(SELECT * FROM database_property WHERE lower(key) <> 'db_identity')".to_string()
+            }
             _ => format!("\"{t}\""),
         };
         let rows: Option<String> = conn
@@ -130,7 +132,7 @@ fn dump(db: &Path) -> String {
 /// later segments), mixes scalar and series values, and runs a structural
 /// change and a delete in the same save.
 fn workload(db: &Path) -> Vec<Result<WriteReport, String>> {
-    let seed = ingest_segments(
+    let seed = write_segments(
         db,
         vec![
             seg("unit", "capacity", "Base", scalar(&["u1", "u2"], 10.0)),
@@ -142,35 +144,37 @@ fn workload(db: &Path) -> Vec<Result<WriteReport, String>> {
         WriteOptions::default(),
     )
     .map_err(|e| e.to_string());
-    let save = commit_changes(
+    let save = commit(
         db,
-        vec![
-            seg("unit", "capacity", "alt_a", scalar(&["u1", "u3"], 11.0)),
-            seg("unit", "profile", "alt_a", series(&["u1", "u2"], 30, 2.0)),
-            seg("Unit", "capacity", "Base", scalar(&["u2"], 12.0)),
-            seg("unit", "Profile", "alt_b", series(&["u3"], 30, 3.0)),
-            seg("unit", "profile", "ALT_c", series(&["u2"], 30, 4.0)),
-            seg("unit", "capacity", "Alt_A2", scalar(&["u1"], 13.0)),
-            seg("unit", "capacity", "alt_b", scalar(&["u1"], 14.0)),
-            seg("node", "demand", "alt_a", scalar(&["n1"], 6.0)),
-            seg("node", "price", "alt_a", scalar(&["n1", "n3"], 7.0)),
-            seg("node", "price", "Base", scalar(&["n2"], 8.0)),
-            seg("Node", "price", "alt_b", scalar(&["n2"], 9.0)),
-            seg("storage", "level", "alt_a", series(&["s1"], 30, 5.0)),
-            seg("storage", "level", "Base", series(&["s1", "s2"], 30, 6.0)),
-            seg("storage", "cap", "alt_b", scalar(&["s1"], 1.0)),
-        ],
-        vec![StructuralChange::CreateAlternative {
-            name: "alt_b".into(),
-            description: None,
-        }],
-        vec![DeleteKey {
-            class: "node".into(),
-            parameter: "demand".into(),
-            alternative: "Base".into(),
-            entity: "n2".into(),
-        }],
-        vec![],
+        ChangeSet {
+            segments: vec![
+                seg("unit", "capacity", "alt_a", scalar(&["u1", "u3"], 11.0)),
+                seg("unit", "profile", "alt_a", series(&["u1", "u2"], 30, 2.0)),
+                seg("Unit", "capacity", "Base", scalar(&["u2"], 12.0)),
+                seg("unit", "Profile", "alt_b", series(&["u3"], 30, 3.0)),
+                seg("unit", "profile", "ALT_c", series(&["u2"], 30, 4.0)),
+                seg("unit", "capacity", "Alt_A2", scalar(&["u1"], 13.0)),
+                seg("unit", "capacity", "alt_b", scalar(&["u1"], 14.0)),
+                seg("node", "demand", "alt_a", scalar(&["n1"], 6.0)),
+                seg("node", "price", "alt_a", scalar(&["n1", "n3"], 7.0)),
+                seg("node", "price", "Base", scalar(&["n2"], 8.0)),
+                seg("Node", "price", "alt_b", scalar(&["n2"], 9.0)),
+                seg("storage", "level", "alt_a", series(&["s1"], 30, 5.0)),
+                seg("storage", "level", "Base", series(&["s1", "s2"], 30, 6.0)),
+                seg("storage", "cap", "alt_b", scalar(&["s1"], 1.0)),
+            ],
+            structural: vec![StructuralChange::CreateAlternative {
+                name: "alt_b".into(),
+                description: None,
+            }],
+            deletes: vec![DeleteKey {
+                class: "node".into(),
+                parameter: "demand".into(),
+                alternative: "Base".into(),
+                entity: "n2".into(),
+            }],
+            ..ChangeSet::default()
+        },
         "t",
         "the multi-segment save",
         WriteOptions::default(),
@@ -178,7 +182,7 @@ fn workload(db: &Path) -> Vec<Result<WriteReport, String>> {
     .map_err(|e| e.to_string());
     // A cached definition whose later segment's batch matches none of its
     // declared members: the same error, with or without the cache.
-    let mismatch = ingest_segments(
+    let mismatch = write_segments(
         db,
         vec![
             seg("unit", "capacity", "alt_a", scalar(&["u1"], 20.0)),
@@ -220,8 +224,8 @@ fn multi_segment_commit_is_identical_with_and_without_the_cache() {
             .count()
     };
     assert_eq!(created("alternative"), 3, "alt_a, ALT_c, Alt_A2");
-    assert_eq!(created("entity_class"), 1, "storage");
-    assert_eq!(created("parameter_definition"), 3, "price, level, cap");
+    assert_eq!(created("class"), 1, "storage");
+    assert_eq!(created("parameter"), 3, "price, level, cap");
     assert_eq!(dump(&cached), dump(&reference), "every table");
 }
 
@@ -244,11 +248,11 @@ fn a_conflict_retry_rebuilds_the_cache() {
             seg("grid", "loss", "alt_y", series(&["g2"], 30, 4.0)),
         ]
     };
-    let report_ref = ingest_segments(&reference, segments(), "t", "m", WriteOptions::default())
+    let report_ref = write_segments(&reference, segments(), "t", "m", WriteOptions::default())
         .expect("reference");
 
     inject_conflicts(1);
-    let report = ingest_segments(&retried, segments(), "t", "m", WriteOptions::default())
+    let report = write_segments(&retried, segments(), "t", "m", WriteOptions::default())
         .expect("the retry commits");
     inject_conflicts(0);
 
@@ -269,7 +273,13 @@ fn a_conflict_retry_rebuilds_the_cache() {
     // reported ids are those rows.
     let conn = Connection::open(&retried).unwrap();
     for w in &report.warnings {
-        let table = w.object_type.as_str();
+        // The report's object-type tag names the table, except for the two
+        // whose tags are short (`class`, `parameter`).
+        let table = match w.object_type.as_str() {
+            "class" => "entity_class",
+            "parameter" => "parameter_definition",
+            t => t,
+        };
         let n: i64 = conn
             .query_row(
                 &format!(
@@ -308,7 +318,7 @@ fn injected_conflicts_exhaust_the_retry_budget() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(dir.path(), "exhaust.duckdb");
     inject_conflicts(5);
-    let err = ingest_segments(
+    let err = write_segments(
         &db,
         vec![seg("grid", "flow", "Base", scalar(&["g1"], 1.0))],
         "t",

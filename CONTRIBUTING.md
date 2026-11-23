@@ -1,19 +1,134 @@
 # Contributing
 
-Stub — grows with the project. What is binding already:
+Thank you for your interest in nodal-db. Issues and pull requests are
+welcome at <https://github.com/nodal-tools/nodal-db>. For a larger change,
+open an issue first so the design can be discussed before you write the
+code. nodal-db is licensed under the EUPL-1.2 (see `LICENSE` and the
+README); contributions are accepted under the same licence.
 
-## Spec workflow
-All lasting work products (plans, findings, critiques, handoffs) go in
-`specs/` under the conventions in `specs/README.md`.
+How the system is built, and the invariants a change must keep, are in
+the developer docs: [Architecture](docs/dev/architecture.md),
+[Engine rules](docs/dev/engine_rules.md) and
+[Design rationale](docs/dev/design_rationale.md).
 
 ## Dev setup
-- **Python 3.11+** (the DuckDB 2.0 Python client requires it; the skin's
-  wheels are abi3-py311) and **DuckDB 2.0** (`duckdb==2.0.0` in
-  `dev-requirements.txt` / `docs-requirements.txt`, matching the engine the
-  core bundles). `just venv` and `just docs-venv` create the two venvs.
-- Lint with ruff before committing.
+
+You need:
+
+- **Rust** (stable; the workspace is a Cargo workspace of three crates:
+  `nodal-db-core`, `nodal-db-cli` and the Python skin `nodal-db-py`).
+  The core bundles DuckDB and compiles it from source on the first build
+  (several minutes; see below).
+- **Python 3.11+** (the DuckDB 2.0 Python client requires it; the
+  skin's wheels are abi3-py311) and **DuckDB 2.0** (`duckdb==2.0.0` in
+  `dev-requirements.txt` / `docs-requirements.txt`, matching the engine
+  the core bundles). `just venv` creates `.venv` (smoke suite and
+  conformance oracles, which `cargo test` uses), `just docs-venv`
+  creates `.venv-docs` (the docs site).
+- [`just`](https://github.com/casey/just) for the task recipes in
+  `justfile`, and [`maturin`](https://www.maturin.rs) to build the
+  Python skin.
+- On Windows, a checkout with git symlinks enabled (`git config
+  core.symlinks true`, with Developer Mode on): `crates/nodal-db-core/schema`
+  and each crate's `LICENSE` are symlinks.
+- Optionally [`sccache`](https://github.com/mozilla/sccache): with it,
+  rebuilding the bundled DuckDB in a new target directory takes seconds
+  instead of minutes.
+
+Building:
+
+```bash
+cargo build --workspace                      # core, CLI, skin (as a cdylib)
+cargo run -p nodal-db-cli -- --help          # the CLI
+cd crates/nodal-db-py && maturin develop     # the skin, into the active venv
+```
+
+The first build compiles the bundled DuckDB: about 4 minutes on a
+32-core machine, considerably longer on a laptop. Later builds reuse it.
+
+## Testing
+
+| Command | Tier | What runs |
+|---|---|---|
+| `just t <args>` | targeted | forwards to `cargo test`, e.g. `just t -p nodal-db-core canon` |
+| `just` (or `just test`) | quick gate, every change | `cargo test --workspace` (slow `#[ignore]` tests skipped), the schema smoke suite, the perf-gate tool's unit tests |
+| `just perf-gate` | pre-merge, perf-sensitive changes | paired A/B ratios against the merge-base ("Performance gates" below) |
+| `just full` | pre-release | the above with the slow tests, the index-scan guards on a release build and the release perf gate |
+
+The Python skin is tested from the outside, through a built wheel:
+
+```bash
+cd crates/nodal-db-py && maturin develop && pip install pytest 'duckdb>=2.0'
+pytest crates/nodal-db-py/tests        # the skin
+pytest python/tests                    # the Spine importer (needs spinedb_api)
+```
+
+Slow tests are marked `#[ignore = "slow: pre-release tier"]`, so they
+drop out of the quick gate; tag any new slow test the same way.
+
+### Testing rules
+
+1. **Tests build their databases from fixtures (JSON, schema, API
+   calls), never from a checked-in binary database.** A checked-in
+   `.duckdb` file lags the schema and silently covers less than it
+   seems to.
+2. **Curated fixture files are extended, not rewritten.** Add cases
+   through the extension mechanism (separate overlay files or an
+   `extend_*` hook), so existing cases keep testing what they tested.
+3. **Parity tests gate rewrites.** When a component is reimplemented
+   (for example a faster path replacing a reference path), keep the
+   reference as an oracle and gate the new path with equality or
+   tolerance parity tests.
+4. **Every write goes through the one core.** A test, tool or binding
+   never writes value rows with its own encoder; the canonical encodings
+   are deterministic functions of the data, and two implementations of
+   them drift.
+
+## Code style and checks
+
+Before opening a PR, run:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+ruff check python crates/nodal-db-py/tests scripts
+```
+
+(`just check` runs the first two plus `cargo check`.) CI runs the same
+gates.
+
+- Public items carry doc comments that stand on their own: say what the
+  item does and its contract, and link to the public docs where more is
+  needed.
 - **SQL lambdas: use `lambda x: ...` syntax only.** The single-arrow form
   `x -> ...` is disabled by default in DuckDB 2.0 and removed in 2.1.
+- Read `docs/dev/engine_rules.md` before changing the schema DDL, core
+  SQL, indexes, sequences, storage or compaction.
+
+## Resource caps
+
+DuckDB sizes every instance to the machine by default: as many threads as
+cores and a memory limit of 80 % of RAM, per instance. A test binary runs
+many tests at once, each with its own instance, so the repo bounds this
+in `.cargo/config.toml [env]` for every `cargo test`, `cargo run` and
+`cargo bench` started in it:
+
+| variable | value | effect |
+|---|---|---|
+| `SLURM_CPUS_ON_NODE` | 4 | DuckDB threads per instance (DuckDB reads it when it creates an instance) |
+| `SLURM_MEM_PER_NODE` | 8000 | DuckDB memory_limit = 80 % of 8 000 MB per instance |
+| `RUST_TEST_THREADS` | 8 | at most 8 tests at once per test binary |
+
+A value in your environment wins: `SLURM_CPUS_ON_NODE=8 cargo test`,
+`RUST_TEST_THREADS=32 cargo test`; an empty `SLURM_*` value runs DuckDB
+uncapped. `cargo run -p nodal-db-cli -- import …` and the criterion
+benches run at 4 DuckDB threads too; set the variables empty to measure
+the engine as shipped. 4 rather than 1 keeps DuckDB's parallel operators
+running in tests. `tests/duckdb_env_caps.rs` fails if a DuckDB release
+stops reading the variables. `just full` runs inside a systemd user scope
+with `MemoryMax=14G` and no swap (`NODAL_FULL_MEMORY_MAX=20G` or `=off`
+to change it).
 
 ## DuckDB upgrades
 A DuckDB bump is a matched bump: the bundled engine (`duckdb` in the
@@ -38,7 +153,7 @@ and re-check it after a bump. After one:
 - If `duckdb_env_caps` fails, the new DuckDB no longer sizes its thread
   pool and memory limit from `SLURM_CPUS_ON_NODE` / `SLURM_MEM_PER_NODE`:
   the `cargo test` caps and the perf gate's caps (which refuses to start
-  then) need another mechanism ("Machine budget" below).
+  then) need another mechanism ("Resource caps" below).
 - If `duckdb_dict_cache_guard`'s tripwire fails ("the DuckDB dict-cache
   bug appears fixed"), remove the `debug_enable_caching_operators`
   workaround as described in engine_rules.md §5. If every core open
@@ -75,7 +190,7 @@ and re-check it after a bump. After one:
      and the `uq_*_name` unique indexes over `cur_name`) persist keys the
      old engine computed, so an index lookup could miss a row a scan
      finds; compaction rebuilds every index from the DDL;
-  4. record the change (release notes, the usage guide's examples of the
+  4. record the change (CHANGELOG.md, the usage guide's examples of the
      rule) and tell downstream users: their files need the same check.
   A build that links a different engine without these steps refuses
   every write (`types::check_engine_fold`, once per process).
@@ -107,8 +222,9 @@ with another implementation (CPython's `unicodedata`, DuckDB's
 `nfc_normalize`): their Unicode versions follow the interpreter or the
 engine.
 
-A bump is a rehash-class change (spec §2.4), deliberate and in one
-branch:
+A bump is a rehash-class change
+([canonical encoding](docs/dev/canonical_encoding.md) §2.4), deliberate
+and in one branch:
 
 1. Download the new release's `UnicodeData.txt`,
    `DerivedNormalizationProps.txt`, `CompositionExclusions.txt` and
@@ -124,53 +240,8 @@ branch:
 4. Existing databases: re-normalize every stored name and label with the
    new tables (only strings with characters unassigned in the old
    version can change), recompute the affected axis hashes, and report
-   names or labels that now collide. No tool does this yet; write it
-   with the bump.
-
-## Testing rules (binding once code exists)
-Adopted from flextool-engine's hard-won lessons:
-
-1. **Tests build their databases from JSON/schema fixtures — never read a
-   checked-in binary DB.** Checked-in `.duckdb`/`.sqlite` files lag the
-   schema and silently under-cover. Provide a `json_to_db`-style fixture
-   builder from day one.
-2. **Fixture files are append-only for agents.** Provide an explicit
-   extension mechanism (an `extend_*` hook or separate overlay files) so
-   agents add cases without rewriting curated fixtures.
-3. **Parity tests gate rewrites.** When a component is reimplemented
-   (e.g. a faster path replacing a reference path), keep the reference as an
-   oracle and gate the new path with equality/tolerance parity tests.
-
-## Machine budget
-DuckDB sizes every instance to the machine by default: as many threads as
-cores and a memory limit of 80 % of RAM, per instance. A test binary runs
-many tests at once, each with its own instance, so an unbounded `cargo
-test` puts hundreds of runnable threads on every core in bursts. The repo
-bounds this in `.cargo/config.toml [env]`, for every `cargo test`, `cargo
-run` and `cargo bench` started in it:
-
-| variable | value | effect |
-|---|---|---|
-| `SLURM_CPUS_ON_NODE` | 4 | DuckDB threads per instance (DuckDB reads it when it creates an instance) |
-| `SLURM_MEM_PER_NODE` | 8000 | DuckDB memory_limit = 80 % of 8 000 MB per instance |
-| `RUST_TEST_THREADS` | 8 | at most 8 tests at once per test binary |
-
-A value in your environment wins: `SLURM_CPUS_ON_NODE=8 cargo test`,
-`RUST_TEST_THREADS=32 cargo test`; an empty `SLURM_*` value
-(`SLURM_CPUS_ON_NODE= SLURM_MEM_PER_NODE=`) runs DuckDB uncapped. Keep in
-mind that a `cargo run -p nodal-db-cli -- import …` and the criterion
-benches (`just bench`) run at 4 DuckDB threads too; set the variables
-empty to measure the engine as shipped. 4 rather than 1 keeps DuckDB's
-parallel operators running in tests (the dict-cache bug and row-order
-nondeterminism live there). `tests/duckdb_env_caps.rs` fails if a DuckDB
-release stops reading the variables. `just full` runs its release-build
-guard step (the index-scan guards and the dict-cache tripwire) uncapped,
-so the engine's production thread count is checked too, builds at 8 cargo
-jobs unless `CARGO_BUILD_JOBS` is set, and runs inside a systemd user
-scope with `MemoryMax=14G` and no swap (`NODAL_FULL_MEMORY_MAX=20G` or
-`=off` to change it; without `systemd-run --user` it runs unbounded and
-says so). Agents additionally source `scripts/dev/agent-env.sh SLOT` (8
-build jobs, own target dir, shared compiler cache).
+   names or labels that now collide. No tool does this yet; it has to
+   be written with the bump.
 
 ## Write-path equivalence check
 A change to the write path that is meant to leave the stored data alone
@@ -352,9 +423,6 @@ a source probe. `just perf-gate-test` runs the tool's own tests;
 `ab.py --self-test --inject METRIC=1.15|wrong|wrongvalue` checks that the
 whole pipeline catches a slowdown or a wrong result.
 
-## PR checklist
-To be defined with the first release process.
-
 ## Release builds
 A release or CI build of the CLI or the Python wheel sets
 `NODAL_DB_GIT_COMMIT` to the commit it builds, so every file it creates
@@ -380,3 +448,19 @@ The schema diagrams and view tables on the Schema page are **generated**:
 `docs/_generated/*.md` (never edit those by hand). After any schema change,
 run `just docs-gen` and commit the result — CI's `--check` step fails on
 stale output.
+
+## PR checklist
+
+- [ ] `cargo fmt`, `cargo clippy -D warnings` and the rustdoc gate are clean.
+- [ ] `just` (the quick gate) passes; Python changes also pass the skin's
+      and the importer's pytest suites.
+- [ ] New behaviour has tests; a new slow test carries the `#[ignore]` tag.
+- [ ] A schema change regenerates `docs/_generated/` (`just docs-gen`),
+      and a read-surface change bumps the revision ("Changing the read
+      surface" above).
+- [ ] A change to the write path, the read macros, the schema, core SQL,
+      compaction, extract or the DuckDB version has a perf-gate run
+      (`just perf-gate`; paste the table, with the reason for any
+      `--allow`).
+- [ ] User-visible changes are described in the docs and in
+      `CHANGELOG.md` under "Unreleased".

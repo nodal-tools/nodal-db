@@ -87,6 +87,7 @@
 
 mod axes;
 mod check;
+mod compat;
 mod gate;
 mod import;
 mod longbig;
@@ -103,7 +104,9 @@ use std::time::Instant;
 use duckdb::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
-use nodal_db_core::api::{commit_changes, write_parameter, DeleteKey, Segment};
+use crate::compat::commit_changes;
+use crate::compat::write_parameter;
+use nodal_db_core::api::{DeleteKey, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
 use nodal_db_core::conn::{with_read, with_write_txn};

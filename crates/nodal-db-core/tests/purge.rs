@@ -13,7 +13,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, purge, ChangeSet, Segment};
+use nodal_db_core::api::{commit, purge, ChangeSet, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::{
@@ -78,7 +78,7 @@ fn seg(class: &str, param: &str, alt: &str, b: RecordBatch) -> Segment {
 }
 
 fn class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -146,7 +146,7 @@ fn req(scope: PS) -> PurgeRequest {
 }
 
 fn call(db: &Path, set: ChangeSet) -> Result<WriteReport, DbError> {
-    commit_change_set(db, set, "t", "m", o())
+    commit(db, set, "t", "m", o())
 }
 
 fn purge1(db: &Path, scope: PS) -> WriteReport {
@@ -1069,7 +1069,7 @@ fn values_retention_follows_the_definition_and_the_override() {
         "t",
         "m",
         WriteOptions {
-            retain_override: Some(false),
+            retain_content: Some(false),
             ..o()
         },
     )
@@ -1099,7 +1099,7 @@ fn values_retention_follows_the_definition_and_the_override() {
         "t",
         "m",
         WriteOptions {
-            retain_override: Some(true),
+            retain_content: Some(true),
             ..o()
         },
     )
@@ -1556,7 +1556,7 @@ fn a_rename_and_a_purge_rewrite_the_documents_once() {
         &db,
         ChangeSet {
             structural: vec![
-                SC::RenameEntityClass {
+                SC::RenameClass {
                     current: "unit".into(),
                     new_name: "gen".into(),
                     description: None,
@@ -1607,7 +1607,7 @@ fn a_rename_and_a_purge_rewrite_the_documents_once() {
     call(
         &db3,
         ChangeSet {
-            structural: vec![SC::RenameEntityClass {
+            structural: vec![SC::RenameClass {
                 current: "unit".into(),
                 new_name: "gen".into(),
                 description: None,
@@ -1803,9 +1803,9 @@ fn a_large_scope_warns_and_proceeds() {
     });
 }
 
-/// `force_replace` stubs every value a purge closes, as for a value delete.
+/// `retain_content: Some(false)` stubs every value a purge closes, as for a value delete.
 #[test]
-fn force_replace_stubs_purged_values() {
+fn retain_content_false_stubs_purged_values() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(&dir);
     let r = purge(
@@ -1818,7 +1818,7 @@ fn force_replace_stubs_purged_values() {
         "t",
         "m",
         WriteOptions {
-            force_replace: true,
+            retain_content: Some(false),
             ..o()
         },
     )

@@ -9,7 +9,7 @@ repo_url = "https://github.com/nodal-tools/nodal-db"
 repo_name = "nodal-tools/nodal-db"
 edit_uri = "edit/main/docs/"
 
-# Only docs/ is published — specs/, schema/ etc. are outside docs_dir.
+# Only docs/ is published; schema/, crates/ etc. are outside docs_dir.
 docs_dir = "docs"
 site_dir = "site"
 
@@ -23,6 +23,7 @@ nav = [
   { "Home" = "index.md" },
   { "Features" = "features.md" },
   { "Using nodal-db" = "usage.md" },
+  { "Reference" = "reference.md" },
   { "Versions and compatibility" = "versions.md" },
   { "Schema" = "schema.md" },
   { "Developer docs" = [

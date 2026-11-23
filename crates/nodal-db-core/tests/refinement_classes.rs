@@ -1,5 +1,5 @@
 //! Refinement classes (pre-release review 2, OD-1): a class is a refinement
-//! class only when the core lists it (`verbs::set_refinement_class`, the
+//! class only when the core lists it (`verbs::set_class_refinement`, the
 //! core property `refinement_classes`), never because of its name. A
 //! refinement link entity (element 1 coarse, element 2 fine) makes an
 //! explicit deactivation of the coarse entity propagate to the fine one in
@@ -11,8 +11,8 @@ use duckdb::Connection;
 
 use nodal_db_core::error::DbError;
 use nodal_db_core::verbs::{
-    ensure_alternative, ensure_entity, ensure_entity_class, set_entity_activation,
-    set_refinement_class, set_scenario_alternatives,
+    ensure_alternative, ensure_class, ensure_entity, set_class_refinement, set_entity_activation,
+    set_scenario_alternatives,
 };
 use nodal_db_core::{api::head_commit, schema_init::init_schema};
 
@@ -23,9 +23,9 @@ const U: &str = "tester";
 fn fixture(dir: &Path) -> std::path::PathBuf {
     let db = dir.join("r.duckdb");
     init_schema(&db).unwrap();
-    ensure_entity_class(&db, "plant", &[], U).unwrap();
-    ensure_entity_class(&db, "gen", &[], U).unwrap();
-    ensure_entity_class(&db, "realizes_plant", &["plant".into(), "gen".into()], U).unwrap();
+    ensure_class(&db, "plant", &[], U).unwrap();
+    ensure_class(&db, "gen", &[], U).unwrap();
+    ensure_class(&db, "realizes_plant", &["plant".into(), "gen".into()], U).unwrap();
     ensure_entity(&db, "plant", Some("p1"), &[], U).unwrap();
     ensure_entity(&db, "gen", Some("g1"), &[], U).unwrap();
     ensure_entity(&db, "realizes_plant", None, &["p1".into(), "g1".into()], U).unwrap();
@@ -84,7 +84,7 @@ fn a_class_named_realizes_is_not_a_refinement_class() {
 fn a_listed_class_propagates_deactivation_and_unlisting_stops_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path());
-    set_refinement_class(&db, "REALIZES_PLANT", true, U).unwrap();
+    set_class_refinement(&db, "REALIZES_PLANT", true, U).unwrap();
     assert_eq!(g1_state(&db), ((false, "propagated".to_string()), 1));
     let conn = Connection::open(&db).unwrap();
     let cid: i64 = conn
@@ -99,17 +99,17 @@ fn a_listed_class_propagates_deactivation_and_unlisting_stops_it() {
 
     // Idempotent: no commit for no change.
     let head = head_commit(&db).unwrap();
-    set_refinement_class(&db, "realizes_plant", true, U).unwrap();
+    set_class_refinement(&db, "realizes_plant", true, U).unwrap();
     assert_eq!(head_commit(&db).unwrap(), head);
 
     // Any name works; two classes are listed in ascending id order.
-    ensure_entity_class(&db, "refines", &["plant".into(), "gen".into()], U).unwrap();
-    set_refinement_class(&db, "refines", true, U).unwrap();
+    ensure_class(&db, "refines", &["plant".into(), "gen".into()], U).unwrap();
+    set_class_refinement(&db, "refines", true, U).unwrap();
     let v = stored(&db).unwrap();
     assert!(v.starts_with(&format!("[{cid},")), "{v}");
 
-    set_refinement_class(&db, "realizes_plant", false, U).unwrap();
-    set_refinement_class(&db, "refines", false, U).unwrap();
+    set_class_refinement(&db, "realizes_plant", false, U).unwrap();
+    set_class_refinement(&db, "refines", false, U).unwrap();
     assert_eq!(stored(&db), None, "an empty list clears the key");
     assert_eq!(g1_state(&db), ((true, "default".to_string()), 0));
 }
@@ -118,12 +118,12 @@ fn a_listed_class_propagates_deactivation_and_unlisting_stops_it() {
 fn a_refinement_class_has_two_dimensions() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path());
-    let err = set_refinement_class(&db, "plant", true, U).unwrap_err();
+    let err = set_class_refinement(&db, "plant", true, U).unwrap_err();
     assert!(
         matches!(&err, DbError::Api(m) if m.contains("exactly two")),
         "{err}"
     );
-    let err = set_refinement_class(&db, "nope", true, U).unwrap_err();
+    let err = set_class_refinement(&db, "nope", true, U).unwrap_err();
     assert!(
         matches!(&err, DbError::Api(m) if m.contains("not found")),
         "{err}"
@@ -183,11 +183,11 @@ fn delete_class(db: &Path, name: &str) -> i64 {
 fn the_mark_survives_a_class_rename() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path());
-    set_refinement_class(&db, "realizes_plant", true, U).unwrap();
+    set_class_refinement(&db, "realizes_plant", true, U).unwrap();
     let cid = class_id(&db, "realizes_plant");
     nodal_db_core::api::commit_structural(
         &db,
-        vec![nodal_db_core::types::StructuralChange::RenameEntityClass {
+        vec![nodal_db_core::types::StructuralChange::RenameClass {
             current: "realizes_plant".into(),
             new_name: "plant_generator".into(),
             description: None,
@@ -209,9 +209,9 @@ fn the_mark_survives_a_class_rename() {
 fn deleting_a_refinement_class_unlists_it_in_the_same_commit() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path());
-    ensure_entity_class(&db, "refines", &["plant".into(), "gen".into()], U).unwrap();
-    set_refinement_class(&db, "realizes_plant", true, U).unwrap();
-    set_refinement_class(&db, "refines", true, U).unwrap();
+    ensure_class(&db, "refines", &["plant".into(), "gen".into()], U).unwrap();
+    set_class_refinement(&db, "realizes_plant", true, U).unwrap();
+    set_class_refinement(&db, "refines", true, U).unwrap();
     let keep = class_id(&db, "refines");
     let c = delete_class(&db, "realizes_plant");
     assert_eq!(stored(&db), Some(format!("[{keep}]")));

@@ -2,7 +2,7 @@
 // Source: UnicodeData.txt 15.1.0 sha256 2fc713e6a31a87c4850a37fe2caffa4218180fadb5de86b43a143ddb4581fb86
 
 //! The name fold's data: Unicode 15.1.0 Simple_Lowercase_Mapping, the
-//! table of DuckDB's `lower()` on the bundled engine (engine_rules.md §8).
+//! table of DuckDB's `lower()` on the bundled engine.
 //! The normative copy is `conformance/unicode/lower_simple_15.1.0.txt`;
 //! `tests/fold_table.rs` checks this file against it.
 

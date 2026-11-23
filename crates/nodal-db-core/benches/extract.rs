@@ -106,9 +106,9 @@ fn write(db: &Path, class: &str, param: &str, batch: RecordBatch) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "bench",
         "extract bench",
+        WriteOptions::default(),
     )
     .expect("write_parameter");
 }

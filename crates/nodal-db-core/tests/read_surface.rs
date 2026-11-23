@@ -102,9 +102,9 @@ fn write(db: &Path, class: &str, param: &str, alt: &str, b: RecordBatch) -> Writ
         alt,
         b,
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .expect("write")
 }
@@ -483,12 +483,12 @@ fn a_write_refreshes_an_old_file_and_keeps_user_views() {
         "High",
         scalars(&["n1"], 99.0),
         &[],
+        "tester",
+        "",
         WriteOptions {
             expect_commit: Some(head),
             ..WriteOptions::default()
         },
-        "tester",
-        "",
     )
     .expect("expect_commit holds across the refresh");
     assert!(
@@ -701,8 +701,10 @@ fn another_schema_version_is_not_refreshed() {
     let db = data_file(dir.path(), "other.duckdb");
     age(&db);
     let c = raw(&db);
-    c.execute_batch("UPDATE database_property SET value = '0.0-other' WHERE key = 'schema_version'")
-        .unwrap();
+    c.execute_batch(
+        "UPDATE database_property SET value = '0.0-other' WHERE key = 'schema_version'",
+    )
+    .unwrap();
     c.close().unwrap();
     let cat = catalog_sql(&db);
     let _ = write_parameter(
@@ -712,9 +714,9 @@ fn another_schema_version_is_not_refreshed() {
         "High",
         scalars(&["n1"], 3.0),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     );
     assert_eq!(catalog_sql(&db), cat);
     let e = api::refresh_read_surface(&db, false).unwrap_err();
@@ -730,7 +732,12 @@ fn stale_reads_overlay_and_match_the_refreshed_file() {
     age(&db);
     // The frozen old surface carries no marker (read as major 0); mark it an
     // older revision of this build's major, the case the overlay serves.
-    set_marker(&db, read_surface::build_version().contract_major, 1, "0000000000000000");
+    set_marker(
+        &db,
+        read_surface::build_version().contract_major,
+        1,
+        "0000000000000000",
+    );
     let refreshed = dir.path().join("refreshed.duckdb");
     fs::copy(&db, &refreshed).unwrap();
     api::refresh_read_surface(&refreshed, false).unwrap();

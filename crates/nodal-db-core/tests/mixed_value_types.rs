@@ -14,7 +14,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, commit_structural, head_commit, DeleteKey, Segment};
+use nodal_db_core::api::{commit, commit_structural, head_commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::canon::LabelDomain;
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
@@ -50,7 +50,7 @@ fn declare(db: &Path, types: Vec<TypeDecl>) {
     commit_structural(
         db,
         vec![
-            StructuralChange::CreateEntityClass {
+            StructuralChange::CreateClass {
                 name: "node".into(),
                 dims: vec![],
                 description: None,
@@ -132,7 +132,17 @@ fn write(
     deletes: Vec<DeleteKey>,
     opts: WriteOptions,
 ) -> Result<nodal_db_core::types::WriteReport, DbError> {
-    commit_changes(db, segments, vec![], deletes, vec![], "t", "m", opts)
+    commit(
+        db,
+        ChangeSet {
+            segments,
+            deletes,
+            ..ChangeSet::default()
+        },
+        "t",
+        "m",
+        opts,
+    )
 }
 
 fn query<T: duckdb::types::FromSql>(db: &Path, sql: &str) -> Vec<Vec<T>> {

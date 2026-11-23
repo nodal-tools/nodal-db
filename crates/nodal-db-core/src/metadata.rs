@@ -1,24 +1,23 @@
 //! Metadata: the pair pool, sources, licenses, roles and the two link tables
 //! (`schema/001_meta.sql`). This module is the one writer of
 //! `metadata_pair`, `source`, `license`, `source_license`, `metadata_role`,
-//! `object_metadata_link` and `value_metadata_link` (invariant 2: one writer
-//! per table); `crate::property` owns `database_property`.
+//! `object_metadata_link` and `value_metadata_link` (one writer per
+//! table); `crate::property` owns `database_property`.
 //!
 //! Value links belong to a **value version**: a link row is valid while the
 //! value version current at its `valid_from_commit` is. Every new version of
 //! a value with links closes them, and a *keep* reopens them at the same
 //! commit (`version + 1`), so link spans tile with value versions. The
 //! write path's keep / set / clear statements are the metadata channel of
-//! `api::commit_change_set`; the lifecycle helpers here serve the other
+//! `api::commit`; the lifecycle helpers here serve the other
 //! value writers and closers:
-//!   - a value delete closes the value's links ([`close_value_links`]);
-//!   - a template `map_values` rewrite keeps them ([`keep_value_links_where`],
-//!     owner ruling OD3), its drop arm closes them
-//!     ([`close_orphaned_value_links`]);
+//!   - a value delete closes the value's links (`close_value_links`);
+//!   - a template `map_values` rewrite keeps them (`keep_value_links_where`),
+//!     its drop arm closes them (`close_orphaned_value_links`);
 //!   - a template `merge_parameter` carries them to the filled target slots
-//!     and carries the source definition's own links ([`carry_merged_links`]);
-//!   - object deletes close links through the registry legs
-//!     (`object_delete::object_legs`; links never block, owner ruling OD2).
+//!     and carries the source definition's own links (`carry_merged_links`);
+//!   - object deletes close links through the registry legs (links never
+//!     block a delete).
 
 use duckdb::{params, Connection};
 
@@ -50,7 +49,9 @@ impl TripleSet<'_> {
             TripleSet::Lists(ts) => {
                 let list = |f: fn(&Triple) -> i64| {
                     duckdb::types::Value::List(
-                        ts.iter().map(|t| duckdb::types::Value::BigInt(f(t))).collect(),
+                        ts.iter()
+                            .map(|t| duckdb::types::Value::BigInt(f(t)))
+                            .collect(),
                     )
                 };
                 vec![list(|t| t.0), list(|t| t.1), list(|t| t.2)]
@@ -77,7 +78,11 @@ pub(crate) fn has_value_links(conn: &Connection) -> Result<bool, DbError> {
 
 /// Close the live links of `set`'s triples at commit `c` (same-commit
 /// guard: a link this commit created is never closed). Returns rows closed.
-pub(crate) fn close_links(conn: &Connection, c: i64, set: &TripleSet<'_>) -> Result<usize, DbError> {
+pub(crate) fn close_links(
+    conn: &Connection,
+    c: i64,
+    set: &TripleSet<'_>,
+) -> Result<usize, DbError> {
     let mut binds: Vec<duckdb::types::Value> = vec![c.into()];
     binds.extend(set.binds());
     binds.push(c.into());
@@ -94,7 +99,11 @@ pub(crate) fn close_links(conn: &Connection, c: i64, set: &TripleSet<'_>) -> Res
 
 /// Reopen at `c` (`version + 1`) the links of `set`'s triples that were
 /// closed at `c`: the second half of a *keep*. Returns rows inserted.
-pub(crate) fn reopen_links(conn: &Connection, c: i64, set: &TripleSet<'_>) -> Result<usize, DbError> {
+pub(crate) fn reopen_links(
+    conn: &Connection,
+    c: i64,
+    set: &TripleSet<'_>,
+) -> Result<usize, DbError> {
     let mut binds: Vec<duckdb::types::Value> = vec![c.into()];
     binds.extend(set.binds());
     binds.push(c.into());
@@ -121,10 +130,15 @@ pub(crate) fn reopen_links(conn: &Connection, c: i64, set: &TripleSet<'_>) -> Re
     )?)
 }
 
-/// A value delete (or any closer of whole values): close the links of the
-/// closed `triples`, chunked. Skips every statement on a link-free file.
-/// Returns rows closed (reported apart from the value rows closed).
-pub fn close_value_links(conn: &Connection, c: i64, triples: &[Triple]) -> Result<usize, DbError> {
+/// Close the links of the closed `triples`, chunked (the unit tests' direct
+/// closer; the write path closes links set-based). Skips every statement on
+/// a link-free file. Returns rows closed.
+#[cfg(test)]
+pub(crate) fn close_value_links(
+    conn: &Connection,
+    c: i64,
+    triples: &[Triple],
+) -> Result<usize, DbError> {
     if triples.is_empty() || !has_value_links(conn)? {
         return Ok(0);
     }
@@ -200,8 +214,11 @@ pub(crate) fn carry_merged_links(
         Value::List(filled.iter().map(|p| Value::BigInt(f(p))).collect())
     };
     let (es, alts) = (list(|p| p.0), list(|p| p.1));
-    let value_links = if filled.is_empty() { 0 } else { conn.execute(
-        "INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id, \
+    let value_links = if filled.is_empty() {
+        0
+    } else {
+        conn.execute(
+            "INSERT INTO value_metadata_link (entity_id, parameter_definition_id, alternative_id, \
            target_kind, target_id, role_id, valid_from_commit, version) \
          SELECT l.entity_id, ?1, l.alternative_id, l.target_kind, l.target_id, l.role_id, ?2, \
                 coalesce((SELECT max(x.version) FROM value_metadata_link x \
@@ -218,8 +235,9 @@ pub(crate) fn carry_merged_links(
                    AND t.parameter_definition_id = ?1 AND t.alternative_id = l.alternative_id \
                    AND t.target_kind = l.target_kind AND t.target_id = l.target_id \
                    AND coalesce(t.role_id, 0) = coalesce(l.role_id, 0))",
-        params![tgt, c, src, es, alts],
-    )? };
+            params![tgt, c, src, es, alts],
+        )?
+    };
     let object_links = conn.execute(
         "INSERT INTO object_metadata_link (object_type, object_id, target_kind, target_id, \
            role_id, valid_from_commit, version) \
@@ -266,7 +284,7 @@ pub(crate) fn close_object_links_of(
 /// Fail when any of `keys` has a live value link: the raw per-key writers
 /// (`history::write_value`, `history::write_long_values`) cannot state keep
 /// / set / clear, so they refuse an annotated value (use
-/// `api::commit_change_set`).
+/// `api::commit`).
 pub(crate) fn refuse_linked(conn: &Connection, keys: &[Triple]) -> Result<(), DbError> {
     if keys.is_empty() || !has_value_links(conn)? {
         return Ok(());
@@ -278,7 +296,7 @@ pub(crate) fn refuse_linked(conn: &Connection, keys: &[Triple]) -> Result<(), Db
         return Err(DbError::ValueMetadataUnstated {
             message: format!(
                 "{count} value(s) carry metadata links: a new version must state keep, set or \
-                 clear — write through commit_change_set with a value_metadata statement \
+                 clear — write through commit with a value_metadata statement \
                  (the raw per-key writers cannot state one)"
             ),
             count,
@@ -289,7 +307,7 @@ pub(crate) fn refuse_linked(conn: &Connection, keys: &[Triple]) -> Result<(), Db
 }
 
 // ===========================================================================
-// The metadata channel of `api::commit_change_set` (`ChangeSet::metadata`)
+// The metadata channel of `api::commit` (`ChangeSet::metadata`)
 // ===========================================================================
 //
 // Runs LAST in the call (after the purges), under the call's commit id:
@@ -302,13 +320,15 @@ pub(crate) fn refuse_linked(conn: &Connection, keys: &[Triple]) -> Result<(), Db
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::api::{find_alternative, find_entity, find_entity_class, find_parameter, find_scenario,
-    find_value_list, lookup_unit};
+use crate::api::{
+    find_alternative, find_entity, find_entity_class, find_parameter, find_scenario,
+    find_value_list, lookup_unit,
+};
 use crate::text::{nfc, NameFolds};
 use crate::types::{
-    fold, Action, Blocker, CoveredWrites, LicenseFields, LinkSpec, MetadataChange,
-    MetadataEffect, MetadataKind, MetadataOutcome, PairRef, Ref, RoleSel, Scope, SourceFields,
-    Subject, Target, ValueAddr, ValueLinkCounts, Warning, WarningKind, WriteReport,
+    fold, Action, Blocker, CoveredWrites, LicenseFields, LinkSpec, MetadataChange, MetadataEffect,
+    MetadataKind, MetadataOutcome, PairRef, Ref, RoleSel, Scope, SourceFields, Subject, Target,
+    ValueAddr, ValueLinkCounts, Warning, WarningKind, WriteReport,
 };
 
 /// A link edge: `(target_kind, target_id, role_id)`.
@@ -389,9 +409,21 @@ fn nfc_value(v: &mut ValueAddr) {
 pub(crate) fn nfc_items(items: &mut [MetadataChange]) {
     for it in items {
         match it {
-            MetadataChange::PutSource { source: r, rename, .. }
-            | MetadataChange::PutLicense { license: r, rename, .. }
-            | MetadataChange::PutRole { role: r, rename, .. } => {
+            MetadataChange::PutSource {
+                source: r,
+                new_name: rename,
+                ..
+            }
+            | MetadataChange::PutLicense {
+                license: r,
+                new_name: rename,
+                ..
+            }
+            | MetadataChange::PutRole {
+                role: r,
+                new_name: rename,
+                ..
+            } => {
                 nfc_ref(r);
                 if let Some(n) = rename {
                     nfc_s(n);
@@ -405,7 +437,10 @@ pub(crate) fn nfc_items(items: &mut [MetadataChange]) {
             MetadataChange::RevisePair { pair, .. } | MetadataChange::DeletePair { pair, .. } => {
                 nfc_pair(pair)
             }
-            MetadataChange::RenamePairKey { from, to } => {
+            MetadataChange::RenamePairKey {
+                current: from,
+                new_name: to,
+            } => {
                 nfc_s(from);
                 nfc_s(to);
             }
@@ -621,7 +656,7 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
         match it {
             MetadataChange::PutSource {
                 source,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 check_ref("source", source).map_err(err)?;
@@ -635,7 +670,7 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
             }
             MetadataChange::PutLicense {
                 license,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 check_ref("license", license).map_err(err)?;
@@ -668,12 +703,19 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
                 check_pair(pair).map_err(err)?;
                 touch(pair_key(pair))?;
             }
-            MetadataChange::RenamePairKey { from, to } => {
+            MetadataChange::RenamePairKey {
+                current: from,
+                new_name: to,
+            } => {
                 ident("pair key", from).map_err(err)?;
                 ident("pair key", to).map_err(err)?;
                 touch(format!("pairkey:{}", fold(from)))?;
             }
-            MetadataChange::PutRole { role, rename, .. } => {
+            MetadataChange::PutRole {
+                role,
+                new_name: rename,
+                ..
+            } => {
                 check_ref("role", role).map_err(err)?;
                 if let Some(n) = rename {
                     ident("role name", n).map_err(err)?;
@@ -777,7 +819,12 @@ pub(crate) fn prepare(items: &[MetadataChange]) -> Result<(), DbError> {
                     true,
                 )
                 .map_err(err)?;
-                let k = format!("{}|{}|{}", value_key(value), target_key(target), role_key(role));
+                let k = format!(
+                    "{}|{}|{}",
+                    value_key(value),
+                    target_key(target),
+                    role_key(role)
+                );
                 if !edges.insert(k) {
                     return Err(DbError::Api(format!(
                         "metadata item {i}: a second item on the same value link"
@@ -1121,7 +1168,10 @@ fn missing<T>(
 
 const BY_NAME: &str = "lower(name) = lower(?)";
 
-fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static str, i64)>, DbError> {
+fn resolve_subject(
+    cx: &mut Ctx<'_>,
+    s: &Subject,
+) -> Result<Resolved<(&'static str, i64)>, DbError> {
     let named = |cx: &mut Ctx<'_>,
                  found: Option<crate::api::Found>,
                  table: &'static str,
@@ -1172,7 +1222,10 @@ fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static s
             let cid = cid.noted(&mut cx.folds, "entity_class", class);
             let f = find_entity(cx.conn, cid, name)?;
             match f {
-                Some(f) => Ok(Resolved::Live(("entity", f.noted(&mut cx.folds, "entity", name)))),
+                Some(f) => Ok(Resolved::Live((
+                    "entity",
+                    f.noted(&mut cx.folds, "entity", name),
+                ))),
                 None if closed_here(
                     cx,
                     "entity",
@@ -1215,15 +1268,20 @@ fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static s
             }
         }
         Subject::Run(id) => {
-            let n: i64 = cx
-                .conn
-                .query_row("SELECT count(*) FROM run WHERE id = ?", params![id], |r| r.get(0))?;
+            let n: i64 =
+                cx.conn
+                    .query_row("SELECT count(*) FROM run WHERE id = ?", params![id], |r| {
+                        r.get(0)
+                    })?;
             if n == 0 {
                 return unknown(format!("run with id {id}"));
             }
             Ok(Resolved::Live(("run", *id)))
         }
-        Subject::Source(r) => Ok(Resolved::Live(("source", require_named(cx, "source", "source", r)?))),
+        Subject::Source(r) => Ok(Resolved::Live((
+            "source",
+            require_named(cx, "source", "source", r)?,
+        ))),
         Subject::License(r) => Ok(Resolved::Live((
             "license",
             require_named(cx, "license", "license", r)?,
@@ -1232,8 +1290,15 @@ fn resolve_subject(cx: &mut Ctx<'_>, s: &Subject) -> Result<Resolved<(&'static s
 }
 
 /// A value's triple, lookup-only; `Covered` when this call deleted it.
-fn resolve_value(cx: &mut Ctx<'_>, v: &ValueAddr, changed: &HashSet<Triple>) -> Result<Resolved<Triple>, DbError> {
-    let label = format!("{}.{} / {} / {}", v.class, v.parameter, v.alternative, v.entity);
+fn resolve_value(
+    cx: &mut Ctx<'_>,
+    v: &ValueAddr,
+    changed: &HashSet<Triple>,
+) -> Result<Resolved<Triple>, DbError> {
+    let label = format!(
+        "{}.{} / {} / {}",
+        v.class, v.parameter, v.alternative, v.entity
+    );
     let Some(cid) = find_entity_class(cx.conn, &v.class)? else {
         return missing(
             cx,
@@ -1311,7 +1376,7 @@ fn value_live(conn: &Connection, t: Triple) -> Result<bool, DbError> {
 
 fn outcome(index: usize, kind: MetadataKind, id: i64, effect: MetadataEffect) -> MetadataOutcome {
     MetadataOutcome {
-        index,
+        item_index: index,
         kind,
         id,
         effect,
@@ -1330,7 +1395,13 @@ fn close_row(conn: &Connection, c: i64, table: &str, id: i64) -> Result<usize, D
     )?)
 }
 
-fn check_free_name(cx: &Ctx<'_>, table: &str, what: &str, name: &str, id: i64) -> Result<(), DbError> {
+fn check_free_name(
+    cx: &Ctx<'_>,
+    table: &str,
+    what: &str,
+    name: &str,
+    id: i64,
+) -> Result<(), DbError> {
     let other: Option<i64> = opt_row(cx.conn.query_row(
         &format!("SELECT id FROM {table} WHERE cur_name = lower(?) AND id <> ?"),
         params![name, id],
@@ -1366,8 +1437,16 @@ fn put_source(
                citation, description, valid_from_commit) \
              VALUES (?, ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?, ?, ?) RETURNING id",
             params![
-                name, f.title, f.path, f.edition, f.publisher, f.issued, f.retrieved, f.citation,
-                f.description, cx.c
+                name,
+                f.title,
+                f.path,
+                f.edition,
+                f.publisher,
+                f.issued,
+                f.retrieved,
+                f.citation,
+                f.description,
+                cx.c
             ],
             |r| r.get(0),
         )?;
@@ -1407,8 +1486,18 @@ fn put_source(
            citation, description, valid_from_commit, version) \
          VALUES (?, ?, ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?, ?, ?, ?)",
         params![
-            id, name, f.title, f.path, f.edition, f.publisher, f.issued, f.retrieved, f.citation,
-            f.description, cx.c, cur.1 + 1
+            id,
+            name,
+            f.title,
+            f.path,
+            f.edition,
+            f.publisher,
+            f.issued,
+            f.retrieved,
+            f.citation,
+            f.description,
+            cx.c,
+            cur.1 + 1
         ],
     )?;
     Ok((
@@ -1539,7 +1628,11 @@ fn put_role(
 }
 
 /// `CreatePair`: the existing key spelling wins (`NameFolded`).
-fn create_pair(cx: &mut Ctx<'_>, name: &str, value: &str) -> Result<(i64, MetadataEffect), DbError> {
+fn create_pair(
+    cx: &mut Ctx<'_>,
+    name: &str,
+    value: &str,
+) -> Result<(i64, MetadataEffect), DbError> {
     let stored: Option<(i64, String)> = opt_row(cx.conn.query_row(
         "SELECT id, name FROM metadata_pair WHERE cur_name = lower(?) ORDER BY id LIMIT 1",
         params![name],
@@ -1571,7 +1664,11 @@ fn create_pair(cx: &mut Ctx<'_>, name: &str, value: &str) -> Result<(i64, Metada
     Ok((id, MetadataEffect::Created))
 }
 
-fn revise_pair(cx: &mut Ctx<'_>, p: &PairRef, value: &str) -> Result<(i64, MetadataEffect), DbError> {
+fn revise_pair(
+    cx: &mut Ctx<'_>,
+    p: &PairRef,
+    value: &str,
+) -> Result<(i64, MetadataEffect), DbError> {
     let Some((id, name, cur)) = find_pair(cx, p)? else {
         require_pair(cx, p)?;
         unreachable!("require_pair errors on a missing pair");
@@ -1603,14 +1700,16 @@ fn revise_pair(cx: &mut Ctx<'_>, p: &PairRef, value: &str) -> Result<(i64, Metad
     Ok((id, MetadataEffect::Updated))
 }
 
-/// `RenamePairKey`: every live pair of the key `from`, in one item.
+/// `RenamePairKey`: every live pair of the key `current`, in one item.
 /// Returns the pair ids renamed.
 fn rename_pair_key(cx: &mut Ctx<'_>, from: &str, to: &str) -> Result<Vec<i64>, DbError> {
     let mut stmt = cx.conn.prepare(
         "SELECT id, name, value, version FROM metadata_pair WHERE cur_name = lower(?) ORDER BY id",
     )?;
     let pairs: Vec<(i64, String, String, i64)> = stmt
-        .query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .query_map(params![from], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
         .collect::<Result<_, _>>()?;
     if pairs.iter().all(|p| p.1 == to) {
         return Ok(Vec::new());
@@ -1735,7 +1834,11 @@ fn target_legs(kind: MetadataKind, id: i64) -> Vec<(&'static str, String, bool)>
                 format!("object_type = 'source' AND object_id = {id}"),
                 false,
             ));
-            legs.push(("value_metadata_link", format!("target_kind = 'source' AND target_id = {id}"), true));
+            legs.push((
+                "value_metadata_link",
+                format!("target_kind = 'source' AND target_id = {id}"),
+                true,
+            ));
         }
         MetadataKind::License => {
             legs.push(("source_license", format!("license_id = {id}"), true));
@@ -1746,7 +1849,11 @@ fn target_legs(kind: MetadataKind, id: i64) -> Vec<(&'static str, String, bool)>
             ));
         }
         MetadataKind::Pair => {
-            legs.push(("value_metadata_link", format!("target_kind = 'pair' AND target_id = {id}"), true));
+            legs.push((
+                "value_metadata_link",
+                format!("target_kind = 'pair' AND target_id = {id}"),
+                true,
+            ));
         }
         _ => {}
     }
@@ -1841,7 +1948,11 @@ fn live_value_links(
         ))?;
         let rows = stmt.query_map(duckdb::params_from_iter(set.binds().iter()), |r| {
             Ok((
-                (r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
+                (
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ),
                 r.get::<_, String>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, Option<i64>>(5)?,
@@ -1858,11 +1969,16 @@ fn live_value_links(
 
 /// Insert value links (set-based): one row per `(triple, edge)`, the
 /// version continuing the edge's history.
-fn insert_value_links(conn: &Connection, c: i64, rows: &[(Triple, Edge)]) -> Result<usize, DbError> {
+fn insert_value_links(
+    conn: &Connection,
+    c: i64,
+    rows: &[(Triple, Edge)],
+) -> Result<usize, DbError> {
     use duckdb::types::Value;
     let mut n = 0;
     for chunk in rows.chunks(crate::history::LONG_INSERT_CHUNK) {
-        let list = |f: &dyn Fn(&(Triple, Edge)) -> Value| Value::List(chunk.iter().map(f).collect());
+        let list =
+            |f: &dyn Fn(&(Triple, Edge)) -> Value| Value::List(chunk.iter().map(f).collect());
         let binds = [
             list(&|r| Value::BigInt(r.0 .0)),
             list(&|r| Value::BigInt(r.0 .1)),
@@ -1895,7 +2011,8 @@ fn close_value_edges(conn: &Connection, c: i64, rows: &[(Triple, Edge)]) -> Resu
     use duckdb::types::Value;
     let mut n = 0;
     for chunk in rows.chunks(crate::history::LONG_INSERT_CHUNK) {
-        let list = |f: &dyn Fn(&(Triple, Edge)) -> Value| Value::List(chunk.iter().map(f).collect());
+        let list =
+            |f: &dyn Fn(&(Triple, Edge)) -> Value| Value::List(chunk.iter().map(f).collect());
         let binds = [
             Value::BigInt(c),
             list(&|r| Value::BigInt(r.0 .0)),
@@ -2015,7 +2132,7 @@ pub(crate) fn apply_channel(
         let o = match it {
             MetadataChange::PutSource {
                 source,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "source", source)? {
@@ -2031,7 +2148,7 @@ pub(crate) fn apply_channel(
             }
             MetadataChange::PutLicense {
                 license,
-                rename,
+                new_name: rename,
                 fields,
             } => {
                 if let Some((id, _)) = find_named(&mut cx, "license", license)? {
@@ -2047,7 +2164,7 @@ pub(crate) fn apply_channel(
             }
             MetadataChange::PutRole {
                 role,
-                rename,
+                new_name: rename,
                 description,
                 iri,
             } => {
@@ -2077,9 +2194,12 @@ pub(crate) fn apply_channel(
                 touched.insert((MetadataKind::Pair, id), i);
                 outcome(i, MetadataKind::Pair, id, e)
             }
-            MetadataChange::RenamePairKey { from, to } => {
-                let mut stmt = conn
-                    .prepare("SELECT id FROM metadata_pair WHERE cur_name = lower(?)")?;
+            MetadataChange::RenamePairKey {
+                current: from,
+                new_name: to,
+            } => {
+                let mut stmt =
+                    conn.prepare("SELECT id FROM metadata_pair WHERE cur_name = lower(?)")?;
                 let held: Vec<i64> = stmt
                     .query_map(params![from], |r| r.get(0))?
                     .collect::<Result<_, _>>()?;
@@ -2259,7 +2379,12 @@ pub(crate) fn apply_channel(
                                 "metadata item {i}: a second statement for the target {label}"
                             )));
                         }
-                        outs[i] = Some(outcome(i, MetadataKind::ValueMetadata, 0, MetadataEffect::NoOp));
+                        outs[i] = Some(outcome(
+                            i,
+                            MetadataKind::ValueMetadata,
+                            0,
+                            MetadataEffect::NoOp,
+                        ));
                     }
                     Scope::Value(v) => match resolve_value(&mut cx, v, &changed)? {
                         Resolved::Live(t) => {
@@ -2280,7 +2405,12 @@ pub(crate) fn apply_channel(
                     },
                 }
                 if outs[i].is_none() {
-                    outs[i] = Some(outcome(i, MetadataKind::ValueMetadata, 0, MetadataEffect::NoOp));
+                    outs[i] = Some(outcome(
+                        i,
+                        MetadataKind::ValueMetadata,
+                        0,
+                        MetadataEffect::NoOp,
+                    ));
                 }
             }
             MetadataChange::LinkValue { value, link } => {
@@ -2289,7 +2419,8 @@ pub(crate) fn apply_channel(
                 match resolve_value(&mut cx, value, &changed)? {
                     Resolved::Live(t) => {
                         adds.entry(t).or_default().push((i, e));
-                        outs[i] = Some(outcome(i, MetadataKind::ValueLink, 0, MetadataEffect::NoOp));
+                        outs[i] =
+                            Some(outcome(i, MetadataKind::ValueLink, 0, MetadataEffect::NoOp));
                     }
                     Resolved::Covered => {
                         outs[i] = Some(outcome(
@@ -2310,7 +2441,8 @@ pub(crate) fn apply_channel(
                 match resolve_value(&mut cx, value, &changed)? {
                     Resolved::Live(t) => {
                         removes.entry(t).or_default().push((i, e));
-                        outs[i] = Some(outcome(i, MetadataKind::ValueLink, 0, MetadataEffect::NoOp));
+                        outs[i] =
+                            Some(outcome(i, MetadataKind::ValueLink, 0, MetadataEffect::NoOp));
                     }
                     Resolved::Covered => {
                         outs[i] = Some(outcome(i, MetadataKind::ValueLink, 0, MetadataEffect::NoOp))
@@ -2400,8 +2532,16 @@ pub(crate) fn apply_channel(
             }
         }
         let kept = fin.iter().filter(|e| old_edges.contains(e)).count();
-        let added: Vec<Edge> = fin.iter().filter(|e| !old_edges.contains(e)).copied().collect();
-        let removed: Vec<Edge> = old_edges.iter().filter(|e| !fin.contains(e)).copied().collect();
+        let added: Vec<Edge> = fin
+            .iter()
+            .filter(|e| !old_edges.contains(e))
+            .copied()
+            .collect();
+        let removed: Vec<Edge> = old_edges
+            .iter()
+            .filter(|e| !fin.contains(e))
+            .copied()
+            .collect();
         if is_changed {
             // A new version: close every old link, insert the final set.
             if !old_edges.is_empty() {
@@ -2462,7 +2602,12 @@ pub(crate) fn apply_channel(
     }
     if let Some((i, _)) = save {
         // The save default's outcome is a statement, never a write by itself.
-        outs[i].get_or_insert(outcome(i, MetadataKind::ValueMetadata, 0, MetadataEffect::NoOp));
+        outs[i].get_or_insert(outcome(
+            i,
+            MetadataKind::ValueMetadata,
+            0,
+            MetadataEffect::NoOp,
+        ));
     }
 
     // ---- M3: object links.
@@ -2472,7 +2617,9 @@ pub(crate) fn apply_channel(
                 let e = resolve_edge(&mut cx, &link.target, &link.role)?;
                 check_touch(i, &e)?;
                 let o = match resolve_subject(&mut cx, subject)? {
-                    Resolved::Covered => outcome(i, MetadataKind::Link, 0, MetadataEffect::DroppedByDelete),
+                    Resolved::Covered => {
+                        outcome(i, MetadataKind::Link, 0, MetadataEffect::DroppedByDelete)
+                    }
                     Resolved::Live((ot, oid)) => {
                         if ot == e.0 && oid == e.1 {
                             return Err(DbError::Api(format!(
@@ -2526,7 +2673,8 @@ pub(crate) fn apply_channel(
                             });
                             outcome(i, MetadataKind::Link, oid, MetadataEffect::NoOp)
                         } else {
-                            let mut o = outcome(i, MetadataKind::Link, oid, MetadataEffect::Deleted);
+                            let mut o =
+                                outcome(i, MetadataKind::Link, oid, MetadataEffect::Deleted);
                             o.links_closed = n;
                             o
                         }
@@ -2613,8 +2761,11 @@ mod tests {
             0
         );
         assert_eq!(
-            n(&conn, "SELECT version FROM value_metadata_link WHERE entity_id = 1 \
-                      AND valid_to_commit IS NULL"),
+            n(
+                &conn,
+                "SELECT version FROM value_metadata_link WHERE entity_id = 1 \
+                      AND valid_to_commit IS NULL"
+            ),
             2
         );
         // Drop entity 2's value: its link closes, entity 3's stays.
@@ -2622,7 +2773,10 @@ mod tests {
             .unwrap();
         assert_eq!(close_orphaned_value_links(&conn, 3, 10).unwrap(), 1);
         assert_eq!(
-            n(&conn, "SELECT count(*) FROM value_metadata_link WHERE valid_to_commit IS NULL"),
+            n(
+                &conn,
+                "SELECT count(*) FROM value_metadata_link WHERE valid_to_commit IS NULL"
+            ),
             2
         );
     }
@@ -2647,7 +2801,12 @@ mod tests {
             }
         );
         // Carrying again adds no second parameter link.
-        assert_eq!(carry_merged_links(&conn, 3, 10, 20, &[(1, 1)]).unwrap().object_links, 0);
+        assert_eq!(
+            carry_merged_links(&conn, 3, 10, 20, &[(1, 1)])
+                .unwrap()
+                .object_links,
+            0
+        );
         // A target value written at 3 by another step (not carried by the
         // merge) gets no copied links.
         conn.execute_batch(
@@ -2658,12 +2817,18 @@ mod tests {
         .unwrap();
         carry_merged_links(&conn, 3, 10, 20, &[(1, 1)]).unwrap();
         assert_eq!(
-            n(&conn, "SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id = 20 \
-                      AND entity_id = 2"),
+            n(
+                &conn,
+                "SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id = 20 \
+                      AND entity_id = 2"
+            ),
             0
         );
         assert_eq!(
-            n(&conn, "SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id = 20"),
+            n(
+                &conn,
+                "SELECT count(*) FROM value_metadata_link WHERE parameter_definition_id = 20"
+            ),
             1
         );
     }
@@ -2672,8 +2837,12 @@ mod tests {
     fn a_value_delete_closes_links_and_skips_a_link_free_file() {
         let dir = tempfile::tempdir().unwrap();
         let conn = fixture(dir.path());
-        assert_eq!(close_value_links(&conn, 3, &[(1, 10, 1), (9, 9, 9)]).unwrap(), 1);
-        conn.execute_batch("DELETE FROM value_metadata_link").unwrap();
+        assert_eq!(
+            close_value_links(&conn, 3, &[(1, 10, 1), (9, 9, 9)]).unwrap(),
+            1
+        );
+        conn.execute_batch("DELETE FROM value_metadata_link")
+            .unwrap();
         assert!(!has_value_links(&conn).unwrap());
         assert_eq!(close_value_links(&conn, 3, &[(2, 10, 1)]).unwrap(), 0);
     }

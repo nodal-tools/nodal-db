@@ -1,5 +1,5 @@
-//! The read surface's version, refresh and overlay
-//! (docs/dev/read_surface.md; `specs/Done/read_surface_contract_PLAN.md` Part B).
+//! The read surface's version, refresh and overlay (see the public page
+//! `docs/dev/read_surface.md`).
 //!
 //! The read surface (every view and macro of `schema/070`-`130_*.sql`) lives
 //! inside each database file, frozen at the build that created or last
@@ -8,7 +8,7 @@
 //! last so the marker exists only if every object before it was created.
 //! This module compares a file's version with this build's and acts:
 //!
-//! - **Writes** ([`refresh_before_write`], called by `conn::run_txn_once`
+//! - **Writes** (`refresh_before_write`, called by `conn::run_txn_once`
 //!   right after the RW open): an older file (lower `(major, revision)`, the
 //!   marker missing, or the same revision with another hash) of this build's
 //!   `SCHEMA_VERSION` gets this build's surface in its own transaction, before
@@ -60,7 +60,7 @@ const VERSION_FILE: &str = "130_read_surface.sql";
 
 /// The committed list of retired surface names (dropped from older files by
 /// the refresh, so a removed object never lingers with a stale body).
-static RETIRED_NAMES: &str = include_str!("../../../schema/read_surface_retired.txt");
+static RETIRED_NAMES: &str = include_str!("../schema/read_surface_retired.txt");
 
 // ---------------------------------------------------------------------------
 // Versions and status
@@ -863,10 +863,10 @@ pub fn read_surface_status(db: &Path) -> Result<SurfaceReport, DbError> {
 /// Refresh the file's read surface now (`nodal-db maintain refresh-views`,
 /// Python `db.refresh_read_surface()`): one read-write cycle, the same
 /// refresh a write runs, but loud: a failure is an error. A current file is
-/// left alone; so is a newer one unless `force` (a downgrade; development
+/// left alone; so is a newer one unless `allow_downgrade` (development
 /// only). Refuses a file of another `SCHEMA_VERSION` (`SchemaMismatch`).
 /// Writes no `commit` row (a catalog refresh is not content).
-pub fn refresh_read_surface(db: &Path, force: bool) -> Result<SurfaceReport, DbError> {
+pub fn refresh_read_surface(db: &Path, allow_downgrade: bool) -> Result<SurfaceReport, DbError> {
     let report = crate::conn::with_rw_conn(db, |conn| {
         let Some(found) = schema_version_on(conn) else {
             return Err(DbError::Api(format!(
@@ -887,7 +887,7 @@ pub fn refresh_read_surface(db: &Path, force: bool) -> Result<SurfaceReport, DbE
             });
         }
         let check = check_on(conn)?;
-        let run = check.is_stale() || (force && check.status != SurfaceStatus::Current);
+        let run = check.is_stale() || (allow_downgrade && check.status != SurfaceStatus::Current);
         if run {
             refresh_on(conn).map_err(|e| {
                 DbError::Api(format!(

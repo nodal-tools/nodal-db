@@ -391,12 +391,14 @@ re-run without cleanup.
   no history row); the summary counts it as unchanged. Re-importing the
   same data therefore changes nothing, and when no value changed the
   import makes no commit and prints `no changes (nothing committed)`.
-- With `--force-replace`, the versions this import replaces keep no
+- With `--no-retain-content`, the versions this import replaces keep no
   content: they stay in history as stubs that record that the value
   changed, but not what it was (as if the parameter's `retain_content`
-  were false). Changed values get new versions either way; unchanged
-  values are not rewritten, so they leave no stub. This applies to all
-  segments.
+  were false). `--retain-content` keeps their content even where the
+  parameter's `retain_content` is false. Without either flag each
+  parameter's own setting applies. Changed values get new versions
+  either way; unchanged values are not rewritten, so they leave no
+  stub. The flags apply to all segments.
 - `--class` and `--parameter` are assertions, not filters: if given,
   every segment must target that class or parameter, or the import
   fails (E4).
@@ -414,7 +416,8 @@ durably, so completed steps survive a later crash.
 ## Errors
 
 Errors print to standard error as `Error: E<n>: <message>` and exit
-with code 1; the database is unchanged. Warnings print to standard
+with code 1, except E9 (busy, retryable), which exits with code 75; the
+database is unchanged. Warnings print to standard
 output and do not affect the exit code (0). The class (`E1` to `E10`)
 is stable; the message text may change between releases.
 
@@ -520,11 +523,11 @@ nodal-db import results.arrows --db model.duckdb --alternative Base \
 ```text
 initialized model.duckdb
 imported results.arrows: commit 2, 2 segment(s), 3 value(s) written, 0 unchanged, 5 row(s) written, axes 3 created / 1 reused, tiers [long, array]
-warning: auto-created entity_class "node" (id 1)
-warning: auto-created parameter_definition "flow" (id 1)
+warning: auto-created class "node" (id 1)
+warning: auto-created parameter "flow" (id 1)
 warning: auto-created alternative "Base" (id 1)
 warning: auto-created entity "north" (id 1)
-warning: auto-created parameter_definition "price" (id 2)
+warning: auto-created parameter "price" (id 2)
 warning: auto-created entity "south" (id 2)
 ```
 

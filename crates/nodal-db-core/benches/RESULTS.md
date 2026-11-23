@@ -323,7 +323,7 @@ backstop (§9 there).
   does not affect these figures (the `bench` profile was already
   optimized).
 
-## Synthetic DB (ddl_sketch §10 scale, built THROUGH `api::write_parameter`/`ingest_segments`)
+## Synthetic DB (ddl_sketch §10 scale, built THROUGH `api::write_parameter`/`write_segments`)
 
 1 226 400 live long rows @ 17.6% dead (140 entities × 8 760 int cells; 30
 entity-rewrites of churn), 1 000 × 8 760-cell float arrays (~70 MB, Tier A),

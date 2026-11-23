@@ -1,10 +1,9 @@
-//! `nodal-db import` — the Arrow-IPC bulk-format importer
-//! (`specs/arrow_ipc_bulk_format.md`, implemented exactly; error classes E1–E10
-//! per §9.1). The importer is a thin adapter: parse container → validate
-//! metadata → structurally normalize (dictionary decode, s/ms→µs timestamp
-//! upcast, dense→long expansion) → ONE `core::ingest_segments` call. It NEVER
-//! re-canonicalizes (CLAUDE.md invariant 2): every transformation here is
-//! structural (unit arithmetic on the same instant, order-preserving
+//! `nodal-db import` — the Arrow-IPC bulk-format importer (the format and its
+//! error classes E1–E10: `docs/dev/arrow_import_format.md`). The importer is a
+//! thin adapter: parse container → validate metadata → structurally normalize
+//! (dictionary decode, s/ms→µs timestamp upcast, dense→long expansion) → ONE
+//! `core::api::commit` call. It NEVER re-canonicalizes: every transformation
+//! here is structural (unit arithmetic on the same instant, order-preserving
 //! coordinate pairing), never an interpretation of the data.
 
 use std::collections::HashSet;
@@ -23,7 +22,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 
-use nodal_db_core::api::{commit_change_set, ChangeSet, Segment};
+use nodal_db_core::api::{commit, ChangeSet, Segment};
 use nodal_db_core::canon::timestamp_in_range;
 use nodal_db_core::error::DbError;
 use nodal_db_core::reconstruct::expand_dense_row;
@@ -42,8 +41,8 @@ fn arrow_versions_unify(
     b
 }
 
-/// Schema-level metadata keys this reader knows (§4.1); any other `nodal:`
-/// key is warn-and-ignore (E5, §3.2).
+/// Schema-level metadata keys this reader knows; any other `nodal:`
+/// key is warn-and-ignore.
 const KNOWN_SCHEMA_KEYS: [&str; 7] = [
     "nodal:format",
     "nodal:format_version",
@@ -53,7 +52,7 @@ const KNOWN_SCHEMA_KEYS: [&str; 7] = [
     "nodal:alternative",
     "nodal:form",
 ];
-/// Field-level metadata keys this reader knows (§7.1).
+/// Field-level metadata keys this reader knows.
 const KNOWN_FIELD_KEYS: [&str; 1] = ["nodal:label_domain"];
 
 pub struct ImportArgs {
@@ -64,7 +63,8 @@ pub struct ImportArgs {
     pub parameter: Option<String>,
     pub user: Option<String>,
     pub message: String,
-    pub force_replace: bool,
+    /// `WriteOptions::retain_content`: `--retain-content` / `--no-retain-content`.
+    pub retain_content: Option<bool>,
     pub value_metadata: Option<ValueMetadataArg>,
 }
 
@@ -74,6 +74,19 @@ pub enum ValueMetadataArg {
     Keep,
     Clear,
 }
+
+/// A retryable import failure (E9: the database was busy or write
+/// conflicts persisted); `main` exits 75 for it.
+#[derive(Debug)]
+pub(crate) struct Retryable(pub String);
+
+impl std::fmt::Display for Retryable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Retryable {}
 
 pub fn run(args: &ImportArgs) -> Result<()> {
     // The commit author is a CLI usage concern, resolved before the container
@@ -190,7 +203,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     }
 
     let opts = WriteOptions {
-        force_replace: args.force_replace,
+        retain_content: args.retain_content,
         ..Default::default()
     };
     let n_segments = segments.len();
@@ -211,14 +224,15 @@ pub fn run(args: &ImportArgs) -> Result<()> {
         metadata,
         ..Default::default()
     };
-    let report =
-        commit_change_set(&args.db, set, &user, &args.message, opts).map_err(|e| match e {
-            // E9: busy / conflict budget exhausted at commit.
-            DbError::Busy { .. } | DbError::Conflict { .. } => anyhow!("E9: {e}"),
-            // Everything else the core rejects is the E6 malformed-payload
-            // class (core-surfaced canonicalization errors, §9.1).
-            other => anyhow!("E6: {other}"),
-        })?;
+    let report = commit(&args.db, set, &user, &args.message, opts).map_err(|e| match e {
+        // E9: busy / conflict budget exhausted at commit (exit 75).
+        DbError::Busy { .. } | DbError::Conflict { .. } => {
+            anyhow::Error::new(Retryable(format!("E9: {e}")))
+        }
+        // Everything else the core rejects is the E6 malformed-payload
+        // class (core-surfaced canonicalization errors, §9.1).
+        other => anyhow!("E6: {other}"),
+    })?;
 
     // Success summary + warnings (warnings MUST be printed — decision B).
     let tiers: Vec<&str> = report
@@ -384,9 +398,9 @@ fn name_folded_lines(warnings: &[nodal_db_core::types::Warning]) -> Vec<String> 
         .collect()
 }
 
-/// Resolve the commit author (spec §8.2): `--user` if given (must be
+/// Resolve the commit author: `--user` if given (must be
 /// non-blank), else the first of `USER`/`USERNAME`/`LOGNAME` whose value is
-/// non-blank — a set-but-empty variable falls through (critique F5). No source
+/// non-blank — a set-but-empty variable falls through. No source
 /// at all is a plain CLI usage error, not an E-class payload error.
 /// `pub(crate)`: the ONE author-resolution rule for every verb (`import`,
 /// `template`, `init --template`).
@@ -608,7 +622,7 @@ fn check_decompressed_sizes(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// How the byte range a `StreamReader` consumed terminates (§2.2.1).
+/// How the byte range a `StreamReader` consumed terminates.
 enum Termination {
     /// A genuine 8-byte end-of-stream frame (continuation sentinel + zero
     /// metadata length) exactly at the reader's stop position.
@@ -627,7 +641,7 @@ enum Termination {
 /// length (legacy: length only), the flatbuffer metadata, then
 /// `Message.bodyLength()` body bytes — so the walk lands exactly on every
 /// message boundary the reader saw, and only a real EOS *frame* at the stop
-/// position counts as termination (critique F1).
+/// position counts as termination.
 fn classify_termination(seg: &[u8]) -> Result<Termination> {
     const CONT: [u8; 4] = [0xff; 4];
     let mut pos = 0usize;
@@ -782,7 +796,7 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
     })
 }
 
-/// `MAJOR.MINOR`, decimal, no leading zeros (§3.1).
+/// `MAJOR.MINOR`, decimal, no leading zeros.
 fn parse_version(s: &str) -> Result<(u32, u32)> {
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 2 {
@@ -801,7 +815,7 @@ fn parse_version(s: &str) -> Result<(u32, u32)> {
     Ok((nums[0], nums[1]))
 }
 
-/// §4.3: metadata if present, else the CLI flag; both present ⇒ must match
+/// The segment's alternative: metadata if present, else the CLI flag; both present ⇒ must match
 /// case-insensitively; neither ⇒ E4.
 fn effective_alternative(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<String> {
     match (&meta.alternative, &args.alternative) {
@@ -836,7 +850,7 @@ fn fold_name(s: &str) -> String {
     nodal_db_core::types::fold(&nodal_db_core::text::nfc(s))
 }
 
-/// `--class` / `--parameter` are assertions, not selectors (OPEN-Q3-6b): a
+/// `--class` / `--parameter` are assertions, not selectors: a
 /// non-matching segment is an error, never skipped. Compared by the core's
 /// name identity (`fold_name`): the names are Unicode.
 fn assert_flags(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<()> {
@@ -906,7 +920,7 @@ fn normalize_segment(
     }
 }
 
-/// §5.1.1: a column literally named `entity`/`value` (case-insensitively) at a
+/// A column literally named `entity`/`value` (case-insensitively) at a
 /// position other than its slot is E6 (the SHOULD-names are tripwires whenever
 /// present); both names absent entirely draws a warning.
 // The case-insensitive matches here are on the reserved Arrow column names
@@ -1056,7 +1070,7 @@ fn check_name_lengths(tag: &str, what: &str, col: &ArrayRef) -> Result<()> {
     Ok(())
 }
 
-/// Decode a dictionary-encoded column to its plain value type (§2.4); reject
+/// Decode a dictionary-encoded column to its plain value type; reject
 /// run-end encoding (forbidden in 1.0, MUST-reject).
 ///
 /// `cast`'s default `safe: true` (failure → NULL) is harmless here: the target
@@ -1103,9 +1117,9 @@ fn decode_encodings(
     }
 }
 
-/// The µs target type for an accepted wire timestamp (§5.2.1): `Second` and
+/// The µs target type for an accepted wire timestamp: `Second` and
 /// `Millisecond` upcast losslessly (integer multiply on the same instant);
-/// `Nanosecond` is rejected with the fix named; tz is preserved (§5.2.2).
+/// `Nanosecond` is rejected with the fix named; tz is preserved.
 fn microsecond_target(tag: &str, field: &Field) -> Result<Option<DataType>> {
     match field.data_type() {
         DataType::Timestamp(TimeUnit::Nanosecond, _) => bail!(
@@ -1167,10 +1181,10 @@ fn upcast_slots<T: ArrowTimestampType>(
 
 /// Checked s/ms→µs upcast of one long-form column. NOT `arrow::compute::cast`:
 /// its default `safe: true` turns an overflowing multiply into NULL, and a
-/// NULL value cell is legal absence — the cell would vanish with exit 0
-/// (§9.3). Same checked multiply as the dense path, plus the store's range
+/// NULL value cell is legal absence — the cell would vanish with exit 0.
+/// Same checked multiply as the dense path, plus the store's range
 /// (`canon::TS_MIN_US..=TS_MAX_US`). The timezone is preserved so the core
-/// still reports the normalization (§5.2.2). `row_offset` makes the reported
+/// still reports the normalization. `row_offset` makes the reported
 /// row relative to the segment.
 fn upcast_ts_checked(
     tag: &str,
@@ -1207,10 +1221,10 @@ fn upcast_ts_checked(
     }
 }
 
-/// Normalize one long-form batch (§5): dictionary decode, type gate for dims
-/// (§5.2) and value (§5.3), s/ms→µs upcast, label-domain presence (§7.2).
+/// Normalize one long-form batch: dictionary decode, type gate for dims
+/// and value, s/ms→µs upcast, label-domain presence.
 /// Field metadata is preserved throughout. A NaN VALUE is a legal stored value
-/// (§5.3.1) — the core canonicalizes it; only NaN axis/coordinate floats are
+/// — the core canonicalizes it; only NaN axis/coordinate floats are
 /// rejected, and no dimension column here is float.
 fn normalize_long_batch(
     tag: &str,
@@ -1638,7 +1652,7 @@ fn expand_dense_batch(
 }
 
 /// Extract one dense dim list into typed coordinates, applying the µs upcast
-/// factor and rejecting null slots (§6.4).
+/// factor and rejecting null slots.
 fn extract_coords(
     tag: &str,
     dim_name: &str,

@@ -1,29 +1,29 @@
 //! Purge: a bulk, versioned close-out of every item in a named scope, in
-//! one commit (entity_descriptions_purge_PLAN §3). It never erases history
+//! one commit. It never erases history
 //! (as-of reads see everything, no erasure marker) and never shrinks the
 //! file.
 //!
-//! ## Execution: set-based, one dependency definition (§3.6, invariant 2)
+//! ## Execution: set-based, one dependency definition
 //! A purge runs the object delete's leg registry
-//! ([`crate::object_delete::object_legs`] and its cascade edges) in **set
-//! form**: every leg's [`crate::object_delete::LegKey`] is rendered against a
+//! (`object_delete::object_legs` and its cascade edges) in **set
+//! form**: every leg's key (`object_delete::LegKey`) is rendered against a
 //! txn-local id table instead of one id, so the close-out of a whole scope
 //! is O(legs + depth) statements, independent of the number of objects. The
 //! per-id and set forms come from one template, and share one SET list and
 //! one same-commit guard (`valid_from_commit < c AND valid_to_commit IS
 //! NULL`): a row this call wrote is never closed.
 //!
-//! ## Two sets per kind (§3.6, V-B1)
+//! ## Two sets per kind
 //! For each object kind a request reaches, two txn-local sets:
 //!   - the **dependent set**: every live object in the request's scope,
-//!     spared ones included, expanded by the cascade edges (B1 containers of
-//!     entities, a class's children and its B2 dependant classes) by an
+//!     spared ones included, expanded by the cascade edges (containers of
+//!     entities, a class's children and its dependant classes) by an
 //!     iterative frontier query;
 //!   - the **close set**: the dependent set minus the call's survivors.
 //!
 //! The close set drives object rows and identity legs; the dependent set
 //! drives dependent legs, each with its own survivor anti-join where its
-//! table has a survivor grain ([`crate::object_delete::Grain`]). Survivors
+//! table has a survivor grain (`object_delete::Grain`). Survivors
 //! are what the call itself re-states, spared upward to every object a
 //! survivor's identity references (an entity's class and elements,
 //! transitively; a parameter's class and bound list; a class's dimension
@@ -32,10 +32,10 @@
 //!
 //! Every set is a `TEMP` table of the write connection, created inside the
 //! write transaction (so a conflict retry rebuilds it) and dropped when the
-//! purge phase ends; the connection is per-operation anyway (CLAUDE.md
-//! invariant 1). The P0 spike (`scripts/bench/RESULTS_purge_spike.md`) chose
-//! the temp-table form over bound `BIGINT[]` lists: the sets are computed in
-//! SQL from the scope, so no id list ever passes through Rust.
+//! purge phase ends; the connection is per-operation anyway. Temp tables
+//! rather than bound `BIGINT[]` lists (measured in
+//! `scripts/bench/RESULTS_purge_spike.md`): the sets are computed in SQL from
+//! the scope, so no id list ever passes through Rust.
 
 use std::collections::HashSet;
 
@@ -48,8 +48,8 @@ use crate::object_delete::{
     cascade_edges, close_current_rows_set, close_leg_set, count_leg_set, object_legs, DepLeg,
     Grain, IdSet, SAMPLE_LIMIT,
 };
-use crate::structural::{CallRenames, CallTouches};
 use crate::property;
+use crate::structural::{CallRenames, CallTouches};
 use crate::template::reconcile::{close_value_lists_set, read_pd_row, revise_pd_row};
 use crate::text::{NameFolds, Normalized};
 use crate::types::{
@@ -93,7 +93,7 @@ pub(crate) fn nfc_request(r: &mut PurgeRequest, n: &mut Normalized) {
 }
 
 /// Pure checks of the requests (no DB): no blank name, and
-/// `Values.parameter` only with its `class` (§3.5.2).
+/// `Values.parameter` only with its `class`.
 pub(crate) fn validate_requests(reqs: &[PurgeRequest]) -> Result<(), DbError> {
     for (i, r) in reqs.iter().enumerate() {
         let blank = |what: &str, s: &str| {
@@ -198,7 +198,7 @@ impl Scope {
 }
 
 /// Resolve every request's names, lookup-only and by the name fold, after
-/// the call's structural changes (§3.5.2): an unknown name is refused, and
+/// the call's structural changes: an unknown name is refused, and
 /// so is a name a rename of this call freed (OD5 extended to purge names:
 /// a replace would silently become an append). Every resolved spelling is
 /// noted in `folds` (`NameFolded`).
@@ -345,12 +345,12 @@ pub(crate) struct PurgeCall<'a> {
     pub(crate) touches: &'a CallTouches,
     /// The value keys the call buffered (written or unchanged).
     pub(crate) written: &'a HashSet<(i64, i64, i64)>,
-    pub(crate) retain_override: Option<bool>,
+    pub(crate) retain_content: Option<bool>,
 }
 
-/// Run the call's purges, last in the call, under its commit `c` (§3.5.1),
+/// Run the call's purges, last in the call, under its commit `c`,
 /// appending one [`PurgeOutcome`] per request to `report.purges`. One
-/// refusal rolls the whole call back (§3.5.7); the order of refusals is
+/// refusal rolls the whole call back; the order of refusals is
 /// name errors (already raised by [`resolve_requests`]), then the
 /// template stamp, then reach outside a scope.
 pub(crate) fn run(
@@ -363,7 +363,7 @@ pub(crate) fn run(
         return Ok(false);
     }
     fill_survivors(conn, call)?;
-    fill_retention(conn, call.retain_override)?;
+    fill_retention(conn, call.retain_content)?;
     for (r, scope) in call.scopes.iter().enumerate() {
         build_request_sets(conn, r, scope)?;
     }
@@ -390,10 +390,10 @@ pub(crate) fn run(
     Ok(vocabulary)
 }
 
-/// The memory guard's threshold (owner ruling 2026-11-19): a purge request
+/// The memory guard's threshold: a purge request
 /// whose scope holds more long-tier cells plus array elements than this
 /// gets a [`WarningKind::PurgeLarge`] warning, in the preview and the
-/// commit; it is not refused. Half the largest point the P0 spike measured
+/// commit; it is not refused. Half the largest point measured
 /// (105 M long cells: about ten minutes and 3.4 GB at the peak, within a
 /// 6.4 GB DuckDB limit; `scripts/bench/RESULTS_purge_spike.md`).
 pub const PURGE_LARGE_CELLS: u64 = 50_000_000;
@@ -496,7 +496,7 @@ fn build_all_close_parameters(conn: &Connection, n: usize) -> Result<(), DbError
 }
 
 /// The live definitions outside every request's close set that bind a list
-/// of request `r`'s close set (V-OD2): reach outside the scope, removed with
+/// of request `r`'s close set: reach outside the scope, removed with
 /// `allow_outside_scope`.
 fn bindings_sql(r: usize) -> String {
     format!(
@@ -507,7 +507,7 @@ fn bindings_sql(r: usize) -> String {
     )
 }
 
-/// The template-stamp check (§3.7, OD7): on a database stamped with a
+/// The template-stamp check: on a database stamped with a
 /// template, a vocabulary request that would close a class, parameter or
 /// value list that existed before the call needs `allow_on_template`; every
 /// refused request is listed in one typed error. Objects the call created
@@ -674,12 +674,12 @@ fn fill_survivors(conn: &Connection, call: &PurgeCall<'_>) -> Result<(), DbError
     spare_upward(conn)
 }
 
-/// The retention partition `pg_retention(pd_id, retained)` (§3.5.5, V-S3):
-/// every definition's `retain_override.unwrap_or(retain_content)`, read
+/// The retention partition `pg_retention(pd_id, retained)`:
+/// every definition's `retain_content` option, else its own `retain_content`, read
 /// before any close (from each definition's latest row, so a definition
 /// the same purge closes keeps its retention).
-fn fill_retention(conn: &Connection, retain_override: Option<bool>) -> Result<(), DbError> {
-    let over = match retain_override {
+fn fill_retention(conn: &Connection, retain_content: Option<bool>) -> Result<(), DbError> {
+    let over = match retain_content {
         Some(true) => "TRUE",
         Some(false) => "FALSE",
         None => "NULL",
@@ -696,7 +696,7 @@ fn fill_retention(conn: &Connection, retain_override: Option<bool>) -> Result<()
 }
 
 /// Request `r`'s scope table of kind `k`: what it has in scope before its
-/// cascade grows it (reach outside it is refused, §3.5.4).
+/// cascade grows it.
 fn scope_table(r: usize, k: SetKind) -> String {
     format!("pg{r}_scope_{}", k.tag())
 }
@@ -836,7 +836,7 @@ fn build_request_sets(conn: &Connection, r: usize, scope: &Scope) -> Result<(), 
 }
 
 /// Refuse the call when a request's close set holds an object no request
-/// of the call has in scope (§3.5.4, P-OD3), unless that request sets
+/// of the call has in scope, unless that request sets
 /// `allow_outside_scope`: every reaching request is listed, per kind and
 /// class, with a bounded sample.
 fn refuse_outside_scope(conn: &Connection, call: &PurgeCall<'_>) -> Result<(), DbError> {
@@ -1065,7 +1065,7 @@ enum Step {
         identity: bool,
     },
     /// Remove the bindings of the request's lists by definitions no
-    /// request closes (V-OD2).
+    /// request closes.
     Unbind,
     /// The request's value lists, members and annotations (the
     /// `close_value_list` door).
@@ -1074,7 +1074,7 @@ enum Step {
     Objects { kind: SetKind, set: String },
 }
 
-/// Request `r`'s steps (§3.6): values, then dependents, then identity legs,
+/// Request `r`'s steps: values, then dependents, then identity legs,
 /// then object rows (V-S3).
 fn steps(conn: &Connection, r: usize, scope: &Scope) -> Result<Vec<Step>, DbError> {
     let mut out = Vec::new();
@@ -1222,7 +1222,7 @@ fn steps(conn: &Connection, r: usize, scope: &Scope) -> Result<Vec<Step>, DbErro
     Ok(out)
 }
 
-/// Execute request `r` (§3.6): its [`steps`], each a set-form statement
+/// Execute request `r`: its [`steps`], each a set-form statement
 /// with the same-commit guard. Returns its outcome and whether it closed
 /// a class, parameter definition or value list.
 fn execute(
@@ -1332,7 +1332,7 @@ fn has(conn: &Connection, table: &str) -> Result<bool, DbError> {
     )? > 0)
 }
 
-/// Read-only preview of `reqs` (§3.6) on `conn` (one per-operation RO
+/// Read-only preview of `reqs` on `conn` (one per-operation RO
 /// connection): the same sets and the same [`steps`], counted instead of
 /// run, with no survivors, so the counts, `outside_scope` and
 /// `template_stamped` are upper bounds of what a call that also writes
@@ -1512,7 +1512,7 @@ fn close_rows(
     Ok(())
 }
 
-/// The value close-out of one tier over `pred` (§3.6, P-OD5), on the SET
+/// The value close-out of one tier over `pred`, on the SET
 /// lists and pre-image copies `history` closes every value with (one
 /// close-out definition, CR2-9): per
 /// retention mode one statement, the definition's effective retention from
@@ -1780,7 +1780,7 @@ pub(crate) fn create_survivor_tables(conn: &Connection) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Spare upward (§3.5.3): every object a survivor's identity references
+/// Spare upward: every object a survivor's identity references
 /// survives too. Value keys, activations and memberships first lend their
 /// entities, parameters and alternatives; then an entity's elements
 /// (transitively, N-D chains), the classes of surviving entities and
@@ -1938,7 +1938,7 @@ pub(crate) fn build_close_sets(conn: &Connection, r: usize) -> Result<(), DbErro
     Ok(())
 }
 
-/// The frontier hard check (§3.5.3): no cascade edge out of request `r`'s
+/// The frontier hard check: no cascade edge out of request `r`'s
 /// close set may reach a survivor. Upward sparing makes that impossible (a
 /// survivor's elements, class and dimension classes survive), so a hit is a
 /// core bug: [`DbError::Internal`], and the call rolls back.
@@ -2107,7 +2107,7 @@ mod tests {
     use crate::types::{StructuralChange as SC, WriteOptions};
 
     fn class(name: &str, dims: &[&str]) -> SC {
-        SC::CreateEntityClass {
+        SC::CreateClass {
             name: name.into(),
             dims: dims.iter().map(|d| d.to_string()).collect(),
             description: None,
@@ -2179,7 +2179,7 @@ mod tests {
 
     /// The dependent set grows by the B1 and class frontiers; the close
     /// set is it minus the survivors spared upward; the frontier of the
-    /// close set never reaches a survivor (purge plan §3.6, V-B1).
+    /// close set never reaches a survivor.
     #[test]
     fn two_sets_spare_upward_through_an_nd_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -2268,7 +2268,7 @@ mod tests {
 
     /// With upward sparing off, a re-stated f1 leaves its elements in the
     /// close set, and the B1 frontier of the closing l1 reaches f1: the hard
-    /// check refuses (purge plan §3.5.3, test 7).
+    /// check refuses.
     #[test]
     fn frontier_reaching_a_survivor_is_internal() {
         let dir = tempfile::tempdir().unwrap();
@@ -2295,7 +2295,7 @@ mod tests {
     }
 
     /// A set-form leg is a hash join of the table against the id set, never
-    /// a nested loop (purge plan §3.6, test 11; P0 spike).
+    /// a nested loop.
     #[test]
     fn set_form_leg_plans_as_a_hash_join() {
         let dir = tempfile::tempdir().unwrap();

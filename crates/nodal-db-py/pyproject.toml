@@ -1,17 +1,46 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
+requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
 
 [project]
 name = "nodal-db"
-description = "Thin Python skin over the nodal-db core: marshal Arrow in, call the one canonicalizer, translate errors out."
+description = "Read and write nodal-db files: versioned modelling data in DuckDB, with append-only history and plain-SQL reads."
+readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "EUPL-1.2" }
+# PEP 639. LICENSE is a symlink to the repository root's licence text, so
+# the sdist and every wheel carry it (dist-info/licenses/LICENSE).
+license = "EUPL-1.2"
+license-files = ["LICENSE"]
+authors = [{ name = "Nodal-Tools" }]
+maintainers = [{ name = "Juha Kiviluoma", email = "juha.kiviluoma@nodal-tools.fi" }]
+keywords = ["duckdb", "database", "versioned data", "modelling", "arrow"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering",
+]
 dynamic = ["version"]
 # pyarrow is required at runtime by the Arrow bridge (arrow-pyarrow constructs
 # pyarrow objects for results and reads any __arrow_c_stream__/__arrow_c_array__
 # producer for inputs). >=16 guarantees the PyCapsule interface both ways.
 dependencies = ["pyarrow>=16"]
+
+[project.urls]
+Homepage = "https://github.com/nodal-tools/nodal-db"
+Documentation = "https://nodal-tools.github.io/nodal-db/"
+Repository = "https://github.com/nodal-tools/nodal-db"
+Issues = "https://github.com/nodal-tools/nodal-db/issues"
+Changelog = "https://github.com/nodal-tools/nodal-db/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # The pytest suite's own deps: `pip install 'nodal-db[test]'` (or install the
@@ -27,3 +56,6 @@ test = ["pytest", "duckdb>=2.0"]
 module-name = "nodal_db"
 # pyo3/extension-module is a DEFAULT cargo feature of this crate (see
 # Cargo.toml [lib]/[features] comments) — no feature override needed here.
+# The sdist is self-contained: maturin packs the workspace's path crates, and
+# the core's embedded schema (`crates/nodal-db-core/schema`, a symlink to the
+# repository's schema/ directory) is packed as real files.

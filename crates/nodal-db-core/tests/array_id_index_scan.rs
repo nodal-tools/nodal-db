@@ -90,9 +90,9 @@ fn write(db: &Path, scale: f64, msg: &str) {
         "Base",
         fixture_batch(scale),
         &[],
-        WriteOptions::default(),
         "tester",
         msg,
+        WriteOptions::default(),
     )
     .expect("write fixture");
 }

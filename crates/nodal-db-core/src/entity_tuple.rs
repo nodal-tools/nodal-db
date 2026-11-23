@@ -1,13 +1,12 @@
-//! Element-tuple uniqueness of N-D entities (entity_rename_PLAN E2, §5.2,
-//! §5.3): no two live entities of one class may hold the same element tuple.
+//! Element-tuple uniqueness of N-D entities: no two live entities of one class may hold the same element tuple.
 //! The single writer enforces it (no index can: the tuple spans
 //! `entity_element` rows); `audit_entity_tuple_dup` finds duplicates written
 //! before the rule or by direct SQL.
 //!
-//! The per-call [`TupleIndex`] keeps the guard's cost constant per (call,
+//! The per-call `TupleIndex` keeps the guard's cost constant per (call,
 //! N-D class): the first N-D create of class K in a call resolves the
 //! position-1 element names of every `CreateEntity` of K in the call (fenced
-//! per name below [`TUPLE_SCOPE_MIN`] names, one set statement at or above
+//! per name below `TUPLE_SCOPE_MIN` names, one set statement at or above
 //! it) and loads, in one statement, the live tuples of K whose position-1
 //! element is among those ids. Every create adds its own tuple. A create
 //! whose position-1 element was not in the loaded scope (a name that

@@ -2,7 +2,9 @@
 
 The first part of this page walks through creating a database, writing
 data and reading it back. The second part covers the rules that tools
-integrating with nodal-db must follow.
+integrating with nodal-db must follow. The [Reference](reference.md)
+lists every Python method, exception, CLI command, change item and
+report field in one place.
 
 The examples share one small data set, taken from energy-system
 modelling (nodal-db's first use case) but standing for any kind of
@@ -14,12 +16,23 @@ these examples.
 
 ## Getting started
 
-### Build
+### Install
 
-Versioned releases, when available, are listed on the
-[Releases page](https://github.com/nodal-tools/nodal-db/releases). To
-build from a checkout of the repository, you need a Rust toolchain and,
-for the Python parts, Python 3.11 or later.
+Release 0.1.0 ships the Python package on PyPI and the CLI on the
+[Releases page](https://github.com/nodal-tools/nodal-db/releases), for
+Linux x86_64 and macOS arm64:
+
+```bash
+pip install nodal-db     # the Python package (import nodal_db); Python 3.11+
+```
+
+For the CLI, download the archive for your platform from the release
+page and put the `nodal-db` binary on your `PATH`.
+
+### Build from source
+
+To build from a checkout of the repository, you need a Rust toolchain
+and, for the Python parts, Python 3.11 or later.
 
 ```bash
 git clone https://github.com/nodal-tools/nodal-db.git
@@ -27,8 +40,9 @@ cd nodal-db
 cargo build --release -p nodal-db-cli    # produces target/release/nodal-db
 ```
 
-The first build compiles the bundled DuckDB engine and takes a while
-(around 15 minutes); later builds are incremental.
+The first build compiles the bundled DuckDB engine: about 4 minutes on a
+32-core machine, considerably longer on a laptop. Later builds are
+incremental.
 
 To build the Python package (`import nodal_db`) into a virtual
 environment:
@@ -48,7 +62,7 @@ The examples below call the CLI as `nodal-db`; put
 === "CLI"
 
     ```bash
-    nodal-db init demo.duckdb --alternative Base
+    nodal-db init demo.duckdb --default-alternative Base
     ```
 
     ```text
@@ -75,7 +89,7 @@ The examples below call the CLI as `nodal-db`; put
 
 `init` creates a new file: in the CLI, Python and Rust alike it refuses
 a path that already exists (any file, an empty one included) or that has
-a `.wal` file next to it. The `--alternative` option creates an initial
+a `.wal` file next to it. The `--default-alternative` option creates an initial
 alternative; without it, the database starts with no alternatives and one
 is created on the first write that names it.
 
@@ -84,7 +98,7 @@ parameters, pass it at creation time (the examples below start without
 one, so the template load does not shift their commit numbers):
 
 ```bash
-nodal-db init demo.duckdb --alternative Base --template model.yaml
+nodal-db init demo.duckdb --default-alternative Base --template model.yaml
 ```
 
 A minimal template:
@@ -184,8 +198,8 @@ do either.
 
     ```text
     imported base.arrows: commit 2, 2 segment(s), 4 value(s) written, 0 unchanged, 4 row(s) written, axes 1 created / 1 reused, tiers [array, scalar]
-    warning: auto-created entity_class "node" (id 1)
-    warning: auto-created parameter_definition "demand" (id 1)
+    warning: auto-created class "node" (id 1)
+    warning: auto-created parameter "demand" (id 1)
     warning: auto-created entity "north" (id 1)
     ...
     ```
@@ -222,7 +236,7 @@ do either.
     ```
 
     Several writes, deletions, structural changes and purges can go into
-    one commit with `db.commit_changes(segments=..., structural=...,
+    one commit with `db.commit(segments=..., structural=...,
     deletes=..., object_deletes=..., purges=..., user=...)`.
 
 === "Rust"
@@ -247,15 +261,17 @@ do either.
     let report = api::write_parameter(
         db_path, "unit", "capacity", "Base", batch,
         &[],                      // label-dimension ordinal domains
-        WriteOptions::default(),
         "alice", "initial capacities",
+        WriteOptions::default(),
     )?;
     ```
 
     Use the Arrow types re-exported as `nodal_db_core::duckdb::arrow` so
     that your code links against the same Arrow version as the core.
-    `api::commit_changes` combines writes, deletions and structural
-    changes in one commit.
+    `api::commit(db_path, ChangeSet { .. }, user, message, opts)` combines
+    writes, deletions, structural changes, purges and metadata in one
+    commit; `write_parameter`, `write_segments` and `delete_values` are
+    convenience wrappers over it.
 
 #### Values of several types for one parameter
 
@@ -291,13 +307,13 @@ changes: the `domains` argument wins over field metadata at the same
 position.
 
 ```python
-db.ensure_entity_class("node", user="alice")
-db.ensure_parameter_definition(
+db.ensure_class("node", user="alice")
+db.ensure_parameter(
     "node", "level", types=[{"kind": "float"}, {"kind": "string"}],
     user="alice")
 north = pa.record_batch({"entity": ["north"], "value": [12.0]})
 south = pa.record_batch({"entity": ["south"], "value": ["high"]})
-db.commit_changes(
+db.commit(
     segments=[{"class": "node", "parameter": "level", "alternative": "Base",
                "batch": [north, south]}],          # a list: one batch per type
     user="alice")
@@ -333,9 +349,9 @@ report["commit_id"], report["values_unchanged"]   # (0, 1)
 
 Use `head_commit` when you need the commit the data is current at. A
 call that changes at least one value commits as usual, and only the
-changed values get the new commit. `--force-replace` (or
-`force_replace`) only decides what the replaced versions keep; it does
-not make the core rewrite unchanged values. A call may not write a
+changed values get the new commit. `--no-retain-content` (or
+`retain_content=False`) only decides what the replaced versions keep; it
+does not make the core rewrite unchanged values. A call may not write a
 value and delete the same value; the core refuses it before writing
 anything, as `DbError::WriteAndDeleteSameKey` in Rust /
 `nodal_db.WriteAndDeleteSameKey` in Python (both subclasses of
@@ -357,7 +373,7 @@ separate calls.
 
 ```python
 try:
-    db.commit_changes(
+    db.commit(
         segments=[{"class": "node", "parameter": "demand",
                    "alternative": "Base", "batch": batch}],
         deletes=[("node", "demand", "Base", "north")],
@@ -367,7 +383,7 @@ except nodal_db.WriteAndDeleteSameKey as e:
 ```
 
 A script that has to send such a batch as one call can make the delete
-win instead: pass `covered_writes="delete_wins"` to `commit_changes` in
+win instead: pass `covered_writes="delete_wins"` to `commit` in
 Python, or set `covered_writes: CoveredWrites::DeleteWins` in the
 `WriteOptions` in Rust. The core then drops every write that a delete in
 the call covers before anything is written (a dropped write creates no
@@ -384,7 +400,7 @@ one covering delete that took effect (`by` names the list, `deletes` or
 `object_deletes`; a value delete is named first if there is one):
 
 ```python
-report = db.commit_changes(
+report = db.commit(
     segments=[{"class": "node", "parameter": "demand",
                "alternative": "Base", "batch": batch}],
     object_deletes=[{"kind": "entity", "class": "node", "name": "north",
@@ -540,8 +556,8 @@ precedence.
 
 === "Rust"
 
-    `api::commit_structural` (or the `structural` argument of
-    `api::commit_changes`) takes a list of `types::StructuralChange`
+    `api::commit_structural` (or the `structural` channel of
+    `api::commit`'s `ChangeSet`) takes a list of `types::StructuralChange`
     values, such as `CreateScenario` and `SetScenarioAlternatives`.
 
 The CLI has no scenario commands; use Python or Rust, or a template.
@@ -565,12 +581,12 @@ meaning. Mark or unmark one with:
 === "Python"
 
     ```python
-    db.set_refinement_class("plant_generator", True, user="alice")
+    db.set_class_refinement("plant_generator", True, user="alice")
     ```
 
 === "Rust"
 
-    `verbs::set_refinement_class(&db, "plant_generator", true, "alice")`.
+    `verbs::set_class_refinement(db_path, "plant_generator", true, "alice")`.
 
 The class must have exactly two dimensions. The marks are stored in the
 core property `refinement_classes`, a JSON array of class ids
@@ -582,9 +598,9 @@ after the load (a template export does not include it either).
 ### Renaming objects and editing descriptions
 
 Five structural changes rename an object or revise its description:
-`RenameAlternative`, `RenameScenario`, `RenameEntityClass`,
+`RenameAlternative`, `RenameScenario`, `RenameClass`,
 `RenameParameter` and `RenameEntity` (Python ops `rename_alternative`,
-`rename_scenario`, `rename_entity_class`, `rename_parameter`,
+`rename_scenario`, `rename_class`, `rename_parameter`,
 `rename_entity`). Each takes the object's `current` name, a `new_name`
 and an optional `description`; `RenameParameter` and `RenameEntity` also
 take the `class` the parameter or entity belongs to. Entities have rules
@@ -592,7 +608,7 @@ of their own as well: see [Renaming entities](#renaming-entities).
 
 ```python
 db.commit_structural([
-    {"op": "rename_entity_class", "current": "node", "new_name": "bus"},
+    {"op": "rename_class", "current": "node", "new_name": "bus"},
     {"op": "rename_parameter", "class": "bus", "current": "demand",
      "new_name": "load", "description": "Hourly load, MW"},
 ], user="alice")
@@ -621,7 +637,7 @@ database; parameter names are unique within their class.
   database (creates and templates follow the same rule). The same name
   with no description change, or `""` on an object with no description,
   is `NoOp`; a call of only no-ops makes no commit (`commit_id` 0).
-  `CreateEntityClass` and `CreateEntity` (Python `create_entity_class`,
+  `CreateClass` and `CreateEntity` (Python `create_class`,
   `create_entity`) also take a `description`, applied only when the
   class or entity is created: a create of an existing one is a `NoOp`
   that keeps the stored description (when one call creates the same
@@ -647,7 +663,8 @@ database; parameter names are unique within their class.
   (`DbError::TemplateStampedRename`, `nodal_db.TemplateStampedRename`,
   an `ApiError` subclass). nodal-db cannot tell which classes and
   parameters the template declares, so the refusal covers all of them.
-  The error lists every refused item (`change_index`, kind, class,
+  The error lists every refused item (`change_index`, `kind` — `class`
+  or `parameter` —, `class` (the parameter's class),
   `current`, `new_name`) so a client can ask its user once; to go ahead,
   resend the allowed items with `allow_on_template: true`
   (`"allow_on_template": True` in Python). Case-only renames,
@@ -787,8 +804,8 @@ stored string.
 ### Purge
 
 A purge closes out everything in a named scope in one commit: all values
-of a class, every entity, every alternative but some, every class. It is
-the counterpart of Spine Toolbox's "purge before writing". **Most work
+of a class, every entity, every alternative but some, every class.
+Spine Toolbox users may know this as "purge before writing". **Most work
 does not need it**: a write replaces the values it names, an object
 delete removes one object with its dependents, and an import into a new
 file starts empty. Use a purge when a source is the whole truth for a
@@ -801,7 +818,7 @@ scope and anything it no longer states must go.
     db.purge([{"scope": "values", "class": "node"}], user="alice")
 
     # Purge and re-import in one commit: a true replace.
-    db.commit_changes(segments=[...], structural=[...],
+    db.commit(segments=[...], structural=[...],
                       purges=[{"scope": "entities"}], user="alice")
     ```
 
@@ -818,7 +835,7 @@ scope and anything it no longer states must go.
 === "Rust"
 
     `api::purge` and `api::preview_purge`, or the `purges` channel of
-    `api::commit_change_set` (`ChangeSet { purges, .. }`) with
+    `api::commit` (`ChangeSet { purges, .. }`) with
     `types::PurgeRequest` and `types::PurgeScope`.
 
 **Scopes.** Each request names one scope and its filters:
@@ -874,9 +891,9 @@ duplicates](#n-d-entities-elements-names-and-duplicates)); use `RenameEntity`. T
   existing definition changes nothing.
 
 Rows the call itself writes are never closed, and closed values follow
-their definition's retention (`retain_content`, or the call's
-`retain_override`; `force_replace` keeps no content, as for a value
-delete). Structural rows and parameter defaults are always
+their definition's retention (the parameter's `retain_content`, unless
+the call's `retain_content` option overrides it: `False` keeps no
+content, `True` keeps it, as for a value delete). Structural rows and parameter defaults are always
 kept in history.
 
 **Reach outside the scope.** A request whose cascade would close objects
@@ -916,9 +933,9 @@ nor a changed template re-creates what was removed: the apply stops with
 `recreate_removed=True` (Python), `ApplyOptions::recreate_removed` (Rust)
 or `template apply --recreate-removed` (CLI) to re-create the removed
 items with new ids; the plan notes each, and `template_plan` /
-`template plan` take the same option to preview it. **This is a
-behaviour change for object deletes and `drop_value_list`** of declared
-items: an apply used to re-create them silently. Removals made by the template's
+`template plan` take the same option to preview it. This applies to
+object deletes and `drop_value_list` of declared items too: an apply
+never re-creates them silently. Removals made by the template's
 own migration steps and `run:` programs never block. For a `run:`
 program, "its commits" means every commit since the template's last
 commit up to the program's progress commit, so a removal some other
@@ -1002,18 +1019,18 @@ values. Items are `"op"`-keyed dicts:
 === "Python"
 
     ```python
-    db.commit_changes(metadata=[
-        {"op": "put_source", "source": "IEA WEO 2024",
-         "fields": {"title": "World Energy Outlook 2024", "issued": "2024-10-16"}},
-        {"op": "put_license", "license": "CC-BY-4.0", "fields": {"spdx": True}},
-        {"op": "set_source_licenses", "source": "IEA WEO 2024", "licenses": ["CC-BY-4.0"]},
+    db.commit(metadata=[
+        {"op": "put_source", "source": "Example dataset 2024",
+         "fields": {"title": "Example dataset 2024 (fictional)", "issued": "2024-10-16"}},
+        {"op": "put_license", "license": "Example-Licence-1.0", "fields": {"title": "Example licence 1.0 (fictional)"}},
+        {"op": "set_source_licenses", "source": "Example dataset 2024", "licenses": ["Example-Licence-1.0"]},
         {"op": "put_role", "role": "primary_source"},
         {"op": "link", "subject": {"dataset": True},
-         "target": {"source": "IEA WEO 2024"}, "role": "primary_source"},
+         "target": {"source": "Example dataset 2024"}, "role": "primary_source"},
         {"op": "link_value",
          "value": {"class": "node", "parameter": "demand",
                    "alternative": "Base", "entity": "north"},
-         "target": {"source": "IEA WEO 2024"}},
+         "target": {"source": "Example dataset 2024"}},
         {"op": "set_property", "key": "title", "value": "Nordic grid model"},
     ], user="alice")
     ```
@@ -1021,23 +1038,23 @@ values. Items are `"op"`-keyed dicts:
 === "Rust"
 
     ```rust
-    use nodal_db_core::api::{commit_change_set, ChangeSet};
+    use nodal_db_core::api::{commit, ChangeSet};
     use nodal_db_core::types::{LinkSpec, MetadataChange as M, Ref, RoleSel, Target, ValueAddr};
 
     let set = ChangeSet {
         metadata: vec![
-            M::PutSource { source: Ref::Name("IEA WEO 2024".into()), rename: None,
+            M::PutSource { source: Ref::Name("Example dataset 2024".into()), rename: None,
                            fields: Default::default() },
             M::LinkValue {
                 value: ValueAddr { class: "node".into(), parameter: "demand".into(),
                                    alternative: "Base".into(), entity: "north".into() },
-                link: LinkSpec { target: Target::Source(Ref::Name("IEA WEO 2024".into())),
+                link: LinkSpec { target: Target::Source(Ref::Name("Example dataset 2024".into())),
                                  role: RoleSel::NoRole },
             },
         ],
         ..Default::default()
     };
-    commit_change_set(&db, set, "alice", "provenance", Default::default())?;
+    commit(db_path, set, "alice", "provenance", Default::default())?;
     ```
 
 A `put_*` of an unknown name creates the record; of a known one it
@@ -1068,11 +1085,11 @@ the save:
     ```python
     db.write_parameter("node", "demand", "Base", batch, user="alice",
                        value_metadata="keep")
-    db.commit_changes(segments=[...], user="alice", metadata=[
+    db.commit(segments=[...], user="alice", metadata=[
         {"op": "value_metadata", "scope": "save", "action": "clear"},
         {"op": "value_metadata",
          "scope": {"class": "node", "parameter": "demand", "alternative": "Base"},
-         "action": {"set": [{"source": "IEA WEO 2024"}]}},
+         "action": {"set": [{"source": "Example dataset 2024"}]}},
     ])
     ```
 
@@ -1087,7 +1104,7 @@ whole (`ValueMetadataUnstated`, Python `nodal_db.ValueMetadataUnstated`,
 with `count` and up to ten `sample` names) and writes nothing. Values
 without links, new values, unchanged writes and deleted values need no
 statement. A save- or target-level `set` also annotates the new values
-of the save ("everything in this import is from IEA"); a value-level
+of the save ("everything in this import is from one source"); a value-level
 `set` or `clear` also edits the links of an unchanged value. Next to a
 keep, `link_value` / `unlink_value` add or remove single links; next to
 a value-level `set` they are refused (a set is the exact list).
@@ -1204,7 +1221,7 @@ and `v_*` columns per value kind (`v_float`, `v_int`, `v_bool`, `v_str`,
 (a period index is `[idxN_ts, idxN_end_ts)`). New columns may be
 appended at the end in later versions: select columns by name.
 [The read surface](dev/read_surface.md) documents every column. The index columns are numbered by position; the
-declared dimension names are in `parameter_type_dimension`. If you
+declared dimension names are in `parameter_type_dimension_current`. If you
 filter array values on your own DuckDB connection, see
 [DuckDB 2.0: filtered reads of long arrays](#duckdb-version) first.
 
@@ -1237,7 +1254,7 @@ Commonly used parts of the read surface:
 | `value_rows`, `value_cells` | all current values as long rows |
 | `<table>_asof(commit)` | a table as of an earlier commit, e.g. `value_scalar_asof(3)` |
 | `value_array_asof_for(commit, parameter_definition_id, entity_id, alternative_id)` | one array value as of an earlier commit (see [Read history](#read-history)) |
-| `"commit"` | the commit log: id, timestamp, user, message |
+| `commit_log` | the commit log: id, timestamp, user, message |
 | `audit_health`, `audit_*` | integrity, completeness and maintenance reports |
 | `nodal_read_surface()` | the version of the views and macros the file carries (see [Old files](#old-files-refresh-the-read-surface)) |
 
@@ -1272,8 +1289,8 @@ batch = db.read_parameter("unit", "capacity", "Base")    # pyarrow.RecordBatch
 table = db.query("SELECT * FROM audit_health").read_all()  # pyarrow.Table
 # a few values (the read_values macro): one entity in every alternative,
 # then two entities in one alternative
-coal = db.read_values("unit", "capacity", ["coal"])
-pair = db.read_values("unit", "capacity", ["coal", "wind"], ["Base"])
+coal = db.read_values("unit", "capacity", ["coal_plant"])
+pair = db.read_values("unit", "capacity", ["coal_plant", "gas_plant"], ["Base"])
 ```
 
 `db.read_values(class, parameter, entities, alternatives=None)` follows
@@ -1382,27 +1399,29 @@ than 64 deep is refused before it is parsed.
 ### Read history
 
 After the coal plant's capacity is updated from 400 to 450 in commit 5,
-the old row is still there, closed out:
+the old version is still there, closed out. `value_timeline` lists every
+version of every value, in every tier:
 
 ```sql
-SELECT entity_id, v_float, version, valid_from_commit, valid_to_commit
-FROM value_scalar ORDER BY entity_id, version;
+SELECT entity_id, tier, version, valid_from_commit, valid_to_commit
+FROM value_timeline WHERE tier = 'scalar' ORDER BY entity_id, version;
 ```
 
 ```text
 ┌───────────┬─────────┬─────────┬───────────────────┬─────────────────┐
-│ entity_id │ v_float │ version │ valid_from_commit │ valid_to_commit │
+│ entity_id │  tier   │ version │ valid_from_commit │ valid_to_commit │
 ├───────────┼─────────┼─────────┼───────────────────┼─────────────────┤
-│         3 │   400.0 │       1 │                 2 │               5 │
-│         3 │   450.0 │       2 │                 5 │            NULL │
-│         4 │   250.0 │       1 │                 2 │            NULL │
+│         3 │ scalar  │       1 │                 2 │               5 │
+│         3 │ scalar  │       2 │                 5 │            NULL │
+│         4 │ scalar  │       1 │                 2 │            NULL │
 └───────────┴─────────┴─────────┴───────────────────┴─────────────────┘
 ```
 
-and an as-of read returns the earlier state:
+and an as-of read returns the content at an earlier commit:
 
 ```sql
 SELECT entity_id, v_float FROM value_scalar_asof(3);   -- 400.0 and 250.0
+SELECT * FROM read_parameter('unit', 'capacity');      -- the current state: 450.0 and 250.0
 ```
 
 For one array value, `value_array_asof_for(commit, parameter_definition_id,
@@ -1414,7 +1433,8 @@ the stored history of every array, as `value_array_asof` does.
 ### Erase an alternative
 
 Erasure physically removes all data of one alternative and leaves an
-`erasure_marker` (see [Features](features.md#erasure-with-markers)). It
+erasure marker, listed by the `audit_erasure` view (see
+[Features](features.md#erasure-with-markers)). It
 is intended for output databases, such as replacing the results of a
 superseded run. Preview first:
 
@@ -1471,15 +1491,16 @@ versions. The source file is only read.
     nodal-db extract demo.duckdb demo-at-3.duckdb --as-of 3
     ```
 
-    On a tiny database the file barely shrinks: a fixed per-file overhead
-    dominates. The size gain grows with the amount of superseded history.
+    On a tiny database the extract does not shrink and can even come out
+    a little larger: a fixed per-file overhead dominates. The size gain
+    grows with the amount of superseded history.
 
     ```text
     extracted the current state (commit 4) of demo.duckdb into demo-slim.duckdb
       source identity   ad485e98-1793-4189-b965-06d2f02f3c10
       extract identity  e4a3d2be-3de7-4675-b234-6046029c2829
       horizon commit 4, extract commit 5, horizon marker 1
-      size 10.8 MiB -> 10.8 MiB; 5 rows left out, 0 unreferenced axes dropped
+      size 14.0 MiB -> 15.3 MiB; 5 rows left out, 0 unreferenced axes dropped
     note: the extract has a NEW database identity; as-of reads before commit 5 fail in it (the source keeps the full history)
     ```
 
@@ -1515,7 +1536,7 @@ edit it.
 
 ```text
 $ nodal-db maintain compact demo.duckdb --if-needed
-demo.duckdb: no compaction needed (10.8 MiB; below the growth and commit thresholds)
+demo.duckdb: no compaction needed (14.0 MiB; below the growth and commit thresholds)
 ```
 
 A compaction usually makes the file smaller, but it does not have to: a
@@ -1532,12 +1553,6 @@ the file, because you asked for it, and prints a warning
 when the result is not smaller. That is rare; the warning is there so
 that you notice it.
 
-A database written before 2026-10-24 gets the smaller long-tier
-index (in a benchmark, about 30 instead of about 80 bytes per long
-cell) on its next compaction, automatic or `nodal-db maintain compact`,
-or on an extract. Nothing else changes: the old index enforces exactly
-the same rule.
-
 On a very large database with a long history, a compaction takes minutes
 (about six minutes for a 1.4 GB file with 228 million long-table rows).
 It holds the database lock for that time, so run it when nobody needs to
@@ -1551,14 +1566,17 @@ write.
     identity, such as an output database that records which input
     database it was produced from, refers to the old file. Keep that
     file as the archive: the extract's horizon marker
-    (`SELECT continuation_db FROM erasure_marker WHERE kind = 'horizon'`)
+    (`SELECT continuation_db FROM audit_erasure WHERE kind = 'horizon'`)
     names it, and its full history stays readable there.
 
 ### Import a Spine database
 
 The `nodal_spine_import` package in `python/` imports a Spine Toolbox
-database into a new nodal-db file. It needs `spinedb_api` and the
-`nodal_db` package installed, and `python/` on the Python path:
+database into a new nodal-db file. In 0.1.0 it is not published as a
+package: run it from a checkout of this repository. It needs
+`spinedb_api` and the `nodal_db` package installed, and the checkout's
+`python/` directory on the Python path (for example
+`PYTHONPATH=python python my_import.py`):
 
 **Compatibility note.** nodal-db renders time-pattern positions with `;`
 for AND within a clause and `,` for OR between clauses (for example
@@ -1734,7 +1752,7 @@ that created the file wrote them. A newer nodal-db brings its own:
 - **Upgrade a file you only read** with the command, or from Python:
 
 ```sh
-nodal-db maintain refresh-views demo.duckdb --check   # report only; exit 0 current, 1 older, 2 newer
+nodal-db maintain refresh-views demo.duckdb --check   # report only; exit 0 current, 3 stale, 4 newer
 nodal-db maintain refresh-views demo.duckdb
 ```
 
@@ -1761,6 +1779,29 @@ views and macros are reserved: give your own objects other names.
     (`USE other`, then switch back), or open the file on its own
     connection. Do not store a view that calls another database's macro.
 
+### CLI exit codes
+
+Scripts can tell the outcomes of a `nodal-db` command apart by its exit
+code:
+
+| Code | Meaning |
+|---|---|
+| 0 | success (also `--help` and `--version`) |
+| 1 | an error: a missing or refused file, a refused write, a bad value the command checks itself. The message says what |
+| 2 | a usage error: an unknown option, a missing argument or a value the argument parser rejects. Nothing was run |
+| 75 | busy, retryable: the database is locked by another process, or a write conflict outlasted the retry budget (any command; for `import` this is error class E9). Nothing was written; run the command again later |
+
+`nodal-db maintain refresh-views DB --check` reports instead of failing:
+
+| Code | Meaning |
+|---|---|
+| 0 | the file's read surface is up to date |
+| 3 | stale: older than this nodal-db's, missing (the file predates versioning), or the same version with other DDL (drift). `refresh-views` without `--check` refreshes it |
+| 4 | newer than this nodal-db's: this build cannot refresh it; use a newer nodal-db |
+
+An error during `--check` (for example a missing file) exits 1, and busy
+exits 75, as for every command.
+
 ### Connection discipline
 
 !!! warning "Hold connections per operation, never long-lived"
@@ -1776,7 +1817,7 @@ views and macros are reserved: give your own objects other names.
 To detect new commits, poll the newest commit id with a short read:
 
 ```sql
-SELECT max(id) FROM "commit";
+SELECT max(id) FROM commit_log;
 ```
 
 To write only if nobody else has committed since you read, pass the
@@ -1797,8 +1838,8 @@ fails with `Stale`:
         print(f"someone committed: expected {e.expected}, found {e.found}")
     ```
 
-    `write_parameter`, `commit_changes`, `commit_structural` and
-    `delete_values` take `expect_commit`. `Stale` is a subclass of
+    `write_parameter`, `commit`, `commit_structural`, `delete_values`,
+    `purge` and `template_apply` take `expect_commit`. `Stale` is a subclass of
     `ApiError`.
 
 === "Rust"
@@ -1806,8 +1847,8 @@ fails with `Stale`:
     ```rust
     let head = api::head_commit(db_path)?;
     let opts = WriteOptions { expect_commit: Some(head), ..Default::default() };
-    match api::commit_changes(db_path, segments, vec![], vec![], vec![],
-                              "alice", "", opts) {
+    let set = api::ChangeSet { segments, ..Default::default() };
+    match api::commit(db_path, set, "alice", "", opts) {
         Err(DbError::Stale { expected, found }) => { /* reload, re-apply */ }
         other => { other?; }
     }

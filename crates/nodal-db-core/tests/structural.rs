@@ -1,5 +1,5 @@
 //! The sanctioned structural (non-value) write path — the fourth
-//! `commit_changes` channel (structural_write_api_plan). Covers create/rename
+//! `commit` channel (structural_write_api_plan). Covers create/rename
 //! identity rows (incl. same-commit in-place edit + collision), A-min scenario
 //! ranking (rotation regression, minimal-diff, clear, no-op), per-edge
 //! activation + membership (base sentinel), the D-S9 creates, the
@@ -15,7 +15,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, commit_structural, delete_objects, preview_object_deletes, Segment,
+    commit, commit_structural, delete_objects, preview_object_deletes, ChangeSet, Segment,
 };
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::{
@@ -80,13 +80,13 @@ fn create_rename_alternative() {
 
     let r = cs(&db, vec![create_alt("hydro")]);
     assert_eq!(r.structural[0].effect, SE::Created);
-    let id = r.structural[0].object_id;
+    let id = r.structural[0].id;
     assert!(id > 0);
 
     // Idempotent create ⇒ NoOp, same id.
     let r = cs(&db, vec![create_alt("HYDRO")]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
 
     // Rename: id preserved, version bumps, old row closed.
     let r = cs(
@@ -98,7 +98,7 @@ fn create_rename_alternative() {
         }],
     );
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     assert_eq!(
         q1(
             &db,
@@ -116,7 +116,7 @@ fn create_rename_alternative() {
 
     // Case-only self-restyle (fold-equal, no desc change) ⇒ a REAL rename
     // (editor request R4, owner decision 2026-10-27: the client decides
-    // whether case matters, not the core — a `commit_changes` caller that
+    // whether case matters, not the core — a `commit` caller that
     // wants it treated as a no-op does so itself), id preserved, version
     // bumps again, and — critically — NOT a false collision with itself
     // (m5's self-exclusion in the uniqueness check still holds: "wet_year"
@@ -131,7 +131,7 @@ fn create_rename_alternative() {
         }],
     );
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     assert_eq!(
         q1(
             &db,
@@ -181,7 +181,7 @@ fn rename_to_the_nfc_form_of_an_nfd_spelling_is_byte_identical_noop() {
         }],
     );
     assert_eq!(r.structural[0].effect, SE::Created);
-    let id = r.structural[0].object_id;
+    let id = r.structural[0].id;
     // The create itself stored the NFC form (the text rule normalizes at
     // every entry point, create included).
     let conn = Connection::open(&db).unwrap();
@@ -204,7 +204,7 @@ fn rename_to_the_nfc_form_of_an_nfd_spelling_is_byte_identical_noop() {
         }],
     );
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     let conn = Connection::open(&db).unwrap();
     let version: i64 = conn
         .query_row(
@@ -317,7 +317,7 @@ fn closed(db: &Path, table: &str) -> i64 {
 fn rename_chain_in_one_call_bumps_once() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
-    let id = cs(&db, vec![create_alt("a")]).structural[0].object_id;
+    let id = cs(&db, vec![create_alt("a")]).structural[0].id;
     cs(
         &db,
         vec![SC::CreateScenario {
@@ -335,7 +335,7 @@ fn rename_chain_in_one_call_bumps_once() {
         ],
     );
     assert!(r.structural.iter().all(|o| o.effect == SE::Renamed));
-    assert_eq!(r.structural[1].object_id, id);
+    assert_eq!(r.structural[1].id, id);
     assert_eq!(
         q1(&db, "SELECT version FROM alternative WHERE cur_name = 'c'"),
         2
@@ -355,7 +355,7 @@ fn rename_swap_over_two_commits() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh_db(&dir);
     let r = cs(&db, vec![create_alt("a"), create_alt("b")]);
-    let (ida, idb) = (r.structural[0].object_id, r.structural[1].object_id);
+    let (ida, idb) = (r.structural[0].id, r.structural[1].id);
     cs(&db, vec![ren_alt("a", "t1"), ren_alt("b", "t2")]);
     cs(&db, vec![ren_alt("t1", "b"), ren_alt("t2", "a")]);
     assert_eq!(
@@ -573,7 +573,7 @@ fn a_min_over_non_contiguous_ranks() {
 // ---------------------------------------------------------------------------
 
 fn class(name: &str) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: vec![],
         description: None,
@@ -995,19 +995,20 @@ fn prepare_guards() {
     assert!(format!("{err}").contains("contradictory renames"), "{err}");
 
     // Both object-delete AND structurally reference one object (M2).
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![],
-        vec![set_ranks("s", &["victim"])],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("victim".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            structural: vec![set_ranks("s", &["victim"])],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("victim".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         o(),
@@ -1017,24 +1018,25 @@ fn prepare_guards() {
 
     // Activation referencing an alternative that is also object-deleted (M2,
     // the alternative endpoint — FIX 1). Pure, name-level: names need not exist.
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![],
-        vec![SC::SetEntityActivation {
-            class: "node".into(),
-            entity: "n1".into(),
-            alternative: "X".into(),
-            active: Some(true),
-        }],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("X".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            structural: vec![SC::SetEntityActivation {
+                class: "node".into(),
+                entity: "n1".into(),
+                alternative: "X".into(),
+                active: Some(true),
+            }],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("X".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         o(),
@@ -1076,26 +1078,28 @@ fn composed_editor_save_one_commit() {
         batches: vec![scalar_batch("n1", 5.0)],
         domains: vec![],
     };
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg],
-        vec![
-            create_alt("wet"),
-            SC::CreateScenario {
-                name: "sc".into(),
-                description: None,
-            },
-            set_ranks("sc", &["wet"]),
-        ],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("old".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            segments: vec![seg],
+            structural: vec![
+                create_alt("wet"),
+                SC::CreateScenario {
+                    name: "sc".into(),
+                    description: None,
+                },
+                set_ranks("sc", &["wet"]),
+            ],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("old".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "editor save",
         o(),
@@ -1133,7 +1137,7 @@ fn qs(db: &Path, sql: &str) -> Option<String> {
 }
 
 fn link_class() -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: "link".into(),
         dims: vec!["node".into(), "unit".into()],
         description: None,

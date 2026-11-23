@@ -175,10 +175,9 @@ The read surface lives **inside each database file**: `init` writes the
 views and macros of the nodal-db that creates the file, and the file
 keeps them. `nodal_read_surface()` says which:
 
-- `contract_major` increases with every breaking change. It was `0`
-  during development and is `1` from release 0.1.0 (whose schema change
-  widened the `version` columns). Through 0.x a bump is announced in the
-  release notes; from 1.0.0 on it needs a major release
+- `contract_major` increases with every breaking change. It is `1` in
+  release 0.1.0. Through 0.x a bump is announced in the release notes
+  (`CHANGELOG.md`); from 1.0.0 on it needs a major release
   ([Versions and compatibility](../versions.md)). Breaking changes are: a stable object, column or parameter removed or
   renamed, a stable column's type or position changed, a documented
   semantics changed (case sensitivity, the NULL conventions, the
@@ -201,7 +200,8 @@ What nodal-db does with a file whose surface differs from its own:
   of yours with a reserved name blocks the upgrade, and the write report
   says so (`read_surface_warning`). `nodal-db maintain refresh-views
   FILE` (Python `db.refresh_read_surface()`) upgrades a file you only
-  read; `--check` only reports (exit code 0 current, 1 older, 2 newer).
+  read; `--check` only reports (exit code 0 current, 3 stale, 4 newer;
+  see [CLI exit codes](../usage.md#cli-exit-codes)).
 - **Reads through nodal-db work on an older file** and warn once per
   file (Python: `nodal_db.ReadSurfaceStaleWarning`; CLI: on stderr).
   nodal-db's own reads (`read_parameter`, `read_values` in Rust and

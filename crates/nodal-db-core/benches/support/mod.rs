@@ -8,7 +8,7 @@
 //!   - 100 000 single-parameter scalars
 //!
 //! Everything is built THROUGH the core write path (`api::write_parameter` →
-//! `ingest_segments` → canon → tier → axis dedup → history) — dogfooding the
+//! `write_segments` → canon → tier → axis dedup → history) — dogfooding the
 //! writer is the point, and the build wall time IS the bulk-write benchmark
 //! number recorded in RESULTS.md. No SQL bypasses the canonicalization
 //! pipeline (CLAUDE.md invariant 2).
@@ -195,9 +195,9 @@ pub fn write_array_entity(db: &Path, name: &str, seed: usize) {
         ALT,
         batch,
         &[],
-        WriteOptions::default(),
         USER,
         "bench array write",
+        WriteOptions::default(),
     )
     .expect("array write");
 }
@@ -213,9 +213,9 @@ pub fn write_long_entity(db: &Path, name: &str, seed: usize) {
         ALT,
         batch,
         &[],
-        WriteOptions::default(),
         USER,
         "bench long write",
+        WriteOptions::default(),
     )
     .expect("long write");
 }
@@ -230,9 +230,9 @@ pub fn write_scalars(db: &Path, names: &[String], vals: &[f64], message: &str) {
         ALT,
         batch,
         &[],
-        WriteOptions::default(),
         USER,
         message,
+        WriteOptions::default(),
     )
     .expect("scalar write");
 }
@@ -390,9 +390,9 @@ fn build() -> Synthetic {
             ALT,
             batch,
             &[],
-            WriteOptions::default(),
             USER,
             "synthetic arrays",
+            WriteOptions::default(),
         )
         .expect("array chunk");
         eprintln!(

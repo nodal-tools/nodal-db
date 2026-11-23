@@ -1,4 +1,4 @@
-//! Connection discipline (VMP Part 6; CLAUDE.md invariant 1).
+//! Connection discipline: every connection is per operation.
 //!
 //! DuckDB's lock model is symmetric: while any read-write connection is open,
 //! a second process's RW *and* read-only connects both fail
@@ -8,24 +8,23 @@
 //! close, with the RW lock held only for the span of one commit.
 //!
 //! - [`with_write_txn`] opens RW (bounded-backoff retry on the lock error),
-//!   `BEGIN`, inserts the `commit` row as the validity edge (VMP Part 5),
-//!   runs the closure, `COMMIT`, and closes. The core's own write cycles
-//!   also `CHECKPOINT` before the close, for the shadowing guard's re-stamp
-//!   (`stamp_own_write`, engine rule 8); the public closure family does not.
-//! - [`with_read`] opens a fresh read-only connection, runs, and closes; the
-//!   commit-cookie poll (#2252) is itself one such per-operation read.
-//! - **In-process serialization (api critique F1):** DuckDB's file lock
-//!   excludes other *processes* only — two threads of one process opening the
-//!   same file get two independent database instances whose commits silently
-//!   diverge (lost or chimerically merged writes). Every open-use-close in
-//!   this library therefore first takes a process-global per-path lock
-//!   ([`path_lock`]), mirroring in-process the exclusion the file lock gives
-//!   cross-process. Connections stay per-operation — this serializes them,
-//!   it never shares them.
+//!   `BEGIN`, inserts the `commit` row as the validity edge, runs the closure,
+//!   `COMMIT`, and closes. The core's own write cycles also `CHECKPOINT`
+//!   before the close, for the shadowing guard's re-stamp (engine rule 8);
+//!   the public closure family does not.
+//! - [`with_read`] opens a fresh read-only connection, runs, and closes; a
+//!   poll of the head commit (the change cookie) is itself one such
+//!   per-operation read.
+//! - **In-process serialization:** DuckDB's file lock excludes other
+//!   *processes* only — two threads of one process opening the same file get
+//!   two independent database instances whose commits silently diverge (lost
+//!   or chimerically merged writes). Every open-use-close in this library
+//!   therefore first takes a process-global per-path lock, mirroring
+//!   in-process the exclusion the file lock gives cross-process. Connections
+//!   stay per-operation — this serializes them, it never shares them.
 //!
-//! NOTE for Phase 3 (documented, not implemented here): the write-conflict
-//! retry loop the history protocol needs keys on the `Conflict` substring, not
-//! a full phrase: DuckDB's wording depends on the operation, not the version
+//! The write-conflict retry loop keys on the `Conflict` substring, not a full
+//! phrase: DuckDB's wording depends on the operation, not the version
 //! (`Conflict on update!` for an UPDATE, `Conflict on tuple deletion!` for a
 //! DELETE; identical on 1.5.5 and 2.0.0).
 
@@ -42,7 +41,7 @@ use crate::MINIMUM_DUCKDB;
 
 /// Bounded-backoff budget for a busy lock. Eight attempts, 20 ms doubling to a
 /// 500 ms cap (~1.9 s worst case) — enough to ride out a short commit; a real
-/// solve-length write is the launching GUI's serialization cost (VMP Part 6).
+/// solve-length write is the launching GUI's serialization cost.
 const MAX_ATTEMPTS: u32 = 8;
 const BACKOFF_START: Duration = Duration::from_millis(20);
 const BACKOFF_CAP: Duration = Duration::from_millis(500);
@@ -51,7 +50,7 @@ const BACKOFF_CAP: Duration = Duration::from_millis(500);
 /// `run_txn_once`).
 const WRITE_STATEMENT_CACHE: usize = 64;
 
-/// Process-global registry of per-path serialization locks (api critique F1).
+/// Process-global registry of per-path serialization locks.
 static PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 /// The canonical process-local identity of one DB path: the canonicalized
@@ -100,7 +99,7 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
 /// 8760-long arrays with a time-window filter. The error invalidates the
 /// whole database instance. Upstream fix: duckdb/duckdb PR #27979
 /// (<https://github.com/duckdb/duckdb/pull/27979>, open); see
-/// docs/dev/engine_rules.md §5 (bug, guard test, how to remove this).
+/// `docs/dev/engine_rules.md` (the bug, its guard test, how to remove this).
 /// The setting is debug-tagged: if a DuckDB release renames or drops it,
 /// every open fails loudly here, which the upgrade checklist catches.
 ///
@@ -113,7 +112,7 @@ fn is_lock_busy(e: &duckdb::Error) -> bool {
 /// writes outside the database itself, no `glob`, no HTTP), extension
 /// autoload and autoinstall off (no downloads), persistent secrets off and
 /// community extensions off, and its configuration is locked right after
-/// the open ([`open_with_retry`]), so no SQL on it can turn any of that back
+/// the open (`open_with_retry`), so no SQL on it can turn any of that back
 /// on. The database file, its WAL and DuckDB's spill directory stay usable.
 /// The one exception is [`Access::Trusted`], an explicit per-call opt-in
 /// for a caller's own query on a file it trusts.
@@ -481,7 +480,7 @@ pub fn builtin_guard_own_writes(db_path: &Path) -> u64 {
 /// measured 2026-11-03; the scan of the built-ins dominates and no filter is
 /// pushed into it), against about 35 ms for a whole per-operation read
 /// (`head_commit`: open, one query, close). Run on every open it would add
-/// over a third to every read (invariant 1 makes opens per-operation), so
+/// over a third to every read, so
 /// the answer is cached per process by path and file state ([`FileStamp`]):
 /// an unchanged file costs a few `stat` calls. The stamp is taken before
 /// and after the open and cached only when the two agree, so a change that
@@ -672,8 +671,8 @@ fn assert_min_version(conn: &Connection) -> Result<(), DbError> {
 /// `BEGIN` → insert the `commit(user, message)` row `RETURNING id` → `f(conn,
 /// commit_id)` → `COMMIT` → close. On any error from `f` (or `COMMIT`) the
 /// transaction is rolled back and the connection is still closed, so the RW
-/// lock is never leaked. `commit_id` is the validity edge Phase 3's history
-/// writes stamp onto rows (VMP Part 5); axis writes ignore it (axes are
+/// lock is never leaked. `commit_id` is the validity edge the history
+/// writes stamp onto rows; axis writes ignore it (axes are
 /// immutable and carry no validity span).
 pub fn with_write_txn<T, F>(db_path: &Path, user: &str, message: &str, f: F) -> Result<T, DbError>
 where
@@ -689,12 +688,12 @@ where
     )
 }
 
-/// How a successful write cycle ends (skip_unchanged_writes_PLAN D1): a
+/// How a successful write cycle ends: a
 /// closure that proved it wrote nothing asks for [`TxnEnd::Rollback`], so
 /// the call leaves no `commit` row and the head (the polling cookie) does
 /// not move. The `commit` row's sequence value stays consumed, as on a
 /// conflict retry, so commit ids may skip. Only the `api` entry points
-/// decide this (`commit_changes` and its wrappers); every other writer,
+/// decide this (`commit` and its wrappers); every other writer,
 /// [`with_write_txn`] included, commits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TxnEnd {
@@ -702,8 +701,8 @@ pub(crate) enum TxnEnd {
     Rollback,
 }
 
-/// Transaction-level options of one write cycle (save_path_open_reduction
-/// plan §2.1): checks the transaction layer runs itself, so any writer can
+/// Transaction-level options of one write cycle: checks the transaction
+/// layer runs itself, so any writer can
 /// use them, not only the `api` entry points.
 ///
 /// `expect_commit = Some(c)`: an optimistic-concurrency precondition. Right
@@ -720,7 +719,7 @@ pub(crate) enum TxnEnd {
 /// (in-process), so no commit can land between them. The guarantee holds
 /// for **core-routed access only**: a second DuckDB instance opened in the
 /// same process outside the core is invisible to both locks (fcntl locks are
-/// per process; api critique F1).
+/// per process).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxnOptions {
     pub expect_commit: Option<i64>,
@@ -741,7 +740,7 @@ pub(crate) fn head_on(conn: &Connection) -> Result<i64, DbError> {
 /// One open → BEGIN → `commit` row → closure → COMMIT → close cycle. Shared by
 /// [`with_write_txn`] (once) and [`with_write_txn_retrying`] (per attempt); a
 /// fresh RW connection and a fresh `commit` row are used every call, so a
-/// rolled-back attempt leaves no orphan commit (VMP Part 5). A closure that
+/// rolled-back attempt leaves no orphan commit. A closure that
 /// returns [`TxnEnd::Rollback`] ends the cycle with ROLLBACK instead of
 /// COMMIT and still returns its value.
 fn run_txn_once<T, F>(
@@ -937,7 +936,7 @@ fn schema_mismatch(found: String) -> DbError {
     }
 }
 
-/// Is this a DuckDB write-write conflict (VMP Part 5 retry trigger)? Matched on
+/// Is this a DuckDB write-write conflict? Matched on
 /// the robust `Conflict` substring, not the full phrase: the wording depends on
 /// the operation (`Conflict on update!` for an UPDATE, `Conflict on tuple
 /// deletion!` for a DELETE; identical on DuckDB 1.5.5 and 2.0.0).
@@ -945,15 +944,15 @@ fn is_conflict(e: &DbError) -> bool {
     matches!(e, DbError::Duckdb(_)) && e.to_string().contains("Conflict")
 }
 
-/// Bounded retry budget for the write-write conflict loop (VMP Part 5).
+/// Bounded retry budget for the write-write conflict loop.
 const MAX_CONFLICT_ATTEMPTS: u32 = 5;
 
 /// Like [`with_write_txn`], but re-runs the *whole* closure from scratch on a
-/// write-write conflict (VMP Part 5). Each attempt opens a fresh transaction and
+/// write-write conflict. Each attempt opens a fresh transaction and
 /// a fresh `commit` row, so the closure re-reads every piece of state it depends
 /// on — current versions, array pre-images, axis lookups — inside the new
 /// transaction; nothing read before the conflict is reused. Hence `F: Fn` (must
-/// be re-runnable), not `FnOnce`. After [`MAX_CONFLICT_ATTEMPTS`] the conflict is
+/// be re-runnable), not `FnOnce`. After `MAX_CONFLICT_ATTEMPTS` the conflict is
 /// surfaced as [`DbError::Conflict`]; any non-conflict error returns immediately.
 pub fn with_write_txn_retrying<T, F>(
     db_path: &Path,
@@ -974,7 +973,7 @@ where
 ///
 /// The public closure family ([`with_write_txn`], [`with_write_txn_retrying`]
 /// and this) runs the caller's SQL, so its commits never re-stamp the file
-/// for the shadowing guard ([`Restamp::No`]): the next open lists it.
+/// for the shadowing guard (`Restamp::No`): the next open lists it.
 pub fn with_write_txn_retrying_opts<T, F>(
     db_path: &Path,
     user: &str,
@@ -1023,7 +1022,7 @@ where
 
 /// [`core_write_txn_retrying_opts`] for a closure that also says how its
 /// cycle ends ([`TxnEnd`]): the `api` entry points, which roll back a call
-/// that wrote nothing (skip_unchanged_writes_PLAN D1). Core-owned SQL, so a
+/// that wrote nothing. Core-owned SQL, so a
 /// commit re-stamps.
 pub(crate) fn with_write_txn_retrying_ends<T, F>(
     db_path: &Path,
@@ -1078,7 +1077,7 @@ where
 }
 
 /// Open a fresh read-only connection, run `f`, and close. Per-operation only —
-/// the handle must not outlive the call (CLAUDE.md invariant 1).
+/// the handle must not outlive the call.
 ///
 /// The read surface (`read_surface` module): the file's version is read
 /// first (one query). A file of another contract major is read through

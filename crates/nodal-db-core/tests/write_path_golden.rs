@@ -1,7 +1,7 @@
 //! Physical-write golden (appender_write_path_PLAN.md D11, narrowed by
 //! critique C12): a fixed, deterministic operation script is driven through
 //! `history::write_value` / `delete_value` (inside `with_write_txn`) and
-//! through `api::commit_changes`, then every row of every value, `_hist` and
+//! through `api::commit`, then every row of every value, `_hist` and
 //! axis table, the `commit` log (without its wall-clock `timestamp`) and the
 //! sequences' counters are rendered **in Rust** and compared with
 //! `tests/fixtures/write_path_golden.txt`.
@@ -44,7 +44,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::{TimeUnit, Value};
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, DeleteKey, Segment};
+use nodal_db_core::api::{commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::{CanonicalValue, TS_MAX_US, TS_MIN_US};
 use nodal_db_core::conn::with_write_txn;
@@ -264,8 +264,7 @@ fn key(e: i64) -> ValueKey {
 }
 
 const FORCE: WriteOptions = WriteOptions {
-    force_replace: true,
-    retain_override: None,
+    retain_content: Some(false),
     expect_commit: None,
     covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
 };
@@ -710,43 +709,43 @@ fn api_script(db: &Path, log: &mut String) {
     // a1: multi-segment fresh writes (array with -0.0, which canon
     // normalizes; scalars; a sparse int long; a 600-cell long; a second
     // and a third alternative for the object deletes below).
-    let r = commit_changes(
+    let r = commit(
         db,
-        vec![
-            seg(
-                "profile",
-                "Base",
-                batch(
-                    &["n1"; 4],
-                    &[("t", vec![0, 1, 2, 3])],
-                    f64s(&[-0.0, 1.0, 2.0, 3.0]),
+        ChangeSet {
+            segments: vec![
+                seg(
+                    "profile",
+                    "Base",
+                    batch(
+                        &["n1"; 4],
+                        &[("t", vec![0, 1, 2, 3])],
+                        f64s(&[-0.0, 1.0, 2.0, 3.0]),
+                    ),
                 ),
-            ),
-            seg(
-                "demand",
-                "Base",
-                batch(&["n1", "n2"], &[], f64s(&[4.5, -0.0])),
-            ),
-            seg(
-                "flow",
-                "Base",
-                batch(&["n1"; 3], &[("t", vec![0, 2, 5])], i64s(&[1, 2, 3])),
-            ),
-            seg(
-                "big",
-                "Base",
-                batch(
-                    &["n3"; 600],
-                    &[("t", (0..600).map(|i| i * 3 + (i % 2)).collect())],
-                    i64s(&(0..600).collect::<Vec<_>>()),
+                seg(
+                    "demand",
+                    "Base",
+                    batch(&["n1", "n2"], &[], f64s(&[4.5, -0.0])),
                 ),
-            ),
-            seg("demand", "altV", batch(&["n1"], &[], f64s(&[8.0]))),
-            seg("demand", "altW", batch(&["n2"], &[], f64s(&[6.0]))),
-        ],
-        vec![],
-        vec![],
-        vec![],
+                seg(
+                    "flow",
+                    "Base",
+                    batch(&["n1"; 3], &[("t", vec![0, 2, 5])], i64s(&[1, 2, 3])),
+                ),
+                seg(
+                    "big",
+                    "Base",
+                    batch(
+                        &["n3"; 600],
+                        &[("t", (0..600).map(|i| i * 3 + (i % 2)).collect())],
+                        i64s(&(0..600).collect::<Vec<_>>()),
+                    ),
+                ),
+                seg("demand", "altV", batch(&["n1"], &[], f64s(&[8.0]))),
+                seg("demand", "altW", batch(&["n2"], &[], f64s(&[6.0]))),
+            ],
+            ..ChangeSet::default()
+        },
         "golden",
         "a1 segments",
         o,
@@ -758,36 +757,38 @@ fn api_script(db: &Path, log: &mut String) {
     // of an alternative the call does not write — all in one commit (the
     // order of the plan's §4.1; an object delete covering a value the call
     // writes is refused, skip_unchanged_writes_PLAN D10).
-    let r = commit_changes(
+    let r = commit(
         db,
-        vec![
-            seg(
-                "profile",
-                "Base",
-                batch(&["n1"; 3], &[("t", vec![0, 1, 2])], f64s(&[9.0, 8.0, 7.0])),
-            ),
-            seg(
-                "big",
-                "Base",
-                batch(
-                    &["n3"; 300],
-                    &[("t", (0..300).map(|i| i * 5).collect())],
-                    i64s(&(0..300).map(|i| -i).collect::<Vec<_>>()),
+        ChangeSet {
+            segments: vec![
+                seg(
+                    "profile",
+                    "Base",
+                    batch(&["n1"; 3], &[("t", vec![0, 1, 2])], f64s(&[9.0, 8.0, 7.0])),
                 ),
-            ),
-            seg(
-                "flow",
-                "altV",
-                batch(&["n1"; 2], &[("t", vec![1, 4])], i64s(&[10, 20])),
-            ),
-        ],
-        vec![],
-        vec![
-            dk("demand", "Base", "n2"),
-            dk("flow", "Base", "n1"),
-            dk("demand", "Base", "nobody"),
-        ],
-        vec![oalt("altW", false)],
+                seg(
+                    "big",
+                    "Base",
+                    batch(
+                        &["n3"; 300],
+                        &[("t", (0..300).map(|i| i * 5).collect())],
+                        i64s(&(0..300).map(|i| -i).collect::<Vec<_>>()),
+                    ),
+                ),
+                seg(
+                    "flow",
+                    "altV",
+                    batch(&["n1"; 2], &[("t", vec![1, 4])], i64s(&[10, 20])),
+                ),
+            ],
+            deletes: vec![
+                dk("demand", "Base", "n2"),
+                dk("flow", "Base", "n1"),
+                dk("demand", "Base", "nobody"),
+            ],
+            object_deletes: vec![oalt("altW", false)],
+            ..ChangeSet::default()
+        },
         "golden",
         "a2 writes+deletes",
         o,
@@ -796,12 +797,12 @@ fn api_script(db: &Path, log: &mut String) {
     writeln!(log, "## report a2\n{}", report_text(&r)).unwrap();
 
     // a3: cascade-delete the alternative: closes rows written by a1 and a2.
-    let r = commit_changes(
+    let r = commit(
         db,
-        vec![],
-        vec![],
-        vec![],
-        vec![oalt("altV", true)],
+        ChangeSet {
+            object_deletes: vec![oalt("altV", true)],
+            ..ChangeSet::default()
+        },
         "golden",
         "a3 object delete",
         o,
@@ -814,7 +815,7 @@ fn api_script(db: &Path, log: &mut String) {
     direct_empty_arrays(db, log);
 }
 
-/// One `commit_changes` call, its report logged under `tag`.
+/// One `commit` call, its report logged under `tag`.
 fn api_commit(
     db: &Path,
     tag: &str,
@@ -824,12 +825,14 @@ fn api_commit(
     opts: WriteOptions,
     log: &mut String,
 ) {
-    let r = commit_changes(
+    let r = commit(
         db,
-        segments,
-        structural,
-        deletes,
-        vec![],
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            ..ChangeSet::default()
+        },
         "golden",
         tag,
         opts,
@@ -848,7 +851,7 @@ fn api_scalar_batches(db: &Path, log: &mut String) {
     let o = WriteOptions::default();
     // a4: four scalar segments in one commit: a replace of n1 plus new n4,
     // n5 (auto-created), a new parameter over n1 and n4, a string and a bool
-    // segment. Then the same keys again under force_replace (stub
+    // segment. Then the same keys again under retain_content = Some(false) (stub
     // close-outs).
     api_commit(
         db,
@@ -892,8 +895,7 @@ fn api_scalar_batches(db: &Path, log: &mut String) {
         vec![],
         vec![],
         WriteOptions {
-            force_replace: true,
-            retain_override: None,
+            retain_content: Some(false),
             expect_commit: None,
             covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         },
@@ -1085,9 +1087,9 @@ fn create_unretained_parameter(db: &Path, name: &str) {
 fn api_long_array_delete_batches(db: &Path, log: &mut String) {
     let o = WriteOptions::default();
     // b1 prep: diverge the per-cell versions of lp/n1 and lp/n2. n1: two
-    // cells (pos0 v1, pos1 v1), one cell under force_replace (pos0 v2, pos1
+    // cells (pos0 v1, pos1 v1), one cell under retain_content = Some(false) (pos0 v2, pos1
     // closed as a stub), three cells (pos0 v3, pos1 v2, pos2 v1). n2: three
-    // cells, then one cell under force_replace (pos1, pos2 closed as stubs).
+    // cells, then one cell under retain_content = Some(false) (pos1, pos2 closed as stubs).
     api_commit(
         db,
         "b1 prep v1",
@@ -1160,7 +1162,7 @@ fn api_long_array_delete_batches(db: &Path, log: &mut String) {
         log,
     );
 
-    // b2: the same parameters under force_replace (stub close-outs; grid/n1
+    // b2: the same parameters under retain_content = Some(false) (stub close-outs; grid/n1
     // moves to other positions, so (0,0) stays dead); then a
     // retain_content = FALSE long parameter written twice.
     api_commit(
@@ -1341,7 +1343,7 @@ fn api_long_array_delete_batches(db: &Path, log: &mut String) {
 
     // b5: a multi-key array segment with replaced (n1, n4) and new (n7, n6)
     // keys, carrying a canonical NaN, -0.0 (canon normalizes it) and a
-    // one-element array; then a force_replace round (stub `_hist` rows).
+    // one-element array; then a retain_content = Some(false) round (stub `_hist` rows).
     api_commit(
         db,
         "b5 arrays",

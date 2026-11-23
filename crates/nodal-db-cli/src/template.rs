@@ -1,16 +1,15 @@
-//! `nodal-db template` — the template-IR verbs (template_ir_plan phases
-//! 2b/3/6): `load` (fresh-init load), `plan` (read-only dry run), `apply`
-//! (reconcile: migration chain + additive diff), `export` (round-trip
-//! acceptance 8.1.7). All decisions live in the core — the CLI parses
+//! `nodal-db template` — the template verbs: `load` (fresh-init load), `plan`
+//! (read-only dry run), `apply` (reconcile: migration chain + additive diff),
+//! `export` (round-trip). All decisions live in the core — the CLI parses
 //! arguments and prints reports; in particular the template-name retarget
 //! guard is `template::apply`'s own refusal (one decision for every front
 //! end), and the CLI deliberately does NOT expose the
-//! `allow_retarget`/`allow_downgrade` overrides yet.
+//! `allow_retarget`/`allow_downgrade` overrides.
 //!
 //! Escape-hatch (`run:`) programs are LIBRARY-registered
 //! (`template::MigrationRegistry`); the CLI ships an empty registry, so a
-//! chain naming a program fails loudly here — tenants run such chains through
-//! their own tool, which registers its migration code (§4.2 Layer 3).
+//! chain naming a program fails loudly here — a tool whose chain uses such
+//! programs runs it through its own code, which registers them.
 
 use std::path::{Path, PathBuf};
 
@@ -75,7 +74,7 @@ pub enum TemplateCommand {
     /// Re-emit the template IR from a loaded database (semantic round-trip:
     /// export and source compare equal under the normalized object model).
     Export {
-        #[arg(long)]
+        /// The database to export from.
         db: PathBuf,
         /// Output file; stdout when omitted.
         #[arg(long)]

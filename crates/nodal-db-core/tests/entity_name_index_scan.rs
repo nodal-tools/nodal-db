@@ -51,7 +51,7 @@ use duckdb::Connection;
 use serde_json::Value as Json;
 
 use nodal_db_core::api::{
-    commit_changes, delete_objects, write_parameter, Segment, ENTITY_LOOKUP_ONE_SQL,
+    commit, delete_objects, write_parameter, ChangeSet, Segment, ENTITY_LOOKUP_ONE_SQL,
     ENTITY_NAME_LOOKUP_SQL, ENTITY_ROW_LOOKUP_SQL,
 };
 use nodal_db_core::axis::AXIS_CANDIDATES_SQL;
@@ -139,9 +139,9 @@ fn write(db: &Path, class: &str, param: &str, batch: RecordBatch) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "fixture",
+        WriteOptions::default(),
     )
     .expect("write fixture");
 }
@@ -522,12 +522,12 @@ fn entity_created_in_one_segment_resolves_in_the_next() {
         batches: vec![scalar_batch(&[entity.to_string()], 5.0)],
         domains: vec![],
     };
-    commit_changes(
+    commit(
         &db,
-        vec![seg("demand", "Fresh"), seg("loss", "FRESH")],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("demand", "Fresh"), seg("loss", "FRESH")],
+            ..ChangeSet::default()
+        },
         "tester",
         "two segments, one new entity",
         WriteOptions::default(),

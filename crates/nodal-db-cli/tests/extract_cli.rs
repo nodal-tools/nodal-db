@@ -47,7 +47,12 @@ fn scalar(db: &Path, sql: &str) -> i64 {
 /// A source with a few superseded scalar versions.
 fn source(dir: &Path) -> std::path::PathBuf {
     let db = dir.join("src.duckdb");
-    run_ok(bin().arg("init").arg(&db).args(["--alternative", "Base"]));
+    run_ok(
+        bin()
+            .arg("init")
+            .arg(&db)
+            .args(["--default-alternative", "Base"]),
+    );
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
@@ -68,9 +73,9 @@ fn source(dir: &Path) -> std::path::PathBuf {
             "Base",
             batch,
             &[],
-            WriteOptions::default(),
             "cli_tester",
             "w",
+            WriteOptions::default(),
         )
         .unwrap();
     }
@@ -99,9 +104,9 @@ fn write_one_more(db: &Path) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "cli_tester",
         "one more",
+        WriteOptions::default(),
     )
     .unwrap();
 }

@@ -44,8 +44,9 @@ struct Case {
 #[derive(Deserialize)]
 struct Step {
     op: Op,
+    /// `WriteOptions::retain_content` for this step (absent: `None`).
     #[serde(default)]
-    force_replace: bool,
+    retain_content: Option<bool>,
     #[serde(default)]
     expect: Expect,
 }
@@ -193,8 +194,7 @@ fn run_case(path: &std::path::Path) {
 
     for (i, step) in case.steps.iter().enumerate() {
         let opts = WriteOptions {
-            force_replace: step.force_replace,
-            retain_override: None,
+            retain_content: step.retain_content,
             expect_commit: None,
             covered_writes: nodal_db_core::types::CoveredWrites::Refuse,
         };

@@ -12,8 +12,8 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, commit_structural, delete_objects, delete_values, head_commit, ingest_segments,
-    write_parameter, DeleteKey, Segment,
+    commit, commit_structural, delete_objects, delete_values, head_commit, write_parameter,
+    write_segments, ChangeSet, DeleteKey, Segment,
 };
 use nodal_db_core::compaction::compact;
 use nodal_db_core::conn::{with_write_txn_retrying_opts, TxnOptions};
@@ -63,9 +63,9 @@ fn write(db: &Path, entity: &str, v: f64, opts: WriteOptions) -> Result<WriteRep
         "Base",
         scalar_batch(entity, v),
         &[],
-        opts,
         "tester",
         "precondition",
+        opts,
     )
 }
 
@@ -159,7 +159,7 @@ fn none_is_unchecked() {
     write(&db, "n1", 2.0, WriteOptions::default()).expect("no precondition");
 }
 
-/// Plan test 5: Every `commit_changes` wrapper honors the field.
+/// Plan test 5: Every `commit` wrapper honors the field.
 #[test]
 fn every_wrapper_honors_expect_commit() {
     let dir = tempfile::tempdir().unwrap();
@@ -174,9 +174,9 @@ fn every_wrapper_honors_expect_commit() {
             Box::new(|db: &Path, o| write(db, "n1", 7.0, o)),
         ),
         (
-            "ingest_segments",
+            "write_segments",
             Box::new(|db: &Path, o| {
-                ingest_segments(
+                write_segments(
                     db,
                     vec![Segment {
                         class: "node".into(),
@@ -243,20 +243,20 @@ fn every_wrapper_honors_expect_commit() {
             }),
         ),
         (
-            "commit_changes",
+            "commit",
             Box::new(|db: &Path, o| {
-                commit_changes(
+                commit(
                     db,
-                    vec![Segment {
-                        class: "node".into(),
-                        parameter: "demand".into(),
-                        alternative: "Base".into(),
-                        batches: vec![scalar_batch("n1", 9.0)],
-                        domains: vec![],
-                    }],
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
+                    ChangeSet {
+                        segments: vec![Segment {
+                            class: "node".into(),
+                            parameter: "demand".into(),
+                            alternative: "Base".into(),
+                            batches: vec![scalar_batch("n1", 9.0)],
+                            domains: vec![],
+                        }],
+                        ..ChangeSet::default()
+                    },
                     "tester",
                     "",
                     o,
@@ -359,9 +359,9 @@ fn erasure_between_load_and_save_is_stale() {
         "runA",
         scalar_batch("n1", 3.0),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     let loaded = head_commit(&db).unwrap();

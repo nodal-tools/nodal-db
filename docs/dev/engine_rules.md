@@ -54,9 +54,9 @@ open of the file, while barely changing its size. This is a DuckDB
 catalog growth issue tied to foreign keys
 ([duckdb/duckdb#27808](https://github.com/duckdb/duckdb/issues/27808)):
 it scales with the number of foreign keys to the written table and does
-not depend on the file size. On the 0.6 schema (75 foreign keys to
-`commit`) it is about 1.1–1.25 ms per commit per open (about 0.9 ms on
-0.4), and it grows faster than linearly after about 50 commits (measured
+not depend on the file size. With 75 foreign keys to `commit` it is
+about 1.1–1.25 ms per commit per open (about 0.9 ms with fewer foreign
+keys in an earlier schema), and it grows faster than linearly after about 50 commits (measured
 on compacted 20 MiB and 96 MiB files: +51 ms after 40 commits, +108 ms
 after 100). A data-only rebuild (`COPY FROM DATABASE`) does not reset
 it. The core's compaction does, which is why `compact_if_due` has a
@@ -365,7 +365,7 @@ Engine reads go through `read_parameter` and the point-read macros, not
 and passes that parameter to `axis_position_stored_in_use`, so its cost
 does not depend on other parameters' axes; it still joins the stored
 positions of all of its own axes, also for a rank-1 value in each of the
-four dimension joins (plan R7).
+four dimension joins.
 
 **Exception: the point-read macros' `ap`.** `value_rows_for` (behind
 `read_value` and `read_values`) still filters `axis_position` by the
@@ -375,7 +375,7 @@ read needs; it works through a runtime join filter that reaches the
 `point_read_axis_positions_are_limited_to_the_values_axes` in
 `point_read_index_scan.rs` fails when the expansion stops being limited
 to the value's axes. Moving it to the arithmetic blocks with a key-scoped
-stored filter is a measured follow-up (plan §6, D12); a parameter-scoped
+stored filter would need its own measurement first; a parameter-scoped
 set (`axis_position_stored_in_use(pd)`) is not an option there, it made
 point reads 2.5 to 19 times slower.
 
@@ -509,8 +509,8 @@ a second DuckDB instance in the same process (Python's own `duckdb`
 module on the same file) shares the process's POSIX locks and could
 change the file between the open and the stamp. Measured
 (2026-11-03, release, medians of 200 single-value saves, 3 runs): +3.0
-to +5.3 ms per save (3–5 %), −22 ms on the next open (~90 → ~67 ms);
-the owner chose the trade. A no-op save (rolled back) and a failed
+to +5.3 ms per save (3–5 %), −22 ms on the next open (~90 → ~67 ms),
+a trade made deliberately in favour of faster opens. A no-op save (rolled back) and a failed
 cycle record nothing (the stamp of their open still holds or the next
 open lists). Compaction (and its leftover-WAL fold), extract and
 `schema_init` use their own connections and do not re-stamp: the next
@@ -616,7 +616,7 @@ contract-gate check in `schema/smoke_test.py`.
 16.0.0), and every name bound into a lookup (`cur_name = lower(?)`,
 `lower(name) = lower(?)`, the `read_values` name lists) is NFC before it
 is bound. Both are done in Rust by `text::nfc`, at the API entry points
-(`commit_changes` and its wrappers, the verbs, erasure, the template
+(`commit` and its wrappers, the verbs, erasure, the template
 loader, `read_parameter`, `read_values`). Never normalize in SQL: no
 `nfc_normalize` (or another DuckDB string function) in the schema, a
 view, a macro or a core statement. String values are not identifiers and
@@ -636,7 +636,7 @@ core.
 **Guards.** `crates/nodal-db-core/tests/unicode_text_rule.rs` (an NFD
 name is stored in NFC and found by both spellings through every lookup
 path; an NFD dimension name, in a batch column or in a declaration
-(template, structural `CreateParameter`, `ensure_parameter_definition`),
+(template, structural `CreateParameter`, `ensure_parameter`),
 is stored in NFC and matches by either spelling; NFD labels read back in NFC; stored label bytes do not depend on
 write order) and `crates/nodal-db-core/tests/text_nfc.rs` (the crate's
 tables against the vendored Unicode 16.0.0 data for every code point,

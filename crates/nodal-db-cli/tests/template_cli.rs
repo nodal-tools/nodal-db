@@ -71,7 +71,6 @@ fn template_verbs_end_to_end() {
     run_ok(
         bin()
             .args(["template", "export"])
-            .arg("--db")
             .arg(&db1)
             .arg("--out")
             .arg(&exported),
@@ -178,7 +177,6 @@ fn template_verbs_on_missing_db_fail_cleanly() {
     let err = run_err(
         bin()
             .args(["template", "export"])
-            .arg("--db")
             .arg(&db)
             .arg("--out")
             .arg(&out),

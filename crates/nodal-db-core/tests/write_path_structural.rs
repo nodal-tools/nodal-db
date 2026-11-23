@@ -22,7 +22,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::Value;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, head_commit, Segment};
+use nodal_db_core::api::{commit, head_commit, ChangeSet, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
 use nodal_db_core::conn::with_write_txn;
@@ -530,34 +530,35 @@ fn rows_written_earlier_in_a_commit_are_visible_to_its_later_statements() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("api.duckdb");
     init_schema_with_default(&db, Some("Base")).unwrap();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("demand", "altV", scalar_batch("n1", 1.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("demand", "altV", scalar_batch("n1", 1.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "seed",
         WriteOptions::default(),
     )
     .unwrap();
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![seg(
-            "flow",
-            "altV",
-            long_batch("n1", &[0, 3, 7], &[1, 2, 3]),
-        )],
-        vec![],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("altV".into()),
-            },
-            ObjectDeleteOpts { cascade: false },
-        )],
+        ChangeSet {
+            segments: vec![seg(
+                "flow",
+                "altV",
+                long_batch("n1", &[0, 3, 7], &[1, 2, 3]),
+            )],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("altV".into()),
+                },
+                ObjectDeleteOpts { cascade: false },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "write then restrict",
         WriteOptions::default(),
@@ -693,12 +694,12 @@ fn scalar_batch_one_key_past_the_round_writes_and_replaces() {
     let (_d, db) = fresh_db();
     let names: Vec<String> = (0..N).map(|i| format!("e{i:05}")).collect();
     let vals: Vec<f64> = (0..N).map(|i| i as f64 * 0.5).collect();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("p", "Base", scalar_names_batch(&names, &vals))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("p", "Base", scalar_names_batch(&names, &vals))],
+            ..ChangeSet::default()
+        },
         "t",
         "fresh",
         WriteOptions::default(),
@@ -725,12 +726,12 @@ fn scalar_batch_one_key_past_the_round_writes_and_replaces() {
     );
 
     let vals2: Vec<f64> = (0..N).map(|i| i as f64 + 0.25).collect();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("p", "Base", scalar_names_batch(&names, &vals2))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("p", "Base", scalar_names_batch(&names, &vals2))],
+            ..ChangeSet::default()
+        },
         "t",
         "replace",
         WriteOptions::default(),
@@ -772,12 +773,12 @@ fn scalar_batch_across_thirty_segments() {
             })
             .collect()
     };
-    let r = commit_changes(
+    let r = commit(
         &db,
-        segs(0.0),
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: segs(0.0),
+            ..ChangeSet::default()
+        },
         "t",
         "a",
         WriteOptions::default(),
@@ -788,12 +789,12 @@ fn scalar_batch_across_thirty_segments() {
         (30, 30, 0)
     );
     assert_eq!(r.tiers, vec![Tier::Scalar]);
-    let r = commit_changes(
+    let r = commit(
         &db,
-        segs(100.0),
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: segs(100.0),
+            ..ChangeSet::default()
+        },
         "t",
         "b",
         WriteOptions::default(),
@@ -885,12 +886,12 @@ fn scalars_rewritten_after_erasure_restart_at_version_one() {
     let (_d, db) = fresh_db();
     let names: Vec<String> = (0..5).map(|i| format!("r{i}")).collect();
     for (msg, v) in [("v1", 1.0), ("v2", 2.0)] {
-        commit_changes(
+        commit(
             &db,
-            vec![seg("p", "run1", scalar_names_batch(&names, &[v; 5]))],
-            vec![],
-            vec![],
-            vec![],
+            ChangeSet {
+                segments: vec![seg("p", "run1", scalar_names_batch(&names, &[v; 5]))],
+                ..ChangeSet::default()
+            },
             "t",
             msg,
             WriteOptions::default(),
@@ -910,12 +911,12 @@ fn scalars_rewritten_after_erasure_restart_at_version_one() {
     .expect("erase");
     assert!(rep.erased);
     assert_eq!(q_i64(&db, "SELECT count(*) FROM value_scalar"), 0);
-    commit_changes(
+    commit(
         &db,
-        vec![seg("p", "run1", scalar_names_batch(&names, &[3.0; 5]))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("p", "run1", scalar_names_batch(&names, &[3.0; 5]))],
+            ..ChangeSet::default()
+        },
         "t",
         "rewrite",
         WriteOptions::default(),
@@ -938,16 +939,16 @@ fn scalars_rewritten_after_erasure_restart_at_version_one() {
 #[test]
 fn entities_resolved_by_earlier_segments_of_a_commit_are_reused() {
     let (_d, db) = fresh_db();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![
-            seg("p1", "Base", scalar_batch("Äx", 1.0)),
-            seg("p2", "Base", scalar_batch("Äx", 2.0)),
-            seg("p3", "Base", scalar_batch("äx", 3.0)),
-        ],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![
+                seg("p1", "Base", scalar_batch("Äx", 1.0)),
+                seg("p2", "Base", scalar_batch("Äx", 2.0)),
+                seg("p3", "Base", scalar_batch("äx", 3.0)),
+            ],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
@@ -971,19 +972,19 @@ fn entities_resolved_by_earlier_segments_of_a_commit_are_reused() {
         q_i64(&db, "SELECT count(*) FROM value_scalar WHERE version = 1"),
         3
     );
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![
-            seg("p1", "Base", scalar_batch("Äx", 4.0)),
-            seg(
-                "p2",
-                "Base",
-                scalar_names_batch(&["Äx".to_string(), "äx".to_string()], &[5.0, 6.0]),
-            ),
-        ],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![
+                seg("p1", "Base", scalar_batch("Äx", 4.0)),
+                seg(
+                    "p2",
+                    "Base",
+                    scalar_names_batch(&["Äx".to_string(), "äx".to_string()], &[5.0, 6.0]),
+                ),
+            ],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
@@ -1011,12 +1012,12 @@ fn segments_resolving_to_one_target_are_rejected() {
     use nodal_db_core::template::ir::{DimSpec, TypeDecl};
     use nodal_db_core::types::StructuralChange;
     let (_d, db) = fresh_db();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("seed", "Base", scalar_batch("s", 1.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("seed", "Base", scalar_batch("s", 1.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "seed",
         WriteOptions::default(),
@@ -1058,15 +1059,16 @@ fn segments_resolving_to_one_target_are_rejected() {
         q_i64(&db, "SELECT count(*) FROM \"commit\""),
         q_i64(&db, "SELECT count(*) FROM value_scalar"),
     );
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![
-            seg("mixed", "ΑΣ", scalar_batch("z", 1.0)),
-            seg("mixed", "ασ", indexed),
-        ],
-        vec![mixed],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![
+                seg("mixed", "ΑΣ", scalar_batch("z", 1.0)),
+                seg("mixed", "ασ", indexed),
+            ],
+            structural: vec![mixed],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
@@ -1130,12 +1132,12 @@ fn delete_batch_one_key_past_the_round() {
     let (_d, db) = fresh_db();
     let names: Vec<String> = (0..N).map(|i| format!("e{i:05}")).collect();
     let vals: Vec<f64> = (0..N).map(|i| i as f64).collect();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("p", "Base", scalar_names_batch(&names, &vals))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("p", "Base", scalar_names_batch(&names, &vals))],
+            ..ChangeSet::default()
+        },
         "t",
         "fresh",
         WriteOptions::default(),
@@ -1143,12 +1145,12 @@ fn delete_batch_one_key_past_the_round() {
     .expect("write");
     let mut keys: Vec<_> = names.iter().map(|n| delete_key("p", n)).collect();
     keys.insert(7, delete_key("p", "nobody"));
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![],
-        vec![],
-        keys,
-        vec![],
+        ChangeSet {
+            deletes: keys,
+            ..ChangeSet::default()
+        },
         "t",
         "delete",
         WriteOptions::default(),
@@ -1223,12 +1225,12 @@ fn long_batch_across_rounds_writes_and_replaces() {
     let (_d, db) = fresh_db();
     let names: Vec<String> = (0..683).map(|i| format!("e{i:03}")).collect();
     let commit = |segs: Vec<Segment>| {
-        commit_changes(
+        commit(
             &db,
-            segs,
-            vec![],
-            vec![],
-            vec![],
+            ChangeSet {
+                segments: segs,
+                ..ChangeSet::default()
+            },
             "t",
             "w",
             WriteOptions::default(),
@@ -1292,15 +1294,15 @@ fn long_and_array_rewritten_after_erasure_restart_at_version_one() {
             ],
         )
         .unwrap();
-        commit_changes(
+        commit(
             &db,
-            vec![
-                seg("l", "run1", long_names_batch(&names, 3, seed)),
-                seg("a", "run1", arr),
-            ],
-            vec![],
-            vec![],
-            vec![],
+            ChangeSet {
+                segments: vec![
+                    seg("l", "run1", long_names_batch(&names, 3, seed)),
+                    seg("a", "run1", arr),
+                ],
+                ..ChangeSet::default()
+            },
             "t",
             msg,
             WriteOptions::default(),
@@ -1370,12 +1372,12 @@ fn array_batch_across_the_element_threshold_writes_and_replaces() {
         .unwrap()
     };
     for (msg, seed) in [("write", 0.0), ("replace", 1.0)] {
-        let r = commit_changes(
+        let r = commit(
             &db,
-            vec![seg("p", "Base", batch(seed))],
-            vec![],
-            vec![],
-            vec![],
+            ChangeSet {
+                segments: vec![seg("p", "Base", batch(seed))],
+                ..ChangeSet::default()
+            },
             "t",
             msg,
             WriteOptions::default(),
@@ -1431,12 +1433,12 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
         seg("l", "Base", long_batch("e", &[0, 1], &[1, 2])),
         seg("a", "Base", float_series_batch("e", &[0, 1], &[1.0, 2.0])),
     ];
-    commit_changes(
+    commit(
         &db,
-        seed,
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: seed,
+            ..ChangeSet::default()
+        },
         "t",
         "seed",
         WriteOptions::default(),
@@ -1461,12 +1463,13 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
     for (parameter, s) in cases {
         let before = table_counts(&db);
         let head = head_commit(&db).unwrap();
-        let err = commit_changes(
+        let err = commit(
             &db,
-            vec![s],
-            vec![],
-            vec![delete_key(parameter, "e")],
-            vec![],
+            ChangeSet {
+                segments: vec![s],
+                deletes: vec![delete_key(parameter, "e")],
+                ..ChangeSet::default()
+            },
             "t",
             "write+delete",
             WriteOptions::default(),
@@ -1498,12 +1501,12 @@ fn a_same_commit_write_and_delete_of_one_key_fails_in_every_tier() {
 #[test]
 fn a_write_and_delete_resolving_to_one_key_are_refused() {
     let (_d, db) = fresh_db();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("s", "Base", scalar_batch("ΑΣ", 1.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("s", "Base", scalar_batch("ΑΣ", 1.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "seed",
         WriteOptions::default(),
@@ -1512,12 +1515,13 @@ fn a_write_and_delete_resolving_to_one_key_are_refused() {
     for v in [2.0, 1.0] {
         let before = table_counts(&db);
         let head = head_commit(&db).unwrap();
-        let err = commit_changes(
+        let err = commit(
             &db,
-            vec![seg("s", "Base", scalar_batch("ΑΣ", v))],
-            vec![],
-            vec![delete_key("s", "ασ")],
-            vec![],
+            ChangeSet {
+                segments: vec![seg("s", "Base", scalar_batch("ΑΣ", v))],
+                deletes: vec![delete_key("s", "ασ")],
+                ..ChangeSet::default()
+            },
             "t",
             "write+delete",
             WriteOptions::default(),

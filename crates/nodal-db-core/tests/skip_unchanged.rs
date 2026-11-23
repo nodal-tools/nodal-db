@@ -2,7 +2,7 @@
 //!
 //! A write whose stored form equals the current stored value writes
 //! nothing in any tier: no close-out, no insert, no `_hist` row. A
-//! `commit_changes` call (and its wrappers) whose every item is a known
+//! `commit` call (and its wrappers) whose every item is a known
 //! no-op makes no commit (D1): it reports `commit_id == 0` and the head does
 //! not move. The census oracle (critique C2) checks every no-op call shape:
 //! the row count and an order-independent content hash of every base table
@@ -21,8 +21,8 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, delete_objects, delete_values, head_commit, test_hooks, write_parameter,
-    DeleteKey, Segment,
+    commit as api_commit, delete_objects, delete_values, head_commit, test_hooks, write_parameter,
+    ChangeSet, DeleteKey, Segment,
 };
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
@@ -129,7 +129,19 @@ fn commit_with(
     deletes: Vec<DeleteKey>,
     opts: WriteOptions,
 ) -> WriteReport {
-    commit_changes(db, segments, structural, deletes, vec![], "t", "m", opts).expect("commit")
+    api_commit(
+        db,
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            ..ChangeSet::default()
+        },
+        "t",
+        "m",
+        opts,
+    )
+    .expect("commit")
 }
 
 fn dk(parameter: &str, entity: &str) -> DeleteKey {
@@ -211,7 +223,7 @@ fn assert_noop(db: &Path, what: &str, call: impl FnOnce() -> WriteReport) -> Wri
 
 // --- one identical re-write per tier ------------------------------------------
 
-/// Through `commit_changes`, for one entity (the point statements) and for
+/// Through `commit`, for one entity (the point statements) and for
 /// three (the set-based round), in every tier: the second write is
 /// unchanged, writes no row anywhere and makes no commit.
 #[test]
@@ -703,16 +715,16 @@ fn every_no_op_call_shape_commits_nothing() {
         )
     });
     assert_eq!(r.values_unchanged, 1);
-    // force_replace stubs superseded rows only: an unchanged write
+    // retain_content = Some(false) stubs superseded rows only: an unchanged write
     // supersedes nothing, so it is still a no-op (D3(i)).
-    assert_noop(&db, "force_replace", || {
+    assert_noop(&db, "retain_content false", || {
         commit_with(
             &db,
             vec![seg("s", scalar_batch(&["a"], &[1.0]))],
             vec![],
             vec![],
             WriteOptions {
-                force_replace: true,
+                retain_content: Some(false),
                 ..WriteOptions::default()
             },
         )
@@ -756,12 +768,12 @@ fn expect_commit_on_a_no_op_call() {
         expect_commit: Some(c),
         ..WriteOptions::default()
     };
-    let err = commit_changes(
+    let err = api_commit(
         &db,
-        vec![seg("s", scalar_batch(&["a"], &[1.0]))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("s", scalar_batch(&["a"], &[1.0]))],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         opts(first.commit_id - 1),
@@ -840,9 +852,9 @@ fn write_parameter_identical_value() {
             "Base",
             string_batch(&["a"], &[s]),
             &[],
-            WriteOptions::default(),
             "t",
             "m",
+            WriteOptions::default(),
         )
         .unwrap()
     };

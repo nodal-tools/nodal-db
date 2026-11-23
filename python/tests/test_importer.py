@@ -451,7 +451,7 @@ def test_type_drift_imports_by_construction_with_a_drift_row(tmp_path):
 
     rep, out = run_import(tmp_path, spine)
     assert not [r for r in rep.residue if "unrepresentable" in r or "unparseable" in r]
-    assert any("hub.routing" in row and "chain will repair" in row
+    assert any("hub.routing" in row and "imported as observed" in row
                for row in rep.drift_table), rep.drift_table
     got = _rows(_nodal(out), "SELECT count(*) AS n FROM read_parameter('hub', 'routing')")
     assert got == [{"n": 3}]  # 1 scalar + 2 array cells
@@ -504,7 +504,7 @@ def test_hostile_source_reports_loud_residue(tmp_path):
 def test_import_stream_with_descriptions_is_idempotent(tmp_path, monkeypatch):
     """A write-stream test: the importer only ever writes NEW files, so this
     replays its write stream (``_import_into``) on the database it built. It
-    makes no commit (skip-unchanged, D1): descriptions are create-only, so
+    makes no commit (unchanged writes are skipped): descriptions are create-only, so
     the re-stated entities and scenarios are no-ops."""
     import nodal_db
     from spinedb_api import DatabaseMapping
@@ -528,7 +528,7 @@ def test_purge_classes_then_reimport_converges(tmp_path, monkeypatch):
     """A write-stream test: the importer only ever writes NEW files, so this
     replays its write stream (``_import_into``) on a database whose classes
     a purge closed. The bootstrap apply re-creates the purged vocabulary
-    (``recreate_removed``) and the data lands again (purge plan V-B2)."""
+    (``recreate_removed``) and the data lands again."""
     import nodal_db
 
     spine = make_basic_spine(tmp_path)
@@ -751,10 +751,10 @@ def test_failed_write_leaves_no_target_and_no_temporary(tmp_path, monkeypatch):
         def __getattr__(self, name):
             return getattr(self._db, name)
 
-        def commit_changes(self, **kw):
+        def commit(self, **kw):
             if kw.get("segments"):
                 raise nodal_db.ApiError("injected values failure")
-            return self._db.commit_changes(**kw)
+            return self._db.commit(**kw)
 
     monkeypatch.setattr(nodal_db, "init", lambda path, **kw: FailingValues(real_init(path, **kw)))
     spine = make_basic_spine(tmp_path)
@@ -1082,16 +1082,16 @@ def test_case_folded_summary_counts_each_name_once(tmp_path):
                     "value": pa.array([1.0] * len(ents))})}
 
     db = nodal_db.init(str(tmp_path / "f.duckdb"), default_alternative="Base")
-    db.commit_changes(segments=[seg("Node", "p", ["Foo", "Bar", "Baz"]),
+    db.commit(segments=[seg("Node", "p", ["Foo", "Bar", "Baz"]),
                                 seg("Other", "p", ["Foo"])], user="t")
-    rep = db.commit_changes(segments=[
+    rep = db.commit(segments=[
         seg("NODE", "p", ["FOO", "BAR"]), seg("NODE", "q", ["FOO", "BAZ"]),
         seg("NODE", "r", ["FOO"]), seg("Other", "q", ["FOO"]),
     ], user="t")
     report = ImportReport(write_warnings=rep["warnings"])
     summary = report.summary()
     assert "case-folded names: 5 " in summary, summary
-    assert ("  case-folded entity_class: 1, e.g. 'NODE' is stored as 'Node' "
+    assert ("  case-folded class: 1, e.g. 'NODE' is stored as 'Node' "
             "(in 3 place(s): segment NODE:p/Base, segment NODE:q/Base, "
             "segment NODE:r/Base)") in summary, summary
     assert ("  case-folded entity: 4, e.g. 'FOO' is stored as 'Foo' "

@@ -19,7 +19,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, delete_values, DeleteKey, Segment};
+use nodal_db_core::api::{commit as api_commit, delete_values, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::encoding::array_payload_hash;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WriteOptions, WriteReport};
@@ -83,7 +83,17 @@ fn arrays(ents: &[String], pay: impl Fn(usize) -> Vec<f64>) -> Segment {
 }
 
 fn commit_opts(db: &Path, seg: Segment, opts: WriteOptions) -> WriteReport {
-    commit_changes(db, vec![seg], vec![], vec![], vec![], "t", "m", opts).expect("commit")
+    api_commit(
+        db,
+        ChangeSet {
+            segments: vec![seg],
+            ..ChangeSet::default()
+        },
+        "t",
+        "m",
+        opts,
+    )
+    .expect("commit")
 }
 
 fn commit(db: &Path, seg: Segment) -> WriteReport {
@@ -133,15 +143,15 @@ fn every_core_row_carries_the_true_hash() {
         commit(&db, arrays(&ents, base));
         assert_live_hashes(&db, &ents, base);
         // A changed rewrite (retained pre-image), then one whose superseded
-        // version is a stub, then force_replace (also a stub), then a delete.
+        // version is a stub, then retain_content = Some(false) (also a stub), then a delete.
         commit(&db, arrays(&ents, pinned));
         let stub = WriteOptions {
-            retain_override: Some(false),
+            retain_content: Some(false),
             ..Default::default()
         };
         commit_opts(&db, arrays(&ents, |k| base(k + 10)), stub);
         let force = WriteOptions {
-            force_replace: true,
+            retain_content: Some(false),
             ..Default::default()
         };
         commit_opts(&db, arrays(&ents, |k| base(k + 20)), force);

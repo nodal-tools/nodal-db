@@ -1,34 +1,31 @@
-//! The G8 migration verbs — the core write-API surface `run:` migration
-//! programs (and the Spine→nodal importer) use for the vocabulary and
-//! scenario/activation writes the Arrow value path does not carry
-//! (`specs/flextool_port_finale_plan.md` §1, decision D-F4, jkiviluo
-//! 2026-09-22).
+//! The migration verbs — the core write surface `run:` migration programs
+//! (and the Spine importer) use for the vocabulary and scenario/activation
+//! writes the Arrow value path does not carry.
 //!
-//! **Eight verbs**: [`ensure_alternative`], [`set_scenario_alternatives`],
+//! **The verbs**: [`ensure_alternative`], [`set_scenario_alternatives`],
 //! [`set_entity_activation`], [`set_class_active_by_default`],
-//! [`set_refinement_class`],
-//! [`ensure_entity_class`], [`ensure_parameter_definition`],
-//! [`ensure_entity`], [`stamp_template_identity`].
+//! [`set_class_refinement`], [`ensure_class`],
+//! [`ensure_parameter`], [`ensure_entity`],
+//! [`stamp_template_identity`].
 //!
-//! Governing rule (plan §1, CLAUDE.md invariant #2): every verb is a THIN
-//! close-out-protocol citizen over the existing single write paths — where a
-//! door exists it is reused (each verb's doc comment names the wrapped path);
-//! where a table had no writer yet (`scenario`, `scenario_alternative`,
-//! `entity_alternative`), the verb becomes its one door. No canonicalization,
-//! typing, or history rule is duplicated here.
+//! Every verb is a THIN wrapper over the existing single write paths (each
+//! verb's doc comment names the wrapped path); where a table had no other
+//! writer (`scenario`, `scenario_alternative`, `entity_alternative`), the verb's
+//! applier is its one writer. No canonicalization, typing, or history rule is
+//! duplicated here.
 //!
-//! Deliberately NOT surface (D-F4): a re-declare/widen mode on
-//! [`ensure_parameter_definition`] — widening is a reconcile operation, and
-//! the sanctioned mid-chain retype is the **close-out + recreate idiom**
-//! through existing verbs (plan §1.6): read the old values →
-//! `api::delete_objects` the definition (versioned close-out, cascade) →
-//! `ensure_parameter_definition` with the new declaration → write the
-//! converted values. Exercised by the `verbs` test suite.
+//! Deliberately not offered: a re-declare/widen mode on
+//! [`ensure_parameter`] — widening is a reconcile operation, and a
+//! mid-chain retype is the **close-out + recreate idiom** through existing
+//! verbs: read the old values → `api::delete_objects` the definition
+//! (versioned close-out, cascade) → `ensure_parameter` with the new
+//! declaration → write the converted values. Exercised by the `verbs` test
+//! suite.
 //!
-//! Connection discipline (CLAUDE.md invariant #1): every verb opens, works,
-//! and closes per operation. Idempotent no-ops pre-check on a read-only
-//! connection and burn **no commit**; the write transaction re-checks inside
-//! (a racing writer costs one replan, never a wrong write).
+//! Connection discipline: every verb opens, works, and closes per operation.
+//! Idempotent no-ops pre-check on a read-only connection and burn **no
+//! commit**; the write transaction re-checks inside (a racing writer costs one
+//! replan, never a wrong write).
 
 use std::path::Path;
 
@@ -40,8 +37,8 @@ use crate::api::{
 };
 use crate::conn::{core_write_txn_retrying, with_read_plain};
 use crate::entity_tuple::TupleIndex;
-use crate::property;
 use crate::error::DbError;
+use crate::property;
 use crate::structural::{
     apply_create_entity, apply_create_entity_class, apply_create_parameter,
     apply_set_entity_activation, apply_set_scenario_alternatives, check_class_dims,
@@ -49,8 +46,7 @@ use crate::structural::{
 };
 use crate::template::ir::TypeDecl;
 use crate::template::reconcile::{
-    close_value_list, read_ec_row, revise_ec_row,
-    value_list_binding_count,
+    close_value_list, read_ec_row, revise_ec_row, value_list_binding_count,
 };
 use crate::text::nfc;
 use crate::text::NameFolds;
@@ -85,9 +81,8 @@ fn require_name(what: &str, name: &str) -> Result<(), DbError> {
 // 1.1 (a) — alternatives and scenario ranks (v38)
 // ---------------------------------------------------------------------------
 
-/// Idempotent alternative creation (plan §1.1): create the alternative when
-/// absent (with `description` — v38 sets a long description on its floor
-/// alternative, critique MINOR 3), return the existing row's id otherwise.
+/// Idempotent alternative creation: create the alternative when
+/// absent (with `description`), return the existing row's id otherwise.
 ///
 /// Wraps the write path's one alternative create site
 /// (`api::insert_alternative_row`, shared with decision-B auto-create),
@@ -116,16 +111,15 @@ pub fn ensure_alternative(
     })
 }
 
-/// Whole-list declarative replace of a scenario's alternative ranking (plan
-/// §1.1): set the scenario's ordered ranking to EXACTLY the given list at
+/// Whole-list declarative replace of a scenario's alternative ranking: set the scenario's ordered ranking to EXACTLY the given list at
 /// contiguous ranks `1..=n`, in ONE commit; a no-op (no commit) when the current
 /// rank ORDER already equals the given order.
 ///
-/// **A-min minimal diff** (structural_write_api_plan §4.3, D-S4): only the rows
+/// **A-min minimal diff**: only the rows
 /// whose rank actually changes are rewritten (two-phase close-then-insert) — an
 /// unchanged prefix/suffix is left untouched, keeping its original
-/// `valid_from_commit`/`version`. Rank values are still **order-only semantics**
-/// (critique MINOR 4): only the order is contract; consumers (and the replay
+/// `valid_from_commit`/`version`. Rank values are still **order-only semantics**:
+/// only the order is contract; consumers (and the replay
 /// fingerprint) compare rank order, never rank numerals. Deliberately NOT a
 /// rank-insertion verb: v38's "insert strictly below the minimum" is read →
 /// prepend → replace in the program, and the program must mirror FlexTool's edge
@@ -214,13 +208,13 @@ pub fn set_scenario_alternatives(
 // ---------------------------------------------------------------------------
 
 /// Write, update, or (`active: None`) close the per-alternative activation
-/// row of one entity via the close-out protocol (plan §1.2). This verb is the
+/// row of one entity via the close-out protocol. This verb is the
 /// `entity_alternative` table's one writer (a new-but-single door). All
 /// referents resolve strictly — activation of a missing entity is a caller
 /// bug, never an auto-create.
 ///
 /// Idempotent: an equal current row (or `None` with no row) is a no-op with
-/// no commit. Note (critique MINOR 11): the final reconcile is the authority
+/// no commit. Note: the final reconcile is the authority
 /// for end-state activation semantics — mid-chain verb effects converge into
 /// it.
 pub fn set_entity_activation(
@@ -292,7 +286,7 @@ pub fn set_entity_activation(
     })
 }
 
-/// Versioned `entity_class.active_by_default` update (plan §1.2) — a thin
+/// Versioned `entity_class.active_by_default` update — a thin
 /// wrapper over the loader's one `entity_class` revision site
 /// (`template::reconcile::{read_ec_row, revise_ec_row}`, the same
 /// close-current-row + insert-successor path `rename_class` and
@@ -403,7 +397,7 @@ pub(crate) fn prune_refinement_classes(conn: &Connection, c: i64) -> Result<(), 
 /// [`REFINEMENT_CLASSES_KEY`], keyed by class id, so it follows renames; a
 /// class name has no meaning of its own. Idempotent: no change burns no
 /// commit.
-pub fn set_refinement_class(
+pub fn set_class_refinement(
     db: &Path,
     class: &str,
     refinement: bool,
@@ -416,7 +410,7 @@ pub fn set_refinement_class(
     // The class id, after checking a new refinement class's shape.
     let class_id = |conn: &Connection| -> Result<i64, DbError> {
         let cid = lookup_entity_class(conn, class)?.ok_or_else(|| {
-            DbError::Api(format!("set_refinement_class: class {class:?} not found"))
+            DbError::Api(format!("set_class_refinement: class {class:?} not found"))
         })?;
         if refinement {
             let dims: i64 = conn.query_row(
@@ -426,7 +420,7 @@ pub fn set_refinement_class(
             )?;
             if dims != 2 {
                 return Err(DbError::Api(format!(
-                    "set_refinement_class: class {class:?} has {dims} dimension(s); a \
+                    "set_class_refinement: class {class:?} has {dims} dimension(s); a \
                      refinement class has exactly two (coarse, fine)"
                 )));
             }
@@ -440,7 +434,7 @@ pub fn set_refinement_class(
     if noop {
         return Ok(());
     }
-    let msg = format!("set_refinement_class {class} = {refinement}");
+    let msg = format!("set_class_refinement {class} = {refinement}");
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         let cid = class_id(conn)?;
         let mut ids = refinement_class_ids(conn)?;
@@ -461,7 +455,7 @@ pub fn set_refinement_class(
 }
 
 /// Drop an orphan value list at RUNTIME — the ninth verb, added under the
-/// Track-B replay finding (2026-09-23; plan §1.6 addendum, route-back in §1.5).
+/// Track-B replay finding.
 ///
 /// Why a verb and not a ladder `drop_value_list` hint: v56 D.3 rebinds the six
 /// boolean-as-enum definitions off their single-`yes` legacy lists onto
@@ -508,7 +502,7 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
 // 1.3 (c) — mid-chain vocabulary creation (v25 / v42 / v50 / v56 / v58)
 // ---------------------------------------------------------------------------
 
-/// Idempotent entity-class creation, 0-D or N-D (plan §1.3) — a wrapper over
+/// Idempotent entity-class creation, 0-D or N-D — a wrapper over
 /// the loader's class-create path (the same `entity_class` +
 /// `entity_class_dimension` inserts as `reconcile::execute_action`'s
 /// `CreateClass` / `CreateClassDims`, with the loader's defaults:
@@ -520,24 +514,19 @@ pub fn drop_value_list(db: &Path, list: &str, user: &str) -> Result<(), DbError>
 /// (by folded class name, in order); a mismatch is a hard error — in-place
 /// re-dimensioning is the deferred reshape door, and v25/v58 are explicitly
 /// create-new / copy / delete-old.
-pub fn ensure_entity_class(
-    db: &Path,
-    name: &str,
-    dims: &[String],
-    user: &str,
-) -> Result<i64, DbError> {
+pub fn ensure_class(db: &Path, name: &str, dims: &[String], user: &str) -> Result<i64, DbError> {
     // Names in NFC (the text rule, `text.rs`).
     let name = &*nfc(name);
     let dims = &nfc_all(dims);
     require_user(user)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "ensure_entity_class: name {name:?} must be non-empty, trimmed, and free of control characters"
+            "ensure_class: name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     if dims.len() > 4 {
         return Err(DbError::Api(format!(
-            "ensure_entity_class: {} dimensions exceeds the rank cap of 4",
+            "ensure_class: {} dimensions exceeds the rank cap of 4",
             dims.len()
         )));
     }
@@ -546,14 +535,14 @@ pub fn ensure_entity_class(
     if let Some(cid) = with_read_plain(db, |conn| lookup_entity_class(conn, name))? {
         return with_read_plain(db, |conn| check_class_dims(conn, name, cid, dims));
     }
-    let msg = format!("ensure_entity_class {name} [{}]", dims.join(", "));
+    let msg = format!("ensure_class {name} [{}]", dims.join(", "));
     // The shared applier is the one class-create body (invariant 2).
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_entity_class(conn, c, name, dims, None, &mut no_report()).map(|(id, _)| id)
     })
 }
 
-/// Idempotent, properly-typed parameter-definition creation (plan §1.3) — a
+/// Idempotent, properly-typed parameter-definition creation — a
 /// wrapper over the loader's definition + type-member create path (the same
 /// `parameter_definition` insert as `reconcile::execute_action`'s
 /// `CreateParameter`, with declared members through
@@ -563,14 +552,14 @@ pub fn ensure_entity_class(
 /// `types` are IR member declarations ([`TypeDecl`]): a scalar kind, or
 /// `indexed` with named-and-kinded dims. With an empty `types` and a
 /// `value_list`, the single rank-0 member is inferred from the list's
-/// uniform member kind (the loader's §3.5 inference); with neither, the
+/// uniform member kind; with neither, the
 /// definition is created TYPELESS (auto-materializes on first write — the
 /// results-template path).
 ///
 /// An EXISTING definition is returned **as-is — never re-declared, never
-/// widened** (decision D-F4: widening is a reconcile operation; the
+/// widened** (widening is a reconcile operation; the
 /// sanctioned mid-chain retype is close-out + recreate, module docs).
-pub fn ensure_parameter_definition(
+pub fn ensure_parameter(
     db: &Path,
     class: &str,
     name: &str,
@@ -594,12 +583,12 @@ pub fn ensure_parameter_definition(
     require_name("class", class)?;
     if !charset_ok(name) {
         return Err(DbError::Api(format!(
-            "ensure_parameter_definition: name {name:?} must be non-empty, trimmed, and free of control characters"
+            "ensure_parameter: name {name:?} must be non-empty, trimmed, and free of control characters"
         )));
     }
     // Pure member validation (the load-time subset of `ir::validate`'s type
     // rules), shared with the structural channel's prepare (invariant 2).
-    validate_type_decls("ensure_parameter_definition", class, name, types)?;
+    validate_type_decls("ensure_parameter", class, name, types)?;
 
     if let Some(id) = with_read_plain(db, |conn| {
         let Some(cid) = lookup_entity_class(conn, class)? else {
@@ -610,7 +599,7 @@ pub fn ensure_parameter_definition(
         return Ok(id); // exists: as-is, never re-declared (D-F4)
     }
 
-    let msg = format!("ensure_parameter_definition {class}.{name}");
+    let msg = format!("ensure_parameter {class}.{name}");
     // The shared applier is the one definition+type-member create body.
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         apply_create_parameter(
@@ -627,7 +616,7 @@ pub fn ensure_parameter_definition(
     })
 }
 
-/// Idempotent 0-D / N-D entity creation (plan §1.3). 0-D: `name` required,
+/// Idempotent 0-D / N-D entity creation. 0-D: `name` required,
 /// `elements` empty. N-D: `elements` (entity names in declared-dimension
 /// order) required; `name` defaults to the elements joined with `__`.
 ///
@@ -671,12 +660,13 @@ pub fn ensure_entity(
         match lookup_entity(conn, s.cid, &effective_name)? {
             // A tuple mismatch (an Api refusal) falls through; a database
             // error does not.
-            Some(eid) => match verify_entity_elements(conn, class, &effective_name, eid, elements)
-            {
-                Ok(()) => Ok(Some(eid)),
-                Err(DbError::Api(_)) => Ok(None),
-                Err(e) => Err(e),
-            },
+            Some(eid) => {
+                match verify_entity_elements(conn, class, &effective_name, eid, elements) {
+                    Ok(()) => Ok(Some(eid)),
+                    Err(DbError::Api(_)) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
             None => Ok(None),
         }
     })?;
@@ -706,7 +696,7 @@ pub fn ensure_entity(
 // ---------------------------------------------------------------------------
 
 /// Stamp `template_name` + `template_version` — the public identity-stamp
-/// surface (plan §1.7, critique M4). Without a stamp, `template_apply` runs
+/// surface. Without a stamp, `template_apply` runs
 /// ZERO migration spans and ZERO programs and quietly reconciles to head
 /// (`pending_spans` returns nothing for an unstamped DB) — exactly the
 /// silent-skip the chain-gap hardening exists to prevent. The importer's
@@ -716,7 +706,7 @@ pub fn ensure_entity(
 /// (`property::set_core` — the same close-out-then-insert the
 /// reconcile's `StampIdentity` action uses). Guard (mirrors
 /// `allow_retarget`'s posture): a DIFFERENT existing stamp — name (folded) or
-/// version — refuses unless `overwrite` is set. Restamping the identical
+/// version — refuses unless `allow_overwrite` is set. Restamping the identical
 /// identity is an idempotent no-op with no commit. Any actual restamp closes
 /// a stale `template_content_hash` (the certification belongs to the old
 /// identity).
@@ -724,7 +714,7 @@ pub fn stamp_template_identity(
     db: &Path,
     name: &str,
     version: &str,
-    overwrite: bool,
+    allow_overwrite: bool,
     user: &str,
 ) -> Result<(), DbError> {
     // Names in NFC (the text rule, `text.rs`).
@@ -745,7 +735,7 @@ pub fn stamp_template_identity(
         existing: &(Option<String>, Option<String>),
         name: &str,
         version: &str,
-        overwrite: bool,
+        allow_overwrite: bool,
     ) -> Result<bool, DbError> {
         let (db_name, db_version) = existing;
         let same = db_name.as_deref().map(fold) == Some(fold(name))
@@ -763,11 +753,11 @@ pub fn stamp_template_identity(
                     || v.as_deref().map(|x| x != version).unwrap_or(false)
             }
         };
-        if differs && !overwrite {
+        if differs && !allow_overwrite {
             return Err(DbError::Api(format!(
                 "database is already stamped with template {:?} version {:?}; refusing \
                  to restamp as {name:?} version {version:?} — this is an explicit \
-                 opt-in (overwrite), not a default (mirrors allow_retarget)",
+                 opt-in (allow_overwrite), not a default (mirrors allow_retarget)",
                 db_name.as_deref().unwrap_or("<none>"),
                 db_version.as_deref().unwrap_or("<none>"),
             )));
@@ -776,13 +766,13 @@ pub fn stamp_template_identity(
     }
 
     let pre = with_read_plain(db, read_stamp)?;
-    if guard(&pre, name, version, overwrite)? {
+    if guard(&pre, name, version, allow_overwrite)? {
         return Ok(());
     }
     let msg = format!("stamp_template_identity {name} version {version}");
     core_write_txn_retrying(db, user, &msg, |conn, c| {
         let existing = read_stamp(conn)?;
-        if guard(&existing, name, version, overwrite)? {
+        if guard(&existing, name, version, allow_overwrite)? {
             return Ok(()); // raced into the desired stamp
         }
         property::set_core(conn, c, "template_name", name)?;

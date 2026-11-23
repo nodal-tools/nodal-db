@@ -13,7 +13,7 @@ Design posture:
   `parameter_type_list` is imported as drift-report metadata only.
 - Reads via spinedb_api with ``upgrade=False`` pinned (the importer never
   upgrades its input; the oracle leg owns upgrading). Writes exclusively
-  through the ``nodal_db`` skin (CLAUDE.md invariant 2).
+  through the ``nodal_db`` package, so the core is the only writer.
 - Loud residue: unconsumed constructs, unflattenable values and the type
   drift table are counted and named — zero silent drops.
 """

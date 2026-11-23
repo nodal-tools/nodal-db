@@ -1,12 +1,13 @@
-//! The tier decision — step 4 of the canonicalization pipeline (VMP Part 3).
+//! The tier decision — step 4 of the canonicalization pipeline.
 //!
 //! Pure and deterministic: given the derived axis lengths, the declared
 //! `value_kind`, and the index tuples already sorted row-major with distinct
 //! positions (canon steps 1-3), decide the physical tier and shape the payload.
-//! The rule is exactly VMP Part 3 step 4:
+//! The rule:
 //!   - rank 0                                            -> Tier::Scalar
 //!   - rank>=1, float-valued, tuple set == Cartesian     -> Tier::Array
 //!   - otherwise                                          -> Tier::Long
+//!
 //! "Cartesian" is: all tuples distinct AND count == product of axis lengths.
 //! Distinctness is guaranteed upstream (canon rejects duplicate tuples), so
 //! here the product check alone decides it.

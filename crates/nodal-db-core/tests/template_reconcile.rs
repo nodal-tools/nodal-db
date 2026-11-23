@@ -211,9 +211,9 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
         "alt",
         string_batch("u1", "constant_efficiency"),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     write_parameter(
@@ -223,9 +223,9 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
         "alt",
         string_batch("u2", "two_point_efficiency"),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 
@@ -248,9 +248,9 @@ fn migration_chain_hints_rewrite_and_escape_hatch_in_order() {
                 "alt",
                 scalar_batch("u1", 0.99),
                 &[],
-                WriteOptions::default(),
                 user,
                 "escape hatch: set eta",
+                WriteOptions::default(),
             )
             .map(|_| ())
         });
@@ -470,9 +470,9 @@ fn narrowing_closes_unused_members_and_keeps_used_ones() {
         "alt",
         scalar_batch("n1", 2.0),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 
@@ -725,9 +725,9 @@ classes:
         "alt",
         scalar_batch("s1", 0.8),
         &[],
-        WriteOptions::default(),
         "tester",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
     let mut t6 = t5.clone();
@@ -1155,9 +1155,9 @@ fn stale_plan_is_refused_via_expect_commit() {
         "alt",
         scalar_batch("n9", 1.0),
         &[],
-        WriteOptions::default(),
         "someone_else",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 
@@ -1653,24 +1653,25 @@ seed:
     let opts = ApplyOptions::default();
     apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts).unwrap();
     // A user deletes the link and creates a unit spelled like the node.
-    nodal_db_core::api::commit_changes(
+    nodal_db_core::api::commit(
         &db,
-        vec![],
-        vec![nodal_db_core::types::StructuralChange::CreateEntity {
-            class: "unit".into(),
-            name: Some("N1".into()),
-            elements: vec![],
-            description: None,
-        }],
-        vec![],
-        vec![(
-            nodal_db_core::types::ObjectDeleteKey {
-                kind: nodal_db_core::types::ObjectKind::Entity,
-                class: Some("link".into()),
-                target: nodal_db_core::types::ObjectRef::Name("l1".into()),
-            },
-            nodal_db_core::types::ObjectDeleteOpts { cascade: true },
-        )],
+        nodal_db_core::api::ChangeSet {
+            structural: vec![nodal_db_core::types::StructuralChange::CreateEntity {
+                class: "unit".into(),
+                name: Some("N1".into()),
+                elements: vec![],
+                description: None,
+            }],
+            object_deletes: vec![(
+                nodal_db_core::types::ObjectDeleteKey {
+                    kind: nodal_db_core::types::ObjectKind::Entity,
+                    class: Some("link".into()),
+                    target: nodal_db_core::types::ObjectRef::Name("l1".into()),
+                },
+                nodal_db_core::types::ObjectDeleteOpts { cascade: true },
+            )],
+            ..nodal_db_core::api::ChangeSet::default()
+        },
         "user",
         "m",
         WriteOptions::default(),

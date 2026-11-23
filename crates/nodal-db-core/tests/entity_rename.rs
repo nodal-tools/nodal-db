@@ -12,7 +12,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, ChangeSet, DeleteKey, Segment};
+use nodal_db_core::api::{commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::ir::TypeDecl;
@@ -39,7 +39,7 @@ fn qs(db: &Path, sql: &str) -> Vec<String> {
 }
 
 fn set(db: &Path, s: ChangeSet) -> Result<WriteReport, DbError> {
-    commit_change_set(db, s, "t", "m", WriteOptions::default())
+    commit(db, s, "t", "m", WriteOptions::default())
 }
 
 fn st(db: &Path, changes: Vec<SC>) -> Result<WriteReport, DbError> {
@@ -64,7 +64,7 @@ fn api_err(r: Result<WriteReport, DbError>) -> String {
 }
 
 fn class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -243,7 +243,7 @@ fn a_rename_keeps_the_id_and_everything_follows() {
     );
     assert_eq!(r.structural[0].kind, StructuralKind::Entity);
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, n1);
+    assert_eq!(r.structural[0].id, n1);
     assert_eq!(id_of(&db, "bus"), n1);
     assert_eq!(
         q1(
@@ -477,7 +477,7 @@ fn class_and_entity_renames_in_one_call() {
     ok(
         &db,
         vec![
-            SC::RenameEntityClass {
+            SC::RenameClass {
                 current: "node".into(),
                 new_name: "bus".into(),
                 description: None,
@@ -725,7 +725,7 @@ fn a_renamed_entity_cannot_be_deleted_in_the_same_call() {
     )
     .unwrap();
     assert_eq!(r.object_deletes.len(), 2);
-    assert_eq!(id_of(&db, "bus"), r.structural[0].object_id);
+    assert_eq!(id_of(&db, "bus"), r.structural[0].id);
 }
 
 #[test]

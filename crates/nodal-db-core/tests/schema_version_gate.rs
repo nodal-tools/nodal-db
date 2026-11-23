@@ -20,7 +20,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, delete_values, DeleteKey, Segment};
+use nodal_db_core::api::{commit as api_commit, delete_values, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::compaction::SCHEMA_VERSION;
 use nodal_db_core::conn::with_write_txn;
 use nodal_db_core::error::DbError;
@@ -90,7 +90,16 @@ fn array(param: &str, e: &str, k: f64) -> Segment {
 }
 
 fn commit(db: &Path, segs: Vec<Segment>, opts: WriteOptions) -> Result<WriteReport, DbError> {
-    commit_changes(db, segs, vec![], vec![], vec![], "t", "m", opts)
+    api_commit(
+        db,
+        ChangeSet {
+            segments: segs,
+            ..ChangeSet::default()
+        },
+        "t",
+        "m",
+        opts,
+    )
 }
 
 /// Per base table: row count and an order-independent hash of its rows.
@@ -172,22 +181,22 @@ fn every_write_to_an_older_file_is_refused_and_writes_nothing() {
     let db = old_file(dir.path());
     let before = census(&db);
     let retained = WriteOptions {
-        retain_override: Some(true),
+        retain_content: Some(true),
         ..Default::default()
     };
     let stub = WriteOptions {
-        retain_override: Some(false),
+        retain_content: Some(false),
         ..Default::default()
     };
     let force = WriteOptions {
-        force_replace: true,
+        retain_content: Some(false),
         ..Default::default()
     };
     for (name, opts) in [
         ("default", WriteOptions::default()),
         ("retained", retained),
         ("stub", stub),
-        ("force_replace", force),
+        ("no_retain", force),
     ] {
         // New keys in every tier, replaces in every tier, and the tier
         // transitions: a scalar over the array p, an array over the long.
@@ -331,7 +340,10 @@ fn a_pre_0_6_layout_file_is_named_by_its_own_version() {
         )
         .map(|_| ()),
     );
-    named("compact", nodal_db_core::compaction::compact(&db).map(|_| ()));
+    named(
+        "compact",
+        nodal_db_core::compaction::compact(&db).map(|_| ()),
+    );
     named(
         "extract",
         nodal_db_core::extract::extract(

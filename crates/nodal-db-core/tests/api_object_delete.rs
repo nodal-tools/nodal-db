@@ -1,7 +1,7 @@
 //! End-to-end tests for ALTERNATIVE object deletion (object_delete plan §6,
 //! P1). A fresh schema DB seeds `Base` explicitly (`init_schema_with_default`,
 //! decision D3); values are written through the public write path; alternatives
-//! are deleted through the new `commit_changes`/`delete_objects` entry. These
+//! are deleted through the new `commit`/`delete_objects` entry. These
 //! exercise the RESTRICT report, the cascade close-out (incl. array →
 //! `value_array_hist`), lookup-only resolution, as-of retention, monotonic
 //! versioning + clean tiling, idempotent re-delete ⇒ NotFound, whole-invocation
@@ -17,7 +17,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, delete_objects, preview_object_deletes, read_parameter, write_parameter,
+    commit, delete_objects, preview_object_deletes, read_parameter, write_parameter, ChangeSet,
     DeleteKey, Segment,
 };
 use nodal_db_core::error::DbError;
@@ -191,9 +191,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         alt,
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("scalar");
     write_parameter(
@@ -203,9 +203,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         alt,
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("array");
     write_parameter(
@@ -215,9 +215,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         alt,
         long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
         &[],
-        o(),
         "t",
         "l",
+        o(),
     )
     .expect("long");
     // node_2 (a distinct entity, in Base) so membership has two members.
@@ -228,9 +228,9 @@ fn seed_full_deps(db: &std::path::Path, alt: &str) {
         "Base",
         scalar_batch("node_2", 5.0),
         &[],
-        o(),
         "t",
         "n2",
+        o(),
     )
     .expect("node_2");
 
@@ -651,9 +651,9 @@ fn combined_atomicity_one_commit() {
         "altA",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "a1",
+        o(),
     )
     .expect("a1");
     write_parameter(
@@ -663,9 +663,9 @@ fn combined_atomicity_one_commit() {
         "altA",
         scalar_batch("node_2", 2.0),
         &[],
-        o(),
         "t",
         "a2",
+        o(),
     )
     .expect("a2");
     seed_full_deps(&db, "altB");
@@ -676,12 +676,14 @@ fn combined_atomicity_one_commit() {
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write node_3 in altA, delete node_1 in altA, cascade-delete altB.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "altA", scalar_batch("node_3", 3.0))],
-        vec![],
-        vec![dk("node", "demand", "altA", "node_1")],
-        vec![(oalt("altB"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "altA", scalar_batch("node_3", 3.0))],
+            deletes: vec![dk("node", "demand", "altA", "node_1")],
+            object_deletes: vec![(oalt("altB"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -734,12 +736,13 @@ fn combined_atomicity_one_commit() {
 fn same_commit_write_then_cascade_guard() {
     let (_dir, db) = fresh_db();
     let commits_before = count(&db, "SELECT count(*) FROM commit");
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![seg("node", "demand", "fresh", scalar_batch("node_1", 7.0))],
-        vec![],
-        vec![],
-        vec![(oalt("fresh"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "fresh", scalar_batch("node_1", 7.0))],
+            object_deletes: vec![(oalt("fresh"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "hazard",
         o(),
@@ -807,7 +810,11 @@ fn preview_matches_commit() {
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
     // And the blocker framing lists the same dependent tables.
-    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
+    for tc in cc
+        .per_table
+        .iter()
+        .filter(|t| !t.table.ends_with("metadata_link"))
+    {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -829,9 +836,9 @@ fn run_referencing_deleted_alternative_not_flagged() {
         "results",
         scalar_batch("solver_x", 1.0),
         &[],
-        o(),
         "t",
         "seed",
+        o(),
     )
     .expect("seed");
     exec(
@@ -895,9 +902,9 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
         "altA",
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "pa",
+        o(),
     )
     .expect("profile altA");
     write_parameter(
@@ -907,9 +914,9 @@ fn seed_parameter_deps(db: &std::path::Path) -> i64 {
         "altB",
         array_batch("node_1", &[0, 1, 2], &[4.0, 5.0, 6.0]),
         &[],
-        o(),
         "t",
         "pb",
+        o(),
     )
     .expect("profile altB");
 
@@ -1134,9 +1141,9 @@ fn param_bare_delete_no_dependents() {
         "altA",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("seed class");
     exec(
@@ -1369,20 +1376,22 @@ fn param_combined_atomicity_one_commit() {
         "altA",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "k1",
+        o(),
     )
     .expect("keep");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write keep/node_2, delete keep/node_1, cascade-delete profile.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "keep", "altA", scalar_batch("node_2", 2.0))],
-        vec![],
-        vec![dk("node", "keep", "altA", "node_1")],
-        vec![(opar("node", "profile"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "keep", "altA", scalar_batch("node_2", 2.0))],
+            deletes: vec![dk("node", "keep", "altA", "node_1")],
+            object_deletes: vec![(opar("node", "profile"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -1457,7 +1466,11 @@ fn param_preview_matches_commit() {
             .unwrap_or_else(|| panic!("preview missing {}", tc.table));
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
-    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
+    for tc in cc
+        .per_table
+        .iter()
+        .filter(|t| !t.table.ends_with("metadata_link"))
+    {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -1536,9 +1549,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("scalar");
     write_parameter(
@@ -1548,9 +1561,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
         &[],
-        o(),
         "t",
         "l",
+        o(),
     )
     .expect("long");
     write_parameter(
@@ -1560,9 +1573,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("array");
     write_parameter(
@@ -1572,9 +1585,9 @@ fn seed_entity_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_2", 5.0),
         &[],
-        o(),
         "t",
         "n2",
+        o(),
     )
     .expect("node_2");
 
@@ -1758,19 +1771,19 @@ fn entity_bare_delete_no_dependents() {
         "Base",
         scalar_batch("solo", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("solo");
     delete_objects(&db, vec![], "t", "noop", o()).ok();
     // Close the only value so `solo` has no dependents.
-    commit_changes(
+    commit(
         &db,
-        vec![],
-        vec![],
-        vec![dk("node", "demand", "Base", "solo")],
-        vec![],
+        ChangeSet {
+            deletes: vec![dk("node", "demand", "Base", "solo")],
+            ..ChangeSet::default()
+        },
         "t",
         "clear",
         o(),
@@ -1894,12 +1907,14 @@ fn entity_combined_atomicity_one_commit() {
     let commits_before = count(&db, "SELECT count(*) FROM commit");
     // ONE commit: write demand/node_3 (new), delete the pre-existing demand/node_2,
     // cascade-delete node_1 — three effects, one commit.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("node_3", 9.0))],
-        vec![],
-        vec![dk("node", "demand", "Base", "node_2")],
-        vec![(oent("node", "node_1"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "Base", scalar_batch("node_3", 9.0))],
+            deletes: vec![dk("node", "demand", "Base", "node_2")],
+            object_deletes: vec![(oent("node", "node_1"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -1979,9 +1994,9 @@ fn seed_nd_link(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_a", 1.0),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("node_a");
     write_parameter(
@@ -1991,9 +2006,9 @@ fn seed_nd_link(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_b", 2.0),
         &[],
-        o(),
         "t",
         "b",
+        o(),
     )
     .expect("node_b");
     exec(
@@ -2255,9 +2270,9 @@ fn entity_cascade_cycle_is_safe() {
         "Base",
         scalar_batch("seed", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("seed");
     // Two 1-D `pair` entities that contain EACH OTHER (p1 ∈ p2, p2 ∈ p1).
@@ -2386,9 +2401,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("scalar node_1");
     write_parameter(
@@ -2398,9 +2413,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         scalar_batch("node_2", 2.0),
         &[],
-        o(),
         "t",
         "s2",
+        o(),
     )
     .expect("scalar node_2");
     write_parameter(
@@ -2410,9 +2425,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         long_batch("node_1", &[0, 1, 2], &[10, 20, 30]),
         &[],
-        o(),
         "t",
         "l",
+        o(),
     )
     .expect("long node_1");
     write_parameter(
@@ -2422,9 +2437,9 @@ fn seed_class_deps(db: &std::path::Path) -> i64 {
         "Base",
         array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("array node_1");
 
@@ -2819,20 +2834,22 @@ fn class_combined_atomicity_one_commit() {
         "Base",
         scalar_batch("g1", 1.0),
         &[],
-        o(),
         "t",
         "g1",
+        o(),
     )
     .expect("g1");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write gen/g2, delete gen/g1, cascade-delete class node.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("gen", "cap", "Base", scalar_batch("g2", 2.0))],
-        vec![],
-        vec![dk("gen", "cap", "Base", "g1")],
-        vec![(oclass("node"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("gen", "cap", "Base", scalar_batch("g2", 2.0))],
+            deletes: vec![dk("gen", "cap", "Base", "g1")],
+            object_deletes: vec![(oclass("node"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -2940,9 +2957,9 @@ fn class_b2_cycle_is_safe() {
         "Base",
         scalar_batch("seed", 1.0),
         &[],
-        o(),
         "t",
         "s",
+        o(),
     )
     .expect("seed");
     // Classes `ca` and `cb` type a dimension on EACH OTHER (mutual B2).
@@ -2990,9 +3007,9 @@ fn seed_gap_class(db: &std::path::Path) {
         "Base",
         scalar_batch("node_a", 1.0),
         &[],
-        o(),
         "t",
         "a",
+        o(),
     )
     .expect("node_a");
     write_parameter(
@@ -3002,9 +3019,9 @@ fn seed_gap_class(db: &std::path::Path) {
         "Base",
         scalar_batch("node_b", 2.0),
         &[],
-        o(),
         "t",
         "b",
+        o(),
     )
     .expect("node_b");
     exec(
@@ -3107,9 +3124,9 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
         "victim",
         scalar_batch("node_1", 1.0),
         &[],
-        o(),
         "t",
         "s1",
+        o(),
     )
     .expect("s1");
     write_parameter(
@@ -3119,9 +3136,9 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
         "victim",
         scalar_batch("node_2", 2.0),
         &[],
-        o(),
         "t",
         "s2",
+        o(),
     )
     .expect("s2");
     let alt_id = count(
@@ -3133,12 +3150,13 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
     // alternative — which ALSO covers node_1's coord. The value delete closes it
     // first; the object cascade's live-guard then finds it already closed and does
     // NOT re-close or re-count it (§2/§8.4 D5).
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![],
-        vec![],
-        vec![dk("node", "demand", "victim", "node_1")],
-        vec![(oalt("victim"), cascade(true))],
+        ChangeSet {
+            deletes: vec![dk("node", "demand", "victim", "node_1")],
+            object_deletes: vec![(oalt("victim"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "overlap",
         o(),
@@ -3181,17 +3199,18 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
 fn same_commit_array_write_then_cascade_guard() {
     let (_dir, db) = fresh_db();
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![seg(
-            "node",
-            "profile",
-            "afresh",
-            array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
-        )],
-        vec![],
-        vec![],
-        vec![(oalt("afresh"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg(
+                "node",
+                "profile",
+                "afresh",
+                array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+            )],
+            object_deletes: vec![(oalt("afresh"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "array hazard",
         o(),

@@ -202,9 +202,9 @@ fn w(db: &Path, class: &str, param: &str, alt: &str, b: RecordBatch, dom: &[Labe
         alt,
         b,
         dom,
-        WriteOptions::default(),
         "tester",
         "fixture",
+        WriteOptions::default(),
     )
     .unwrap_or_else(|e| panic!("write {class}.{param}/{alt}: {e}"));
 }
@@ -795,12 +795,12 @@ fn value_array_asof_for_equals_value_array_asof() {
             alt,
             dt_series(&[e], &hours, k),
             &[],
-            WriteOptions {
-                retain_override: retain,
-                ..Default::default()
-            },
             "tester",
             "asof fixture",
+            WriteOptions {
+                retain_content: retain,
+                ..Default::default()
+            },
         )
         .unwrap_or_else(|err| panic!("write {e}/{alt}: {err}"));
     };

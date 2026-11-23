@@ -1,24 +1,24 @@
-//! The sanctioned structural (non-value) write path — the fourth
-//! `commit_changes` channel (structural_write_api_plan §2/§4/§5).
+//! The structural (non-value) write path — the `structural` channel of
+//! [`crate::api::commit`].
 //!
 //! Every table these appliers touch (`alternative`, `scenario`,
 //! `scenario_alternative`, `entity_alternative`, `membership`, and — via the
 //! `Create*` ops — `entity_class`, `entity`, `parameter_definition`) has ONE
-//! writer site (invariant 2): the appliers here are the conn-taking bodies both
-//! the standalone G8 verbs (their own-commit wrappers with an idempotent read
+//! writer site: the appliers here are the connection-taking bodies that both
+//! the standalone verbs (their own-commit wrappers with an idempotent read
 //! pre-check) AND this composable channel call. No table gets a second writer;
 //! the history/typing rules live in exactly one place.
 //!
-//! History discipline (VMP Part 5, invariant 3): append-only close-out — create
-//! is a fresh row, rename is close + same-id successor (version+1), ranking is
-//! A-min contiguous `1..=n` minimal-diff, activation/membership is the per-key
-//! close-out protocol. The `valid_from == commit_id` **same-commit guard** edits
-//! a row created THIS commit in place (rename/flag) or physically DELETEs it (a
-//! close), never closing it (would trip the span CHECK). An uncommitted insert
-//! was never visible, so editing/deleting it is not a history rewrite (D-S5).
+//! History discipline (append-only close-out): create is a fresh row, rename
+//! is close + same-id successor (version+1), ranking is a contiguous `1..=n`
+//! minimal diff, activation/membership is the per-key close-out protocol. The
+//! `valid_from == commit_id` **same-commit guard** edits a row created THIS
+//! commit in place (rename/flag) or physically DELETEs it (a close), never
+//! closing it (that would trip the span CHECK). An uncommitted insert was never
+//! visible, so editing or deleting it is not a history rewrite.
 //!
-//! Referent resolution is **strict** (lookup-only, hard error naming a miss,
-//! §4.4) — the only auto-creates are the `Create*` ops and the scenario
+//! Referent resolution is **strict** (lookup-only, a hard error naming the
+//! miss) — the only auto-creates are the `Create*` ops and the scenario
 //! auto-create inside `SetScenarioAlternatives`.
 
 use std::collections::{HashMap, HashSet};
@@ -37,10 +37,10 @@ use crate::property;
 use crate::template::ir::{normalize_audit_rules, parse_audit_rules_doc};
 use crate::template::ir::{TypeDecl, DIM_KINDS, SCALAR_KINDS};
 use crate::template::reconcile::{
-    insert_class_dim_row, insert_class_row, insert_definition_row,
-    insert_entity_element_row, insert_entity_row, insert_membership_row, insert_scenario_row,
-    insert_type_member, read_ec_row, read_pd_row, revise_alternative_row, revise_ec_row,
-    revise_entity_row, revise_pd_row, revise_scenario_row,
+    insert_class_dim_row, insert_class_row, insert_definition_row, insert_entity_element_row,
+    insert_entity_row, insert_membership_row, insert_scenario_row, insert_type_member, read_ec_row,
+    read_pd_row, revise_alternative_row, revise_ec_row, revise_entity_row, revise_pd_row,
+    revise_scenario_row,
 };
 use crate::text::NameFolds;
 use crate::types::{
@@ -54,7 +54,7 @@ use crate::types::{
 
 /// Apply one [`StructuralChange`] under the open transaction's `commit_id`,
 /// appending its [`StructuralOutcome`] to `report.structural`. Items apply
-/// sequentially against the one open txn (§4.1), so item N's inserts are visible
+/// sequentially against the one open txn, so item N's inserts are visible
 /// to item N+1's strict lookups (create → activate resolves in one save).
 ///
 /// Every reference to an existing object (an idempotent create's own name
@@ -213,16 +213,16 @@ fn apply_one(
             )?;
             (StructuralKind::Entity, id, e)
         }
-        StructuralChange::CreateEntityClass {
+        StructuralChange::CreateClass {
             name,
             dims,
             description,
         } => {
             let (id, e) =
                 apply_create_entity_class(conn, c, name, dims, description.as_deref(), folds)?;
-            (StructuralKind::EntityClass, id, e)
+            (StructuralKind::Class, id, e)
         }
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current,
             new_name,
             description,
@@ -236,7 +236,7 @@ fn apply_one(
                 allow_on_template: *allow_on_template,
             };
             let (id, e) = apply_rename_entity_class(conn, c, &r, folds, calls)?;
-            (StructuralKind::EntityClass, id, e)
+            (StructuralKind::Class, id, e)
         }
         StructuralChange::RenameParameter {
             class,
@@ -299,15 +299,14 @@ fn apply_one(
     report.structural.push(StructuralOutcome {
         change_index,
         kind,
-        object_id,
+        id: object_id,
         effect,
     });
     Ok(())
 }
 
-/// What the structural items of one `commit_change_set` attempt name or
-/// create, by resolved id, at each purge grain (purge plan §3.5.3, critique
-/// S9): the purge spares exactly these (and, upward, what their identity
+/// What the structural items of one `commit` attempt name or
+/// create, by resolved id, at each purge grain: the purge spares exactly these (and, upward, what their identity
 /// references). Filled by [`apply_structural`] like [`CallRenames`], from
 /// resolved ids, never from outcomes (an activation outcome carries only
 /// the entity id). Every item counts, `NoOp` included. A closure local of
@@ -463,8 +462,7 @@ impl CallTouches {
             StructuralChange::CreateEntity { .. } | StructuralChange::RenameEntity { .. } => {
                 self.entities.insert(object_id);
             }
-            StructuralChange::CreateEntityClass { .. }
-            | StructuralChange::RenameEntityClass { .. } => {
+            StructuralChange::CreateClass { .. } | StructuralChange::RenameClass { .. } => {
                 self.classes.insert(object_id);
             }
             StructuralChange::CreateParameter { .. } | StructuralChange::RenameParameter { .. } => {
@@ -536,7 +534,7 @@ fn read_identity(conn: &Connection, table: &str, id: i64) -> Result<IdentityRow,
 // Per-call rename book-keeping (class_param_rename_PLAN §4.5 b/f, §5.2, §6.1)
 // ---------------------------------------------------------------------------
 
-/// What the renames of one `commit_changes` attempt did, for the checks and
+/// What the renames of one `api::commit` attempt did, for the checks and
 /// writes that follow them in the same call. A closure local of the write
 /// transaction (rebuilt on a conflict retry, like the write buffers), so no
 /// id from a rolled-back attempt is reused.
@@ -559,7 +557,7 @@ pub(crate) struct CallRenames {
     /// of it).
     pub(crate) parameter_original: HashMap<i64, (i64, String)>,
     /// Class and parameter renames that changed a folded name without
-    /// `allow_on_template` (the template-stamp check, §6.1).
+    /// `allow_on_template`.
     pub(crate) template_candidates: Vec<TemplateCandidate>,
 }
 
@@ -622,7 +620,7 @@ impl CallRenames {
     }
 
     /// The renamed-away entity names `change` writes, for the "renamed to"
-    /// note on its not-found error (entity_rename_PLAN §4): `(old, new)`
+    /// note on its not-found error: `(old, new)`
     /// per name. An element of a `CreateEntity` matches in its dimension's
     /// class, or in every member class of a class-set dimension.
     fn renamed_entity_refs(
@@ -671,7 +669,6 @@ impl CallRenames {
         }
         Ok(out)
     }
-
 
     /// Did a rename of this call change any class or parameter name's
     /// bytes (so the name-keyed metadata documents may need a rewrite)?
@@ -816,7 +813,7 @@ fn doc_classes(conn: &Connection, calls: &CallRenames) -> Result<Vec<DocClass>, 
 }
 
 /// What a call closed or unbound of the vocabulary the name-keyed
-/// documents name (purge plan §3.7, V-S2), by **pre-call** names (the
+/// documents name, by **pre-call** names (the
 /// documents hold those): classes and parameter definitions whose id has
 /// no live row after a close at `c` (a purge or an object delete), and
 /// definitions a purge unbound from their value list (a revision at `c`
@@ -876,8 +873,8 @@ impl RemovedNames {
     }
 }
 
-/// Rewrite the two name-keyed metadata documents at the end of a call
-/// (class_param_rename_PLAN §5.2, OD8; purge plan §3.7, V-S2): the
+/// Rewrite the two name-keyed metadata documents at the end of a call:
+/// the
 /// `presentation` document's `parameter_group_membership` keys
 /// (`"{class}.{parameter}"`) and the `audit_rules` document's `class`,
 /// `selector` and `require[]` names. Runs ONCE per call, after every
@@ -1054,7 +1051,7 @@ pub(crate) fn rewrite_name_documents(
     Ok(())
 }
 
-/// The template-stamp check (class_param_rename_PLAN OD7, §6.1), after the
+/// The template-stamp check, after the
 /// structural changes ran: refuse every class or parameter rename of the
 /// call that changed a folded name without `allow_on_template`, of an
 /// object that existed before the call (one this call created cannot be
@@ -1079,7 +1076,7 @@ pub(crate) fn refuse_template_stamped_renames(
         .structural
         .iter()
         .filter(|o| o.effect == StructuralEffect::Created)
-        .map(|o| (o.kind, o.object_id))
+        .map(|o| (o.kind, o.id))
         .collect();
     let renames: Vec<TemplateStampedRenameItem> = calls
         .template_candidates
@@ -1183,12 +1180,12 @@ pub(crate) fn refuse_freed_name(
 
 /// An identity table's one revision site (`revise_alternative_row` /
 /// `revise_scenario_row`: `(conn, c, id, name, description, version,
-/// valid_from)`), which holds the same-commit in-place branch (D-S5).
+/// valid_from)`), which holds the same-commit in-place branch.
 type Revise = fn(&Connection, i64, i64, &str, Option<&str>, i64, i64) -> Result<(), DbError>;
 type Lookup = fn(&Connection, &str) -> Result<Option<i64>, DbError>;
 
 /// Versioned identity rename (close + same-id successor, version+1), with the
-/// same-commit in-place edit (D-S5), the in-call swap guard (B2) and the
+/// same-commit in-place edit, the in-call swap guard (B2) and the
 /// self-excluding uniqueness check (m5). Records the rename in `away`.
 #[allow(clippy::too_many_arguments)]
 fn rename_identity(
@@ -1240,8 +1237,8 @@ fn rename_identity(
     Ok(rev.effect)
 }
 
-/// What one rename or description revision does to its row
-/// (class_param_rename_PLAN §4.4): the row's description after it, and the
+/// What one rename or description revision does to its row:
+/// the row's description after it, and the
 /// effect to report. `None` from [`decide_revision`] is a `NoOp`.
 pub(crate) struct Revision {
     pub(crate) description: Option<String>,
@@ -1259,10 +1256,10 @@ pub(crate) struct Revision {
 /// exactly "byte-identical post-NFC" — no Rust-side fold here: the fold
 /// belongs only in the uniqueness lookup (self-excluded by id).
 ///
-/// The description (OD3, S6): `None` keeps the stored one, `Some("")`
+/// The description: `None` keeps the stored one, `Some("")`
 /// clears it (a stored description is never the empty string), `Some(d)`
 /// sets it. The clear is mapped BEFORE the comparison, so clearing an
-/// absent description is no change. Effect (OD4): `Renamed` when the name
+/// absent description is no change. Effect: `Renamed` when the name
 /// bytes change, `Updated` for a description-only revision.
 pub(crate) fn decide_revision(
     row_name: &str,
@@ -1351,7 +1348,7 @@ pub(crate) fn apply_rename_scenario(
     Ok((id, e))
 }
 
-/// One `RenameEntityClass` / `RenameParameter` item, as written.
+/// One `RenameClass` / `RenameParameter` item, as written.
 pub(crate) struct VocabRename<'a> {
     pub(crate) change_index: usize,
     pub(crate) current: &'a str,
@@ -1360,10 +1357,10 @@ pub(crate) struct VocabRename<'a> {
     pub(crate) allow_on_template: bool,
 }
 
-/// `RenameEntityClass` (class_param_rename_PLAN §4.2): strict resolution,
+/// `RenameClass`: strict resolution,
 /// the swap guard, whole-database uniqueness (self excluded by id), the
 /// shared decision step, then the one `entity_class` revision site, which
-/// carries every other column and holds the D-S5 in-place branch. Nothing
+/// carries every other column and holds the same-commit in-place branch. Nothing
 /// else is written: every reference to a class is by id.
 pub(crate) fn apply_rename_entity_class(
     conn: &Connection,
@@ -1374,11 +1371,7 @@ pub(crate) fn apply_rename_entity_class(
 ) -> Result<(i64, StructuralEffect), DbError> {
     let (current, new_name) = (r.current, r.new_name);
     let id = find_entity_class(conn, current)?
-        .ok_or_else(|| {
-            DbError::Api(format!(
-                "rename_entity_class: class {current:?} does not exist"
-            ))
-        })?
+        .ok_or_else(|| DbError::Api(format!("rename_class: class {current:?} does not exist")))?
         .noted(folds, "entity_class", current);
     let mut row = read_ec_row(conn, id)?;
     refuse_freed_name(
@@ -1391,7 +1384,7 @@ pub(crate) fn apply_rename_entity_class(
     if let Some(other) = lookup_entity_class(conn, new_name)? {
         if other != id {
             return Err(DbError::Api(format!(
-                "rename_entity_class: {new_name:?} already names a different class"
+                "rename_class: {new_name:?} already names a different class"
             )));
         }
     }
@@ -1415,7 +1408,7 @@ pub(crate) fn apply_rename_entity_class(
         if fold(&old) != fold(new_name) && !r.allow_on_template {
             calls.template_candidates.push(TemplateCandidate {
                 change_index: r.change_index,
-                kind: StructuralKind::EntityClass,
+                kind: StructuralKind::Class,
                 object_id: id,
                 class: None,
                 current: current.to_string(),
@@ -1426,7 +1419,7 @@ pub(crate) fn apply_rename_entity_class(
     Ok((id, rev.effect))
 }
 
-/// `RenameParameter` (class_param_rename_PLAN §4.3): as
+/// `RenameParameter`: as
 /// [`apply_rename_entity_class`], for one definition of `class` (resolved
 /// strictly by the name it has at this point of the call); names are unique
 /// per class. The one `parameter_definition` revision site carries the
@@ -1498,7 +1491,7 @@ pub(crate) fn apply_rename_parameter(
     Ok((id, rev.effect))
 }
 
-/// `RenameEntity` (entity_rename_PLAN §3): strict resolution of the class
+/// `RenameEntity`: strict resolution of the class
 /// and the entity (by the names they have at this point of the call), the
 /// swap guard, per-class uniqueness (self excluded by id) and the class-set
 /// check, the shared decision step, then the one `entity` revision site.
@@ -1520,9 +1513,7 @@ pub(crate) fn apply_rename_entity(
         .ok_or_else(|| DbError::Api(format!("rename_entity: class {class:?} not found")))?
         .noted(folds, "entity_class", class);
     let mut row = find_entity_row(conn, cid, current)?.ok_or_else(|| {
-        DbError::Api(format!(
-            "rename_entity: entity {class}:{current} not found"
-        ))
+        DbError::Api(format!("rename_entity: entity {class}:{current} not found"))
     })?;
     let id = row.id;
     folds.note("entity", current, &row.name, id);
@@ -2061,7 +2052,7 @@ pub(crate) fn check_class_dims(
         Ok(cid)
     } else {
         Err(DbError::Api(format!(
-            "ensure_entity_class: {name:?} already exists with dimensions [{}], not [{}] — \
+            "ensure_class: {name:?} already exists with dimensions [{}], not [{}] — \
              in-place re-dimensioning (reshape) is not supported; create a new class and \
              migrate the data",
             have.join(", "),
@@ -2091,7 +2082,7 @@ pub(crate) fn apply_create_entity_class(
         let id = find_entity_class(conn, d)?
             .ok_or_else(|| {
                 DbError::Api(format!(
-                    "ensure_entity_class: dimension class {d:?} does not exist (create it first)"
+                    "ensure_class: dimension class {d:?} does not exist (create it first)"
                 ))
             })?
             .noted(folds, "entity_class", d);
@@ -2183,7 +2174,7 @@ pub(crate) fn effective_entity_name(
 }
 
 /// Idempotent 0-D / N-D entity create, with the element-tuple rule for N-D
-/// classes (entity_rename_PLAN E2, §5.2): no two live entities of a class
+/// classes: no two live entities of a class
 /// may hold the same element tuple.
 ///
 /// - An explicit name that exists is a `NoOp` when its tuple matches (else
@@ -2256,7 +2247,7 @@ pub(crate) fn apply_create_entity(
         }
         if !holders.is_empty() {
             let names: Vec<String> = holders.iter().map(|h| format!("{:?}", h.name)).collect();
-            // No verb prefix: this is reached from `commit_change_set`'s
+            // No verb prefix: this is reached from `commit`'s
             // `CreateEntity` as well as from the `ensure_entity` verb.
             return Err(DbError::Api(format!(
                 "class {class:?}: elements [{}] already exist as {}; {}",
@@ -2293,7 +2284,7 @@ pub(crate) fn apply_create_entity(
 }
 
 /// Pure member-declaration validation (the load-time subset of `ir::validate`):
-/// legal kinds, D3 dim rules, rank cap, pairwise distinguishability (D2a).
+/// legal kinds, D3 dim rules, rank cap, pairwise distinguishability.
 /// Shared by the G8 verb's pre-section and [`prepare_structural`] (`what` names
 /// the calling op in messages).
 pub(crate) fn validate_type_decls(
@@ -2374,7 +2365,7 @@ pub(crate) fn apply_create_parameter(
     let cid = find_entity_class(conn, class)?
         .ok_or_else(|| {
             DbError::Api(format!(
-                "ensure_parameter_definition: class {class:?} not found (create it first)"
+                "ensure_parameter: class {class:?} not found (create it first)"
             ))
         })?
         .noted(folds, "entity_class", class);
@@ -2390,9 +2381,7 @@ pub(crate) fn apply_create_parameter(
         Some(l) => Some(
             find_value_list(conn, l)?
                 .ok_or_else(|| {
-                    DbError::Api(format!(
-                        "ensure_parameter_definition: value_list {l:?} not found"
-                    ))
+                    DbError::Api(format!("ensure_parameter: value_list {l:?} not found"))
                 })?
                 .noted(folds, "parameter_value_list", l),
         ),
@@ -2416,14 +2405,14 @@ pub(crate) fn apply_create_parameter(
                 }),
                 [] => {
                     return Err(DbError::Api(format!(
-                        "ensure_parameter_definition: cannot infer a kind from empty value_list \
+                        "ensure_parameter: cannot infer a kind from empty value_list \
                          {:?} (declare types explicitly)",
                         value_list.unwrap_or("")
                     )))
                 }
                 many => {
                     return Err(DbError::Api(format!(
-                        "ensure_parameter_definition: value_list {:?} members mix kinds {many:?} \
+                        "ensure_parameter: value_list {:?} members mix kinds {many:?} \
                          — declare types explicitly",
                         value_list.unwrap_or("")
                     )))
@@ -2484,7 +2473,7 @@ pub(crate) fn prepare_structural(
     // allowed in either order (the in-transaction swap guard and uniqueness
     // check are unaffected; same for parameters below).
     check_rename_coherence(changes, |ch| match ch {
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current, new_name, ..
         } if current != new_name => Some((fold(current), current, new_name)),
         _ => None,
@@ -2527,7 +2516,7 @@ pub(crate) fn prepare_structural(
     // would leave a live orphan under the same-commit guard. That includes
     // creating it (Create*), or creating an entity, parameter or class under
     // a deleted class (the class cascade skips rows this commit created).
-    // `commit_changes` repeats the create check on the resolved ids.
+    // `api::commit` repeats the create check on the resolved ids.
     let mut del_alts: HashSet<String> = HashSet::new();
     let mut del_classes: HashSet<String> = HashSet::new();
     let mut del_params: HashSet<(String, String)> = HashSet::new();
@@ -2553,7 +2542,7 @@ pub(crate) fn prepare_structural(
                 ObjectKind::Entity => {
                     // Element-tuple-addressed (`ObjectRef::Elements`) entity
                     // deletes are not matched by this name-level guard: the
-                    // resolved-id guard in `commit_changes` (`reaches_created`
+                    // resolved-id guard in `api::commit` (`reaches_created`
                     // over `CallTouches::row_refs`) refuses them, and so every
                     // cascade this name-level check cannot see.
                     if let Some(cls) = &key.class {
@@ -2631,7 +2620,7 @@ pub(crate) fn prepare_structural(
             } if (clash_scen(current) || clash_scen(new_name)) => {
                 return Err(orphan("scenario", current));
             }
-            StructuralChange::RenameEntityClass {
+            StructuralChange::RenameClass {
                 current, new_name, ..
             } => {
                 if clash_class(current) || clash_class(new_name) {
@@ -2672,7 +2661,7 @@ pub(crate) fn prepare_structural(
             StructuralChange::CreateScenario { name, .. } if clash_scen(name) => {
                 return Err(orphan("scenario", name));
             }
-            StructuralChange::CreateEntityClass { name, dims, .. } => {
+            StructuralChange::CreateClass { name, dims, .. } => {
                 if clash_class(name) {
                     return Err(orphan("class", name));
                 }
@@ -2794,11 +2783,11 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             }
             Ok(())
         }
-        StructuralChange::CreateEntityClass { name, dims, .. } => {
+        StructuralChange::CreateClass { name, dims, .. } => {
             require_charset("class", name)?;
             if dims.len() > 4 {
                 return Err(DbError::Api(format!(
-                    "create_entity_class: {} dimensions exceeds the rank cap of 4",
+                    "create_class: {} dimensions exceeds the rank cap of 4",
                     dims.len()
                 )));
             }
@@ -2815,7 +2804,7 @@ fn validate_change(ch: &StructuralChange) -> Result<(), DbError> {
             validate_type_decls("create_parameter", class, name, types)
         }
         // A new name carries the same hygiene floor as a created one.
-        StructuralChange::RenameEntityClass {
+        StructuralChange::RenameClass {
             current, new_name, ..
         } => {
             require_nonempty("class", current)?;

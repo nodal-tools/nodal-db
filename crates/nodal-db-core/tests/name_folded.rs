@@ -21,7 +21,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 
 use nodal_db_core::api::test_hooks::{inject_conflicts, without_resolve_cache};
-use nodal_db_core::api::{commit_changes, DeleteKey, Segment};
+use nodal_db_core::api::{commit as api_commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
     ObjectDeleteKey, ObjectDeleteOpts, ObjectKind, ObjectRef, StructuralChange, Warning,
@@ -68,12 +68,15 @@ fn commit(
     deletes: Vec<DeleteKey>,
     object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
 ) -> WriteReport {
-    commit_changes(
+    api_commit(
         db,
-        segments,
-        structural,
-        deletes,
-        object_deletes,
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            object_deletes,
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
@@ -157,8 +160,8 @@ fn value_write_with_case_variant_names_warns_per_referent() {
     assert_eq!(
         folded(&r),
         vec![
-            f("segment", "entity_class", at, 1, "node", "Node"),
-            f("segment", "parameter_definition", at, 1, "PRICE", "Price"),
+            f("segment", "class", at, 1, "node", "Node"),
+            f("segment", "parameter", at, 1, "PRICE", "Price"),
             f("segment", "alternative", at, 1, "high", "High"),
             f("segment", "entity", at, 1, "n1", "N1"),
         ]
@@ -167,9 +170,7 @@ fn value_write_with_case_variant_names_warns_per_referent() {
     let class = r
         .warnings
         .iter()
-        .find(|w| {
-            w.object_type == "entity_class" && matches!(w.kind, WarningKind::NameFolded { .. })
-        })
+        .find(|w| w.object_type == "class" && matches!(w.kind, WarningKind::NameFolded { .. }))
         .unwrap();
     assert!(class.id > 0);
     // Exact spellings: no warning at all.
@@ -304,7 +305,7 @@ fn structural_references_and_idempotent_creates_warn() {
         folded(&r),
         vec![
             f("structural", "alternative", "", 3, "HIGH", "High"),
-            f("structural", "entity_class", "", 1, "NODE", "Node"),
+            f("structural", "class", "", 1, "NODE", "Node"),
             f("structural", "entity", "", 1, "n2", "N2"),
         ]
     );
@@ -335,10 +336,10 @@ fn value_and_object_deletes_warn_in_their_own_groups() {
     assert_eq!(
         folded(&r),
         vec![
-            f("delete", "entity_class", "", 1, "node", "Node"),
-            f("delete", "parameter_definition", "", 1, "price", "Price"),
+            f("delete", "class", "", 1, "node", "Node"),
+            f("delete", "parameter", "", 1, "price", "Price"),
             f("delete", "entity", "", 1, "n1", "N1"),
-            f("object_delete", "entity_class", "", 1, "NODE", "Node"),
+            f("object_delete", "class", "", 1, "NODE", "Node"),
             f("object_delete", "entity", "", 1, "n2", "N2"),
         ]
     );

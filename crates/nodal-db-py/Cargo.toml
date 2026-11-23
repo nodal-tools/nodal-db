@@ -1,8 +1,8 @@
-# The thin PyO3 skin — the write-path SDK (engine_portability_FINDINGS §7):
-# a LOGIC-FREE marshaling layer over the one core. It marshals Arrow tables
-# and scalars in, calls nodal-db-core, and translates DbError out. It never
-# implements any canonicalization, tier, or history rule (CLAUDE.md
-# invariant 2 — bindings over the one core, never a second implementation).
+# The thin PyO3 skin — the write-path SDK: a LOGIC-FREE marshaling layer over
+# the one core. It marshals Arrow tables and scalars in, calls nodal-db-core,
+# and translates DbError out. It never implements any canonicalization, tier,
+# or history rule (bindings over the one core, never a second
+# implementation).
 #
 # Build: `maturin develop` (or `maturin build --release`) with the venv
 # active. `pyo3/extension-module` is a DEFAULT feature and the lib has no
@@ -12,9 +12,17 @@
 # — and never needs libpython to link. CI stays exactly as it is.
 [package]
 name = "nodal-db-py"
-version = "0.1.0"
-edition = "2021"
-license = "EUPL-1.2"
+description = "The Python package of nodal-db (PyO3 bindings over nodal-db-core); published to PyPI as nodal-db."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish = false
 
 [lib]
@@ -29,8 +37,8 @@ test = false
 doctest = false
 
 [dependencies]
-nodal-db-core = { path = "../nodal-db-core" }
-# The sanctioned direct arrow line (root Cargo.toml R2 comment): `ffi` is
+nodal-db-core = { path = "../nodal-db-core", version = "0.1.0" }
+# The sanctioned direct arrow line (root Cargo.toml, the one-arrow rule): `ffi` is
 # needed for ArrowArrayStreamReader (PyCapsule stream import); the pin
 # guarantees ONE arrow in the tree, so batches imported here ARE the
 # `duckdb::arrow` RecordBatch type the core's API takes (compile-time proof,

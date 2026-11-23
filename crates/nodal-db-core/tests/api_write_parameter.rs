@@ -172,9 +172,9 @@ fn scalar_new_class_auto_creates_and_reads_back() {
         "scen_a",
         scalar_batch("node_1", 42.5),
         &[],
-        WriteOptions::default(),
         "tester",
         "scalar write",
+        WriteOptions::default(),
     )
     .expect("write");
 
@@ -186,8 +186,8 @@ fn scalar_new_class_auto_creates_and_reads_back() {
         .inspect(|w| assert_eq!(w.kind, WarningKind::AutoCreated))
         .map(|w| (w.object_type.clone(), w.name.clone()))
         .collect();
-    assert!(created.contains(&("entity_class".into(), "node".into())));
-    assert!(created.contains(&("parameter_definition".into(), "demand".into())));
+    assert!(created.contains(&("class".into(), "node".into())));
+    assert!(created.contains(&("parameter".into(), "demand".into())));
     assert!(created.contains(&("alternative".into(), "scen_a".into())));
     assert!(created.contains(&("entity".into(), "node_1".into())));
     assert_eq!(created.len(), 4, "exactly the four referents auto-created");
@@ -218,9 +218,9 @@ fn dense_float_writes_array_tier_and_reads_back() {
         "Base",
         indexed_float_batch("node_1", "step", &[0, 1, 2], &[1.5, 2.5, 3.5]),
         &[],
-        WriteOptions::default(),
         "tester",
         "array write",
+        WriteOptions::default(),
     )
     .expect("write");
     assert_eq!(
@@ -259,9 +259,9 @@ fn dense_float_with_nan_stays_array_tier_and_round_trips() {
         "Base",
         indexed_float_batch("node_1", "step", &coords, &vals),
         &[],
-        WriteOptions::default(),
         "tester",
         "nan array write",
+        WriteOptions::default(),
     )
     .expect("write");
 
@@ -310,9 +310,9 @@ fn sparse_int_writes_long_tier_and_reads_back() {
         "Base",
         indexed_int_batch("node_1", "step", &[10, 20, 30], &[100, 200, 300]),
         &[],
-        WriteOptions::default(),
         "tester",
         "long write",
+        WriteOptions::default(),
     )
     .expect("write");
     assert_eq!(report.tiers, vec![Tier::Long], "int measure ⇒ long tier");
@@ -344,9 +344,9 @@ fn empty_user_is_rejected_and_empty_message_is_fine() {
         "Base",
         scalar_batch("n", 1.0),
         &[],
-        opts,
         "  ",
         "m",
+        opts,
     )
     .expect_err("blank user must be rejected");
     assert!(err.to_string().contains("user"), "unexpected error: {err}");
@@ -358,9 +358,9 @@ fn empty_user_is_rejected_and_empty_message_is_fine() {
         "Base",
         scalar_batch("n", 1.0),
         &[],
-        opts,
         "tool",
         "",
+        opts,
     )
     .expect("empty message is allowed");
 }
@@ -377,9 +377,9 @@ fn updating_a_scalar_bumps_the_version() {
         "Base",
         scalar_batch("node_1", 1.0),
         &[],
-        opts,
         "t",
         "v1",
+        opts,
     )
     .expect("write v1");
     let r2 = write_parameter(
@@ -389,9 +389,9 @@ fn updating_a_scalar_bumps_the_version() {
         "Base",
         scalar_batch("node_1", 2.0),
         &[],
-        opts,
         "t",
         "v2",
+        opts,
     )
     .expect("write v2");
     // Second call finds every referent existing ⇒ no auto-create warnings.
@@ -460,9 +460,9 @@ fn retain_content_false_stubs_the_superseded_row() {
         "Base",
         scalar_batch("u1", 1.0),
         &[],
-        opts,
         "t",
         "v1",
+        opts,
     )
     .expect("write v1");
     write_parameter(
@@ -472,9 +472,9 @@ fn retain_content_false_stubs_the_superseded_row() {
         "Base",
         scalar_batch("u1", 2.0),
         &[],
-        opts,
         "t",
         "v2",
+        opts,
     )
     .expect("write v2");
 
@@ -522,9 +522,9 @@ fn concurrent_writers_serialize_in_process() {
                 "Base",
                 scalar_batch(ent, v),
                 &[],
-                WriteOptions::default(),
                 "t",
                 msg,
+                WriteOptions::default(),
             )
         })
     };
@@ -562,9 +562,9 @@ fn declared_value_kind_mismatch_is_rejected() {
         "Base",
         scalar_batch("n1", 7.0),
         &[],
-        o,
         "t",
         "float",
+        o,
     )
     .expect("float declare");
     let schema = Arc::new(Schema::new(vec![
@@ -579,7 +579,7 @@ fn declared_value_kind_mismatch_is_rejected() {
         ],
     )
     .unwrap();
-    let err = write_parameter(&db, "node", "p", "Base", strs, &[], o, "t", "drift")
+    let err = write_parameter(&db, "node", "p", "Base", strs, &[], "t", "drift", o)
         .expect_err("kind drift must be loud");
     let msg = err.to_string();
     assert!(
@@ -600,9 +600,9 @@ fn case_aliased_entity_names_in_one_batch_are_rejected() {
         "Base",
         scalar_batch2(&["N1", "n1"], &[1.0, 2.0]),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("case alias must be rejected");
     let msg = err.to_string();
@@ -630,9 +630,9 @@ fn dimension_name_mismatch_is_rejected() {
         "Base",
         indexed_float_batch("e1", "region", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "declare",
+        o,
     )
     .expect("declare with dim 'region'");
     let err = write_parameter(
@@ -642,9 +642,9 @@ fn dimension_name_mismatch_is_rejected() {
         "Base",
         indexed_float_batch("e2", "season", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "rename",
+        o,
     )
     .expect_err("dim name mismatch must be loud");
     let msg = err.to_string();
@@ -665,7 +665,7 @@ fn blank_referent_names_are_rejected_before_db_work() {
         ("node", "", "Base", "parameter"),
         ("node", "p", " ", "alternative"),
     ] {
-        let err = write_parameter(&db, c, p, a, scalar_batch("n", 1.0), &[], o, "t", "m")
+        let err = write_parameter(&db, c, p, a, scalar_batch("n", 1.0), &[], "t", "m", o)
             .expect_err("blank name must be rejected");
         assert!(err.to_string().contains(what), "missing {what:?} in: {err}");
     }
@@ -676,9 +676,9 @@ fn blank_referent_names_are_rejected_before_db_work() {
         "Base",
         scalar_batch(" ", 1.0),
         &[],
-        o,
         "t",
         "m",
+        o,
     )
     .expect_err("blank entity name must be rejected");
     assert!(err.to_string().contains("entity"), "unexpected: {err}");
@@ -725,9 +725,9 @@ fn tz_bearing_timestamp_value_warns_timezone_normalized() {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect("tz-aware instants are accepted");
     assert_eq!(report.values_written, 1);
@@ -770,9 +770,9 @@ fn materializing_parameter_type_for_existing_definition_warns() {
         "Base",
         scalar_batch("u1", 1.0),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect("write");
     let w = report
@@ -807,9 +807,9 @@ fn empty_batch_is_rejected_without_side_effects() {
         "Base",
         scalar_batch2(&[], &[]),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("empty batch must be rejected");
     assert!(err.to_string().contains("empty batch"), "unexpected: {err}");
@@ -892,9 +892,9 @@ fn indistinguishable_or_noncontiguous_declarations_are_refused() {
         "Base",
         scalar_batch("n", 1.0),
         &[],
-        o,
         "t",
         "m",
+        o,
     )
     .expect_err("indistinguishable declaration must be refused");
     let msg = err.to_string();
@@ -909,9 +909,9 @@ fn indistinguishable_or_noncontiguous_declarations_are_refused() {
         "Base",
         indexed_float_batch("n", "step", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "m",
+        o,
     )
     .expect_err("non-contiguous positions must be refused");
     assert!(err.to_string().contains("contiguous"), "unexpected: {err}");
@@ -954,9 +954,9 @@ fn auto_create_entity_in_nd_class_is_refused() {
         "Base",
         scalar_batch("f1", 1.0),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("N-D auto-create must be refused");
     let msg = err.to_string();
@@ -979,9 +979,9 @@ fn rank_mismatch_names_the_parameter_and_counts_ranks() {
         "Base",
         indexed_float_batch("e", "step", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "declare",
+        o,
     )
     .expect("rank-1 declare");
     let err = write_parameter(
@@ -991,9 +991,9 @@ fn rank_mismatch_names_the_parameter_and_counts_ranks() {
         "Base",
         scalar_batch("e", 1.0),
         &[],
-        o,
         "t",
         "m",
+        o,
     )
     .expect_err("rank mismatch must be loud");
     let msg = err.to_string();
@@ -1094,9 +1094,9 @@ fn multi_type_set_accepts_each_declared_member() {
         "Base",
         scalar_batch("u1", 0.95),
         &[],
-        o,
         "t",
         "scalar member",
+        o,
     )
     .expect("scalar member write");
     assert_eq!(r1.tiers, vec![Tier::Scalar]);
@@ -1117,9 +1117,9 @@ fn multi_type_set_accepts_each_declared_member() {
         "hourly",
         indexed_float_batch("u1", "step", &[0, 1, 2], &[0.9, 0.8, 0.7]),
         &[],
-        o,
         "t",
         "indexed member",
+        o,
     )
     .expect("indexed member write");
     assert_eq!(r2.tiers, vec![Tier::Array], "tier rule unchanged per value");
@@ -1182,7 +1182,7 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
         ],
     )
     .unwrap();
-    let err = write_parameter(&db, "unit", "availability", "Base", strs, &[], o, "t", "m")
+    let err = write_parameter(&db, "unit", "availability", "Base", strs, &[], "t", "m", o)
         .expect_err("non-member kind must be rejected");
     let msg = err.to_string();
     assert!(
@@ -1198,9 +1198,9 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
         "Base",
         indexed_float_batch("u1", "season", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "m",
+        o,
     )
     .expect_err("non-member dim name must be rejected");
     let msg = err.to_string();
@@ -1226,7 +1226,7 @@ fn multi_type_set_rejects_nonmember_and_never_widens() {
         ],
     )
     .unwrap();
-    let err = write_parameter(&db, "unit", "availability", "Base", rank2, &[], o, "t", "m")
+    let err = write_parameter(&db, "unit", "availability", "Base", rank2, &[], "t", "m", o)
         .expect_err("non-member rank must be rejected");
     assert!(err.to_string().contains("rank 2"), "unexpected: {err}");
 
@@ -1262,9 +1262,9 @@ fn multi_type_same_rank_members_distinguished_by_index_kind() {
         "Base",
         indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "integer member",
+        o,
     )
     .expect("integer-indexed write");
     assert_eq!(r1.tiers, vec![Tier::Array]);
@@ -1277,9 +1277,9 @@ fn multi_type_same_rank_members_distinguished_by_index_kind() {
         "ts",
         datetime_indexed_batch("n1", "t", &[0, hour], &[3.0, 4.0]),
         &[],
-        o,
         "t",
         "datetime member",
+        o,
     )
     .expect("datetime-indexed write");
     assert_eq!(r2.tiers, vec![Tier::Array]);
@@ -1343,9 +1343,9 @@ fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
         "Base",
         indexed_float_batch("n1", "t", &[0, 1], &[1.0, 2.0]),
         &[],
-        o,
         "t",
         "t member",
+        o,
     )
     .expect("t-member write");
     write_parameter(
@@ -1355,9 +1355,9 @@ fn same_kind_members_differing_only_in_dim_name_write_but_blur_on_read() {
         "alt2",
         indexed_float_batch("n1", "step", &[10, 20], &[3.0, 4.0]),
         &[],
-        o,
         "t",
         "step member",
+        o,
     )
     .expect("step-member write");
     assert_eq!(
@@ -1430,9 +1430,9 @@ fn metadata_label_domain_sets_ordinals() {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect("metadata-channel write");
     let conn = Connection::open(&db).unwrap();
@@ -1463,9 +1463,9 @@ fn malformed_label_domain_metadata_fails_before_db_work() {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("malformed metadata must be loud");
     assert!(
@@ -1507,9 +1507,9 @@ fn domains_arg_wins_over_conflicting_metadata() {
         "Base",
         batch,
         &arg,
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect("arg-channel write");
     let conn = Connection::open(&db).unwrap();
@@ -1542,9 +1542,9 @@ fn array_id_is_stable_across_replace_and_copied_into_hist() {
             "Base",
             indexed_float_batch("node_1", "step", &[0, 1, 2], &[v, v + 1.0, v + 2.0]),
             &[],
-            WriteOptions::default(),
             "tester",
             msg,
+            WriteOptions::default(),
         )
         .expect("write");
     }
@@ -1592,9 +1592,9 @@ fn unicode_case_aliased_entity_names_are_rejected_as_api_errors() {
         "Base",
         scalar_batch2(&["Äx", "äx"], &[1.0, 2.0]),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("Unicode case alias must be rejected");
     assert!(
@@ -1611,9 +1611,9 @@ fn unicode_case_aliased_entity_names_are_rejected_as_api_errors() {
         "Base",
         scalar_batch("Äx", 1.0),
         &[],
-        WriteOptions::default(),
         "t",
         "seed",
+        WriteOptions::default(),
     )
     .expect("seed");
     let err = write_parameter(
@@ -1623,9 +1623,9 @@ fn unicode_case_aliased_entity_names_are_rejected_as_api_errors() {
         "Base",
         scalar_batch2(&["Äx", "äx"], &[3.0, 4.0]),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("Unicode case alias must be rejected");
     assert_eq!(err.to_string(), expect);
@@ -1680,9 +1680,9 @@ fn write_err(db: &std::path::Path, class: &str, entities: &[&str], vals: &[f64])
         "Base",
         scalar_batch2(entities, vals),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect_err("must fail")
     .to_string()
@@ -1731,9 +1731,9 @@ fn entity_ids_after_a_failed_commit_are_contiguous() {
         "Base",
         scalar_batch2(&["a", "b"], &[1.0, 2.0]),
         &[],
-        WriteOptions::default(),
         "t",
         "seed",
+        WriteOptions::default(),
     )
     .expect("seed");
     // Four missing names; the second has two values (a canon error).
@@ -1754,9 +1754,9 @@ fn entity_ids_after_a_failed_commit_are_contiguous() {
         "Base",
         scalar_batch("c", 3.0),
         &[],
-        WriteOptions::default(),
         "t",
         "after",
+        WriteOptions::default(),
     )
     .expect("write after failure");
     let minted: Vec<i64> = r
@@ -1792,9 +1792,9 @@ fn non_ascii_dimension_name_matches_its_declared_member_case_insensitively() {
         "Base",
         indexed_float_batch("n1", "Ä_STEP", &[0, 1], &[1.0, 2.0]),
         &[],
-        WriteOptions::default(),
         "t",
         "m",
+        WriteOptions::default(),
     )
     .expect("Ä_STEP instantiates the ä_step member");
     let got = read_parameter(&db, "node", "usage", "Base").expect("read");

@@ -2,6 +2,19 @@
 members = ["crates/*"]
 resolver = "2"
 
+# Shared package metadata (each crate inherits it with `.workspace = true`).
+# Every crate stays `publish = false` until crates.io publishing starts.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "EUPL-1.2"
+repository = "https://github.com/nodal-tools/nodal-db"
+homepage = "https://nodal-tools.github.io/nodal-db/"
+documentation = "https://nodal-tools.github.io/nodal-db/"
+keywords = ["duckdb", "database", "versioning", "modelling", "arrow"]
+categories = ["database", "science"]
+
 # Strip symbols from dev/test binaries. The bundled DuckDB static lib carries
 # heavy debuginfo, which bloats every DuckDB-linked test binary to ~GB and has
 # repeatedly filled this (tight) disk. We don't need symbol-level backtraces for
@@ -26,12 +39,12 @@ opt-level = 3
 debug = false
 
 # Versions are pinned once here and referenced from each crate via
-# `workspace = true`. The de-risk spike (Phase 0) gates the duckdb-rs choice:
-# its bundled DuckDB must be >= 2.0 (the line the schema is verified on;
-# native 2.0 storage format, see crates/nodal-db-core/src/lib.rs).
+# `workspace = true`. The bundled DuckDB must be >= 2.0 (the line the schema
+# is verified on; native 2.0 storage format, see
+# crates/nodal-db-core/src/lib.rs).
 # arrow is normally consumed only through `duckdb::arrow` so exactly one arrow
-# major is ever in the tree (risk R2) — with ONE sanctioned exception, the
-# direct pinned `arrow` line below (R2 partially re-opened; see its comment).
+# version is ever in the tree (the one-arrow rule) — with ONE sanctioned
+# exception, the direct pinned `arrow` line below (see its comment).
 [workspace.dependencies]
 # duckdb-rs versions its crate to encode the bundled DuckDB release in the
 # MINOR number: 1.20000.0 bundles DuckDB 2.0.0, so DuckDB 2.0.1 will be
@@ -45,7 +58,7 @@ debug = false
 # the `arrow-pyarrow` pin (further below) to the identical version — and
 # arrow-pyarrow's own pyo3 requirement then dictates the `pyo3` line.
 duckdb = { version = "=1.20000.0", features = ["bundled"] }
-# R2 partially re-opened (specs/arrow_ipc_bulk_format.md §2.4, critique F12):
+# The one exception to the one-arrow rule:
 # the `nodal-db import` boundary needs arrow's IPC reader/writer, which
 # `duckdb::arrow` does NOT re-export (duckdb pulls arrow without the `ipc`
 # feature). This direct dependency is pinned EXACTLY (=60.2.0) to the arrow
@@ -59,13 +72,13 @@ arrow = { version = "=60.2.0", default-features = false, features = ["ipc", "ipc
 thiserror = "2.0.20"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 # NFC normalization. Pinned to =0.1.24 because that release's tables are
-# Unicode 16.0.0 — the version spec §3.4.1.1 pins. (0.1.25 bumped to Unicode
-# 17.0.0.) A version bump here is a rehash-class change (spec §2.4);
+# Unicode 16.0.0 — the version the canonical encoding pins (0.1.25 bumped to
+# Unicode 17.0.0). A version bump here changes content hashes;
 # crates/nodal-db-core/tests/text_nfc.rs fails when the tables move.
 unicode-normalization = "=0.1.24"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-# Template IR (template_ir_plan.md D1: YAML 1.2 authoring surface). serde_norway
+# Template IR (YAML 1.2 authoring surface). serde_norway
 # is the maintained serde_yaml fork whose scalar resolution follows the YAML 1.2
 # core schema in ALL contexts (only true/false are booleans — the Norway problem
 # is closed even under deserialize_any/untagged enums, verified against
@@ -73,11 +86,11 @@ serde_json = "1.0.151"
 # emitter quotes any scalar its own parser would misread ('69', 'true'), so
 # emit->parse round-trips are self-consistent.
 serde_norway = "0.9.42"
-# The Python skin (crates/nodal-db-py; engine_portability_FINDINGS §7: the
-# write-path SDK is bindings over the one core). arrow-pyarrow is the
+# The Python skin (crates/nodal-db-py: the write-path SDK is bindings over the
+# one core). arrow-pyarrow is the
 # maintained Arrow <-> Python bridge split out of arrow-rs; it is pinned
 # EXACTLY to the `arrow` pin above (same release train, same arrow-array in
-# the tree — the R2 one-arrow-version rule extends to it).
+# the tree — the one-arrow rule extends to it).
 # MATCHED-BUMP REQUIRED (three-way): a duckdb-rs bump that changes the
 # re-exported arrow version requires bumping `arrow` AND `arrow-pyarrow` to
 # the identical version — and arrow-pyarrow's own pyo3 requirement then
@@ -90,8 +103,7 @@ pyo3 = { version = "0.29.3", features = ["abi3-py311"] }
 clap = { version = "4.6.6", features = ["derive"] }
 anyhow = "1.0.104"
 tempfile = "3.27.0"
-# The pre-freeze benchmark gate (rust_implementation_plan.md Part 2 dev-only
-# deps; Part 5 deliverable 4). Dev-only, never in a shipped artifact.
+# The benchmark suite (criterion). Dev-only, never in a shipped artifact.
 criterion = "0.5"
 # Test-only: reads the gzipped official NormalizationTest
 # (conformance/unicode/, tests/text_nfc.rs). Already in the tree as a

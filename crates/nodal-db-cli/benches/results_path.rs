@@ -40,7 +40,7 @@
 //!
 //! Every DB write goes through the one canonicalization pipeline (CLAUDE.md
 //! invariant 2): lane (a) calls `api::write_parameter`, lane (b) drives the
-//! `import` verb (`api::ingest_segments`). The row-group phase copies an
+//! `import` verb (`api::write_segments`). The row-group phase copies an
 //! already-written table into a *scratch* raw-DuckDB file for reading only;
 //! it never writes a nodal-db database. Data is deterministic (splitmix64,
 //! fixed seed); `scripts/bench/raw_duckdb_layout.py` generates bit-identical
@@ -513,9 +513,9 @@ fn ingest_api_dense(db: &Path, n_params: usize, entities: usize) -> IngestResult
                 ALT,
                 batch,
                 &[],
-                WriteOptions::default(),
                 USER,
                 "bench dense",
+                WriteOptions::default(),
             )
             .expect("dense write");
             chunk_ms.push(ms(tc));
@@ -548,9 +548,9 @@ fn ingest_api_long(db: &Path, entities: usize) -> IngestResult {
                 ALT,
                 batch,
                 &[],
-                WriteOptions::default(),
                 USER,
                 "bench long",
+                WriteOptions::default(),
             )
             .expect("long write");
             chunk_ms.push(ms(tc));
@@ -950,9 +950,9 @@ fn phase_bigarray(ctx: &Ctx) {
             ALT,
             b,
             &[],
-            WriteOptions::default(),
             USER,
             "bench big array",
+            WriteOptions::default(),
         )
         .expect("big array write");
         let wall = ms(t);

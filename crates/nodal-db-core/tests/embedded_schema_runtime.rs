@@ -43,9 +43,9 @@ fn write_scalar(db: &Path, entity: &str, v: f64) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "tester",
         "embedded-schema write",
+        WriteOptions::default(),
     )
     .expect("write_parameter");
 }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, commit_changes, commit_structural, ChangeSet};
+use nodal_db_core::api::{commit, commit_structural, ChangeSet};
 use nodal_db_core::entity_tuple::test_hooks;
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
@@ -41,7 +41,7 @@ fn q1(db: &Path, sql: &str) -> i64 {
 }
 
 fn class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -107,15 +107,24 @@ fn explicit_name_hit_with_its_tuple_is_a_noop_and_another_tuple_is_refused() {
     let r = ok(&db, vec![nd("unit__node", Some("u1__n1"), &["u1", "n1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
     assert_eq!(r.commit_id, 0);
-    let m = api_err(cs(&db, vec![nd("unit__node", Some("u1__n1"), &["u2", "n1"])]));
-    assert!(m.contains("already exists with elements [u1, n1], not [u2, n1]"), "{m}");
+    let m = api_err(cs(
+        &db,
+        vec![nd("unit__node", Some("u1__n1"), &["u2", "n1"])],
+    ));
+    assert!(
+        m.contains("already exists with elements [u1, n1], not [u2, n1]"),
+        "{m}"
+    );
 }
 
 #[test]
 fn explicit_new_name_over_a_held_tuple_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(&dir);
-    let m = api_err(cs(&db, vec![nd("unit__node", Some("link1"), &["u1", "n1"])]));
+    let m = api_err(cs(
+        &db,
+        vec![nd("unit__node", Some("link1"), &["u1", "n1"])],
+    ));
     assert!(
         m.contains("elements [u1, n1] already exist as \"u1__n1\"")
             && m.contains("duplicate element tuples are not allowed"),
@@ -134,12 +143,12 @@ fn derived_name_holder_is_a_noop_with_a_folded_spelling_warned() {
     let id = q1(&db, "SELECT id FROM entity WHERE cur_name = 'u1__n1'");
     let r = ok(&db, vec![nd("unit__node", None, &["u1", "n1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     // Another spelling of the elements derives another spelling of the
     // name: the holder answers, and the fold is reported.
     let r = ok(&db, vec![nd("unit__node", None, &["U1", "N1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     let folded: Vec<(String, String)> = r
         .warnings
         .iter()
@@ -185,7 +194,10 @@ fn derived_name_taken_by_another_tuple_asks_for_an_explicit_name() {
     let r = ok(&db, vec![nd("unit__node", None, &["u1", "bus"])]);
     assert_eq!(r.structural[0].effect, SE::Created);
     assert_eq!(
-        q1(&db, "SELECT count(*) FROM entity WHERE cur_name = 'u1__bus'"),
+        q1(
+            &db,
+            "SELECT count(*) FROM entity WHERE cur_name = 'u1__bus'"
+        ),
         1
     );
 }
@@ -234,7 +246,7 @@ fn two_creates_of_one_tuple_in_a_call() {
     );
     assert_eq!(r.structural[0].effect, SE::Created);
     assert_eq!(r.structural[1].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, r.structural[1].object_id);
+    assert_eq!(r.structural[0].id, r.structural[1].id);
 }
 
 #[test]
@@ -262,32 +274,33 @@ fn elements_created_in_the_call_are_free() {
 fn a_delete_and_a_re_create_of_a_tuple_in_one_call_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(&dir);
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![],
-        vec![nd("unit__node", Some("again"), &["u1", "n1"])],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Entity,
-                class: Some("unit__node".into()),
-                target: ObjectRef::Name("u1__n1".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            structural: vec![nd("unit__node", Some("again"), &["u1", "n1"])],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Entity,
+                    class: Some("unit__node".into()),
+                    target: ObjectRef::Name("u1__n1".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
     );
     let m = api_err(r);
     assert!(m.contains("already exist as \"u1__n1\""), "{m}");
-    // The error is not prefixed with a verb's name (`commit_changes` is
+    // The error is not prefixed with a verb's name (`commit` is
     // not `ensure_entity`) and points at the rename.
     assert!(!m.contains("ensure_entity"), "{m}");
     assert!(m.contains("use RenameEntity"), "{m}");
     // A purge of the class in the same call (a "true replace") does not
     // free the tuple either: the structural changes run first.
-    let r = commit_change_set(
+    let r = commit(
         &db,
         ChangeSet {
             structural: vec![nd("unit__node", Some("again"), &["u1", "n1"])],
@@ -322,10 +335,7 @@ fn a_conflict_retry_rebuilds_the_index() {
     );
     assert!(r.structural.iter().all(|o| o.effect == SE::Created));
     assert_eq!(live_nd(&db), 3);
-    assert_eq!(
-        q1(&db, "SELECT count(*) FROM audit_entity_tuple_dup"),
-        0
-    );
+    assert_eq!(q1(&db, "SELECT count(*) FROM audit_entity_tuple_dup"), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +365,13 @@ fn ensure_entity_follows_the_rule_and_its_fast_path_falls_through() {
     // The derived name taken by another tuple: the fast path's mismatch
     // falls through to the transaction's message.
     ensure_entity(&db, "unit__node", Some("u2__n2"), &els("u2", "n1"), "t").unwrap();
-    let m = api_err(ensure_entity(&db, "unit__node", None, &els("u2", "n2"), "t"));
+    let m = api_err(ensure_entity(
+        &db,
+        "unit__node",
+        None,
+        &els("u2", "n2"),
+        "t",
+    ));
     assert!(m.contains("give an explicit name"), "{m}");
 }
 
@@ -439,12 +455,15 @@ fn existing_duplicates_are_audited_left_alone_and_block_new_ones() {
     );
     assert_eq!(r.structural[2].effect, SE::NoOp);
     // A new create of the tuple lists every holder.
-    let m = api_err(cs(&db, vec![nd("unit__node", Some("third"), &["u1", "n1"])]));
+    let m = api_err(cs(
+        &db,
+        vec![nd("unit__node", Some("third"), &["u1", "n1"])],
+    ));
     assert!(m.contains("already exist as \"u1__n1\", \"dup\""), "{m}");
     // `name: None` is a NoOp: one holder has the derived name.
     let r = ok(&db, vec![nd("unit__node", None, &["u1", "n1"])]);
     assert_eq!(r.structural[0].effect, SE::NoOp);
-    assert_eq!(r.structural[0].object_id, orig);
+    assert_eq!(r.structural[0].id, orig);
 }
 
 // ---------------------------------------------------------------------------

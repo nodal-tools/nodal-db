@@ -1,5 +1,5 @@
-//! Class and parameter descriptions and renames (`CreateEntityClass`'s
-//! description, `RenameEntityClass`, `RenameParameter`), the description
+//! Class and parameter descriptions and renames (`CreateClass`'s
+//! description, `RenameClass`, `RenameParameter`), the description
 //! rule shared by every rename op (a stored description is never `""`), and
 //! the empty-description rule of the template IR.
 
@@ -11,7 +11,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, commit_structural, DeleteKey, Segment};
+use nodal_db_core::api::{commit, commit_structural, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::ir::TypeDecl;
@@ -43,7 +43,7 @@ fn qopt(db: &Path, sql: &str) -> Option<String> {
 }
 
 fn class_d(name: &str, description: Option<&str>) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: vec![],
         description: description.map(Into::into),
@@ -51,7 +51,7 @@ fn class_d(name: &str, description: Option<&str>) -> SC {
 }
 
 // ---------------------------------------------------------------------------
-// CreateEntityClass.description (P1)
+// CreateClass.description (P1)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -177,7 +177,7 @@ fn class(name: &str) -> SC {
 }
 
 fn nd_class(name: &str, dims: &[&str]) -> SC {
-    SC::CreateEntityClass {
+    SC::CreateClass {
         name: name.into(),
         dims: dims.iter().map(|d| d.to_string()).collect(),
         description: None,
@@ -207,7 +207,7 @@ fn entity(class: &str, name: &str) -> SC {
 }
 
 fn ren_class(current: &str, new_name: &str) -> SC {
-    SC::RenameEntityClass {
+    SC::RenameClass {
         current: current.into(),
         new_name: new_name.into(),
         description: None,
@@ -216,7 +216,7 @@ fn ren_class(current: &str, new_name: &str) -> SC {
 }
 
 fn desc_class(current: &str, description: &str) -> SC {
-    SC::RenameEntityClass {
+    SC::RenameClass {
         current: current.into(),
         new_name: current.into(),
         description: Some(description.into()),
@@ -246,7 +246,7 @@ fn desc_param(class: &str, current: &str, description: &str) -> SC {
 
 fn allowed(mut ch: SC) -> SC {
     match &mut ch {
-        SC::RenameEntityClass {
+        SC::RenameClass {
             allow_on_template, ..
         }
         | SC::RenameParameter {
@@ -301,7 +301,7 @@ fn okey(kind: ObjectKind, class: Option<&str>, name: &str) -> (ObjectDeleteKey, 
     )
 }
 
-/// One `commit_changes` call over every channel.
+/// One `commit` call over every channel.
 fn call(
     db: &Path,
     segments: Vec<Segment>,
@@ -309,12 +309,15 @@ fn call(
     deletes: Vec<DeleteKey>,
     object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(
+    commit(
         db,
-        segments,
-        structural,
-        deletes,
-        object_deletes,
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            object_deletes,
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
@@ -372,7 +375,7 @@ fn param_id(db: &Path, name: &str) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// RenameEntityClass / RenameParameter: the basic contract (tests 2-11)
+// RenameClass / RenameParameter: the basic contract (tests 2-11)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -382,9 +385,9 @@ fn class_rename_keeps_the_id_and_history() {
     let id = class_id(&db, "node");
     let before = q1(&db, "SELECT max(id) FROM commit");
     let r = cs(&db, vec![ren_class("node", "bus")]);
-    assert_eq!(r.structural[0].kind, StructuralKind::EntityClass);
+    assert_eq!(r.structural[0].kind, StructuralKind::Class);
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, id);
+    assert_eq!(r.structural[0].id, id);
     assert_eq!(class_id(&db, "bus"), id);
     assert_eq!(
         q1(
@@ -419,7 +422,7 @@ fn parameter_rename_keeps_values_and_reads_follow() {
     let r = cs(&db, vec![ren_param("node", "demand", "load")]);
     assert_eq!(r.structural[0].kind, StructuralKind::Parameter);
     assert_eq!(r.structural[0].effect, SE::Renamed);
-    assert_eq!(r.structural[0].object_id, pid);
+    assert_eq!(r.structural[0].id, pid);
     assert_eq!(param_id(&db, "load"), pid);
     assert_eq!(
         q1(
@@ -554,7 +557,7 @@ fn description_only_revision_is_updated_and_clear_maps_before_compare() {
         &db,
         vec![
             desc_class("node", "Buses."),
-            SC::RenameEntityClass {
+            SC::RenameClass {
                 current: "node".into(),
                 new_name: "node".into(),
                 description: None,
@@ -580,7 +583,7 @@ fn description_only_revision_is_updated_and_clear_maps_before_compare() {
     // A rename plus a description in one item: one bump, Renamed.
     let r = cs(
         &db,
-        vec![SC::RenameEntityClass {
+        vec![SC::RenameClass {
             current: "node".into(),
             new_name: "bus".into(),
             description: Some("Buses.".into()),
@@ -1489,13 +1492,7 @@ fn renames_on_a_stamped_db_need_the_flag() {
     assert_eq!(
         got,
         vec![
-            (
-                0,
-                StructuralKind::EntityClass,
-                None,
-                "node".into(),
-                "bus".into()
-            ),
+            (0, StructuralKind::Class, None, "node".into(), "bus".into()),
             (
                 1,
                 StructuralKind::Parameter,

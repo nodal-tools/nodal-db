@@ -1,5 +1,5 @@
 //! A value write and an object delete covering that value in ONE
-//! `commit_changes` call are refused up front (skip_unchanged_writes_PLAN
+//! `commit` call are refused up front (skip_unchanged_writes_PLAN
 //! D10, from the P2 review). The cascade closes only rows older than the
 //! commit, so under the long cell diff it would close the unchanged old
 //! cells and keep the changed cells the write just inserted: a partial
@@ -19,7 +19,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, head_commit, Segment};
+use nodal_db_core::api::{commit, head_commit, ChangeSet, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
@@ -146,37 +146,37 @@ fn seeded() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.duckdb");
     init_schema_with_default(&db, Some("Base")).unwrap();
-    commit_changes(
+    commit(
         &db,
-        vec![
-            seg(
-                "node",
-                "flow",
-                "A",
-                long_batch("node_1", &[0, 1, 2], &[1, 2, 3]),
-            ),
-            seg("node", "demand", "Base", scalar_batch("node_1", 1.0)),
-            seg(
-                "node",
-                "profile",
-                "Base",
-                array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
-            ),
-        ],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![
+                seg(
+                    "node",
+                    "flow",
+                    "A",
+                    long_batch("node_1", &[0, 1, 2], &[1, 2, 3]),
+                ),
+                seg("node", "demand", "Base", scalar_batch("node_1", 1.0)),
+                seg(
+                    "node",
+                    "profile",
+                    "Base",
+                    array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+                ),
+            ],
+            ..ChangeSet::default()
+        },
         "t",
         "seed",
         WriteOptions::default(),
     )
     .unwrap();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("node_2", 2.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "Base", scalar_batch("node_2", 2.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "seed node_2",
         WriteOptions::default(),
@@ -199,12 +199,12 @@ fn seeded() -> (tempfile::TempDir, PathBuf) {
                   ((SELECT id FROM entity WHERE cur_name=lower('link_ab')), 2,
                    (SELECT id FROM entity WHERE cur_name=lower('node_2')), (SELECT max(id) FROM commit));",
     );
-    commit_changes(
+    commit(
         &db,
-        vec![seg("link", "cap", "Base", scalar_batch("link_ab", 5.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("link", "cap", "Base", scalar_batch("link_ab", 5.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "seed link_ab",
         WriteOptions::default(),
@@ -236,12 +236,13 @@ fn assert_refused(
 ) {
     let before = census(db);
     let head = head_commit(db).unwrap();
-    let err = commit_changes(
+    let err = commit(
         db,
-        segments,
-        vec![],
-        vec![],
-        vec![(od, opts)],
+        ChangeSet {
+            segments,
+            object_deletes: vec![(od, opts)],
+            ..ChangeSet::default()
+        },
         "t",
         "write + object delete",
         WriteOptions::default(),
@@ -450,12 +451,12 @@ fn class_delete_is_refused() {
 #[test]
 fn a_final_sigma_spelling_is_refused_by_the_name_check() {
     let (_d, db) = seeded();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("ΑΣ", 1.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "Base", scalar_batch("ΑΣ", 1.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "sigma",
         WriteOptions::default(),
@@ -476,18 +477,19 @@ fn a_final_sigma_spelling_is_refused_by_the_name_check() {
 #[test]
 fn a_write_to_an_unrelated_key_alongside_an_object_delete_commits() {
     let (_d, db) = seeded();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("node_2", 7.0))],
-        vec![],
-        vec![],
-        vec![
-            (okey(ObjectKind::Alternative, None, "A"), cascade(true)),
-            (
-                okey(ObjectKind::Parameter, Some("node"), "profile"),
-                cascade(true),
-            ),
-        ],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "Base", scalar_batch("node_2", 7.0))],
+            object_deletes: vec![
+                (okey(ObjectKind::Alternative, None, "A"), cascade(true)),
+                (
+                    okey(ObjectKind::Parameter, Some("node"), "profile"),
+                    cascade(true),
+                ),
+            ],
+            ..ChangeSet::default()
+        },
         "t",
         "unrelated",
         WriteOptions::default(),
@@ -527,28 +529,29 @@ fn a_write_to_an_unrelated_key_alongside_an_object_delete_commits() {
 #[test]
 fn same_names_in_another_class_or_a_sibling_entity_are_not_covered() {
     let (_d, db) = seeded();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![
-            seg("node", "cap", "Base", scalar_batch("node_1", 3.0)),
-            seg("node", "demand", "Base", scalar_batch("node_1", 4.0)),
-        ],
-        vec![],
-        vec![],
-        vec![
-            (
-                okey(ObjectKind::Parameter, Some("link"), "cap"),
-                cascade(true),
-            ),
-            (
-                okey(ObjectKind::Entity, Some("node"), "node_2"),
-                cascade(true),
-            ),
-            (
-                okey(ObjectKind::Entity, Some("link"), "node_1"),
-                cascade(true),
-            ),
-        ],
+        ChangeSet {
+            segments: vec![
+                seg("node", "cap", "Base", scalar_batch("node_1", 3.0)),
+                seg("node", "demand", "Base", scalar_batch("node_1", 4.0)),
+            ],
+            object_deletes: vec![
+                (
+                    okey(ObjectKind::Parameter, Some("link"), "cap"),
+                    cascade(true),
+                ),
+                (
+                    okey(ObjectKind::Entity, Some("node"), "node_2"),
+                    cascade(true),
+                ),
+                (
+                    okey(ObjectKind::Entity, Some("link"), "node_1"),
+                    cascade(true),
+                ),
+            ],
+            ..ChangeSet::default()
+        },
         "t",
         "same names elsewhere",
         WriteOptions::default(),

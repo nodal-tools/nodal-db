@@ -33,7 +33,7 @@ answer will be a served API, not a protocol document.
 ## Reading: SQL is the API
 
 - Read through the **views and table macros**
-  ([`schema/070`–`120_*.sql`](https://github.com/nodal-tools/nodal-db/tree/main/schema)),
+  ([`schema/070`–`130_*.sql`](https://github.com/nodal-tools/nodal-db/tree/main/schema)),
   not the base tables. The base-table layout is not a stable interface;
   the read surface is. [The read surface](read_surface.md) is its
   contract: which objects are public, the rules for readers, which read
@@ -136,9 +136,30 @@ touches canonical data, including a future port, is correct only if it
 reproduces these vectors exactly. The vectors are the specification;
 the README files in the subdirectories explain the vector formats.
 
-## Not yet written
+## Error reference
 
-- Per-language snippets for reading correctly (open-query-close and
-  commit polling).
-- An error reference beyond `Busy`, `Stale`, `SchemaMismatch` and
-  `ReadSurfaceStale`.
+Every error a client should handle is a defined variant of `DbError` in
+Rust and an exception class in Python (all derive from
+`nodal_db.NodalDbError`; the full tree is on the
+[Reference](../reference.md#exceptions) page). Match the variant or the
+class, never the message text.
+
+| Rust | Python | What to do |
+|---|---|---|
+| `Busy` | `Busy` | the file is locked; retry later (the CLI exits 75) |
+| `Conflict` | `Conflict` | a write conflict outlasted the retry budget; retry (the CLI exits 75) |
+| `Stale` | `Stale` | `expect_commit` did not match; re-read and re-apply |
+| `SchemaMismatch` | `SchemaMismatch` | the file has another schema version; re-create it or use a matching build |
+| `ReadSurfaceStale` | `ReadSurfaceStale` | refresh the file's read surface |
+| `CoveredWrite`, `WriteAndDeleteSameKey` | same names | split the writes and deletes into separate calls, or use `covered_writes="delete_wins"` |
+| `UndeclaredValueType` | `UndeclaredValueType` | the batch's type is not declared for the parameter |
+| `ValueMetadataUnstated` | `ValueMetadataUnstated` | say what new versions of linked values keep (`value_metadata`) |
+| `TemplateStampedRename`, `TemplateStampedPurge` | same names | ask the user, then resend with `allow_on_template` |
+| `ShadowedBuiltin` | `ShadowedBuiltin` | drop the offending macro, then compact |
+| `UnreplayableWal` | `UnreplayableWal` | move the leftover WAL aside, then compact |
+| `Api` | `ApiError` | a caller-contract problem; the message says which |
+| `VersionTooOld`, `SchemaDir`, `Duckdb`, `Canon` / `Encode`, `Arrow`, `Internal` and the axis errors | `VersionTooOld`, `SchemaError`, `DatabaseError`, `CanonError`, `ArrowError`, `InternalError` | not retryable; report them |
+
+The Python classes from `Stale` to `TemplateStampedPurge` are `ApiError`
+subclasses, so `except nodal_db.ApiError` also catches them.
+

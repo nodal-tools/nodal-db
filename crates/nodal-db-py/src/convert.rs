@@ -1,4 +1,4 @@
-//! Marshaling only (engine_portability_FINDINGS §7): Python objects <->
+//! Marshaling only: Python objects <->
 //! the core's plain-data types, and `DbError` -> the exception hierarchy.
 //! Nothing in this file makes a decision the core does not already make —
 //! every function is a mechanical re-shaping.
@@ -23,10 +23,9 @@ use nodal_db_core::types::{
     Action, Blocker, CascadeCounts, CoveredWrites, CoveringDelete, EntityAddr, LicenseFields,
     LinkSpec, MetadataChange, MetadataEffect, MetadataKind, MetadataOutcome, ObjectDeleteKey,
     ObjectDeleteOpts, ObjectDeleteOutcome, ObjectDeletePreview, ObjectDeleteResult, ObjectKind,
-    ObjectRef, PairRef, PurgeOutcome, PurgePreview, PurgeRequest, PurgeScope, Ref, RoleSel,
-    Scope, SourceFields, StructuralChange, StructuralEffect, StructuralKind, StructuralOutcome,
-    Subject, TableCount, Target, Tier, ValueAddr, ValueLinkCounts, Warning, WarningKind,
-    WriteReport,
+    ObjectRef, PairRef, PurgeOutcome, PurgePreview, PurgeRequest, PurgeScope, Ref, RoleSel, Scope,
+    SourceFields, StructuralChange, StructuralEffect, StructuralKind, StructuralOutcome, Subject,
+    TableCount, Target, Tier, ValueAddr, ValueLinkCounts, Warning, WarningKind, WriteReport,
 };
 
 use crate::{
@@ -96,7 +95,7 @@ fn stale_err(msg: String, expected: i64, found: i64) -> PyErr {
     err
 }
 
-/// A `CoveredWrite` (D10) exception carrying the covering object-delete key
+/// A `CoveredWrite` exception carrying the covering object-delete key
 /// and the covered write's resolved ids (when known) as attributes.
 fn covered_write_err(
     msg: String,
@@ -123,7 +122,7 @@ fn covered_write_err(
     err
 }
 
-/// A `WriteAndDeleteSameKey` (D9) exception carrying the colliding delete
+/// A `WriteAndDeleteSameKey` exception carrying the colliding delete
 /// key and its resolved ids (when known) as attributes.
 fn write_and_delete_same_key_err(
     msg: String,
@@ -227,7 +226,9 @@ fn template_stamped_rename_err(
             let item = PyDict::new(py);
             let _ = item.set_item("change_index", r.change_index);
             let _ = item.set_item("kind", structural_kind_tag(r.kind));
-            let _ = item.set_item("class_name", r.class);
+            // A dict key, not an attribute: "class" (as in the structural
+            // item it echoes) is fine here, unlike `err.class`.
+            let _ = item.set_item("class", r.class);
             let _ = item.set_item("current", r.current);
             let _ = item.set_item("new_name", r.new_name);
             let _ = renames.append(item);
@@ -345,7 +346,7 @@ pub(crate) fn batches_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatc
 }
 
 /// `{position: [label, ...]}` -> the core's ordinal label domains
-/// (decision D's in-process channel; the Arrow field-metadata channel
+/// (the in-process channel; the Arrow field-metadata channel
 /// `nodal:label_domain` passes through untouched on the batch itself).
 pub(crate) fn domains_from_py(domains: Option<HashMap<u8, Vec<String>>>) -> Vec<LabelDomain> {
     domains
@@ -379,9 +380,9 @@ pub(crate) fn segment_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Segment> {
     })
 }
 
-/// G8 verb type declarations (`ensure_parameter_definition`): a list of
+/// Verb type declarations (`ensure_parameter`): a list of
 /// member dicts `{"kind": str, "dims"?: [{"name": str, "kind": str}]}` —
-/// the IR's `types:` shape 1:1. Validation (legal kinds, D3 dim rules,
+/// the IR's `types:` shape 1:1. Validation (legal kinds, dimension rules,
 /// distinguishability) lives in the core verb, not here.
 pub(crate) fn type_decls_from_py(
     types: Option<Vec<Bound<'_, PyAny>>>,
@@ -448,16 +449,17 @@ fn object_kind_from_str(s: &str) -> PyResult<ObjectKind> {
         "parameter" => ObjectKind::Parameter,
         "alternative" => ObjectKind::Alternative,
         "class" => ObjectKind::Class,
+        "scenario" => ObjectKind::Scenario,
         other => {
             return Err(ApiError::new_err(format!(
-                "unknown object kind {other:?} (expected entity/parameter/alternative/class)"
-            )))
+            "unknown object kind {other:?} (expected entity/parameter/alternative/class/scenario)"
+        )))
         }
     })
 }
 
 /// An object-delete key dict: `{"kind": "entity"|"parameter"|"alternative"|
-/// "class", "class": str?, "name": str}` or, for an N-D entity,
+/// "class"|"scenario", "class": str?, "name": str}` or, for an N-D entity,
 /// `"elements": [str, ...]` instead of `"name"`. The exactly-one-of
 /// name/elements rule mirrors the core's `ObjectRef` enum.
 pub(crate) fn object_key_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ObjectDeleteKey> {
@@ -731,12 +733,12 @@ pub(crate) fn structural_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Stru
             new_name: req_str(obj, &op, "new_name")?,
             description: opt_str(obj, "description")?,
         },
-        "create_entity_class" => StructuralChange::CreateEntityClass {
+        "create_class" => StructuralChange::CreateClass {
             name: req_str(obj, &op, "name")?,
             dims: str_list(obj, "dims")?,
             description: opt_str(obj, "description")?,
         },
-        "rename_entity_class" => StructuralChange::RenameEntityClass {
+        "rename_class" => StructuralChange::RenameClass {
             current: req_str(obj, &op, "current")?,
             new_name: req_str(obj, &op, "new_name")?,
             description: opt_str(obj, "description")?,
@@ -946,26 +948,11 @@ fn object_delete_outcome_to_py<'py>(
 }
 
 fn structural_kind_tag(k: StructuralKind) -> &'static str {
-    match k {
-        StructuralKind::Alternative => "alternative",
-        StructuralKind::Scenario => "scenario",
-        StructuralKind::ScenarioRanking => "scenario_ranking",
-        StructuralKind::Activation => "activation",
-        StructuralKind::Membership => "membership",
-        StructuralKind::Entity => "entity",
-        StructuralKind::EntityClass => "entity_class",
-        StructuralKind::Parameter => "parameter",
-    }
+    k.tag()
 }
 
 fn structural_effect_tag(e: StructuralEffect) -> &'static str {
-    match e {
-        StructuralEffect::Created => "created",
-        StructuralEffect::Renamed => "renamed",
-        StructuralEffect::Updated => "updated",
-        StructuralEffect::NoOp => "no_op",
-        StructuralEffect::Cleared => "cleared",
-    }
+    e.tag()
 }
 
 fn structural_outcome_to_py<'py>(
@@ -975,7 +962,7 @@ fn structural_outcome_to_py<'py>(
     let d = PyDict::new(py);
     d.set_item("change_index", o.change_index)?;
     d.set_item("kind", structural_kind_tag(o.kind))?;
-    d.set_item("object_id", o.object_id)?;
+    d.set_item("id", o.id)?;
     d.set_item("effect", structural_effect_tag(o.effect))?;
     Ok(d)
 }
@@ -999,7 +986,9 @@ fn md_keys(obj: &Bound<'_, PyAny>, what: &str, allowed: &[&str]) -> PyResult<()>
     for k in dict.keys() {
         let k: String = k.extract()?;
         if !allowed.contains(&k.as_str()) {
-            return Err(md_err(format!("{what} does not take {k:?} (it takes {allowed:?})")));
+            return Err(md_err(format!(
+                "{what} does not take {k:?} (it takes {allowed:?})"
+            )));
         }
     }
     Ok(())
@@ -1111,7 +1100,11 @@ fn md_link(target: &Bound<'_, PyAny>, role_from: &Bound<'_, PyAny>) -> PyResult<
 }
 
 fn md_value(obj: &Bound<'_, PyAny>, op: &str) -> PyResult<ValueAddr> {
-    md_keys(obj, "a value address", &["class", "parameter", "alternative", "entity"])?;
+    md_keys(
+        obj,
+        "a value address",
+        &["class", "parameter", "alternative", "entity"],
+    )?;
     Ok(ValueAddr {
         class: md_req(obj, op, "class")?.extract()?,
         parameter: md_req(obj, op, "parameter")?.extract()?,
@@ -1125,8 +1118,23 @@ fn md_value(obj: &Bound<'_, PyAny>, op: &str) -> PyResult<ValueAddr> {
 /// `{"scenario": ..}`, `{"run": id}`, `{"source": ref}`, `{"license": ref}`,
 /// `{"value_list": ..}`, `{"unit": ..}`.
 fn md_subject(obj: &Bound<'_, PyAny>) -> PyResult<Subject> {
-    md_keys(obj, "a subject", &["dataset", "entity", "class", "parameter", "alternative",
-        "scenario", "run", "source", "license", "value_list", "unit"])?;
+    md_keys(
+        obj,
+        "a subject",
+        &[
+            "dataset",
+            "entity",
+            "class",
+            "parameter",
+            "alternative",
+            "scenario",
+            "run",
+            "source",
+            "license",
+            "value_list",
+            "unit",
+        ],
+    )?;
     if obj.cast::<PyDict>().map(|d| d.len()).unwrap_or(0) != 1 {
         return Err(md_err(format!("a subject has exactly one key, got {obj}")));
     }
@@ -1205,7 +1213,11 @@ fn md_scope(obj: &Bound<'_, PyAny>) -> PyResult<Scope> {
     if md_opt(obj, "entity").is_some() {
         return Ok(Scope::Value(md_value(obj, "value_metadata")?));
     }
-    md_keys(obj, "a target scope", &["class", "parameter", "alternative"])?;
+    md_keys(
+        obj,
+        "a target scope",
+        &["class", "parameter", "alternative"],
+    )?;
     Ok(Scope::Target {
         class: md_req(obj, "value_metadata", "class")?.extract()?,
         parameter: md_req(obj, "value_metadata", "parameter")?.extract()?,
@@ -1217,8 +1229,20 @@ fn md_fields_source(obj: &Bound<'_, PyAny>) -> PyResult<SourceFields> {
     let Some(f) = md_opt(obj, "fields") else {
         return Ok(SourceFields::default());
     };
-    md_keys(&f, "source fields", &["title", "path", "edition", "publisher", "issued",
-        "retrieved", "citation", "description"])?;
+    md_keys(
+        &f,
+        "source fields",
+        &[
+            "title",
+            "path",
+            "edition",
+            "publisher",
+            "issued",
+            "retrieved",
+            "citation",
+            "description",
+        ],
+    )?;
     Ok(SourceFields {
         title: opt_str(&f, "title")?,
         path: opt_str(&f, "path")?,
@@ -1252,13 +1276,13 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
     let op: String = md_req(obj, "metadata item", "op")?.extract()?;
     let o = op.as_str();
     let keys: &[&str] = match o {
-        "put_source" => &["source", "rename", "fields"],
-        "put_license" => &["license", "rename", "fields"],
+        "put_source" => &["source", "new_name", "fields"],
+        "put_license" => &["license", "new_name", "fields"],
         "set_source_licenses" => &["source", "licenses"],
         "create_pair" => &["name", "value"],
         "revise_pair" => &["pair", "value"],
-        "rename_pair_key" => &["from", "to"],
-        "put_role" => &["role", "rename", "description", "iri"],
+        "rename_pair_key" => &["current", "new_name"],
+        "put_role" => &["role", "new_name", "description", "iri"],
         "set_property" => &["key", "value"],
         "delete_source" => &["source", "cascade"],
         "delete_license" => &["license", "cascade"],
@@ -1275,12 +1299,12 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
     Ok(match o {
         "put_source" => MetadataChange::PutSource {
             source: md_ref(&md_req(obj, o, "source")?)?,
-            rename: opt_str(obj, "rename")?,
+            new_name: opt_str(obj, "new_name")?,
             fields: md_fields_source(obj)?,
         },
         "put_license" => MetadataChange::PutLicense {
             license: md_ref(&md_req(obj, o, "license")?)?,
-            rename: opt_str(obj, "rename")?,
+            new_name: opt_str(obj, "new_name")?,
             fields: md_fields_license(obj)?,
         },
         "set_source_licenses" => {
@@ -1302,12 +1326,12 @@ pub(crate) fn metadata_change_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Metada
             value: md_req(obj, o, "value")?.extract()?,
         },
         "rename_pair_key" => MetadataChange::RenamePairKey {
-            from: md_req(obj, o, "from")?.extract()?,
-            to: md_req(obj, o, "to")?.extract()?,
+            current: md_req(obj, o, "current")?.extract()?,
+            new_name: md_req(obj, o, "new_name")?.extract()?,
         },
         "put_role" => MetadataChange::PutRole {
             role: md_ref(&md_req(obj, o, "role")?)?,
-            rename: opt_str(obj, "rename")?,
+            new_name: opt_str(obj, "new_name")?,
             description: opt_str(obj, "description")?,
             iri: opt_str(obj, "iri")?,
         },
@@ -1387,30 +1411,11 @@ pub(crate) fn metadata_from_py(
 }
 
 fn md_kind_tag(k: MetadataKind) -> &'static str {
-    match k {
-        MetadataKind::Source => "source",
-        MetadataKind::License => "license",
-        MetadataKind::SourceLicenses => "source_licenses",
-        MetadataKind::Pair => "pair",
-        MetadataKind::Role => "role",
-        MetadataKind::Property => "property",
-        MetadataKind::Link => "link",
-        MetadataKind::ValueLink => "value_link",
-        MetadataKind::ValueMetadata => "value_metadata",
-    }
+    k.tag()
 }
 
 fn md_effect_tag(e: MetadataEffect) -> &'static str {
-    match e {
-        MetadataEffect::Created => "created",
-        MetadataEffect::Updated => "updated",
-        MetadataEffect::Renamed => "renamed",
-        MetadataEffect::NoOp => "noop",
-        MetadataEffect::Cleared => "cleared",
-        MetadataEffect::Deleted => "deleted",
-        MetadataEffect::Restricted => "restricted",
-        MetadataEffect::DroppedByDelete => "dropped_by_delete",
-    }
+    e.tag()
 }
 
 fn metadata_outcome_to_py<'py>(
@@ -1418,7 +1423,7 @@ fn metadata_outcome_to_py<'py>(
     o: &MetadataOutcome,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("index", o.index)?;
+    d.set_item("item_index", o.item_index)?;
     d.set_item("kind", md_kind_tag(o.kind))?;
     d.set_item("id", o.id)?;
     d.set_item("effect", md_effect_tag(o.effect))?;
@@ -1518,7 +1523,7 @@ pub(crate) fn erase_preview_to_py<'py>(
     d.set_item("alternative_id", p.alternative_id)?;
     d.set_item("alternative_name", &p.alternative_name)?;
     d.set_item("per_table", table_counts_to_py(py, &p.per_table)?)?;
-    d.set_item("rows_total", p.rows_total)?;
+    d.set_item("total_rows", p.total_rows)?;
     d.set_item("bytes_estimate", p.bytes_estimate)?;
     d.set_item("still_current", p.still_current)?;
     let scen = PyList::empty(py);
@@ -1545,7 +1550,7 @@ pub(crate) fn erase_report_to_py<'py>(
     d.set_item("alternative_id", r.alternative_id)?;
     d.set_item("identity_closed", r.identity_closed)?;
     d.set_item("per_table", table_counts_to_py(py, &r.per_table)?)?;
-    d.set_item("rows_total", r.rows_total)?;
+    d.set_item("total_rows", r.total_rows)?;
     d.set_item("bytes_estimate", r.bytes_estimate)?;
     Ok(d)
 }

@@ -1,19 +1,39 @@
-//! nodal-db-core — the writer library and the single canonicalizer.
+//! nodal-db-core — the writer library and the single canonicalizer of
+//! nodal-db database files.
 //!
-//! Phase 0 scaffold: module stubs only. The canonical byte encoding and the
-//! 64-bit content hash live here as an `encoding` module (folded in per
-//! HANDOFF §6.6, overriding the plan's separate-crate proposal). Real
-//! implementation lands in Phases 1-3.
+//! A nodal-db file is a DuckDB database with a fixed schema: classes,
+//! entities, parameters, alternatives and scenarios, parameter values in
+//! typed tables (scalar, dense array, long), and append-only history with
+//! as-of reads. This crate is the one writer: every value goes through
+//! the same canonicalization pipeline ([`canon`], [`tier`], [`encoding`])
+//! so the same data always produces the same stored bytes, whoever
+//! writes it.
+//!
+//! The entry points:
+//! - [`schema_init`] creates a database file from the embedded schema.
+//! - [`api::commit`] commits one [`api::ChangeSet`] (value writes,
+//!   structural changes, value and object deletes, purges, metadata)
+//!   atomically; [`api::write_parameter`], [`api::delete_values`] and the
+//!   [`verbs`] are convenience wrappers over it. Reads go through the SQL
+//!   views (the read surface, [`read_surface`]) or
+//!   [`api::read_parameter`].
+//! - [`template`] loads, plans, applies and exports templates.
+//! - [`compaction`], [`extract`], [`erasure`] and [`purge`] maintain a file.
+//!
+//! Connections are per operation: every call opens the file, works and
+//! closes it, so a long-lived reader never blocks a writer ([`conn`]).
+//!
+//! User documentation: <https://nodal-tools.github.io/nodal-db/>.
 
 /// Re-export of the one `duckdb` (and thus the one `duckdb::arrow`) this
 /// library is built against, so downstream crates (the CLI, tests) can name
-/// the exact same types the public API uses — the compile-time anchor of the
-/// R2 one-arrow-version rule.
+/// the exact same types the public API uses: one arrow version in the whole
+/// dependency tree.
 pub use duckdb;
 
 /// Minimum bundled DuckDB version the schema semantics are verified on.
-/// Mirrors `schema/build.py`'s `MINIMUM_DUCKDB`. Asserted at connection open
-/// (see the Phase-0 spike) and, later, by `conn`.
+/// Mirrors `schema/build.py`'s `MINIMUM_DUCKDB`; asserted when a connection
+/// opens.
 ///
 /// 2.0 because the project writes DuckDB's native 2.0 storage format
 /// (`storage_version` tag `v2.0.0+`; readers need DuckDB >= 2.0) and the
@@ -22,10 +42,14 @@ pub use duckdb;
 /// WAL on every write. The tests in `tests/storage_format.rs` guard that.
 pub const MINIMUM_DUCKDB: (u32, u32) = (2, 0);
 
-/// Plain FFI-friendly data types for the pipeline (Phase 2).
+/// The database format version this build writes and accepts (see
+/// [`compaction::SCHEMA_VERSION`], where it is defined).
+pub use compaction::SCHEMA_VERSION;
+
+// Each module's documentation is its own `//!` header.
+
 pub mod types;
 
-/// Unicode text normalization: the core's one NFC function (plan T5).
 pub mod text;
 
 /// The name fold's data (`types::fold`): Unicode 15.1 simple lowercase, the
@@ -34,112 +58,55 @@ pub mod text;
 #[doc(hidden)]
 pub mod fold_table;
 
-/// Canonical byte encoding + 64-bit content hash (Phase 1) + value encoding
-/// (Phase 2, spec §9 / OPEN-7).
 pub mod encoding;
 
-/// The canonicalization pipeline: NULL elimination, axis derivation, sort,
-/// tier (Phase 2, VMP Part 3).
 pub mod canon;
 
-/// The tier decision — pipeline step 4 (Phase 2, VMP Part 3).
 pub mod tier;
 
-/// Array-tier reconstruction: dense flat `DOUBLE[]` -> logical long rows, the
-/// inverse of `tier` (Phase 2, VMP Part 3; `specs/reconstruction.md`).
 pub mod reconstruct;
 
-/// One error type for the DB-facing layer (Phase 2b).
 pub mod error;
 
-/// Apply `schema/*.sql` in numbered order (Phase 2b, `build.py` in Rust).
 pub mod schema_init;
 
-/// Connection discipline: open-write-close / open-read-close (Phase 2b, VMP Part 6).
 pub mod conn;
 
-/// The read surface's version marker, the refresh of older files before a
-/// write, and the read overlay (`docs/dev/read_surface.md`).
 pub mod read_surface;
 
-/// Content-verified axis dedup persistence (Phase 2b, VMP Part 4).
 pub mod axis;
 
-/// The history write protocol: from/to close-out, array `_hist` pre-image,
-/// version counter, retention, tier transitions (Phase 3a, VMP Part 5).
 pub mod history;
 
-/// The public Arrow-in write path: `write_parameter` / `read_parameter`
-/// (Phase 3b, VMP Parts 3-6). Ties name-resolution (auto-create, decision B),
-/// declared-type lookup, canon, tier, axis dedup, and history into one atomic,
-/// retried commit.
 pub mod api;
 
-/// Object deletion: structural close-out of an object row (+ dependents) inside
-/// the same atomic commit as value writes/deletes (object_delete plan §2-§4).
-/// A single leg registry drives the cascade, the RESTRICT report, and the
-/// read-only preview.
 pub mod object_delete;
 
-/// Element-tuple uniqueness of N-D entities: the per-call tuple index the
-/// entity create consults (no two live entities of a class hold one tuple).
 #[doc(hidden)]
 pub mod entity_tuple;
 
-/// The set path of entity renames: a long run of `RenameEntity` items of a
-/// call applied as one batch.
 #[doc(hidden)]
 pub mod entity_rename_set;
 
-/// Purge (entity_descriptions_purge plan §3): a bulk, versioned close-out of
-/// every item in a named scope, in one commit, through the object delete's
-/// leg registry in set form.
 pub mod purge;
 
-/// Physical repack (Sense A): rebuild the DB file into a fresh, densely-packed
-/// one that reclaims dead blocks while preserving ALL logical content, then
-/// atomically swap it in (`specs/compaction_DESIGN.md`). The rebuild copy is
-/// clustered current-first (erasure_compaction_plan §4.1, always-on).
 pub mod compaction;
 
 /// The shared whole-file rebuild machinery (catalog maps, real-column
-/// discovery, RO source ATTACH, sequence restore, durability helpers) used by
-/// [`compaction`] and the history-free extract.
+/// discovery, read-only source ATTACH, sequence restore, durability
+/// helpers) used by [`compaction`] and the history-free extract.
 pub(crate) mod rebuild;
 
-/// History-free extract: a new database file holding exactly the content
-/// valid at one commit of a source, with a `kind='horizon'` erasure marker as
-/// the trace of the omitted history; the source is only read and becomes the
-/// archive.
 pub mod extract;
 
-/// Hard erasure: physical removal with a trace — erase-by-alternative plus the
-/// `erasure_marker` write, one atomic transaction; the sanctioned exception to
-/// append-only history (`specs/erasure_compaction_plan.md`).
 pub mod erasure;
 
-/// The G8 migration verbs: the core write surface `run:` migration programs
-/// and the Spine importer use for vocabulary, scenario-rank, activation, and
-/// template-identity writes (`specs/flextool_port_finale_plan.md` §1, D-F4).
 pub mod verbs;
 
-/// Database properties: the single-valued `database_property` table (core,
-/// user and tool keys) and its one writer.
 pub mod property;
 
-/// Metadata: the pair pool, sources, licenses, roles and the object and
-/// value link tables; their one writer and the value-link lifecycle.
 pub mod metadata;
 
-/// The sanctioned structural (non-value) write path — the fourth
-/// `commit_changes` channel: create/rename alternatives + scenarios, declarative
-/// scenario ranking (A-min), per-edge activation + membership, and the D-S9
-/// entity/class/parameter creates (`specs/structural_write_api_plan.md`). Shared
-/// appliers so no table gets a second writer (invariant 2).
 pub mod structural;
 
-/// The template IR loader: parse/validate the YAML-1.2/JSON vocabulary IR,
-/// load into a fresh DB, reconcile against a populated one (three-layer
-/// migration model, v1 mechanics), export back out
-/// (`specs/template_ir_plan.md`; HANDOFF §8.4 phase 2).
 pub mod template;

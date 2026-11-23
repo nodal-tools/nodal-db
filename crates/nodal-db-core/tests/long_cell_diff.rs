@@ -3,7 +3,7 @@
 //!
 //! The randomized test drives seeded sequences of direct `write_value` /
 //! `delete_value` commits, and set-based rounds of several long values
-//! (`write_long_values`, as `commit_changes` writes them), over a few keys: cell edits, adds and removes on
+//! (`write_long_values`, as `commit` writes them), over a few keys: cell edits, adds and removes on
 //! the same axes, identical rewrites, axis and kind changes (whole-value
 //! rewrites), transitions to and from the scalar and array tiers, deletes
 //! and rewrites, with and without content retention, interleaved with
@@ -533,7 +533,7 @@ fn next_value(r: &mut Rng, cur: &Option<Val>) -> Option<Val> {
 
 fn opts_for(retained: bool) -> WriteOptions {
     WriteOptions {
-        force_replace: !retained,
+        retain_content: (!retained).then_some(false),
         ..WriteOptions::default()
     }
 }
@@ -608,7 +608,7 @@ fn run_seed(seed: u64, commits: usize) -> SetMix {
         let other_val = (r.below(4) as f64).to_bits();
         // Usually the long values of a multi-key commit go through one
         // set-based round (N > 1: the grouped probe, the set close-outs),
-        // as `commit_changes` writes them; the rest one key at a time.
+        // as `commit` writes them; the rest one key at a time.
         let set_round = plan
             .iter()
             .filter(|(_, v, _)| matches!(v, Some(Val::Long { .. })))

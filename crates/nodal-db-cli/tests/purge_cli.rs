@@ -59,9 +59,9 @@ fn write(db: &Path, class: &str, entities: &[&str]) {
         "Base",
         batch,
         &[],
-        WriteOptions::default(),
         "t",
         "",
+        WriteOptions::default(),
     )
     .unwrap();
 }

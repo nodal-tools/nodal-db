@@ -1,0 +1,246 @@
+name: Release
+
+# A `v*` tag (e.g. v0.1.0) builds and tests the Python wheels, the sdist and
+# the CLI binaries, publishes the wheels and the sdist to PyPI, and creates
+# the GitHub Release with the wheels, the binaries and the tag's CHANGELOG.md
+# section as its notes.
+#
+# Platforms: Linux x86_64 and macOS arm64.
+# - Linux wheels are manylinux_2_28 (glibc >= 2.28: RHEL/Rocky/Alma 8,
+#   Debian 10, Ubuntu 18.10 and later, i.e. typical HPC clusters). The
+#   bundled DuckDB 2.0 needs a C++17 compiler; the manylinux_2_28 image's gcc
+#   toolset builds it, which manylinux2014's (CentOS 7) is not verified for.
+#   The Linux CLI binary is built in the same image, so it runs on the same
+#   systems.
+# - macOS: arm64, deployment target 11.0.
+#
+# PyPI uses trusted publishing (no token): the PyPI project `nodal-db` has a
+# trusted publisher for owner nodal-tools, repository nodal-db, workflow
+# release.yml, environment `pypi`.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag must match the version every package carries.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $cargo_version" >&2
+            exit 1
+          fi
+          if ! grep -q "^## \[$tag\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$tag]' section" >&2
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  wheel-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/nodal-db-py
+          target: x86_64
+          manylinux: "2_28"
+          args: --release --out ../../dist
+          docker-options: -e NODAL_DB_GIT_COMMIT=${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-x86_64
+          path: dist/*.whl
+
+  wheel-macos:
+    needs: version
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      NODAL_DB_GIT_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/nodal-db-py
+          target: aarch64-apple-darwin
+          args: --release --out ../../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-macos-arm64
+          path: dist/*.whl
+
+  sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/nodal-db-py
+          command: sdist
+          args: --out ../../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Each wheel installed into a clean venv and the skin's test suite run
+  # against it (from the tests directory, so the installed package is what
+  # is imported); the sdist built from scratch into a wheel and smoke-tested,
+  # so a source install works too.
+  test-wheels:
+    needs: [wheel-linux, wheel-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: wheel-linux-x86_64
+          - os: macos-14
+            artifact: wheel-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+      - name: install the wheel and run the skin tests
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl "pytest" "duckdb==2.0.0"
+          cd crates/nodal-db-py/tests
+          /tmp/venv/bin/python -m pytest -q
+
+  test-sdist:
+    needs: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: build a wheel from the sdist alone and import it
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.tar.gz
+          cd /tmp
+          /tmp/venv/bin/python -c "import nodal_db, tempfile, os; p = os.path.join(tempfile.mkdtemp(), 'x.duckdb'); nodal_db.init(p); print(nodal_db.open(p).head_commit())"
+
+  cli-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    env:
+      NODAL_DB_GIT_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: build
+        run: cargo build --release --locked -p nodal-db-cli
+      - name: package
+        run: |
+          name="nodal-db-${{ needs.version.outputs.version }}-x86_64-linux-gnu"
+          mkdir -p "$name" cli
+          cp target/release/nodal-db LICENSE README.md CHANGELOG.md "$name"/
+          "$name"/nodal-db --version
+          tar czf "cli/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux-x86_64
+          path: cli/*.tar.gz
+
+  cli-macos:
+    needs: version
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      NODAL_DB_GIT_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: build
+        run: cargo build --release --locked -p nodal-db-cli
+      - name: package
+        run: |
+          name="nodal-db-${{ needs.version.outputs.version }}-aarch64-apple-darwin"
+          mkdir -p "$name" cli
+          cp target/release/nodal-db LICENSE README.md CHANGELOG.md "$name"/
+          "$name"/nodal-db --version
+          tar czf "cli/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos-arm64
+          path: cli/*.tar.gz
+
+  publish-pypi:
+    needs: [test-wheels, test-sdist, cli-linux, cli-macos]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nodal-db/
+    permissions:
+      id-token: write   # trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  github-release:
+    needs: [version, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: release notes from CHANGELOG.md
+        run: |
+          awk -v v="${{ needs.version.outputs.version }}" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: checksums
+        run: cd assets && sha256sum * > SHA256SUMS
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "nodal-db ${{ needs.version.outputs.version }}" \
+            --notes-file notes.md \
+            --verify-tag

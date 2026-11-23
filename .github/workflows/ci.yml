@@ -10,6 +10,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   gate:
     runs-on: ubuntu-latest
@@ -37,13 +43,58 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace
 
-      # Quick gate, half 2: schema smoke (expects 223/223), on the venv's
-      # DuckDB pinned to the line the schema is verified on (2.0.0).
+      # Quick gate, half 2: the schema smoke suite, on the
+      # venv's DuckDB pinned to the line the schema is verified on (2.0.0).
       - name: schema smoke test
         run: .venv/bin/python schema/smoke_test.py
 
       # The A/B perf gate's tool tests (stdlib unittest: statistics,
       # verdicts, exit codes, cache keys on a temp repository). No builds
-      # and no benchmarks: the gate itself is local-only (ab_ratio_gates D3).
+      # and no benchmarks: the gate itself is local-only.
       - name: perf-gate tool tests
         run: python -m unittest discover -s scripts/bench/ab/tests
+
+  # Formatting, lints and the API docs: rustdoc warnings (broken intra-doc
+  # links, public docs pointing at private items) fail the build.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+  # What ships to Python users: the wheel built by maturin, installed into a
+  # clean venv, then the skin's pytest suite and the Spine importer's tests
+  # (python/tests) against the installed package.
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: build the wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/nodal-db-py
+          args: --release --out ../../dist
+      - name: test venv
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl pytest "duckdb==2.0.0"
+          # The Spine importer's tests need spinedb_api (the version the
+          # importer is developed against).
+          /tmp/venv/bin/pip install "spinedb_api @ git+https://github.com/spine-tools/Spine-Database-API.git@5b487d9c5"
+      - name: skin tests
+        working-directory: crates/nodal-db-py/tests
+        run: /tmp/venv/bin/python -m pytest -q
+      - name: Spine importer tests
+        run: /tmp/venv/bin/python -m pytest -q python/tests

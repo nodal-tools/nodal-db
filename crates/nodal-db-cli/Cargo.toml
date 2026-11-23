@@ -1,20 +1,31 @@
 [package]
 name = "nodal-db-cli"
-version = "0.1.0"
-edition = "2021"
-license = "EUPL-1.2"
+description = "The nodal-db command-line tool: create, import into and maintain nodal-db database files."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories = ["database", "command-line-utilities", "science"]
 publish = false
 
 [[bin]]
 name = "nodal-db"
 path = "src/main.rs"
+# The skin library `nodal_db` documents under the same name; the CLI has no
+# library docs to build.
+doc = false
 
 [dependencies]
-nodal-db-core = { path = "../nodal-db-core" }
+nodal-db-core = { path = "../nodal-db-core", version = "0.1.0" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
-# Direct arrow for IPC only — pinned =60.2.0 to duckdb's re-export (risk R2;
+# Direct arrow for IPC only — pinned =60.2.0 to duckdb's re-export (the one-arrow rule;
 # see the workspace Cargo.toml comment: duckdb bumps require a matched bump).
 arrow = { workspace = true }
 

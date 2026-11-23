@@ -54,17 +54,16 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use duckdb::{params, AccessMode, Connection};
+use duckdb::{params, Connection};
 
 use crate::compaction::{write_baseline, SCHEMA_VERSION};
-use crate::conn::{canonical_path_key, open_with_retry, path_lock};
+use crate::conn::{canonical_path_key, open_for_rebuild, path_lock, utf8_path};
 use crate::error::DbError;
 use crate::rebuild::{
     assert_temp_schema_version, attach_source_ro, check_catalog, check_selection, cluster_order,
-    discover_real_columns, fsync_dir, fsync_file, parent_dir, q, remove_temp, restore_sequences,
-    selection_for, Selection, SRC, TABLE_ORDER,
+    create_temp_db, discover_real_columns, fsync_dir, fsync_file, parent_dir, q, remove_orphan,
+    remove_temp, restore_sequences, selection_for, Selection, SRC, TABLE_ORDER,
 };
 use crate::schema_init::init_schema;
 
@@ -163,6 +162,9 @@ pub fn extract(src: &Path, dest: &Path, opts: &ExtractOpts) -> Result<ExtractRep
     if opts.user.trim().is_empty() {
         return Err(DbError::Api("extract: user must be non-empty".into()));
     }
+    // Non-UTF-8 paths are refused before anything is named after them (L2).
+    utf8_path(src)?;
+    utf8_path(dest)?;
     if !src.is_file() {
         return Err(DbError::Api(format!(
             "no database file at {:?} (extract needs an existing source)",
@@ -193,9 +195,15 @@ pub fn extract(src: &Path, dest: &Path, opts: &ExtractOpts) -> Result<ExtractRep
     sweep_orphan_extract_temps(dest);
 
     let bytes_source = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
-    let temp = temp_path_for(dest);
-    init_schema(&temp)?;
-    let conn = match open_with_retry(&temp, AccessMode::ReadWrite) {
+    // A new, empty file under an unpredictable name (L3), then the schema.
+    let temp = temp_path_for(dest)?;
+    if let Err(e) = init_schema(&temp) {
+        remove_temp(&temp);
+        return Err(e);
+    }
+    // The only path this connection may reach besides its own file is the
+    // source (engine rule 12).
+    let conn = match open_for_rebuild(&temp, src) {
         Ok(c) => c,
         Err(e) => {
             remove_temp(&temp);
@@ -466,11 +474,11 @@ fn build_into(conn: &Connection, src: &Path, opts: &ExtractOpts) -> Result<Extra
 fn preflight_source(conn: &Connection) -> Result<String, DbError> {
     // Either layout: a pre-0.6 source is named by its own version.
     let versions: Vec<String> = crate::property::schema_versions_any(conn, Some(SRC), None)
-    .map_err(|e| {
-        DbError::Api(format!(
-            "extract refused: the source does not look like a nodal-db database ({e})"
-        ))
-    })?;
+        .map_err(|e| {
+            DbError::Api(format!(
+                "extract refused: the source does not look like a nodal-db database ({e})"
+            ))
+        })?;
     if versions.len() != 1 || !crate::compaction::is_current_schema_version(&versions[0]) {
         return Err(DbError::SchemaMismatch {
             message: format!(
@@ -905,20 +913,20 @@ fn strings(conn: &Connection, sql: &str) -> Result<Vec<String>, DbError> {
 // `<db>.compact.` prefix is left alone).
 // ---------------------------------------------------------------------------
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// `<dest-filename>.extract.<pid>.<n>.tmp`, a sibling of dest (same
-/// filesystem, so the hard-link publish works).
-fn temp_path_for(dest: &Path) -> PathBuf {
-    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
-    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("db");
-    let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    dir.join(format!("{name}.extract.{}.{n}.tmp", std::process::id()))
+/// Create the private directory `<dest-filename>.extract.<pid>.<random>.tmp`
+/// next to dest and return the temp database path inside it (same
+/// filesystem, so the hard-link publish works;
+/// [`create_temp_db`]: unpredictable, never through a planted symlink).
+fn temp_path_for(dest: &Path) -> Result<PathBuf, DbError> {
+    create_temp_db(
+        parent_dir(dest),
+        &format!("{}.extract", crate::compaction::file_name(dest)?),
+    )
 }
 
-fn temp_prefix(dest: &Path) -> String {
-    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("db");
-    format!("{name}.extract.")
+fn temp_prefix(dest: &Path) -> Option<String> {
+    let name = dest.file_name()?.to_str()?;
+    Some(format!("{name}.extract."))
 }
 
 /// Delete abandoned `<dest-filename>.extract.*.tmp` (and `.tmp.wal`) siblings
@@ -927,14 +935,16 @@ fn temp_prefix(dest: &Path) -> String {
 /// temp here and then fail loudly at publish; it never produces a wrong dest.)
 pub fn sweep_orphan_extract_temps(dest: &Path) {
     let dir = parent_dir(dest);
-    let prefix = temp_prefix(dest);
+    let Some(prefix) = temp_prefix(dest) else {
+        return;
+    };
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         if let Some(name) = entry.file_name().to_str() {
             if name.starts_with(&prefix) && (name.ends_with(".tmp") || name.ends_with(".tmp.wal")) {
-                let _ = fs::remove_file(entry.path());
+                remove_orphan(&entry.path());
             }
         }
     }
@@ -949,7 +959,9 @@ fn wal_path(db: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conn::open_with_retry;
     use crate::rebuild::SELECTION;
+    use duckdb::AccessMode;
 
     /// A dest that appears while the extract runs (after the step-1 check)
     /// is never replaced: the publish is a hard link, not a rename.
@@ -1012,7 +1024,7 @@ mod tests {
         )
         .unwrap();
         let check_against = |dest: &Path| -> Result<Option<String>, DbError> {
-            let conn = open_with_retry(dest, AccessMode::ReadWrite).unwrap();
+            let conn = open_for_rebuild(dest, &src).unwrap();
             attach_source_ro(&conn, &src).unwrap();
             let r = self_check_derived_views(&conn);
             let temps: i64 = conn

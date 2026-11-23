@@ -162,11 +162,11 @@ names, which compaction refuses loudly.
 - **Out**: `pyarrow.RecordBatch` (`read_parameter`) and
   `pyarrow.RecordBatchReader` (`query`), exported zero-copy.
 - The bridge is the maintained `arrow-pyarrow` crate (split out of
-  arrow-rs), **pinned `=60.0.0`** to the workspace `arrow` pin — one
+  arrow-rs), **pinned `=60.2.0`** to the workspace `arrow` pin — one
   arrow in the tree, so imported batches ARE the core's `RecordBatch`
   type at compile time. Version coupling is three-way and matched-bump:
   duckdb-rs ⇒ `arrow` ⇒ `arrow-pyarrow` (whose pyo3 requirement then
-  dictates the `pyo3` line; 60.0.0 ⇒ pyo3 ^0.29). See the root
+  dictates the `pyo3` line; 60.2.0 ⇒ pyo3 ^0.29). See the root
   `Cargo.toml` comments. Runtime needs `pyarrow>=16` (PyCapsule
   interface both directions).
 

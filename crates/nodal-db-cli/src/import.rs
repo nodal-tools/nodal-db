@@ -82,6 +82,17 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     let user = resolve_user(args)?;
     require_db(&args.db)?;
 
+    let size = std::fs::metadata(&args.file)
+        .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?
+        .len();
+    if size > MAX_INPUT_BYTES {
+        bail!(
+            "{}: {size} bytes is more than the importer reads in one file ({} GiB); \
+             split the data into several imports",
+            args.file.display(),
+            MAX_INPUT_BYTES >> 30
+        );
+    }
     let bytes = std::fs::read(&args.file)
         .map_err(|e| anyhow!("cannot read {}: {e}", args.file.display()))?;
     // E1: not an IPC stream — empty file or the IPC *file* (Feather) magic.
@@ -99,6 +110,11 @@ pub fn run(args: &ImportArgs) -> Result<()> {
             args.file.display()
         );
     }
+
+    // Before any decoding: no compressed buffer may declare more decompressed
+    // bytes than the importer allows (arrow reserves the declared size up
+    // front, so a crafted prefix would abort the process).
+    check_decompressed_sizes(&bytes)?;
 
     let raws = split_segments(&bytes)?;
 
@@ -144,6 +160,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     // Unicode too or Ä/ä-aliased targets slip past — critique F3).
     let mut targets: HashSet<(String, String, String)> = HashSet::new();
     let mut segments: Vec<Segment> = Vec::with_capacity(raws.len());
+    let mut budget = DecodeBudget::default();
     for (raw, meta) in raws.iter().zip(&metas) {
         let alternative = effective_alternative(raw.ordinal, meta, args)?;
         assert_flags(raw.ordinal, meta, args)?;
@@ -160,7 +177,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 alternative
             );
         }
-        let batches = normalize_segment(raw, meta)?;
+        let batches = normalize_segment(raw, meta, &mut budget)?;
         segments.push(Segment {
             class: meta.class.clone(),
             parameter: meta.parameter.clone(),
@@ -216,14 +233,14 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     if report.commit_id == 0 {
         // Every value equal to the stored one: the core made no commit
         // (skip_unchanged_writes_PLAN D1), so the message is not recorded.
-        println!(
+        say!(
             "imported {}: no changes (nothing committed), {} segment(s), {} value(s) unchanged",
             args.file.display(),
             n_segments,
             report.values_unchanged,
         );
     } else {
-        println!(
+        say!(
             "imported {}: commit {}, {} segment(s), {} value(s) written, {} unchanged, \
              {} row(s) written, axes {} created / {} reused, tiers [{}]",
             args.file.display(),
@@ -240,25 +257,27 @@ pub fn run(args: &ImportArgs) -> Result<()> {
     for w in &report.warnings {
         match &w.kind {
             WarningKind::AutoCreated => {
-                println!(
+                say!(
                     "warning: auto-created {} {:?} (id {})",
-                    w.object_type, w.name, w.id
+                    w.object_type,
+                    w.name,
+                    w.id
                 )
             }
-            WarningKind::TimezoneNormalized { column, tz } => println!(
+            WarningKind::TimezoneNormalized { column, tz } => say!(
                 "warning: timezone-normalized column {column:?} (tz {tz}); \
                  stored as the UTC-µs instants unchanged"
             ),
             // Import never issues deletes, but the match is exhaustive: surface
             // these consistently if the shared write path ever emits one.
             WarningKind::UnknownReferent { key_index, level } => {
-                println!("warning: unknown {level} for delete key {key_index} (skipped)")
+                say!("warning: unknown {level} for delete key {key_index} (skipped)")
             }
             WarningKind::NothingToDelete { key_index } => {
-                println!("warning: nothing to delete for key {key_index} (no live value)")
+                say!("warning: nothing to delete for key {key_index} (no live value)")
             }
             WarningKind::DroppedByDelete { .. } => {
-                println!(
+                say!(
                     "warning: write of {} dropped (a delete in the call covers it)",
                     w.name
                 )
@@ -268,7 +287,7 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 count,
                 written,
                 stored,
-            } => println!(
+            } => say!(
                 "warning: {count} {what}(s) of {} stored in Unicode NFC, e.g. {written:?} as \
                  {stored:?} (spellings that differ only in normalization are one {what})",
                 w.name
@@ -280,14 +299,14 @@ pub fn run(args: &ImportArgs) -> Result<()> {
                 request_index,
                 cells,
                 threshold,
-            } => println!(
+            } => say!(
                 "warning: purge request {request_index} covers {cells} cells (more than \
                  {threshold})"
             ),
         }
     }
     for line in name_folded_lines(&report.warnings) {
-        println!("{line}");
+        say!("{line}");
     }
     Ok(())
 }
@@ -479,6 +498,116 @@ fn split_segments(bytes: &[u8]) -> Result<Vec<RawSegment>> {
     Ok(out)
 }
 
+/// The largest input file the importer reads (it reads the whole file into
+/// memory first).
+const MAX_INPUT_BYTES: u64 = 16 << 30;
+/// The largest decompressed size one compressed buffer may declare: arrow
+/// reserves the declared size before it decompresses, so the prefix, not the
+/// real content, decides the allocation. 2 GiB is more than one column
+/// buffer of a 32-bit-offset Arrow array can address.
+const MAX_DECOMPRESSED_BUFFER: u64 = 2 << 30;
+/// The largest decompressed size all compressed buffers of one file may
+/// declare together.
+const MAX_DECOMPRESSED_TOTAL: u64 = 16 << 30;
+
+/// Walk every IPC message frame of the whole container (all segments; the
+/// frame layout is [`classify_termination`]'s) and refuse (E6) a compressed
+/// record or dictionary batch whose buffers declare more decompressed bytes
+/// than [`MAX_DECOMPRESSED_BUFFER`] each or [`MAX_DECOMPRESSED_TOTAL`]
+/// together. Each compressed buffer starts with its decompressed length as
+/// a little-endian `i64` (`-1`: stored uncompressed). Runs before any
+/// `StreamReader`, so a crafted prefix can never reach arrow's allocation.
+/// Frames it cannot walk are left to the reader, which reports them.
+fn check_decompressed_sizes(bytes: &[u8]) -> Result<()> {
+    const CONT: [u8; 4] = [0xff; 4];
+    let mut pos = 0usize;
+    let mut total: u64 = 0;
+    while pos + 4 <= bytes.len() {
+        let word: [u8; 4] = bytes[pos..pos + 4].try_into().unwrap();
+        let (meta_len, header) = if word == CONT {
+            if pos + 8 > bytes.len() {
+                return Ok(());
+            }
+            (
+                i32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()),
+                8usize,
+            )
+        } else {
+            (i32::from_le_bytes(word), 4usize)
+        };
+        if meta_len == 0 {
+            // An end-of-stream frame; the next segment (if any) follows.
+            pos += header;
+            continue;
+        }
+        let Ok(meta_len) = usize::try_from(meta_len) else {
+            return Ok(());
+        };
+        let Some(meta_end) = pos
+            .checked_add(header + meta_len)
+            .filter(|&e| e <= bytes.len())
+        else {
+            return Ok(());
+        };
+        let Ok(msg) = arrow::ipc::root_as_message(&bytes[pos + header..meta_end]) else {
+            return Ok(());
+        };
+        let Ok(body_len) = usize::try_from(msg.bodyLength()) else {
+            return Ok(());
+        };
+        let Some(body_end) = meta_end.checked_add(body_len).filter(|&e| e <= bytes.len()) else {
+            return Ok(());
+        };
+        let batch = msg
+            .header_as_record_batch()
+            .or_else(|| msg.header_as_dictionary_batch().and_then(|d| d.data()));
+        if let Some(batch) = batch.filter(|b| b.compression().is_some()) {
+            let body = &bytes[meta_end..body_end];
+            for buf in batch.buffers().into_iter().flatten() {
+                let (Ok(off), Ok(len)) =
+                    (usize::try_from(buf.offset()), usize::try_from(buf.length()))
+                else {
+                    continue;
+                };
+                if len < 8 {
+                    continue;
+                }
+                let Some(prefix) = off.checked_add(8).and_then(|end| body.get(off..end)) else {
+                    continue;
+                };
+                let declared = i64::from_le_bytes(prefix.try_into().unwrap());
+                if declared == -1 {
+                    continue;
+                }
+                let declared = u64::try_from(declared).map_err(|_| {
+                    anyhow!(
+                        "E6: a compressed buffer in the IPC message at byte {pos} declares \
+                         a negative decompressed length ({declared})"
+                    )
+                })?;
+                if declared > MAX_DECOMPRESSED_BUFFER {
+                    bail!(
+                        "E6: a compressed buffer in the IPC message at byte {pos} declares \
+                         {declared} decompressed bytes, more than the importer accepts for \
+                         one buffer ({} GiB)",
+                        MAX_DECOMPRESSED_BUFFER >> 30
+                    );
+                }
+                total = total.saturating_add(declared);
+                if total > MAX_DECOMPRESSED_TOTAL {
+                    bail!(
+                        "E6: the compressed buffers of this file declare more than {} GiB \
+                         of decompressed data in total; split the data into several imports",
+                        MAX_DECOMPRESSED_TOTAL >> 30
+                    );
+                }
+            }
+        }
+        pos = body_end;
+    }
+    Ok(())
+}
+
 /// How the byte range a `StreamReader` consumed terminates (§2.2.1).
 enum Termination {
     /// A genuine 8-byte end-of-stream frame (continuation sentinel + zero
@@ -628,13 +757,13 @@ fn parse_meta(ordinal: usize, schema: &Schema) -> Result<SegMeta> {
     // the namespace are foreign tools' business and ignored silently.
     for key in md.keys() {
         if key.starts_with("nodal:") && !KNOWN_SCHEMA_KEYS.contains(&key.as_str()) {
-            println!("warning: segment {ordinal}: ignoring unknown metadata key {key:?} (E5)");
+            say!("warning: segment {ordinal}: ignoring unknown metadata key {key:?} (E5)");
         }
     }
     for field in schema.fields() {
         for key in field.metadata().keys() {
             if key.starts_with("nodal:") && !KNOWN_FIELD_KEYS.contains(&key.as_str()) {
-                println!(
+                say!(
                     "warning: segment {ordinal}: ignoring unknown metadata key {key:?} \
                      on field {:?} (E5)",
                     field.name()
@@ -735,7 +864,11 @@ fn assert_flags(ordinal: usize, meta: &SegMeta, args: &ImportArgs) -> Result<()>
 // interpretive: dictionary decode, s/ms→µs upcast, dense→long expansion.
 // ---------------------------------------------------------------------------
 
-fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch>> {
+fn normalize_segment(
+    raw: &RawSegment,
+    meta: &SegMeta,
+    budget: &mut DecodeBudget,
+) -> Result<Vec<RecordBatch>> {
     let ordinal = raw.ordinal;
     let tag = format!("segment {ordinal} ({}:{})", meta.class, meta.parameter);
 
@@ -759,7 +892,7 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
             raw.batches
                 .iter()
                 .map(|b| {
-                    let r = normalize_long_batch(&tag, b, row_offset);
+                    let r = normalize_long_batch(&tag, b, row_offset, budget);
                     row_offset += b.num_rows();
                     r
                 })
@@ -768,7 +901,7 @@ fn normalize_segment(raw: &RawSegment, meta: &SegMeta) -> Result<Vec<RecordBatch
         Form::Dense => raw
             .batches
             .iter()
-            .map(|b| expand_dense_batch(&tag, b))
+            .map(|b| expand_dense_batch(&tag, b, budget))
             .collect(),
     }
 }
@@ -808,10 +941,117 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
         }
     }
     if !saw_entity && !saw_value {
-        println!(
+        say!(
             "warning: {tag}: no column named 'entity' or 'value' — columns are \
              interpreted positionally"
         );
+    }
+    Ok(())
+}
+
+/// The most decoded bytes one import may produce from dictionary columns and
+/// the dense expansion together (the same total as
+/// [`MAX_DECOMPRESSED_TOTAL`]): the importer holds every decoded batch until
+/// the one commit.
+const MAX_DECODED_TOTAL: u64 = MAX_DECOMPRESSED_TOTAL;
+/// The longest entity name or label the importer accepts, in bytes.
+pub(crate) const MAX_NAME_BYTES: usize = 64 << 10;
+
+/// The running decoded-size account of one import ([`MAX_DECODED_TOTAL`]).
+#[derive(Default)]
+struct DecodeBudget {
+    used: u64,
+}
+
+impl DecodeBudget {
+    fn charge(&mut self, tag: &str, what: &str, bytes: u64) -> Result<()> {
+        self.used = self.used.saturating_add(bytes);
+        if self.used > MAX_DECODED_TOTAL {
+            bail!(
+                "E6: {tag}: decoding {what:?} would bring the import to more than {} GiB \
+                 of decoded data (dictionary values repeated by their keys, or dense rows \
+                 expanded); split the data into several imports",
+                MAX_DECODED_TOTAL >> 30
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The size a dictionary column decodes to: for string or binary values the
+/// bytes of the value each key references (plus an offset per row), else
+/// the value width per row. Computed from the keys and the dictionary,
+/// without decoding. Returns `(decoded bytes, longest referenced value)`.
+fn dictionary_decoded_bytes(col: &ArrayRef) -> (u64, u64) {
+    use arrow::array::AsArray;
+    let Some(dict) = col.as_any_dictionary_opt() else {
+        return (0, 0);
+    };
+    let rows = dict.len() as u64;
+    let values = dict.values();
+    if values.is_empty() {
+        return (0, 0);
+    }
+    let lens: Option<Vec<u64>> = match values.data_type() {
+        DataType::Utf8 => Some(
+            values
+                .as_string::<i32>()
+                .offsets()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).max(0) as u64)
+                .collect(),
+        ),
+        DataType::LargeUtf8 => Some(
+            values
+                .as_string::<i64>()
+                .offsets()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).max(0) as u64)
+                .collect(),
+        ),
+        DataType::Binary => Some(
+            values
+                .as_binary::<i32>()
+                .offsets()
+                .windows(2)
+                .map(|w| (w[1] - w[0]).max(0) as u64)
+                .collect(),
+        ),
+        _ => None,
+    };
+    match lens {
+        Some(lens) => {
+            let (mut total, mut longest) = (0u64, 0u64);
+            for &k in &dict.normalized_keys() {
+                total = total.saturating_add(lens[k] + 8);
+                longest = longest.max(lens[k]);
+            }
+            (total, longest)
+        }
+        None => {
+            let width = values.get_array_memory_size() as u64 / values.len() as u64;
+            (rows.saturating_mul(width.max(8)), 0)
+        }
+    }
+}
+
+/// Refuse (E6) a string in an entity or label column longer than
+/// [`MAX_NAME_BYTES`].
+fn check_name_lengths(tag: &str, what: &str, col: &ArrayRef) -> Result<()> {
+    if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
+        let longest = s
+            .offsets()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).max(0) as usize)
+            .max()
+            .unwrap_or(0);
+        if longest > MAX_NAME_BYTES {
+            bail!(
+                "E6: {tag}: {what} holds a string of {longest} bytes; names and labels may \
+                 be at most {} KiB",
+                MAX_NAME_BYTES >> 10
+            );
+        }
     }
     Ok(())
 }
@@ -823,7 +1063,17 @@ fn check_name_tripwires(tag: &str, schema: &Schema) -> Result<()> {
 /// is the dictionary's own value type, so the value cast is the identity, and
 /// unpacking is a `take` by keys that errors on an out-of-range key rather
 /// than nulling it. A NULL key decodes to NULL, which is the cell's meaning.
-fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, ArrayRef)> {
+///
+/// The decoded size is charged to `budget` BEFORE the cast: a dictionary
+/// lets a few bytes of keys reference one long value millions of times, so
+/// the decoded column can be far larger than anything the file declares.
+fn decode_encodings(
+    tag: &str,
+    field: &Field,
+    col: &ArrayRef,
+    name_column: bool,
+    budget: &mut DecodeBudget,
+) -> Result<(Field, ArrayRef)> {
     match field.data_type() {
         DataType::RunEndEncoded(_, _) => bail!(
             "E6: {tag}: column {:?} is run-end encoded — not supported in format \
@@ -831,6 +1081,16 @@ fn decode_encodings(tag: &str, field: &Field, col: &ArrayRef) -> Result<(Field, 
             field.name()
         ),
         DataType::Dictionary(_, value_type) => {
+            let (decoded, longest) = dictionary_decoded_bytes(col);
+            if name_column && longest > MAX_NAME_BYTES as u64 {
+                bail!(
+                    "E6: {tag}: column {:?} holds a string of {longest} bytes; names and \
+                     labels may be at most {} KiB",
+                    field.name(),
+                    MAX_NAME_BYTES >> 10
+                );
+            }
+            budget.charge(tag, field.name(), decoded)?;
             let plain = cast(col, value_type).map_err(|e| {
                 anyhow!(
                     "E6: {tag}: cannot decode dictionary column {:?}: {e}",
@@ -952,7 +1212,12 @@ fn upcast_ts_checked(
 /// Field metadata is preserved throughout. A NaN VALUE is a legal stored value
 /// (§5.3.1) — the core canonicalizes it; only NaN axis/coordinate floats are
 /// rejected, and no dimension column here is float.
-fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Result<RecordBatch> {
+fn normalize_long_batch(
+    tag: &str,
+    batch: &RecordBatch,
+    row_offset: usize,
+    budget: &mut DecodeBudget,
+) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 2 {
         bail!("E6: {tag}: long form needs at least (entity, value) columns, got {ncols}");
@@ -965,7 +1230,13 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
     let mut fields: Vec<Field> = Vec::with_capacity(ncols);
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(ncols);
     for i in 0..ncols {
-        let (field, col) = decode_encodings(tag, batch.schema().field(i), batch.column(i))?;
+        let (field, col) = decode_encodings(
+            tag,
+            batch.schema().field(i),
+            batch.column(i),
+            i < ncols - 1,
+            budget,
+        )?;
         let (field, col) = if i == 0 {
             (field, col) // entity column: the core validates Utf8 + nulls
         } else {
@@ -1004,6 +1275,11 @@ fn normalize_long_batch(tag: &str, batch: &RecordBatch, row_offset: usize) -> Re
                 (field, col)
             }
         };
+        if i == 0 {
+            check_name_lengths(tag, "the entity column", &col)?;
+        } else if i < ncols - 1 {
+            check_name_lengths(tag, &format!("label dimension {:?}", field.name()), &col)?;
+        }
         // §7.2: a label dimension without nodal:label_domain is E6.
         if i > 0
             && i < ncols - 1
@@ -1061,7 +1337,11 @@ enum DimKind {
     Label,
 }
 
-fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
+fn expand_dense_batch(
+    tag: &str,
+    batch: &RecordBatch,
+    budget: &mut DecodeBudget,
+) -> Result<RecordBatch> {
     let ncols = batch.num_columns();
     if ncols < 3 {
         bail!(
@@ -1078,7 +1358,24 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
     let mut fields: Vec<Field> = Vec::with_capacity(ncols);
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(ncols);
     for i in 0..ncols {
-        let (f, c) = decode_encodings(tag, batch.schema().field(i), batch.column(i))?;
+        let (f, c) = decode_encodings(
+            tag,
+            batch.schema().field(i),
+            batch.column(i),
+            i == 0,
+            budget,
+        )?;
+        if i == 0 {
+            check_name_lengths(tag, "the entity column", &c)?;
+        } else if let Some(list) = c.as_any().downcast_ref::<ListArray>() {
+            if i < ncols - 1 {
+                check_name_lengths(
+                    tag,
+                    &format!("label dimension {:?}", f.name()),
+                    list.values(),
+                )?;
+            }
+        }
         fields.push(f);
         cols.push(c);
     }
@@ -1236,6 +1533,27 @@ fn expand_dense_batch(tag: &str, batch: &RecordBatch) -> Result<RecordBatch> {
             payload.push(vals.value(k));
         }
 
+        // Every expanded cell (one per payload value; the expansion checks
+        // the shape) copies the entity name and its labels: charge that
+        // before the expansion allocates it (a long name times a long payload).
+        let labels: u64 = dim_lists
+            .iter()
+            .map(|l| {
+                l.iter()
+                    .map(|c| match c {
+                        Coord::Label(s) => s.len() as u64,
+                        _ => 0,
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .sum();
+        let per_cell = ent.len() as u64 + labels + 8 * (rank as u64 + 1) + 24;
+        budget.charge(
+            tag,
+            "the dense expansion",
+            per_cell.saturating_mul(payload.len() as u64),
+        )?;
         // Row-major expansion via the core helper (§6.3) — the same law as
         // reconstruct, by construction.
         let expanded = expand_dense_row(&dim_lists, &payload).map_err(|e| {

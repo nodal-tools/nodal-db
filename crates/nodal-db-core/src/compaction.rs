@@ -107,12 +107,12 @@ use std::path::{Path, PathBuf};
 
 use duckdb::{AccessMode, Connection};
 
-use crate::conn::{head_on, open_with_retry, path_lock};
+use crate::conn::{head_on, open_for_rebuild, open_with_retry, path_lock, utf8_path};
 use crate::error::DbError;
 use crate::rebuild::{
-    assert_temp_schema_version, attach_source_ro, check_catalog, cluster_order,
-    discover_real_columns, fsync_dir, fsync_file, parent_dir, q, remove_temp, restore_sequences,
-    SRC, TABLE_ORDER,
+    assert_temp_schema_version, attach_source_ro, check_catalog, cluster_order, create_temp_db,
+    discover_real_columns, fsync_dir, fsync_file, parent_dir, q, remove_orphan, remove_temp,
+    restore_sequences, SRC, TABLE_ORDER,
 };
 use crate::schema_init::init_schema;
 
@@ -450,7 +450,11 @@ pub fn compact_if_due(
             Ok(no_op_report(current))
         }
         Some(c) if head < c => compact_locked(db_path, CompactionTrigger::NoBaseline),
-        Some(c) if (head - c) as u64 >= n => compact_locked(db_path, CompactionTrigger::Commits),
+        // Checked (L8): a crafted sidecar `commit=` (i64::MIN) must not
+        // overflow; a distance that does not fit counts as due.
+        Some(c) if head.checked_sub(c).is_none_or(|d| d as u64 >= n) => {
+            compact_locked(db_path, CompactionTrigger::Commits)
+        }
         Some(_) => Ok(no_op_report(current)),
     }
 }
@@ -536,6 +540,8 @@ fn no_op_report(current: u64) -> CompactionReport {
 /// baseline sidecar refresh. Shared by [`compact`] and the fire paths of
 /// [`compact_if_needed`] / [`compact_if_due`].
 fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<CompactionReport, DbError> {
+    // A non-UTF-8 path is refused before anything is named after it (L2).
+    utf8_path(db_path)?;
     // Exclusive for the WHOLE op (invariant #1, §4): held across init, copy,
     // self-check and swap. Non-reentrant — nothing below may call a `conn`
     // helper that re-takes this lock (that is why we use `open_with_retry`
@@ -606,14 +612,23 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
     }
 
     // ---- Build the fresh temp and repack into it ---------------------------
-    let temp_path = temp_path_for(db_path);
-    // A stale temp with this exact name (same pid, astronomically unlikely) is
-    // removed by the sweep above; init a clean file.
-    init_schema(&temp_path)?;
+    // A new, empty file under an unpredictable name (L3), then the schema.
+    let temp_path = temp_path_for(db_path)?;
+    if let Err(e) = init_schema(&temp_path) {
+        remove_temp(&temp_path);
+        return Err(e);
+    }
 
-    // The repack runs on ONE temp RW connection with the source ATTACHed RO.
+    // The repack runs on ONE temp RW connection with the source ATTACHed RO
+    // (the only path it may reach besides its own file: engine rule 12).
     // Any failure inside must clean the temp and keep the original untouched.
-    let conn = open_with_retry(&temp_path, AccessMode::ReadWrite)?;
+    let conn = match open_for_rebuild(&temp_path, db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            remove_temp(&temp_path);
+            return Err(e);
+        }
+    };
     let outcome = repack_into(&conn, db_path, &temp_path);
 
     let Repacked {
@@ -723,11 +738,17 @@ fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<Compacti
         return Err(DbError::Busy { attempts: 1 });
     }
     crate::conn::forget_builtin_guard(&temp_path);
-    fs::rename(&temp_path, db_path).map_err(|source| DbError::SchemaDir {
-        path: temp_path.display().to_string(),
-        source,
-    })?;
+    if let Err(source) = fs::rename(&temp_path, db_path) {
+        remove_temp(&temp_path);
+        return Err(DbError::SchemaDir {
+            path: temp_path.display().to_string(),
+            source,
+        });
+    }
     fsync_dir(dir);
+    // The temp's private directory is empty now (or holds DuckDB's spill
+    // leftovers): remove it.
+    remove_temp(&temp_path);
 
     let bytes_after = fs::metadata(db_path)
         .map(|m| m.len())
@@ -988,20 +1009,37 @@ fn self_check(
 // Temp-file naming, orphan sweep, and durability helpers (§3).
 // ---------------------------------------------------------------------------
 
-/// `<db-filename>.compact.<pid>.tmp`, a sibling in the SAME directory (so the
-/// final `rename` is a same-filesystem atomic replace). The full DB filename
-/// (with extension) is used as the prefix so two DBs that share a stem cannot
-/// collide.
-fn temp_path_for(db_path: &Path) -> PathBuf {
-    let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
-    dir.join(format!("{name}.compact.{}.tmp", std::process::id()))
+/// Create the private directory `<db-filename>.compact.<pid>.<random>.tmp` in
+/// the SAME directory and return the temp database path inside it (so the
+/// final `rename` is a same-filesystem atomic
+/// replace; [`create_temp_db`]: unpredictable, never through a planted
+/// symlink). The full DB filename (with extension) is used as the prefix so
+/// two DBs that share a stem cannot collide.
+fn temp_path_for(db_path: &Path) -> Result<PathBuf, DbError> {
+    create_temp_db(
+        parent_dir(db_path),
+        &format!("{}.compact", file_name(db_path)?),
+    )
+}
+
+/// The UTF-8 file name of a database path (L2: refused otherwise, never a
+/// fallback name two databases could share).
+pub(crate) fn file_name(db_path: &Path) -> Result<&str, DbError> {
+    db_path
+        .file_name()
+        .ok_or_else(|| {
+            DbError::Api(format!(
+                "{:?} does not name a database file",
+                db_path.display().to_string()
+            ))
+        })
+        .and_then(|n| utf8_path(Path::new(n)))
 }
 
 /// The prefix a temp sibling of `db_path` starts with (for the orphan sweep).
-fn temp_prefix(db_path: &Path) -> String {
-    let name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
-    format!("{name}.compact.")
+fn temp_prefix(db_path: &Path) -> Option<String> {
+    let name = db_path.file_name()?.to_str()?;
+    Some(format!("{name}.compact."))
 }
 
 /// Delete any abandoned `<db-filename>.compact.*.tmp` (and matching `*.wal`)
@@ -1014,7 +1052,9 @@ fn temp_prefix(db_path: &Path) -> String {
 /// `compaction-baseline` exclusion below is belt-and-braces.
 pub fn sweep_orphan_temps(db_path: &Path) {
     let dir = parent_dir(db_path);
-    let prefix = temp_prefix(db_path);
+    let Some(prefix) = temp_prefix(db_path) else {
+        return;
+    };
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -1024,7 +1064,7 @@ pub fn sweep_orphan_temps(db_path: &Path) {
                 continue; // never touch the advisory baseline sidecar
             }
             if name.starts_with(&prefix) && (name.ends_with(".tmp") || name.ends_with(".tmp.wal")) {
-                let _ = fs::remove_file(entry.path());
+                remove_orphan(&entry.path());
             }
         }
     }
@@ -1043,10 +1083,13 @@ pub fn sweep_orphan_temps(db_path: &Path) {
 /// no commit, and [`compact_if_due`] adopts it. An older build reading a v2
 /// sidecar fails to parse it, treats it as missing, compacts once and
 /// rewrites v1; the new build then adopts that without compacting.
+///
+/// The name is built from the file name's raw bytes, so a non-UTF-8 name
+/// gets its own sidecar (L2), never one shared with another database.
 pub fn baseline_path(db_path: &Path) -> PathBuf {
-    let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
-    dir.join(format!("{name}.compaction-baseline"))
+    let mut name = db_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".compaction-baseline");
+    db_path.with_file_name(name)
 }
 
 /// One parsed baseline sidecar ([`baseline_path`]).
@@ -1095,17 +1138,38 @@ fn parse_baseline(text: &str) -> Option<Baseline> {
 /// compaction. Both values are required, so every writer (the repack, the
 /// extract, the adopt step) records the commit too (plan C8 ii).
 pub(crate) fn write_baseline(db_path: &Path, bytes: u64, commit: i64) {
+    use std::io::Write;
     let final_path = baseline_path(db_path);
-    // Distinct temp name (pid-tagged) that CANNOT match the orphan-temp sweep
-    // (`…compaction-baseline.<pid>.tmp` does not start with `…compact.`).
+    // A distinct temp name that CANNOT match the orphan-temp sweep
+    // (`…compaction-baseline.<pid>.<random>.tmp` does not start with
+    // `…compact.`), created new (L3): `create_new` never follows a planted
+    // symlink, and the random part makes the name unpredictable.
     let tmp = {
         let mut s = final_path.as_os_str().to_os_string();
-        s.push(format!(".{}.tmp", std::process::id()));
+        s.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            crate::rebuild::random_tag()
+        ));
         PathBuf::from(s)
     };
     let text = format!("bytes={bytes}\ncommit={commit}\n");
-    if fs::write(&tmp, text.as_bytes()).is_ok() && fs::rename(&tmp, &final_path).is_err() {
-        let _ = fs::remove_file(&tmp);
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(text.as_bytes()));
+    match written {
+        Ok(()) => {
+            if fs::rename(&tmp, &final_path).is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+        // Not ours to remove when it already existed.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            let _ = fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -1277,7 +1341,7 @@ mod tests {
         }
         // temp: empty (fresh schema, then wipe bootstrap like the real path).
         let temp = fresh(&dir, "temp.duckdb");
-        let conn = open_with_retry(&temp, AccessMode::ReadWrite).unwrap();
+        let conn = open_for_rebuild(&temp, &src).unwrap();
         conn.execute_batch("DELETE FROM database_property; DELETE FROM \"commit\";")
             .unwrap();
         attach_source_ro(&conn, &src).unwrap();

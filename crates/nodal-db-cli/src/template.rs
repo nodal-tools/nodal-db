@@ -106,7 +106,7 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
                 ..Default::default()
             };
             let p = tpl::plan_with(&db, &t, &opts).map_err(anyhow::Error::from)?;
-            print!("{p}");
+            print!("{}", crate::clean_text(&p.to_string()));
             Ok(())
         }
         TemplateCommand::Apply {
@@ -128,7 +128,7 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
             require_db(&db)?;
             let (t, warnings) = tpl::export(&db).map_err(anyhow::Error::from)?;
             for w in &warnings {
-                eprintln!("warning: {w}");
+                say_err!("warning: {w}");
             }
             let text = if json {
                 tpl::to_json(&t).map_err(anyhow::Error::from)?
@@ -139,12 +139,18 @@ pub fn run(cmd: TemplateCommand) -> Result<()> {
                 Some(path) => {
                     std::fs::write(&path, &text)
                         .with_context(|| format!("writing {}", path.display()))?;
-                    eprintln!(
+                    say_err!(
                         "exported template {} version {} to {}",
                         t.template.name,
                         t.template.version,
                         path.display()
                     );
+                }
+                // The export is data: written to a pipe or a file it stays
+                // byte-exact. On a terminal, controls the serializers leave
+                // as they are (C1, bidi overrides) are escaped.
+                None if std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+                    print!("{}", crate::clean_text(&text))
                 }
                 None => print!("{text}"),
             }
@@ -191,16 +197,17 @@ fn apply_file(
         other => anyhow::Error::from(other),
     })?;
     if outcome.no_op {
-        println!(
+        say!(
             "template {} version {}: already applied (content hash match) — no-op",
-            t.template.name, t.template.version
+            t.template.name,
+            t.template.version
         );
         return Ok(());
     }
     for w in &outcome.warnings {
-        eprintln!("warning: {w}");
+        say_err!("warning: {w}");
     }
-    println!(
+    say!(
         "applied template {} version {} in {} commit(s): {} action(s){}",
         t.template.name,
         t.template.version,
@@ -213,13 +220,13 @@ fn apply_file(
         }
     );
     for a in &outcome.plan.actions {
-        println!("  + {a}");
+        say!("  + {a}");
     }
     for n in &outcome.notes {
-        println!("  note: {n}"); // chain-step records (D14 cascade counts &c.)
+        say!("  note: {n}"); // chain-step records (D14 cascade counts &c.)
     }
     for s in &outcome.plan.skipped {
-        println!("  skip: {s}");
+        say!("  skip: {s}");
     }
     Ok(())
 }

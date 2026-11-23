@@ -40,6 +40,36 @@ def test_open_missing_file_is_typed_error(tmp_path):
         nodal_db.open(str(tmp_path / "nope.duckdb"))
 
 
+def test_init_refuses_an_existing_file(tmp_path):
+    import duckdb
+
+    mine = tmp_path / "mine.duckdb"
+    con = duckdb.connect(str(mine))
+    con.execute("CREATE TABLE mine (x INTEGER)")
+    con.close()
+    with pytest.raises(nodal_db.ApiError, match="already exists"):
+        nodal_db.init(str(mine))
+    con = duckdb.connect(str(mine), read_only=True)
+    tables = con.execute("SELECT count(*) FROM duckdb_tables()").fetchone()[0]
+    con.close()
+    assert tables == 1, "the foreign file was written"
+
+
+def test_query_is_locked_down_unless_trusted(db, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET-123")
+    sql = f"SELECT content FROM read_text('{secret}')"
+    with pytest.raises(nodal_db.NodalDbError, match="Permission Error"):
+        db.query(sql)
+    with pytest.raises(nodal_db.NodalDbError, match="locked"):
+        db.query("SET enable_external_access = true")
+    got = db.query(sql, trusted=True).read_all()
+    assert got.column(0).to_pylist() == ["SECRET-123"]
+    # Per call: the next query is locked again.
+    with pytest.raises(nodal_db.NodalDbError, match="Permission Error"):
+        db.query(sql)
+
+
 def test_identity_is_stable_uuid(db):
     ident = db.db_identity()
     assert len(ident) == 36

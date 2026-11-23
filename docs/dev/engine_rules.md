@@ -672,3 +672,58 @@ unchanged.
 
 **Guards.** None automated: a review rule for DDL changes. The vectors
 in `conformance/` pin the hash values as unsigned decimals.
+
+## 12. A file's SQL runs without file, network or extension access
+
+**Rule.** Every connection the core opens gets, from `conn::config_for`
+(behind `conn::core_config`), `enable_external_access = false`,
+`autoload_known_extensions = false`, `autoinstall_known_extensions =
+false`, `allow_persistent_secrets = false` and
+`allow_community_extensions = false`, and `SET lock_configuration =
+true` right after the open (`conn::open_with_retry_as`), before the
+shadowing guard (§8) or any other SQL runs. Never open a connection
+around these, and never add a `SET` to a core path (it fails on the
+locked connection). The one sanctioned exception is `conn::Access::Trusted`
+(Python `db.query(..., trusted=True)`), an explicit per-call opt-in for a
+caller's own query on a file it trusts; it opens with DuckDB's defaults
+and no lock.
+
+The rebuild's temp connection (compaction, extract), which `ATTACH`es its
+source, needs a different order, verified on DuckDB 2.0.0:
+`allowed_paths` cannot be set in the config ("before the database is
+started") nor once external access is off ("Cannot change allowed_paths
+when enable_external_access is disabled"). So `conn::open_for_rebuild`
+opens with external access on (autoload, autoinstall, secrets and
+community extensions already off), then `SET allowed_paths = ['<src>',
+'<src>.wal']`, `SET enable_external_access = false`, `SET
+lock_configuration = true`, and only then attaches the source
+(`rebuild::attach_source_ro`, with the same absolute UTF-8 spelling of
+the path, `conn::attach_path`).
+
+**Why.** A database file carries its own views and macros, and the core
+calls some of them by name: `nodal_read_surface()` on every read and
+before every write, the read macros of a file that claims a current
+surface, and, during compaction and extract, whatever the source file
+put under a base table's name (a view reads as a table). The shadowing
+guard (§8) only stops a macro named like a built-in. With DuckDB's
+defaults a file someone sent you could therefore read any local file
+(`read_text`, `glob`), make HTTP requests (autoloaded `httpfs`), install
+and load signed extensions (the bundled engine is built with autoload
+and autoinstall on), use the user's persistent secrets, or start
+DuckDB's UI server, on every core open. With the lock-down those fail
+with DuckDB's `Permission Error` (or a missing-function error for an
+extension), and a locked configuration refuses every `SET`, so no SQL
+can lift it. The database file, its WAL and DuckDB's spill directory are
+not external access: a sort larger than `memory_limit` still spills.
+
+**Guards.**
+[`crates/nodal-db-core/tests/untrusted_file_lockdown.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/untrusted_file_lockdown.rs)
+(a marker that calls `read_text` fails reads, status and the write
+connection; a base table replaced by such a view fails compaction and
+extract; no core connection installs or loads an extension; no `SET`
+unlocks it; `Access::Trusted` reads and the next locked call does not),
+[`lockdown_spill.rs`](https://github.com/nodal-tools/nodal-db/blob/main/crates/nodal-db-core/tests/lockdown_spill.rs)
+(a spilling sort under a 64 MiB limit, compaction and extract still
+attach), and the CLI's `tests/security_cli.rs` (`refresh-views --check`
+on such a file). A DuckDB upgrade that renames a setting fails every
+open loudly.

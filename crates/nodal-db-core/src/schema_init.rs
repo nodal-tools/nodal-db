@@ -230,6 +230,10 @@ pub fn init_schema_from_sources(db_path: &Path, sources: &[(&str, &str)]) -> Res
 /// As [`init_schema`], but optionally seed one default alternative (decision
 /// D3): `Some(name)` ⇒ exactly one alternative row exists in the fresh DB;
 /// `None` ⇒ zero (the value write path auto-creates on first use).
+///
+/// Every init function creates a new file: a path that already exists (any
+/// entry, an empty file or a symlink included) or has a `<db>.wal` is
+/// refused with [`DbError::Api`], touching nothing.
 pub fn init_schema_with_default(
     db_path: &Path,
     default_alternative: Option<&str>,
@@ -246,13 +250,7 @@ pub fn init_schema_from_dir_with_default(
     // Same in-process per-path serialization as every other open (conn F1).
     let lock = crate::conn::path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let before = crate::conn::file_stamp(db_path);
-    let conn = Connection::open_with_flags(
-        db_path,
-        crate::conn::core_config(duckdb::AccessMode::ReadWrite)?,
-    )?;
-    // The DDL's generated columns and indexes bind `lower()` (engine rule 8).
-    crate::conn::guard_builtins(&conn, db_path, before)?;
+    let conn = crate::conn::open_fresh(db_path)?;
     apply_schema_from(&conn, dir)?;
     if let Some(name) = default_alternative {
         seed_default_alternative(&conn, name)?;
@@ -270,13 +268,7 @@ pub fn init_schema_from_sources_with_default(
 ) -> Result<(), DbError> {
     let lock = crate::conn::path_lock(db_path);
     let _serial = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let before = crate::conn::file_stamp(db_path);
-    let conn = Connection::open_with_flags(
-        db_path,
-        crate::conn::core_config(duckdb::AccessMode::ReadWrite)?,
-    )?;
-    // The DDL's generated columns and indexes bind `lower()` (engine rule 8).
-    crate::conn::guard_builtins(&conn, db_path, before)?;
+    let conn = crate::conn::open_fresh(db_path)?;
     let mut sorted: Vec<&(&str, &str)> = sources.iter().collect();
     sorted.sort_by_key(|(name, _)| *name);
     for (_, sql) in sorted {

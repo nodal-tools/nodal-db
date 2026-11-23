@@ -73,9 +73,11 @@ The examples below call the CLI as `nodal-db`; put
     )?;
     ```
 
-`init` refuses to overwrite an existing database. The `--alternative`
-option creates an initial alternative; without it, the database starts
-with no alternatives and one is created on the first write that names it.
+`init` creates a new file: in the CLI, Python and Rust alike it refuses
+a path that already exists (any file, an empty one included) or that has
+a `.wal` file next to it. The `--alternative` option creates an initial
+alternative; without it, the database starts with no alternatives and one
+is created on the first write that names it.
 
 To start from a template that declares the model's classes and
 parameters, pass it at creation time (the examples below start without
@@ -1317,6 +1319,65 @@ SELECT * FROM read_values('node', 'demand', ['north', 'south'], ['Base', 'high_d
   read of one or a few series, such as one series in one time window,
   works on any connection, whatever its settings.
 
+### Opening files from others
+
+A database file carries its own SQL: the views and macros of its read
+surface. Whoever made the file could have replaced them, so a file you
+were sent runs its author's SQL whenever it is read. nodal-db therefore
+opens every connection with DuckDB's file, network and extension access
+turned off: no reads or writes of other files (`read_csv`, `read_text`,
+`COPY … TO`, `glob`, `ATTACH`), no HTTP, no extension install or
+autoload, no persistent secrets. The configuration is locked, so no SQL
+on the connection can turn this back on. The database file itself, its
+`.wal` and DuckDB's temporary spill files work as usual; compaction and
+extract may also attach the one source file they copy.
+
+This applies to `db.query` too, so your own SQL there cannot read or
+write other files. Run the query in nodal-db and do the file I/O on
+your own DuckDB connection or in pyarrow:
+
+```python
+table = db.query("SELECT * FROM read_parameter('node', 'demand')").read_all()
+pyarrow.parquet.write_table(table, "demand.parquet")
+```
+
+For a file you trust, `trusted=True` opens that one query's connection
+with DuckDB's full access:
+
+```python
+db.query("SELECT * FROM read_csv('targets.csv')", trusted=True)
+```
+
+!!! warning "`trusted=True` trusts the file, not only your query"
+    The file's own views and macros run on the same connection, so with
+    `trusted=True` they get full access too: they can read any file you
+    can read and make network requests. Use it only for files you made
+    or trust. Rust code passes `conn::Access::Trusted` to
+    `conn::with_read_retrying_as` for the same effect.
+
+Your own DuckDB connection to a file someone sent you is not locked
+down: open it with `config={"enable_external_access": False,
+"autoload_known_extensions": False, "autoinstall_known_extensions":
+False}` (Python) when you only read it.
+
+The CLI also caps DuckDB's memory and threads for every database a
+command opens, so a huge or crafted file cannot take the whole machine:
+by default at most 50% of RAM (DuckDB's own default is 80%) and at most
+8 threads. Set them with the global options `--memory-limit SIZE` (`4GiB`,
+`25%`) and `--threads N`, e.g. `nodal-db --memory-limit 8GiB maintain
+compact big.duckdb`. Under SLURM (`SLURM_MEM_PER_NODE`,
+`SLURM_CPUS_ON_NODE` set) DuckDB sizes itself from the allocation
+instead. DuckDB spills large sorts and joins to disk, so a lower limit
+makes a large operation slower, not impossible.
+
+Other inputs are bounded too: the importer refuses an Arrow-IPC file
+larger than 16 GiB or one whose compressed buffers claim more than
+2 GiB each, or 16 GiB in total, once decompressed, one whose dictionary
+columns and dense rows would decode to more than 16 GiB, and entity
+names or labels longer than 64 KiB (all E6). These limits are the
+importer's own, separate from `--memory-limit`. A template
+larger than 16 MiB or with flow collections (`[…]`, `{…}`) nested more
+than 64 deep is refused before it is parsed.
 
 ### Read history
 

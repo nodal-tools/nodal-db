@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use arrow::ffi_stream::ArrowArrayStreamReader;
+use arrow::ffi_stream::RecordBatchStreamReader;
 use arrow::record_batch::RecordBatch;
 use arrow_pyarrow::FromPyArrow;
 use pyo3::prelude::*;
@@ -333,7 +333,7 @@ pub(crate) fn batches_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatc
         return Ok(out);
     }
     if obj.hasattr("__arrow_c_stream__")? {
-        let reader = ArrowArrayStreamReader::from_pyarrow_bound(obj)?;
+        let reader = RecordBatchStreamReader::from_pyarrow_bound(obj)?;
         let mut out = Vec::new();
         for b in reader {
             out.push(b.map_err(|e| ArrowError::new_err(e.to_string()))?);

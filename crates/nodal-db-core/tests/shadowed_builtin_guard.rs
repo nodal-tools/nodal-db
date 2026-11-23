@@ -242,11 +242,12 @@ fn init_refuses_a_shadowed_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("shadow.duckdb");
     direct_sql(&db, "CREATE MACRO lower(x) AS x;");
-    assert_shadowed(
-        init_schema_with_default(&db, Some("Base")),
-        "lower",
-        "macro",
-    );
+    // init refuses any existing file before it opens it (finding L1), so
+    // the DDL never runs under the macro either.
+    match init_schema_with_default(&db, Some("Base")) {
+        Err(DbError::Api(m)) if m.contains("already exists") => {}
+        other => panic!("expected the existing-file refusal, got {other:?}"),
+    }
 }
 
 #[test]

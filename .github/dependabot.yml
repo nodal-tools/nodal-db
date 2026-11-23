@@ -1,0 +1,11 @@
+# Weekly update proposals for the pinned GitHub Actions (the workflows pin
+# third-party actions by commit SHA, with the version in a comment).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

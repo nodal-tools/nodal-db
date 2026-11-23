@@ -11,7 +11,8 @@ requires-python = ">=3.11"
 # the sdist and every wheel carry it (dist-info/licenses/LICENSE).
 license = "EUPL-1.2"
 license-files = ["LICENSE"]
-authors = [{ name = "Nodal-Tools Oy" }]
+authors = [{ name = "Nodal-Tools" }]
+maintainers = [{ name = "jkiviluo", email = "juha.kiviluoma@nodal-tools.fi" }]
 keywords = ["duckdb", "database", "versioned data", "modelling", "arrow"]
 classifiers = [
     "Development Status :: 3 - Alpha",

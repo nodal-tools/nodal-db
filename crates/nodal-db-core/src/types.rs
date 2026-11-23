@@ -1,14 +1,13 @@
-//! Plain, FFI-friendly data types for the canonicalization pipeline (VMP
-//! Parts 2-3). No trait objects, no borrowed lifetimes crossing FFI — every
-//! type here is owned `Clone`/`Copy` data a future PyO3 skin wraps 1:1
-//! (`rust_implementation_plan.md` Part 0/Part 3).
+//! Plain data types of the public API: values, write options, reports,
+//! warnings, structural changes, delete keys and their outcomes. No trait
+//! objects and no borrowed lifetimes: every type here is owned `Clone` data a
+//! binding (the Python skin) can wrap one to one.
 
 use serde::{Deserialize, Serialize};
 
-/// Scalar measure kinds (VMP Part 2). `tag()` is the `value_kind` string stored
-/// in `value_scalar.value_kind` etc. and hashed by the value encoding (spec
-/// §9.3). Note `DateTime` -> `"date_time"` (underscore), distinct from the
-/// `datetime` axis-kind tag (spec §5.1.2 footgun).
+/// Scalar measure kinds. `tag()` is the `value_kind` string stored
+/// in `value_scalar.value_kind` etc. and hashed by the value encoding. Note `DateTime` -> `"date_time"` (underscore), distinct from the
+/// `datetime` axis-kind tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValueKind {
     Float,
@@ -20,7 +19,7 @@ pub enum ValueKind {
 }
 
 impl ValueKind {
-    /// The canonical `value_kind` tag (spec §9.3).
+    /// The canonical `value_kind` tag.
     pub fn tag(self) -> &'static str {
         match self {
             ValueKind::Float => "float",
@@ -33,9 +32,9 @@ impl ValueKind {
     }
 }
 
-/// Index (axis) kinds (VMP Part 1). `Datetime`/`Integer`/`Label` are the kinds
+/// Index (axis) kinds. `Datetime`/`Integer`/`Label` are the kinds
 /// this pure pipeline derives from long-form input; `Period`/`TimePattern` axis
-/// *encoding* exists (spec §7.6/§7.7) but their long-input derivation needs a
+/// *encoding* exists but their long-input derivation needs a
 /// richer multi-field wire form — deferred to a later chunk (canon returns
 /// `CanonError::UnsupportedKind`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +46,7 @@ pub enum IndexKind {
     TimePattern,
 }
 
-/// The physical tier (VMP Part 3 tier rule).
+/// The physical tier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tier {
     Scalar,
@@ -55,8 +54,8 @@ pub enum Tier {
     Long,
 }
 
-/// The declared shape of a parameter: ordered `(position, kind)` dimensions
-/// (VMP Part 2 "where dimensionality is declared"). Rank 0 (empty) is a scalar.
+/// The declared shape of a parameter: ordered `(position, kind)` dimensions.
+/// Rank 0 (empty) is a scalar.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclaredType {
     pub positions: Vec<(u8, IndexKind)>,
@@ -69,7 +68,7 @@ impl DeclaredType {
 }
 
 /// Write options the pure pipeline is aware of; the full retention/force
-/// semantics land with the history protocol (VMP Part 5).
+/// semantics land with the history protocol.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WriteOptions {
     pub force_replace: bool,
@@ -87,11 +86,11 @@ pub struct WriteOptions {
     /// `conn::with_write_txn_retrying_opts` there). `None` (the default):
     /// no check.
     pub expect_commit: Option<i64>,
-    /// What `api::commit_changes` does with a value write that a delete in
-    /// the same call covers: a value delete of the same key
-    /// (skip_unchanged_writes_PLAN D9), or an object delete whose cascade
+    /// What `api::commit` does with a value write that a delete in
+    /// the same call covers: a value delete of the same key,
+    /// or an object delete whose cascade
     /// reaches the value (its entity or a container of it, its parameter
-    /// definition, its alternative, or a class above them; D10). The default,
+    /// definition, its alternative, or a class above them). The default,
     /// [`CoveredWrites::Refuse`], refuses the whole call; a script that needs
     /// such a batch opts into [`CoveredWrites::DeleteWins`]. Meaningless
     /// outside the `api` entry points (like `expect_commit`).
@@ -105,8 +104,8 @@ pub enum CoveredWrites {
     /// Refuse the call before anything is written, whatever the content,
     /// the tier or the object delete's `cascade` option (the default):
     /// [`crate::error::DbError::WriteAndDeleteSameKey`] for a value delete
-    /// of a written key (D9), [`crate::error::DbError::CoveredWrite`] for an
-    /// object delete covering a write (D10).
+    /// of a written key, [`crate::error::DbError::CoveredWrite`] for an
+    /// object delete covering a write.
     #[default]
     Refuse,
     /// The delete wins: every covered write is dropped before anything runs
@@ -124,8 +123,7 @@ pub enum CoveredWrites {
     DeleteWins,
 }
 
-/// A value's identity key. OPEN-7 (jkiviluo, 2026-08-17) folds this into the
-/// value encoding (spec §9.6): value equality is key + shape + measure, not
+/// A value's identity key. The value encoding includes it: value equality is key + shape + measure, not
 /// measure-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValueKey {
@@ -134,8 +132,8 @@ pub struct ValueKey {
     pub alternative_id: i64,
 }
 
-/// A single scalar measure — the slot-1 primary measure of the value encoding
-/// (spec §9.5). Duration is one logical component carried as two fields.
+/// A single scalar measure — the slot-1 primary measure of the value encoding.
+/// Duration is one logical component carried as two fields.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ScalarValue {
     Float(f64),
@@ -184,8 +182,8 @@ fn fold_char(c: char) -> char {
 /// `None` once the engine agreed, the refusal message once it did not.
 static ENGINE_FOLD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
-/// Refuse to write through an engine whose `lower()` is not [`fold`]
-/// (name_fold_identity_PLAN C1 as reshaped by K5). Once per process, on the
+/// Refuse to write through an engine whose `lower()` is not [`fold`].
+/// Once per process, on the
 /// first write connection, [`engine_fold_mismatch`] compares the engine's
 /// `lower()` with the fold's table on every Unicode scalar value and on
 /// strings where a context rule (final sigma, `İ`) would show. A mismatch
@@ -382,10 +380,10 @@ fn per_code_point_difference(
 /// leading/trailing whitespace), and contains no ASCII control characters
 /// (bytes < 0x20 or 0x7f, including newlines, tabs, and NUL). The DB CHECK is
 /// gone, so the writer is strictly *stricter* than the DB — the safe direction,
-/// never "writer accepts, DB rejects" (api critique F3). This is the canonical
+/// never "writer accepts, DB rejects". This is the canonical
 /// predicate: mirrored in Rust so a caller-contract problem fails as a clean
 /// error, never a raw CHECK error mid-transaction. Shared by the G8 verbs and
-/// the structural channel's pure prepare (invariant 2 — one name rule); the
+/// the structural channel's pure prepare; the
 /// template IR and reconcile predicates delegate here so they cannot drift.
 pub(crate) fn charset_ok(s: &str) -> bool {
     !s.is_empty() && s == s.trim() && !s.chars().any(|c| c.is_ascii_control())
@@ -430,7 +428,7 @@ pub struct LongRow {
     pub value: ScalarValue,
 }
 
-/// The shaped payload of a canonicalized value, per tier (VMP Part 3).
+/// The shaped payload of a canonicalized value, per tier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ShapedData {
     /// Rank 0.
@@ -442,31 +440,30 @@ pub enum ShapedData {
 }
 
 /// A machine-readable warning surfaced to the caller of the public write API
-/// (`api::write_parameter`). The founding case (decision B,
-/// `rust_impl_session_decisions.md`) is name-resolution auto-create: a referent
+/// (`api::commit` and its wrappers). The founding case is name-resolution
+/// auto-create: a referent
 /// named in the write did not exist and was created, which the caller MUST be
 /// able to detect programmatically — never a mere log line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WarningKind {
-    /// A named referent (entity_class / parameter_definition / alternative /
-    /// entity / parameter_type) was auto-created because name resolution found
+    /// A named referent (class / parameter / alternative / entity /
+    /// parameter_type) was auto-created because name resolution found
     /// no current row.
     AutoCreated,
-    /// A tz-bearing `Timestamp(µs, tz)` batch column was accepted (api critique
-    /// F6): a tz-aware timestamp is a well-defined instant and is stored as the
+    /// A tz-bearing `Timestamp(µs, tz)` batch column was accepted: a tz-aware timestamp is a well-defined instant and is stored as the
     /// UTC-µs instant unchanged, but the tz display metadata is dropped —
     /// surfaced here so tz-aware feeds are never silently reinterpreted.
     TimezoneNormalized { column: String, tz: String },
     /// A [`DeleteKey`](crate::api::DeleteKey) named a referent that has no
     /// current row (case-insensitive lookup missed at `level` —
-    /// `"entity_class"` / `"parameter_definition"` / `"alternative"` /
-    /// `"entity"`); the key was skipped, never a hard error. `key_index` is the
-    /// key's position in the caller's `deletes` vec, so the caller maps a skip
-    /// back to its source key (delete critique MINOR-3).
+    /// `"class"` / `"parameter"` / `"alternative"` / `"entity"`); the key
+    /// was skipped, never a hard error. `key_index` is the key's position in
+    /// the caller's `deletes` vec, so the caller maps a skip back to its
+    /// source key.
     UnknownReferent { key_index: usize, level: String },
     /// A [`DeleteKey`](crate::api::DeleteKey) fully resolved but held no live
     /// value; the delete was a no-op. `key_index` is the key's position in the
-    /// caller's `deletes` vec (delete critique MINOR-3).
+    /// caller's `deletes` vec.
     NothingToDelete { key_index: usize },
     /// A value write was dropped because a delete in the same call covers
     /// it ([`CoveredWrites::DeleteWins`]): nothing was written for it.
@@ -512,9 +509,9 @@ pub enum WarningKind {
     /// resolved this way, in input order (one spelling resolving to two rows,
     /// e.g. entities of two classes, is two entries), `count` its length,
     /// and `written`/`stored` the first entry's pair.
-    /// `object_type` is the referent table (`"entity_class"`,
-    /// `"parameter_definition"`, `"alternative"`, `"entity"`,
-    /// `"scenario"`, `"parameter_value_list"`), `name` the segment
+    /// `object_type` is the referent's object type (`"class"`,
+    /// `"parameter"`, `"alternative"`, `"entity"`, `"scenario"`,
+    /// `"parameter_value_list"`), `name` the segment
     /// (`class:parameter/alternative`, as written) or empty, and `id` the
     /// first resolved row's id. Not a write by itself. A client that sends
     /// the spellings it loaded never sees one.
@@ -537,6 +534,17 @@ pub enum WarningKind {
         cells: u64,
         threshold: u64,
     },
+}
+
+/// The object-type tag reports use for a referent table: `"class"` for
+/// `entity_class` and `"parameter"` for `parameter_definition` (the same
+/// tags as [`ObjectKind::tag`]); every other table name is its own tag.
+pub(crate) fn object_type_tag(table: &str) -> &str {
+    match table {
+        "entity_class" => "class",
+        "parameter_definition" => "parameter",
+        other => other,
+    }
 }
 
 /// One reference of a [`WarningKind::NameFolded`] warning: the spelling
@@ -564,8 +572,8 @@ pub enum CoveringDelete {
 }
 
 /// One structured warning. For [`WarningKind::AutoCreated`], `object_type` is
-/// the referent table (`"entity_class"`, `"parameter_definition"`,
-/// `"alternative"`, `"entity"`, `"parameter_type"`), `name` the resolved name,
+/// the referent's object type (`"class"`, `"parameter"`, `"alternative"`,
+/// `"entity"`, `"parameter_type"`), `name` the resolved name,
 /// `id` the id assigned to the created row. For
 /// [`WarningKind::TimezoneNormalized`], `object_type` is `"column"`, `name`
 /// the column name, and `id` is 0 (no row was created).
@@ -579,14 +587,14 @@ pub struct Warning {
 
 /// The aggregate result of one `api::write_parameter` call (plan Part 3
 /// `types`: "tiers touched, rows written, axes reused/created, commit id"),
-/// plus the machine-readable auto-create warnings (decision B). Owned and
+/// plus the machine-readable auto-create warnings. Owned and
 /// FFI-friendly. One report covers every per-entity value written by the call.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WriteReport {
     /// The commit id stamped on every row this call wrote (the validity edge).
     /// `0` when the call changed nothing (every value unchanged, every delete
-    /// a miss, every structural item a no-op, every object delete not found;
-    /// skip_unchanged_writes_PLAN D1): no commit was made and the head did
+    /// a miss, every structural item a no-op, every object delete not found):
+    /// no commit was made and the head did
     /// not move. Use `api::head_commit` for the commit the data is current
     /// at.
     pub commit_id: i64,
@@ -609,18 +617,18 @@ pub struct WriteReport {
     /// Distinct tiers written (first-seen order); a tier whose values were
     /// all unchanged is not listed.
     pub tiers: Vec<Tier>,
-    /// Machine-readable warnings (auto-create, decision B).
+    /// Machine-readable warnings.
     pub warnings: Vec<Warning>,
     /// Per-request outcomes of any object deletes in this commit (empty for
-    /// pure value writes/deletes). Additive field (object_delete plan §1) — a
+    /// pure value writes/deletes). Additive field — a
     /// structured result, not a warning, so the CLI's exhaustive `WarningKind`
     /// match is untouched.
     pub object_deletes: Vec<ObjectDeleteOutcome>,
     /// Per-item outcomes of any structural (create/rename/set-ranks/activation/
-    /// membership) changes in this commit (structural_write_api_plan §2.3).
+    /// membership) changes in this commit.
     /// Empty for pure value work. Additive, like `object_deletes`.
     pub structural: Vec<StructuralOutcome>,
-    /// Per-request outcomes of any purges in this commit (purge plan §3.4).
+    /// Per-request outcomes of any purges in this commit.
     /// Additive, like `object_deletes`.
     pub purges: Vec<PurgeOutcome>,
     /// Set when the database file's read surface was older than this
@@ -669,7 +677,7 @@ impl WriteReport {
     /// A delete writes no new current row and touches no tier, so this only
     /// folds `rows_closed` and — because a no-op delete (no live value) closes
     /// nothing — counts a "value deleted" in `values_written` **only** when it
-    /// actually closed ≥1 row (delete design §1; keeps the write-path [`absorb`]
+    /// actually closed ≥1 row (keeps the write-path `absorb`
     /// untouched). Never pushes to `tiers` (a delete's tier is `None`).
     pub fn absorb_delete(&mut self, o: &WriteOutcome) {
         self.rows_closed += o.rows_closed;
@@ -679,8 +687,8 @@ impl WriteReport {
     }
 }
 
-/// The full result of one `history::write_value` / `history::delete_value` call
-/// (VMP Part 5). Owned, FFI-friendly; folds into a [`WriteReport`] for callers
+/// The full result of one `history::write_value` / `history::delete_value` call.
+/// Owned, FFI-friendly; folds into a [`WriteReport`] for callers
 /// that only want the summary.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WriteOutcome {
@@ -693,7 +701,7 @@ pub struct WriteOutcome {
     pub version: u32,
     /// The stored value already equals the written one (same tier, binding,
     /// axes and stored payload), so nothing was written: `rows_written` and
-    /// `rows_closed` are 0 (skip_unchanged_writes_PLAN §2).
+    /// `rows_closed` are 0.
     pub unchanged: bool,
     /// Long tier: the current cells left as they were. Every cell of an
     /// unchanged long value; the equal cells of a cell diff; 0 for a long
@@ -715,7 +723,7 @@ pub struct WriteOutcome {
 // (lookup-only, case-insensitive, never auto-created), exactly like DeleteKey.
 // ---------------------------------------------------------------------------
 
-/// Which object kind a delete targets (object_delete plan §1). P1 implements
+/// Which object kind a delete targets. P1 implements
 /// `Alternative` only; the other variants are defined now so the enum (and the
 /// leg registry) is complete for P2/P3/P4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -740,7 +748,7 @@ impl ObjectKind {
     }
 }
 
-/// How to address the target object (object_delete plan §1, §6). Two channels
+/// How to address the target object. Two channels
 /// for an N-D entity: its own unique `Name`, or its identifying `Elements`
 /// tuple. Keeping it an enum (not two `Option`s) makes the "exactly one
 /// channel" contract unrepresentable-when-wrong. P1 exercises only `Name`.
@@ -752,7 +760,7 @@ pub enum ObjectRef {
     Elements(Vec<String>),
 }
 
-/// A typed object-delete target (object_delete plan §1). `class` is REQUIRED
+/// A typed object-delete target. `class` is REQUIRED
 /// for `Entity`/`Parameter` (both are per-class) and None for
 /// `Alternative`/`Class` (addressed by their own globally-unique name).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -762,7 +770,7 @@ pub struct ObjectDeleteKey {
     pub target: ObjectRef,
 }
 
-/// Cascade opt-in per request (object_delete plan §1, decision D1). This is the
+/// Cascade opt-in per request. This is the
 /// REPORT CONTRACT, never a guard:
 ///   cascade:false ⇒ if the object has any dependent, close out NOTHING for
 ///                   this key and return `Restricted{blockers}`; if it has
@@ -775,14 +783,14 @@ pub struct ObjectDeleteOpts {
     pub cascade: bool,
 }
 
-/// Per-dependent-table close-out count (object_delete plan §1).
+/// Per-dependent-table close-out count.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableCount {
     pub table: String,
     pub rows: usize,
 }
 
-/// What a cascade closed out (object_delete plan §1). `object_rows` counts the
+/// What a cascade closed out. `object_rows` counts the
 /// target object row(s) (and, for entity/parameter/class, its identity rows);
 /// `per_table` is the machine-readable dependent breakdown; `total_rows` is the
 /// precomputed headline (object_rows + Σ per_table.rows).
@@ -793,7 +801,7 @@ pub struct CascadeCounts {
     pub total_rows: usize,
 }
 
-/// One RESTRICT blocker (object_delete plan §1): a dependent table still
+/// One RESTRICT blocker: a dependent table still
 /// referencing the target, with a bounded sample of rendered identifiers for
 /// the editor's red-block breakdown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,7 +812,7 @@ pub struct Blocker {
     pub sample: Vec<String>,
 }
 
-/// The outcome for one object-delete request (object_delete plan §1). No
+/// The outcome for one object-delete request. No
 /// `residual_danglers` (change-model ruling 2: a `run` leg to a closed-out —
 /// not absent — object is coherent as-of, fixed by the audit-view change, not
 /// by a report field).
@@ -818,12 +826,12 @@ pub enum ObjectDeleteResult {
     },
     /// Target did not resolve, or already closed out, or was created in this
     /// same commit (the `valid_from < commit_id` guard matched nothing) —
-    /// folded into one variant so an idempotent whole-save retry is safe (D4).
+    /// folded into one variant so an idempotent whole-save retry is safe.
     NotFound,
 }
 
 /// One request's outcome, mapped back to the caller's staged item by
-/// `key_index` (object_delete plan §1).
+/// `key_index`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectDeleteOutcome {
     pub key_index: usize,
@@ -847,7 +855,7 @@ pub struct EntityAddr {
 }
 
 /// A sanctioned create/update of a structural (non-value) object, applied inside
-/// `commit_changes`' atomic commit (structural_write_api_plan §2.2). Removal is
+/// `commit_changes`' atomic commit. Removal is
 /// NOT here — it rides `object_deletes` ([`ObjectKind`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StructuralChange {
@@ -990,8 +998,9 @@ pub enum StructuralChange {
     },
 }
 
-/// Which structural object an outcome concerns (structural_write_api_plan §2.3).
+/// Which structural object an outcome concerns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StructuralKind {
     Alternative,
     Scenario,
@@ -999,13 +1008,37 @@ pub enum StructuralKind {
     Activation,
     Membership,
     Entity,
-    EntityClass,
+    Class,
     Parameter,
 }
 
-/// What a structural change did (structural_write_api_plan §2.3): tell "created
+impl StructuralKind {
+    /// The snake_case tag reports use (the Python skin's strings, and this
+    /// type's serde and `Display` form).
+    pub fn tag(self) -> &'static str {
+        match self {
+            StructuralKind::Alternative => "alternative",
+            StructuralKind::Scenario => "scenario",
+            StructuralKind::ScenarioRanking => "scenario_ranking",
+            StructuralKind::Activation => "activation",
+            StructuralKind::Membership => "membership",
+            StructuralKind::Entity => "entity",
+            StructuralKind::Class => "class",
+            StructuralKind::Parameter => "parameter",
+        }
+    }
+}
+
+impl std::fmt::Display for StructuralKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.tag())
+    }
+}
+
+/// What a structural change did: tell "created
 /// a new object" from "it already existed", and "changed" from "already so".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StructuralEffect {
     Created,
     Renamed,
@@ -1014,8 +1047,28 @@ pub enum StructuralEffect {
     Cleared,
 }
 
+impl StructuralEffect {
+    /// The snake_case tag reports use (the Python skin's strings, and this
+    /// type's serde and `Display` form).
+    pub fn tag(self) -> &'static str {
+        match self {
+            StructuralEffect::Created => "created",
+            StructuralEffect::Renamed => "renamed",
+            StructuralEffect::Updated => "updated",
+            StructuralEffect::NoOp => "no_op",
+            StructuralEffect::Cleared => "cleared",
+        }
+    }
+}
+
+impl std::fmt::Display for StructuralEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.tag())
+    }
+}
+
 /// One structural item's outcome, mapped back to the caller's `structural` vec
-/// by `change_index` (structural_write_api_plan §2.3).
+/// by `change_index`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructuralOutcome {
     /// Position in the caller's `structural` vec.
@@ -1032,7 +1085,7 @@ pub struct StructuralOutcome {
 // channels. Names, not ids; resolved lookup-only, case-insensitively.
 // ---------------------------------------------------------------------------
 
-/// What one purge request closes (purge plan §3.4). Every filter name is
+/// What one purge request closes. Every filter name is
 /// resolved lookup-only after the call's structural changes; an unknown or
 /// blank name is refused, and so is a name a rename of the same call freed.
 ///
@@ -1093,7 +1146,7 @@ pub enum PurgeScope {
     },
 }
 
-/// One purge request: a scope and its two opt-ins (purge plan §3.4).
+/// One purge request: a scope and its two opt-ins.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurgeRequest {
     pub scope: PurgeScope,
@@ -1123,7 +1176,7 @@ impl PurgeRequest {
     }
 }
 
-/// What one purge request did, in `WriteReport::purges` (purge plan §3.4).
+/// What one purge request did, in `WriteReport::purges`.
 /// Counts come from the close-out statements' row counts: a row two
 /// requests (or an object delete and a request) reach is counted once, by
 /// the first that closed it.
@@ -1146,7 +1199,7 @@ pub struct PurgeOutcome {
     pub unbound: usize,
 }
 
-/// Read-only preview of one purge request (purge plan §3.6). Computed with
+/// Read-only preview of one purge request. Computed with
 /// no survivors (nothing is written), so its counts, `outside_scope` and
 /// `template_stamped` are upper bounds of what a call that also writes
 /// would close.
@@ -1170,11 +1223,10 @@ pub struct PurgePreview {
     pub template_stamped: bool,
 }
 
-/// Read-only preview of ONE object delete (object_delete plan §3, decision D6).
+/// Read-only preview of ONE object delete.
 /// Carries BOTH framings of the same dependency set so the editor renders the
 /// cascade preview or the restrict block from one call. The commit-time
-/// `ObjectDeleteOutcome` is authoritative; this is a best-effort snapshot
-/// (critique C5 — a concurrent writer can still move the counts).
+/// `ObjectDeleteOutcome` is authoritative; this is a best-effort snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectDeletePreview {
     pub key_index: usize,
@@ -1183,7 +1235,6 @@ pub struct ObjectDeletePreview {
     pub cascade: CascadeCounts,
     pub blockers: Vec<Blocker>,
 }
-
 
 // ---------------------------------------------------------------------------
 // The metadata channel (`api::ChangeSet::metadata`)
@@ -1218,9 +1269,15 @@ pub enum Subject {
     /// The dataset as a whole.
     Dataset,
     /// An entity, by its class and (0-D or N-D) name.
-    Entity { class: String, name: String },
+    Entity {
+        class: String,
+        name: String,
+    },
     Class(String),
-    Parameter { class: String, name: String },
+    Parameter {
+        class: String,
+        name: String,
+    },
     Alternative(String),
     Scenario(String),
     Run(i64),
@@ -1323,14 +1380,26 @@ pub enum MetadataChange {
         fields: LicenseFields,
     },
     /// The exact set of licenses of a source.
-    SetSourceLicenses { source: Ref, licenses: Vec<Ref> },
+    SetSourceLicenses {
+        source: Ref,
+        licenses: Vec<Ref>,
+    },
     /// Create a pair (no-op when it exists; a key that differs from an
     /// existing key only in case is stored in the existing spelling).
-    CreatePair { name: String, value: String },
+    CreatePair {
+        name: String,
+        value: String,
+    },
     /// A pair's new value (same id).
-    RevisePair { pair: PairRef, value: String },
+    RevisePair {
+        pair: PairRef,
+        value: String,
+    },
     /// Re-spell or rename the key of every pair of `from`.
-    RenamePairKey { from: String, to: String },
+    RenamePairKey {
+        from: String,
+        to: String,
+    },
     /// Create or revise a role.
     PutRole {
         role: Ref,
@@ -1339,31 +1408,55 @@ pub enum MetadataChange {
         iri: Option<String>,
     },
     /// Set (or with `None`, clear) a user or tool database property.
-    SetProperty { key: String, value: Option<String> },
+    SetProperty {
+        key: String,
+        value: Option<String>,
+    },
     /// Delete a source; without `cascade` a remaining link restricts it.
-    DeleteSource { source: Ref, cascade: bool },
-    DeleteLicense { license: Ref, cascade: bool },
-    DeletePair { pair: PairRef, cascade: bool },
+    DeleteSource {
+        source: Ref,
+        cascade: bool,
+    },
+    DeleteLicense {
+        license: Ref,
+        cascade: bool,
+    },
+    DeletePair {
+        pair: PairRef,
+        cascade: bool,
+    },
     /// Delete a role (restricted while any link uses it).
-    DeleteRole { role: Ref },
-    Link { subject: Subject, link: LinkSpec },
+    DeleteRole {
+        role: Ref,
+    },
+    Link {
+        subject: Subject,
+        link: LinkSpec,
+    },
     Unlink {
         subject: Subject,
         target: Target,
         role: RoleSel,
     },
-    LinkValue { value: ValueAddr, link: LinkSpec },
+    LinkValue {
+        value: ValueAddr,
+        link: LinkSpec,
+    },
     UnlinkValue {
         value: ValueAddr,
         target: Target,
         role: RoleSel,
     },
     /// A keep / set / clear statement for new value versions.
-    ValueMetadata { scope: Scope, action: Action },
+    ValueMetadata {
+        scope: Scope,
+        action: Action,
+    },
 }
 
 /// The kind of object a metadata outcome is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MetadataKind {
     Source,
     License,
@@ -1376,8 +1469,33 @@ pub enum MetadataKind {
     ValueMetadata,
 }
 
+impl MetadataKind {
+    /// The snake_case tag reports use (the Python skin's strings, and this
+    /// type's serde and `Display` form).
+    pub fn tag(self) -> &'static str {
+        match self {
+            MetadataKind::Source => "source",
+            MetadataKind::License => "license",
+            MetadataKind::SourceLicenses => "source_licenses",
+            MetadataKind::Pair => "pair",
+            MetadataKind::Role => "role",
+            MetadataKind::Property => "property",
+            MetadataKind::Link => "link",
+            MetadataKind::ValueLink => "value_link",
+            MetadataKind::ValueMetadata => "value_metadata",
+        }
+    }
+}
+
+impl std::fmt::Display for MetadataKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.tag())
+    }
+}
+
 /// What one metadata item did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MetadataEffect {
     Created,
     Updated,
@@ -1392,11 +1510,34 @@ pub enum MetadataEffect {
     DroppedByDelete,
 }
 
+impl MetadataEffect {
+    /// The snake_case tag reports use (the Python skin's strings, and this
+    /// type's serde and `Display` form).
+    pub fn tag(self) -> &'static str {
+        match self {
+            MetadataEffect::Created => "created",
+            MetadataEffect::Updated => "updated",
+            MetadataEffect::Renamed => "renamed",
+            MetadataEffect::NoOp => "no_op",
+            MetadataEffect::Cleared => "cleared",
+            MetadataEffect::Deleted => "deleted",
+            MetadataEffect::Restricted => "restricted",
+            MetadataEffect::DroppedByDelete => "dropped_by_delete",
+        }
+    }
+}
+
+impl std::fmt::Display for MetadataEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.tag())
+    }
+}
+
 /// One metadata item's outcome (`WriteReport::metadata`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataOutcome {
     /// The item's position in `ChangeSet::metadata`.
-    pub index: usize,
+    pub item_index: usize,
     pub kind: MetadataKind,
     /// The object's id (0 for a property, a statement or a key rename).
     pub id: i64,
@@ -1427,6 +1568,47 @@ pub struct ValueLinkCounts {
 #[cfg(test)]
 mod tests {
     use super::ScalarValue;
+
+    #[test]
+    fn report_tags_match_serde_and_display() {
+        use super::{MetadataEffect as M, StructuralEffect as S, StructuralKind as K};
+        let json = |v: serde_json::Value| v.as_str().unwrap().to_string();
+        for e in [S::Created, S::Renamed, S::Updated, S::NoOp, S::Cleared] {
+            assert_eq!(json(serde_json::to_value(e).unwrap()), e.tag());
+            assert_eq!(e.to_string(), e.tag());
+        }
+        let all = [
+            M::Created,
+            M::Updated,
+            M::Renamed,
+            M::NoOp,
+            M::Cleared,
+            M::Deleted,
+            M::Restricted,
+            M::DroppedByDelete,
+        ];
+        for e in all {
+            assert_eq!(json(serde_json::to_value(e).unwrap()), e.tag());
+        }
+        let tags: Vec<&str> = all.iter().map(|e| e.tag()).collect();
+        assert_eq!(
+            tags,
+            [
+                "created",
+                "updated",
+                "renamed",
+                "no_op",
+                "cleared",
+                "deleted",
+                "restricted",
+                "dropped_by_delete"
+            ]
+        );
+        assert_eq!(S::NoOp.tag(), M::NoOp.tag());
+        assert_eq!(K::Class.tag(), super::ObjectKind::Class.tag());
+        assert_eq!(K::Parameter.tag(), super::ObjectKind::Parameter.tag());
+        assert_eq!(json(serde_json::to_value(K::Class).unwrap()), "class");
+    }
 
     #[test]
     fn float_identity_string_is_canonical() {

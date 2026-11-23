@@ -1,28 +1,25 @@
-//! Hard erasure — physical removal **with a trace** (erasure_compaction_plan
-//! §2–§3, decisions D-E1..E6 2026-09-19). The one sanctioned exception to
-//! append-only history: rows are physically DELETEd, and every removal writes
-//! an `erasure_marker` row in the SAME transaction (the removed rows carry no
-//! close-out edge — the marker IS their trace). The `commit` log is never
-//! touched; as-of reads that would silently span removed content fail loudly
-//! on the marker (the WHERE-clause guard in `schema/110_views_history.sql`).
-//! History may be *removed with a trace*; it may never be *rewritten*.
+//! Hard erasure — physical removal **with a trace**. The one sanctioned
+//! exception to append-only history: rows are physically DELETEd, and every
+//! removal writes an `erasure_marker` row in the SAME transaction (the removed
+//! rows carry no close-out edge — the marker IS their trace). The `commit` log
+//! is never touched; as-of reads that would silently span removed content fail
+//! loudly on the marker (the WHERE-clause guard in
+//! `schema/110_views_history.sql`). History may be *removed with a trace*; it
+//! may never be *rewritten*.
 //!
-//! ## v1 grain: erase-by-alternative
-//! The results-architecture customer (`specs/schema_interop.md` §9
-//! overwrite-on-rerun): a discarded run's whole result-alternative. Scope is
-//! closed by definition — every row keyed on the alternative, ANY validity,
-//! across the seven alternative-keyed tables plus the `value_array_hist` twin
-//! (plan §2.2, leg list independently re-verified by the critique). Retained:
-//! the `alternative` identity row (closed, never removed — D-E2), the whole
-//! `commit` log, `run` provenance rows, `semantic_annotation`, and `axis` rows
-//! (orphan collection is a deferred maintain-pass job, D-E5 — an erase that
-//! scanned total axis references would turn a fast targeted operation into a
-//! whole-DB scan).
+//! ## The grain: erase-by-alternative
+//! The use case is overwrite-on-rerun: a discarded run's whole result
+//! alternative. Scope is closed by definition — every row keyed on the
+//! alternative, ANY validity, across the seven alternative-keyed tables plus
+//! the `value_array_hist` twin. Retained: the `alternative` identity row
+//! (closed, never removed), the whole `commit` log, `run` provenance rows,
+//! `semantic_annotation`, and `axis` rows (orphaned axes are not collected: an
+//! erase that scanned total axis references would turn a fast targeted
+//! operation into a whole-DB scan).
 //!
-//! ## Shared predicates, separate execution arms (critique M3)
-//! Row selection comes from the object-delete leg registry
-//! ([`crate::object_delete::erase_scope_legs`]) — ONE dependency definition
-//! (invariant 2). The *executor* is erase's own: registry predicate +
+//! ## Shared predicates, separate execution arms
+//! Row selection comes from the object-delete leg registry — ONE dependency
+//! definition. The *executor* is erase's own: registry predicate +
 //! any-validity + plain DELETE. The delete arm's live-guard and its array
 //! hist-move do NOT run here — verbatim, the hist-move would copy the
 //! discarded run's array payloads (the gigabytes this primitive exists to
@@ -30,19 +27,18 @@
 //! them, write-amplifying the erase by roughly the run's size.
 //!
 //! ## Marker kinds
-//! The marker table is shaped for the whole grain family (alternative /
-//! horizon / entity / detach-to-archive). This module writes ONLY
-//! `kind='alternative'` with `continuation_db` NULL; the history-free extract
-//! ([`crate::extract`]) writes `kind='horizon'`, into the new file it builds
-//! (it removes nothing from its source, which becomes the archive named by
-//! `continuation_db`). No API writes `kind='entity'` — the unbuilt semantics
-//! cannot be half-used (plan §6). [`erase_alternative`] refuses
-//! non-alternative [`ObjectDeleteKey`]s.
+//! The marker table is shaped for a family of grains (alternative / horizon /
+//! entity / detach-to-archive). This module writes ONLY `kind='alternative'`
+//! with `continuation_db` NULL; the history-free extract ([`crate::extract`])
+//! writes `kind='horizon'`, into the new file it builds (it removes nothing
+//! from its source, which becomes the archive named by `continuation_db`). No
+//! API writes `kind='entity'`. [`erase_alternative`] refuses non-alternative
+//! keys.
 //!
-//! ## Where erase may run (D-E6)
+//! ## Where erase may run
 //! The mechanism is DB-agnostic; the input-vs-output-DB policy is a client
-//! concern (editor/CLI warn on provenance-stamped input DBs). Nothing here
-//! inspects provenance.
+//! concern (the CLI warns that erasing from a curated input database is almost
+//! certainly a mistake). Nothing here inspects provenance.
 //!
 //! Bytes return to the OS at the next [`crate::compaction::compact`]; the
 //! primitive stays two calls — erase is fast and transactional, compaction is
@@ -65,7 +61,7 @@ pub struct NamedRef {
     pub name: String,
 }
 
-/// Read-only preview of one [`erase_alternative`] (plan §3, mirroring the
+/// Read-only preview of one [`erase_alternative`] (mirroring the
 /// object-delete preview convention): per-table row counts, an advisory bytes
 /// estimate, and the reported-not-blocking reference surface. Best-effort
 /// snapshot — the erase-time [`EraseReport`] is authoritative; a concurrent
@@ -89,9 +85,9 @@ pub struct ErasePreview {
     pub bytes_estimate: u64,
     /// `true` ⇒ the identity row is still current, so erase will close it.
     pub still_current: bool,
-    /// Live scenarios whose stacks lose a rank row (REPORTED, never blocking
-    /// — plan §3: erase has no cascade-vs-refuse choice; the editor's job is
-    /// to show this, the core's job is to be exact about it).
+    /// Live scenarios whose stacks lose a rank row (REPORTED, never blocking:
+    /// erase has no cascade-vs-refuse choice; a client's job is to show
+    /// this, the core's job is to be exact about it).
     pub referencing_scenarios: Vec<NamedRef>,
     /// `run` rows whose results this erase removes (`result_alternative_id`).
     /// The rows themselves are retained — a run pointing at an erased
@@ -105,13 +101,13 @@ pub struct ErasePreview {
     pub expect_present_problems: Vec<String>,
 }
 
-/// Options for [`erase_alternative`] (plan §3).
+/// Options for [`erase_alternative`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EraseOpts<'a> {
     /// Free-form operator context, stored on the marker row.
     pub note: Option<&'a str>,
-    /// Optional machine-check of the rerun-overwrite ordering contract
-    /// (plan m7a; `schema_interop.md` §9): names that MUST have a current
+    /// Optional machine-check of the rerun-overwrite ordering contract:
+    /// names that MUST have a current
     /// alternative row (the replacement run) or the erase refuses, touching
     /// nothing. Belt for the client-ordered flow; empty = no check. The
     /// FlexTool runner should use it.
@@ -157,7 +153,7 @@ pub struct EraseReport {
 const NOOP_SENTINEL: &str = "erase: nothing to erase (internal no-op sentinel)";
 
 /// Preview one erase-by-alternative (read-only; one per-operation RO
-/// connection, CLAUDE.md invariant 1). `opts` contributes only its
+/// connection). `opts` contributes only its
 /// `expect_present` names — the SAME ordering check the erase enforces is run
 /// read-only and reported in [`ErasePreview::expect_present_problems`]
 /// (`opts.note` is recorded only by an actual erase). See [`ErasePreview`].
@@ -229,7 +225,7 @@ pub fn preview_erase_alternative(
     })
 }
 
-/// Erase one alternative (plan §2.1): one ordinary write transaction
+/// Erase one alternative: one ordinary write transaction
 /// (per-operation connection, conflict-retried, [`DbError::Busy`] on
 /// contention — nothing new), performing in order:
 ///
@@ -244,7 +240,7 @@ pub fn preview_erase_alternative(
 ///     counts/bytes from step 3);
 ///  5. commit.
 ///
-/// Transaction atomicity gives the plan's §1.2 invariant: a reader either
+/// Transaction atomicity guarantees that a reader either
 /// sees the pre-erase state or (identity closed + data gone + marker
 /// present) — never anything between. Bytes return to the OS at the next
 /// compaction.
@@ -460,7 +456,7 @@ fn expect_present_problems(
     Ok(problems)
 }
 
-/// Convenience chain (plan §4.2): [`erase_alternative`] then
+/// Convenience chain: [`erase_alternative`] then
 /// [`crate::compaction::compact`]. Deliberately TWO separate operations, not
 /// one fused one — erase is a fast ordinary write transaction, compaction is
 /// a heavyweight exclusively-locked whole-file rewrite; their lock scopes
@@ -484,8 +480,7 @@ pub fn erase_alternative_and_compact(
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Validate the erase key: v1 erases ALTERNATIVES only (plan §6 — other
-/// marker kinds have no writer), addressed by their own name (no class, no
+/// Validate the erase key: v1 erases ALTERNATIVES only, addressed by their own name (no class, no
 /// element tuple). Returns the name.
 fn validate_erase_key(alt: &ObjectDeleteKey) -> Result<&str, DbError> {
     if alt.kind != ObjectKind::Alternative {
@@ -534,7 +529,7 @@ struct ResolvedAlt {
 ///     like every core resolver);
 ///   - the CLOSED IDENTITIES that carried the name in some version and have
 ///     **no current row at all** — erase composes with a prior
-///     `delete_objects` (D-E2 keeps the closed row resolvable). An id that
+///     `delete_objects`. An id that
 ///     still has a current row is deliberately NOT matched by its former
 ///     names: a renamed alternative's stale name must never resolve to live
 ///     data (the current channel matches current names only).

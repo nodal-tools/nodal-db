@@ -1,31 +1,28 @@
-//! Object deletion — the structural close-out path (object_delete plan §2-§4).
+//! Object deletion — the structural close-out path.
 //!
-//! An *object* delete closes out a whole object row (an alternative, and in
-//! later phases an entity / parameter / class) plus its dependents, inside the
-//! SAME atomic commit as any value writes/deletes ([`crate::api::commit_changes`]).
-//! Everything here is driven by ONE **leg registry** ([`object_legs`]) so the
-//! forward COUNTs the preview runs and the forward UPDATEs the commit runs can
-//! never drift (CLAUDE.md invariant 2 — one canonicalizer, one dependency
-//! finder). P1 implements the alternative leg set (§4a) and P2 the parameter
-//! set (§4d), including indirect-key and filtered legs; the registry is shaped
-//! so P3/P4 add entity/class legs without touching this code.
+//! An *object* delete closes out a whole object row (an alternative, entity,
+//! parameter, class or scenario) plus its dependents, inside the SAME atomic
+//! commit as any value writes/deletes ([`crate::api::commit`]). Everything here
+//! is driven by ONE **leg registry** so the forward COUNTs the preview runs and
+//! the forward UPDATEs the commit runs can never drift (one dependency finder).
 //!
-//! ## The same-commit guard (§2, critique C1/C9)
+//! ## The same-commit guard
 //! Every close-out here — the object row, each dependent, and the array
 //! move-to-hist arm — is guarded by `valid_from_commit < commit_id AND
 //! valid_to_commit IS NULL`. A row CREATED in this same commit
 //! (`valid_from = commit_id`) is therefore never closed: closing it would set
 //! `valid_to = valid_from` and trip the span CHECK, rolling the whole txn back
 //! with a raw DuckDB error. A target that the guard matches nothing for is
-//! reported [`ObjectDeleteResult::NotFound`], never an error.
+//! reported [`ObjectDeleteResult::NotFound`],
+//! never an error.
 //!
-//! ## `run` provenance is intentionally out of scope (change-model ruling 2)
+//! ## `run` provenance is intentionally out of scope
 //! `run.result_alternative_id` (and, for entities, `run.tool_entity_id`) is an
 //! immutable append-only leg. A `run` pointing at a *closed-out* alternative is
 //! coherent as-of, so it is NOT a dependent here: cascade never touches it, it
 //! never blocks a `cascade:false` delete, and it is not a residual on the
-//! report. The 2-line `audit_dangling_ref` fix (schema/120) keeps such a `run`
-//! off the dangling-ref list.
+//! report. `audit_dangling_ref` (schema/120) keeps such a `run` off the
+//! dangling-ref list.
 
 use std::collections::HashSet;
 
@@ -48,8 +45,7 @@ use crate::types::{
 
 /// How a leg's rows reference the target object: a key column matched
 /// against the target id, optionally through an indirect table, optionally
-/// filtered (purge plan §3.6, critique S7: a predicate *template*, rendered
-/// in two forms, never derived by string replacement).
+/// filtered.
 ///
 /// Rendered by [`LegKey::render`]:
 ///   - **per-id** ([`IdSet::One`], exactly one `?` bound to the target id):
@@ -144,8 +140,7 @@ impl LegKey {
     }
 }
 
-/// What, in a purge, can spare a dependent leg's rows (purge plan §3.5.3,
-/// §3.6 "two sets per kind"): the survivor grain of its table. A leg with a
+/// What, in a purge, can spare a dependent leg's rows: the survivor grain of its table. A leg with a
 /// grain runs over the scope's dependent set with its own survivor
 /// anti-join; a [`Grain::Attached`] leg runs over the close set (a spared
 /// object keeps its descriptors and attachments, §3.7); a [`Grain::Plain`] leg
@@ -167,8 +162,8 @@ pub(crate) enum Grain {
     /// Describes or is attached to an object and no op of a call re-states
     /// it: kept for a spared object, closed with a closing one (runs over
     /// the close set). Vocabulary descriptors (display modes, class-set
-    /// membership, annotations of classes, parameters and lists; V-S5) and,
-    /// by the owner's ruling of 2026-11-19, an entity's attachments
+    /// membership, annotations of classes, parameters and lists) and an
+    /// entity's attachments
     /// (locations, units, metadata links, annotations), which the core
     /// cannot write back for all of them.
     Attached,
@@ -181,8 +176,7 @@ pub(crate) enum Grain {
 /// selects the rows referencing the target object's id. The SAME leg drives
 /// a forward COUNT (preview / blocker), a guarded close-out UPDATE
 /// (cascade), a blocker `sample` SELECT, erasure's DELETE and the purge's
-/// set-form close-out — one [`LegKey`], so they can never drift (CLAUDE.md
-/// invariant 2). `column` is kept purely as the human-facing label for
+/// set-form close-out — one [`LegKey`], so they can never drift. `column` is kept purely as the human-facing label for
 /// [`Blocker::column`]; it does not drive SQL.
 #[derive(Clone, Copy)]
 pub(crate) struct DepLeg {
@@ -202,12 +196,12 @@ pub(crate) struct DepLeg {
     /// A SQL expression producing a human-readable identifier per referencing
     /// row, for the bounded blocker `sample`.
     sample_expr: &'static str,
-    /// Erase participation (erasure_compaction_plan §3): `true` ⇒ the erase
+    /// Erase participation: `true` ⇒ the erase
     /// execution arm ([`erase_scope_legs`]) physically DELETEs this leg's rows
     /// — same `key`, ANY validity, plain DELETE, no hist-move, no
     /// live-guard. The SHARED predicate is what keeps delete's close-outs,
-    /// erase's preview COUNTs, and erase's DELETEs from ever drifting
-    /// (CLAUDE.md invariant 2). `true` on the whole Alternative set; `false`
+    /// erase's preview COUNTs, and erase's DELETEs from ever drifting.
+    /// `true` on the whole Alternative set; `false`
     /// on other kinds' legs (their erase grains are future designs — the core
     /// refuses to erase them in v1).
     erase: bool,
@@ -228,7 +222,7 @@ impl DepLeg {
 
     /// Does a live row of this leg block a `cascade:false` delete? Every
     /// leg but the metadata links: links close with their object, counted,
-    /// and never block (owner ruling OD2, 2026-11-19); erasure still removes
+    /// and never block; erasure still removes
     /// them through the same legs.
     pub(crate) fn blocks(&self) -> bool {
         !matches!(self.table, "object_metadata_link" | "value_metadata_link")
@@ -254,13 +248,13 @@ impl DepLeg {
 ///     for an alternative.
 ///   - `dependent` legs are external references: cascade closes them, and a
 ///     `cascade:false` delete blocks on any that are live.
-///   - `erase_extra` legs (erasure_compaction_plan §3, critique m1) exist ONLY
+///   - `erase_extra` legs exist ONLY
 ///     for the erase execution arm — for an alternative, exactly the
 ///     `value_array_hist` twin, whose rows are already closed (hist rows have
 ///     no live state to block on or close out, so delete's blocker/preview/
 ///     close-out paths never see these legs). They live HERE, in the one
 ///     registry, so erase's dependency definition stays a single source of
-///     truth with delete's (invariant 2 — one dependency finder, never two).
+///     truth with delete's.
 pub(crate) struct ObjectLegSet {
     pub(crate) object_table: &'static str,
     pub(crate) identity: Vec<DepLeg>,
@@ -837,7 +831,7 @@ pub(crate) struct CascadeEdge {
     pub(crate) name_table: &'static str,
 }
 
-/// The cross-kind cascade edges out of `kind` (§10 ruling 1, §4e). Entity has the
+/// The cross-kind cascade edges out of `kind`. Entity has the
 /// single B1 edge; a class has three (child entities, child parameters, and the
 /// B2 dependent classes). Alternative and Parameter have none, so their closure
 /// reduces to `[self]` and the P1/P2 behavior is unchanged.
@@ -987,7 +981,7 @@ fn collect_container_blockers(
     Ok(blockers)
 }
 
-/// Max blocker-sample rows rendered per leg (bounded — §1).
+/// Max blocker-sample rows rendered per leg.
 pub(crate) const SAMPLE_LIMIT: usize = 5;
 
 // ---------------------------------------------------------------------------
@@ -1207,7 +1201,7 @@ fn resolve_target(
     }
 }
 
-/// Resolve an N-D entity by its element tuple within `class_id` (§4c, C6). Reads
+/// Resolve an N-D entity by its element tuple within `class_id`. Reads
 /// the class's declared dimensions (ordered by position), resolves each provided
 /// element name within its position's dimension type (a class, or any member
 /// class of a class-set dimension), then finds the single entity in `class_id`
@@ -1403,7 +1397,7 @@ fn sample_leg(conn: &Connection, leg: &DepLeg, target_id: i64) -> Result<Vec<Str
 }
 
 /// Count the DISTINCT live dependent rows a whole cross-kind closure would close,
-/// per table (§3 preview). A single physical row can be reached from more than
+/// per table. A single physical row can be reached from more than
 /// one work item — e.g. a `value_scalar` row is keyed by BOTH its child entity
 /// (`entity_id`) and its child parameter (`parameter_definition_id`), and a
 /// `membership` row by two legs of the same entity — so a naive per-leg SUM would
@@ -1564,7 +1558,7 @@ pub(crate) fn close_current_row(
 const CLOSE_SET: &str = "SET valid_to_commit = ?";
 
 /// The same-commit guard of every structural close-out (one bind: the commit
-/// id): a row this commit wrote is never closed (§2, purge plan §3.5.1).
+/// id): a row this commit wrote is never closed.
 const LIVE_GUARD: &str = "valid_from_commit < ? AND valid_to_commit IS NULL";
 
 // ---------------------------------------------------------------------------
@@ -1641,7 +1635,7 @@ pub(crate) fn close_current_rows_set(
 }
 
 /// Accumulates a cascade's counts across the target AND every recursively-
-/// cascaded object (§10 ruling 1). `per_table` is merged by table name so a leg
+/// cascaded object. `per_table` is merged by table name so a leg
 /// that fires on several cascaded objects (e.g. `value_scalar` on the target and
 /// each container entity) reports one summed row, matching the flat single-object
 /// framing for kinds with no recursive edge.
@@ -1783,8 +1777,7 @@ fn apply_one(
 }
 
 /// The first value key in `written` that this object delete would cascade
-/// over, or `None` (skip_unchanged_writes_PLAN D10, the resolved-id repeat of
-/// `api::reject_write_and_object_delete`). The scope is the target's FULL
+/// over, or `None`. The scope is the target's FULL
 /// cascade closure — every entity, parameter definition and alternative it
 /// reaches — whatever `cascade` says: a value written and its object
 /// deleted in one call is refused whatever the request's options. A target
@@ -1981,7 +1974,7 @@ mod tests {
 
     /// Every leg and cascade edge renders in the per-id form with exactly
     /// one bind, in the bound-list set form with exactly one bind and in the
-    /// table set form with none (purge plan §3.6, test 11), and every form
+    /// table set form with none, and every form
     /// is valid SQL against the schema.
     #[test]
     fn every_leg_renders_both_forms_with_one_bind() {

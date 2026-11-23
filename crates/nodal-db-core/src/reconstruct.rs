@@ -12,10 +12,9 @@
 //!   i1 = k / (n2·n3·n4),  i2 = (k / (n3·n4)) % n2,
 //!   i3 = (k / n4) % n3,   i4 = k % n4
 //! — the row-major strides `stride[i] = ∏_{j>i} nⱼ`, `p_i = (k / stride[i]) % nᵢ`.
-//! The normative statement and the column-major (Julia/Fortran) transpose hazard
-//! are in `specs/reconstruction.md`; the machine-checkable fixtures live in
-//! `conformance/reconstruction_fixtures/` (runner
-//! `tests/reconstruction_fixtures.rs`).
+//! A reader in a column-major language (Julia, Fortran) must transpose. The
+//! machine-checkable fixtures live in `conformance/reconstruction_fixtures/`
+//! (runner `tests/reconstruction_fixtures.rs`).
 
 use crate::types::{LongRow, ScalarValue};
 
@@ -71,19 +70,18 @@ pub fn reconstruct(
     Ok(rows)
 }
 
-/// Expand one **dense wire row** (`specs/arrow_ipc_bulk_format.md` §6.1–6.3)
+/// Expand one **dense wire row**
 /// into `(coordinate tuple, value)` pairs: the write-direction inverse of the
-/// read-side [`reconstruct`], under the same row-major law (spec
-/// `reconstruction.md` §2 — last dimension varies fastest).
+/// read-side [`reconstruct`], under the same row-major law (the last
+/// dimension varies fastest).
 ///
-/// `dim_lists[i]` is dimension `i`'s coordinates in the producer's axis order
-/// (pairing-only — the core re-derives stored axes afterwards, spec §6.3);
+/// `dim_lists[i]` is dimension `i`'s coordinates in the producer's axis order;
 /// `values` is the flat row-major payload, `len(values) = ∏ len(dim_lists)`.
 ///
 /// Not a third implementation of the layout law: the flat-index → position
 /// decomposition is **delegated to [`reconstruct`]** and only mapped through
-/// the coordinate lists, so this cannot drift from the read side (CLAUDE.md
-/// invariant 2). Validated against `conformance/reconstruction_fixtures/*`
+/// the coordinate lists, so this cannot drift from the read side.
+/// Validated against `conformance/reconstruction_fixtures/*`
 /// in the inverse direction by `tests/reconstruction_fixtures.rs`.
 pub fn expand_dense_row<C: Clone>(
     dim_lists: &[Vec<C>],

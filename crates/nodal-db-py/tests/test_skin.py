@@ -89,8 +89,8 @@ def test_scalar_roundtrip_dtype_fidelity(db):
     assert rep["values_written"] == 2
     assert rep["tiers"] == ["scalar"]
     assert {(w["kind"], w["object_type"]) for w in rep["warnings"]} == {
-        ("auto_created", "entity_class"),
-        ("auto_created", "parameter_definition"),
+        ("auto_created", "class"),
+        ("auto_created", "parameter"),
         ("auto_created", "entity"),
     }
 
@@ -225,7 +225,7 @@ def test_identical_write_is_unchanged_and_commits_nothing(db):
     # (D9), as the typed `WriteAndDeleteSameKey` (an `ApiError` subclass,
     # so `except ApiError` still catches it) carrying the key.
     with pytest.raises(nodal_db.WriteAndDeleteSameKey) as ei:
-        db.commit_changes(
+        db.commit(
             segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
                        "batch": scalar_batch(["u1"], [2.0])}],
             deletes=[("unit", "capacity", "Base", "u1")],
@@ -239,7 +239,7 @@ def test_identical_write_is_unchanged_and_commits_nothing(db):
     assert ei.value.resolved is None  # the up-front name check, not resolved ids
 
 
-def test_commit_changes_mixed_value_types_in_one_segment(db):
+def test_commit_mixed_value_types_in_one_segment(db):
     # One parameter declared float and string; one segment whose `batch` is
     # a list of batches of different types writes both in one commit.
     db.ensure_entity_class("node", user="t")
@@ -247,7 +247,7 @@ def test_commit_changes_mixed_value_types_in_one_segment(db):
         "node", "level", types=[{"kind": "float"}, {"kind": "string"}], user="t"
     )
     head = db.head_commit()
-    rep = db.commit_changes(
+    rep = db.commit(
         segments=[{"class": "node", "parameter": "level", "alternative": "Base",
                    "batch": [scalar_batch(["north"], [12.0]),
                              scalar_batch(["south"], ["high"])]}],
@@ -262,7 +262,7 @@ def test_commit_changes_mixed_value_types_in_one_segment(db):
     # A batch type the parameter does not declare: the typed refusal (an
     # ApiError subclass), nothing written.
     with pytest.raises(nodal_db.UndeclaredValueType) as ei:
-        db.commit_changes(
+        db.commit(
             segments=[{"class": "node", "parameter": "level", "alternative": "Base",
                        "batch": [scalar_batch(["north"], [1.0]),
                                  scalar_batch(["east", "west"], [True, False])]}],
@@ -283,7 +283,7 @@ def test_commit_changes_mixed_value_types_in_one_segment(db):
                               "t": pa.array([0, 1], pa.int64()),
                               "value": [1.0, 2.0]})
     with pytest.raises(nodal_db.UndeclaredValueType) as ei:
-        db.commit_changes(
+        db.commit(
             segments=[{"class": "node", "parameter": "level", "alternative": "Base",
                        "batch": [scalar_batch(["north"], [1.0]), series]}],
             user="t",
@@ -305,12 +305,12 @@ def test_query_returns_arrow_reader(db):
         db.query("INSERT INTO commit (user, message) VALUES ('x', 'y')")
 
 
-def test_commit_changes_write_plus_object_delete_is_covered_write(db):
+def test_commit_write_plus_object_delete_is_covered_write(db):
     # A value write and an object delete that cascades over it in one call
     # (D10) is refused up front as the typed `CoveredWrite` (an `ApiError`
     # subclass), carrying the covering object-delete key.
     with pytest.raises(nodal_db.CoveredWrite) as ei:
-        db.commit_changes(
+        db.commit(
             segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
                        "batch": scalar_batch(["u1"], [1.0])}],
             object_deletes=[{"kind": "alternative", "name": "Base", "cascade": True}],
@@ -322,11 +322,11 @@ def test_commit_changes_write_plus_object_delete_is_covered_write(db):
     assert ei.value.resolved is None  # the up-front name check, not resolved ids
 
 
-def test_commit_changes_write_plus_delete_one_commit(db):
+def test_commit_write_plus_delete_one_commit(db):
     db.write_parameter(
         "unit", "capacity", "Base", scalar_batch(["u1", "u2"], [1.0, 2.0]), user="t"
     )
-    rep = db.commit_changes(
+    rep = db.commit(
         segments=[
             {
                 "class": "unit",
@@ -343,7 +343,7 @@ def test_commit_changes_write_plus_delete_one_commit(db):
     assert rep["rows_closed"] >= 1
 
 
-def test_commit_changes_covered_writes_delete_wins(db):
+def test_commit_covered_writes_delete_wins(db):
     # WriteOptions::covered_writes: refused by default, dropped with a
     # warning under "delete_wins"; the uncovered write proceeds.
     db.write_parameter(
@@ -359,16 +359,16 @@ def test_commit_changes_covered_writes_delete_wins(db):
     ]
     deletes = [("unit", "capacity", "Base", "U1")]
     with pytest.raises(nodal_db.ApiError):
-        db.commit_changes(segments=segments, deletes=deletes, user="t")
+        db.commit(segments=segments, deletes=deletes, user="t")
     with pytest.raises(nodal_db.ApiError):
-        db.commit_changes(
+        db.commit(
             segments=segments, deletes=deletes, user="t", covered_writes="refuse"
         )
     with pytest.raises(ValueError):
-        db.commit_changes(
+        db.commit(
             segments=segments, deletes=deletes, user="t", covered_writes="nope"
         )
-    rep = db.commit_changes(
+    rep = db.commit(
         segments=segments, deletes=deletes, user="t", covered_writes="delete_wins"
     )
     assert rep["commit_id"] > 0
@@ -394,7 +394,7 @@ def test_commit_changes_covered_writes_delete_wins(db):
     # An object delete that finds nothing beside a write it covers: the
     # write is dropped and nothing is committed (no entity auto-created).
     head = db.head_commit()
-    rep = db.commit_changes(
+    rep = db.commit(
         segments=[
             {
                 "class": "unit",
@@ -418,7 +418,7 @@ def test_delete_wins_refuses_when_the_delete_does_not_take_effect(db):
     db.write_parameter("unit", "capacity", "Base", scalar_batch(["u1"], [1.0]), user="t")
     head = db.head_commit()
     with pytest.raises(nodal_db.ApiError, match="did not take effect"):
-        db.commit_changes(
+        db.commit(
             segments=[{"class": "unit", "parameter": "capacity", "alternative": "Base",
                        "batch": scalar_batch(["u1"], [2.0])}],
             object_deletes=[{"kind": "entity", "class": "unit", "name": "u1",
@@ -434,7 +434,7 @@ def test_object_delete_preview_and_commit(db):
     key = {"kind": "entity", "class": "unit", "name": "u1"}
     (preview,) = db.preview_object_deletes([key])
     assert preview["found"] and preview["cascade"]["total_rows"] >= 1
-    rep = db.commit_changes(object_deletes=[dict(key, cascade=True)], user="t")
+    rep = db.commit(object_deletes=[dict(key, cascade=True)], user="t")
     (outcome,) = rep["object_deletes"]
     assert outcome["status"] == "deleted"
     assert db.read_parameter("unit", "capacity", "Base").num_rows == 0
@@ -471,7 +471,7 @@ def test_api_errors_are_typed(db):
     with pytest.raises(nodal_db.ApiError, match="entity column and a value column"):
         db.write_parameter("c", "p", "a", bad, user="t")
     with pytest.raises(nodal_db.ApiError, match="nothing to do"):
-        db.commit_changes(user="t")
+        db.commit(user="t")
 
 
 def test_busy_on_externally_locked_file(db):
@@ -732,7 +732,7 @@ def test_expect_commit_stale_raises_and_writes_nothing(db):
     assert (ei.value.expected, ei.value.found) == (loaded, other["commit_id"])
     assert db.head_commit() == other["commit_id"]
     for call in (
-        lambda: db.commit_changes(
+        lambda: db.commit(
             deletes=[("unit", "capacity", "Base", "u1")], user="t", expect_commit=loaded
         ),
         lambda: db.delete_values([("unit", "capacity", "Base", "u1")], user="t", expect_commit=loaded),
@@ -1064,11 +1064,11 @@ def test_class_and_parameter_rename_ops(db):
     )
     got = [(o["kind"], o["effect"]) for o in rep["structural"]]
     assert got == [
-        ("entity_class", "created"),
-        ("entity_class", "renamed"),
+        ("class", "created"),
+        ("class", "renamed"),
         ("parameter", "renamed"),
         # A description cleared on the row this call created: an update.
-        ("entity_class", "updated"),
+        ("class", "updated"),
     ]
     assert one_value(db, "SELECT count(*) FROM read_parameter('bus', 'load')") == 1
     assert (
@@ -1161,7 +1161,7 @@ def test_template_stamped_rename_is_typed_and_resendable(db):
     assert isinstance(e, nodal_db.ApiError)
     assert (e.template_name, e.template_version) == ("flextool", "40")
     assert e.renames == [
-        {"change_index": 0, "kind": "entity_class", "class_name": None,
+        {"change_index": 0, "kind": "class", "class_name": None,
          "current": "node", "new_name": "bus"},
         {"change_index": 1, "kind": "parameter", "class_name": "bus",
          "current": "demand", "new_name": "load"},
@@ -1355,8 +1355,8 @@ def test_case_variant_reference_reports_name_folded(db):
         for w in rep["warnings"] if w["kind"] == "name_folded"
     )
     assert folded == [
+        ("segment", "class", 1, "node", "Node", "node:p/Base"),
         ("segment", "entity", 1, "n1", "N1", "node:p/Base"),
-        ("segment", "entity_class", 1, "node", "Node", "node:p/Base"),
     ]
     assert all(w["id"] > 0 for w in rep["warnings"] if w["kind"] == "name_folded")
     # Each warning lists its references: (written, stored, resolved id).
@@ -1400,7 +1400,7 @@ def test_nfd_names_and_labels_read_back_in_nfc(db):
 
 
 def _purge_fixture(db):
-    db.commit_changes(
+    db.commit(
         structural=[
             {"op": "create_entity_class", "name": "unit", "dims": []},
             {"op": "create_entity", "class": "unit", "name": "u1"},
@@ -1450,9 +1450,9 @@ def test_purge_scope_dicts_report_and_preview(db):
     assert one_value(db, "SELECT count(*) FROM entity WHERE valid_to_commit IS NULL") == 0
 
 
-def test_purge_in_commit_changes_spares_what_the_call_writes(db):
+def test_purge_in_commit_spares_what_the_call_writes(db):
     _purge_fixture(db)
-    rep = db.commit_changes(
+    rep = db.commit(
         segments=[{"class": "unit", "parameter": "cap", "alternative": "Base",
                    "batch": scalar_batch(["u1"], [1.0])}],
         purges=[{"scope": "values", "class": "unit"}],

@@ -12,7 +12,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, ChangeSet, DeleteKey, Segment};
+use nodal_db_core::api::{commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::ir::TypeDecl;
@@ -39,7 +39,7 @@ fn qs(db: &Path, sql: &str) -> Vec<String> {
 }
 
 fn set(db: &Path, s: ChangeSet) -> Result<WriteReport, DbError> {
-    commit_change_set(db, s, "t", "m", WriteOptions::default())
+    commit(db, s, "t", "m", WriteOptions::default())
 }
 
 fn st(db: &Path, changes: Vec<SC>) -> Result<WriteReport, DbError> {

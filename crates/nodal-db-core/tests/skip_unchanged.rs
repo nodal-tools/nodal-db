@@ -21,8 +21,8 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, delete_objects, delete_values, head_commit, test_hooks, write_parameter,
-    DeleteKey, Segment,
+    commit as api_commit, delete_objects, delete_values, head_commit, test_hooks, write_parameter,
+    ChangeSet, DeleteKey, Segment,
 };
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::CanonicalValue;
@@ -129,7 +129,19 @@ fn commit_with(
     deletes: Vec<DeleteKey>,
     opts: WriteOptions,
 ) -> WriteReport {
-    commit_changes(db, segments, structural, deletes, vec![], "t", "m", opts).expect("commit")
+    api_commit(
+        db,
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            ..ChangeSet::default()
+        },
+        "t",
+        "m",
+        opts,
+    )
+    .expect("commit")
 }
 
 fn dk(parameter: &str, entity: &str) -> DeleteKey {
@@ -756,12 +768,12 @@ fn expect_commit_on_a_no_op_call() {
         expect_commit: Some(c),
         ..WriteOptions::default()
     };
-    let err = commit_changes(
+    let err = api_commit(
         &db,
-        vec![seg("s", scalar_batch(&["a"], &[1.0]))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("s", scalar_batch(&["a"], &[1.0]))],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         opts(first.commit_id - 1),

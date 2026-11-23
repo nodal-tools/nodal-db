@@ -1,15 +1,16 @@
-//! `nodal-db` CLI — verb dispatch (`specs/rust_implementation_plan.md`
-//! Part 4). `init` applies the schema (optionally loading a template — the
-//! init-with-template path); `import` ingests the Arrow-IPC bulk format
-//! (`specs/arrow_ipc_bulk_format.md`) through the one core canonicalizer — the
-//! CLI deserializes and expands, it NEVER re-canonicalizes (CLAUDE.md
-//! invariant 2). `template` is un-frozen (template_ir_plan phase 2/3:
-//! load / plan / apply / export); `extract` writes a history-free copy of a
-//! database into a new file; `maintain` is a subcommand group whose first
-//! member is `compact` (the physical repack). `migrate` remains an explicit
-//! not-implemented stub reserving the verb (§3.3 door 3) — the reconcile
-//! runner lives under `template apply` in v1 (§4.4: `migrate` becomes the
-//! full-chain runner as a later door).
+//! `nodal-db` — the command-line tool over `nodal-db-core`.
+//!
+//! `init` creates a database file (optionally loading a template);
+//! `import` ingests the Arrow-IPC bulk format through the core's one
+//! canonicalizer (the CLI deserializes and expands, it never
+//! re-canonicalizes); `erase-alternative`, `extract` and `purge` remove or
+//! close out data; `maintain` compacts a file or refreshes its read
+//! surface; `template` loads, plans, applies and exports templates.
+//!
+//! Exit codes: 0 success, 1 error, 75 busy (the database is locked or the
+//! write-conflict retries ran out: retry later), and for
+//! `maintain refresh-views --check` 3 (stale) and 4 (newer than this
+//! nodal-db).
 
 /// `println!` through [`clean`]: every line the CLI prints may carry names
 /// from a database or a file someone else wrote.
@@ -31,14 +32,21 @@ use std::path::PathBuf;
 use anyhow::bail;
 use clap::{Parser, Subcommand};
 
-/// The compile-time-embedded schema (plan Q4): ONE list, owned by the core
+/// The compile-time-embedded schema: ONE list, owned by the core
 /// (`schema_init::EMBEDDED_SCHEMA`) and shared with every other embedder
 /// (the Python skin), so the copies cannot drift. A census test in the core
 /// asserts it matches `schema/*.sql` exactly.
 use nodal_db_core::schema_init::EMBEDDED_SCHEMA;
 
 #[derive(Parser)]
-#[command(name = "nodal-db", about = "nodal_db core CLI", version)]
+#[command(
+    name = "nodal-db",
+    about = "nodal-db: create, import into and maintain nodal-db database files",
+    version,
+    after_help = "Exit codes: 0 success; 1 error; 75 busy (the database is locked by \
+another process or write conflicts persisted: retry later). \
+`maintain refresh-views --check` also exits 3 (stale) or 4 (newer than this nodal-db)."
+)]
 struct Cli {
     /// DuckDB memory limit for every database this command opens, e.g.
     /// `4GiB` or `25%` (of RAM). Default: 50% of RAM, or DuckDB's own
@@ -122,15 +130,13 @@ fn escape_controls(s: &str, keep_lines: bool) -> Cow<'_, str> {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Apply the schema into a fresh DuckDB file (optionally loading a
-    /// template — the init-with-template path).
+    /// Create a new database file, optionally loading a template.
     Init {
         /// Path of the DuckDB file to create.
         db: PathBuf,
-        /// Seed one default alternative with this name. Omitted ⇒ no
-        /// alternative is seeded (the value write path auto-creates on first
-        /// use); the DB is never implicitly given a `Base`. A template's seed
-        /// alternative maps HERE, never to template content.
+        /// Create one alternative with this name. Without it the file has
+        /// no alternative until the first write names one (writes create
+        /// missing alternatives); there is no implicit `Base`.
         #[arg(long)]
         alternative: Option<String>,
         /// Load this template (YAML or JSON IR) right after the schema.
@@ -140,17 +146,15 @@ enum Command {
         #[arg(long)]
         user: Option<String>,
         /// Development builds only (a release build refuses it): apply
-        /// schema/*.sql from a directory instead of the compile-time-embedded
-        /// schema. Without a value, uses the repo's schema/ directory as
-        /// resolved by the core.
+        /// schema/*.sql from a directory instead of the embedded schema.
+        /// Without a value, uses the repository's schema/ directory.
         #[arg(long, num_args = 0..=1, hide = !cfg!(debug_assertions))]
         schema_dir: Option<Option<PathBuf>>,
     },
-    /// Import an Arrow-IPC bulk file into an existing database, atomically
-    /// (one commit).
+    /// Import an Arrow-IPC bulk file into a database in one commit.
     ///
     /// File format and error classes (E1–E10):
-    /// https://nodal-tools.github.io/nodal-db/dev/arrow_import_format/
+    /// <https://nodal-tools.github.io/nodal-db/dev/arrow_import_format/>
     Import {
         /// Arrow-IPC bulk container (concatenated IPC streams).
         file: PathBuf,
@@ -190,13 +194,14 @@ enum Command {
         #[arg(long, value_enum)]
         value_metadata: Option<import::ValueMetadataArg>,
     },
-    /// Hard-erase one alternative's data (physical removal WITH a trace:
-    /// closes the identity row, DELETEs every alternative-keyed row across
-    /// all tiers, and writes an erasure_marker in the same transaction).
-    /// Bytes return to the OS at the next compaction. NOTE: the mechanism
-    /// works on any database; running it against a curated input database is
-    /// almost certainly a mistake — the intended use is overwriting an output
-    /// database on rerun.
+    /// Physically remove one alternative and all its data, leaving a trace.
+    ///
+    /// Closes the alternative, deletes every row of its data in every
+    /// storage tier and writes an erasure marker, in one transaction. The
+    /// space returns to the operating system at the next compaction. Meant
+    /// for overwriting the results of a rerun in an output database;
+    /// running it on a curated input database is almost certainly a
+    /// mistake.
     EraseAlternative {
         /// Target DuckDB file.
         db: PathBuf,
@@ -210,21 +215,23 @@ enum Command {
         /// Free-form operator context, stored on the marker row.
         #[arg(long)]
         note: Option<String>,
-        /// Rerun-overwrite ordering belt: each named alternative must have a
-        /// current row (the replacement run) or the erase refuses.
+        /// Refuse unless this alternative exists (repeatable): name the
+        /// replacement run's alternative so the old one is never erased
+        /// before the new one is written.
         #[arg(long = "expect-present")]
         expect_present: Vec<String>,
         /// Commit author for the erasure commit; defaults to the OS username.
         #[arg(long)]
         user: Option<String>,
     },
-    /// Write a history-free copy of a database into a NEW file: the content
-    /// valid at the source's last commit (or at --as-of N), without the
-    /// superseded history. The source is only read; it stays the complete
-    /// history (the archive). The copy gets its own database identity and a
-    /// horizon marker naming the source; as-of reads at commits before the
-    /// extract's own commit fail loudly in it. Writers of the source wait (or
-    /// get "busy") while the copy runs.
+    /// Write a history-free copy of a database into a new file.
+    ///
+    /// The copy holds the content valid at the source's last commit (or at
+    /// --as-of N), without the superseded history. The source is only read;
+    /// it keeps the complete history. The copy gets its own database
+    /// identity and a horizon marker naming the source; as-of reads at
+    /// commits before the extract's own commit fail in it. Writers of the
+    /// source wait (or get "busy") while the copy runs.
     Extract {
         /// The source database (read only).
         src: PathBuf,
@@ -241,9 +248,10 @@ enum Command {
         #[arg(long)]
         user: Option<String>,
     },
-    /// Close out everything in one scope in one commit (a versioned
-    /// close-out: history is kept, nothing is removed and the file does not
-    /// shrink). Refuses a reach outside the scope unless
+    /// Close out everything in one scope in one commit.
+    ///
+    /// A versioned close-out: history is kept, nothing is removed and the
+    /// file does not shrink. Refuses a reach outside the scope unless
     /// --allow-outside-scope, and on a template-stamped database a classes,
     /// parameters or value-lists purge unless --allow-on-template.
     Purge {
@@ -285,15 +293,12 @@ enum Command {
         #[arg(long, default_value = "")]
         message: String,
     },
-    /// Not implemented in v1 core (verb reserved; the v1 reconcile runner is
-    /// `template apply`).
-    Migrate,
     /// Database maintenance.
     Maintain {
         #[command(subcommand)]
         command: MaintainCommand,
     },
-    /// Template IR operations: load / plan / apply / export.
+    /// Load, plan, apply and export templates.
     Template {
         #[command(subcommand)]
         command: template::TemplateCommand,
@@ -302,10 +307,11 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MaintainCommand {
-    /// Rewrite the database file densely packed, reclaiming the space of
-    /// old checkpoints and erased data. Keeps every row, history included,
-    /// and the database identity. Takes the database's lock for the
-    /// duration.
+    /// Rewrite the database file densely packed to reclaim space.
+    ///
+    /// Reclaims the space of old checkpoints and erased data. Keeps every
+    /// row, history included, and the database identity. Takes the
+    /// database's lock for the duration.
     Compact {
         /// Target DuckDB file.
         db: PathBuf,
@@ -326,19 +332,23 @@ enum MaintainCommand {
         #[arg(long, requires = "if_needed")]
         max_commits: Option<u64>,
     },
-    /// Replace the database's views and macros (its read surface) with this
-    /// nodal-db's when they are older. Any write with this nodal-db does the
-    /// same first; use this for a file that is only read. Data and history
-    /// are untouched and no commit is recorded. A current file is left
-    /// alone, and so is a newer one (unless --force). Fails, changing
-    /// nothing, when the refresh cannot run (e.g. a table of yours holds a
-    /// name the read surface reserves).
+    /// Update the database's views and macros to this nodal-db's version.
+    ///
+    /// Replaces the read surface (views and macros) when it is older than
+    /// this nodal-db's. Any write with this nodal-db does the same first;
+    /// use this for a file that is only read. Data and history are
+    /// untouched and no commit is recorded. A current file is left alone,
+    /// and so is a newer one (unless --force). Fails, changing nothing,
+    /// when the refresh cannot run (e.g. a table of yours holds a name the
+    /// read surface reserves).
     RefreshViews {
         /// Target DuckDB file.
         db: PathBuf,
         /// Only report the schema version and the file's and this build's
-        /// read-surface versions. Exit code 0 = current, 1 = stale (older, or
-        /// predating versioning), 2 = newer than this nodal-db.
+        /// read-surface versions, changing nothing. Exit code 0 = up to
+        /// date, 3 = stale (older, predating versioning, or the same version
+        /// with other definitions), 4 = newer than this nodal-db (it cannot
+        /// refresh it), 1 = error.
         #[arg(long)]
         check: bool,
         /// Also replace a NEWER read surface with this build's (a downgrade;
@@ -352,6 +362,31 @@ enum MaintainCommand {
 /// Bytes as MiB with one decimal.
 fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// Exit code: success (and `refresh-views --check`: up to date).
+const EXIT_OK: i32 = 0;
+/// Exit code: an error.
+const EXIT_ERROR: u8 = 1;
+/// Exit code: busy or conflicted, retryable (BSD `EX_TEMPFAIL`): another
+/// process holds the database's lock or write conflicts persisted.
+const EXIT_BUSY: u8 = 75;
+/// `refresh-views --check`: the read surface is stale (older, predating
+/// versioning, or drifted); a refresh or any write updates it.
+const EXIT_STALE: i32 = 3;
+/// `refresh-views --check`: the read surface is newer than this nodal-db's,
+/// which cannot refresh it.
+const EXIT_NEWER: i32 = 4;
+
+/// Is the error (or any error in its chain) a retryable busy / conflict?
+fn is_busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<nodal_db_core::error::DbError>(),
+            Some(nodal_db_core::error::DbError::Busy { .. })
+                | Some(nodal_db_core::error::DbError::Conflict { .. })
+        ) || c.downcast_ref::<import::Retryable>().is_some()
+    })
 }
 
 fn main() -> std::process::ExitCode {
@@ -378,7 +413,7 @@ fn main() -> std::process::ExitCode {
                     say_err!("    {c}");
                 }
             }
-            std::process::ExitCode::FAILURE
+            std::process::ExitCode::from(if is_busy(&e) { EXIT_BUSY } else { EXIT_ERROR })
         }
     }
 }
@@ -777,10 +812,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::Migrate => bail!(
-            "migrate: not implemented in v1 core (the v1 reconcile runner is \
-             `template apply`)"
-        ),
         Command::Maintain {
             command:
                 MaintainCommand::Compact {
@@ -853,9 +884,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 say!("  this nodal-db          {}", r.check.expected);
                 say!("  status                 {}", r.check.status.as_str());
                 let code = match r.check.status {
-                    SurfaceStatus::Current => 0,
-                    SurfaceStatus::Newer => 2,
-                    _ => 1,
+                    SurfaceStatus::Current => EXIT_OK,
+                    SurfaceStatus::Older | SurfaceStatus::Missing | SurfaceStatus::Drift => {
+                        EXIT_STALE
+                    }
+                    SurfaceStatus::Newer => EXIT_NEWER,
                 };
                 for n in nodal_db_core::read_surface::take_notices() {
                     say_err!("warning: {}", n.message);

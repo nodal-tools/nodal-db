@@ -1,5 +1,5 @@
 //! Database properties: the single-valued `database_property` table, the one
-//! writer of its rows (invariant 2: one writer per table).
+//! writer of its rows (one writer per table).
 //!
 //! A key's `owner` is a function of its spelling, CHECKed by the DDL
 //! (`schema/001_meta.sql`), so the DDL is the one classifier and
@@ -8,7 +8,7 @@
 //!     `created_by`, the template stamp, the `presentation` document,
 //!     `audit_rules` and `refinement_classes`, and every key of the reserved
 //!     namespace [`CORE_NAMESPACE`] (`nodal:`). Only the core writes them
-//!     ([`set_core`], [`clear_core`], [`insert_core`]); the metadata channel
+//!     (`set_core`, `clear_core`, `insert_core`); the metadata channel
 //!     refuses them. A new core key goes into `nodal:`, which needs no DDL
 //!     change (the bare names are the closed list of 0.1.0);
 //!   - **tool** keys: `<tool>:<name>`, both parts non-empty, any tool name

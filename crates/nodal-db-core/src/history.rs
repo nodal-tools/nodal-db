@@ -1,14 +1,14 @@
-//! The history write protocol (VMP Part 5) — the append-only versioning that
-//! turns one already-canonicalized value into the correct
-//! INSERT/UPDATE/close-out sequence across the three tiers. The drift-sensitive
-//! heart of the write path (CLAUDE.md invariant 2): this module never
+//! The history write protocol — the append-only versioning that turns one
+//! already-canonicalized value into the correct INSERT/UPDATE/close-out
+//! sequence across the three tiers. The drift-sensitive heart of the write
+//! path: this module never
 //! re-canonicalizes — it consumes exactly the [`CanonicalValue`] `canon`
 //! produced and the axis ids `axis::dedup_or_insert` resolves.
 //!
 //! Every step here runs INSIDE the caller's transaction (opened by
 //! `conn::with_write_txn` / `with_write_txn_retrying`, which also stamps the
-//! `commit` row that is the validity edge). Autocommit is forbidden (VMP Part 5,
-//! critique #1): the value rows and their commit row are atomic together.
+//! `commit` row that is the validity edge). Autocommit is forbidden: the value
+//! rows and their commit row are atomic together.
 //!
 //! Tier mechanics:
 //!   - **scalar / long**: single-table from/to-commit. The superseded row
@@ -30,7 +30,7 @@
 //!     updated, copied verbatim into `_hist`; a delete or tier transition
 //!     followed by a re-insert mints a new one.
 //!
-//! **Version counter (VMP Part 5, `audit_history_tiling`)**: the new version is
+//! **Version counter (checked by `audit_history_tiling`)**: the new version is
 //! `max(existing versions for the key) + 1`, scoped to the tier-partition the
 //! tiling audit uses — per triple within `value_scalar`; per triple across
 //! `value_array` + `value_array_hist`; per `(triple, index tuple)` within
@@ -39,7 +39,7 @@
 //! tier, and a continued cross-tier version would make the new tier's first row
 //! read as "current version > 1 with no superseded rows".
 //!
-//! **Physical write mechanism (appender_write_path_PLAN D1, D4)**: every
+//! **Physical write mechanism**: every
 //! statement is plain SQL on the caller's connection. The hot-path statements
 //! (the `write_value` protocol: tier probes, version scans, close-outs, the
 //! bulk inserts, the array update/delete and pre-image copies) are prepared
@@ -50,13 +50,13 @@
 //! `INSERT … SELECT … FROM (SELECT unnest(?::T[]), …)` per
 //! ≤ `LONG_INSERT_CHUNK` cells, an array payload is one bound `?::DOUBLE[]`. The statement text no longer
 //! depends on the cell count, so DuckDB parses it once per transaction, not
-//! once per value. The encoder is still the one [`VCols::of`]; timestamps
+//! once per value. The encoder is still the one `VCols::of`; timestamps
 //! still cross as µs through `make_timestamp`; floats arrive canonical. A
 //! columnar insert zips its `unnest`s by position and NULL-pads a short list
 //! silently, so a hard length check (all builds) guards every execution.
 //!
-//! **Set-based scalar write (set_based_scalar_write_PLAN)**: the scalar tier
-//! has one writer, [`write_scalars`], which handles a batch of distinct keys
+//! **Set-based scalar write**: the scalar tier
+//! has one writer, `write_scalars`, which handles a batch of distinct keys
 //! in rounds of ≤ `LONG_INSERT_CHUNK`: one grouped live + version probe, a
 //! long/array live probe only for the keys not live in scalar, the per-key
 //! `close_out_tier` for a tier transition, one close-out UPDATE per retention
@@ -66,8 +66,8 @@
 //! sequential scan rather than the compound indexes, so a set-based round is
 //! what makes a scalar batch cost O(keys + table) per commit.
 //!
-//! **Set-based long write (set_based_long_and_delete_PLAN §3.2)**: the long
-//! tier has one writer, [`write_longs`], on the scalar skeleton: per round
+//! **Set-based long write**: the long
+//! tier has one writer, `write_longs`, on the scalar skeleton: per round
 //! (≤ `LONG_INSERT_CHUNK` keys and cells, or one larger value) the scalar
 //! live probe, one grouped long probe returning the per-position max
 //! version and the current-cell count, the array live probe for the keys
@@ -80,8 +80,8 @@
 //! resolved at buffer time; [`write_value`] delegates a long value with
 //! N = 1, which keeps the point probe and close-out statements.
 //!
-//! **Set-based array write (set_based_long_and_delete_PLAN §3.3)**: the array
-//! tier has one writer, [`write_arrays`], on the same skeleton: per round
+//! **Set-based array write**: the array
+//! tier has one writer, `write_arrays`, on the same skeleton: per round
 //! (≤ `LONG_INSERT_CHUNK` keys and ≤ `ARRAY_ROUND_ELEMENTS` payload
 //! elements, or one larger value) the three live probes and one version
 //! probe over `value_array` ∪ `value_array_hist`; for the keys whose
@@ -93,8 +93,8 @@
 //! defers a commit's arrays like its long values; [`write_value`]
 //! delegates with N = 1, which keeps today's per-key statements.
 //!
-//! **Set-based delete (set_based_long_and_delete_PLAN §3.4)**: deletes have
-//! one implementation, [`delete_values`]: per round, the three live probes
+//! **Set-based delete**: deletes have
+//! one implementation, `delete_values`: per round, the three live probes
 //! (scalar; long with its current-cell count; array with its `array_id`)
 //! under the per-key precedence, then per tier and retention mode one
 //! close-out (the scalar and long UPDATEs; the array pre-image copy plus
@@ -105,9 +105,9 @@
 //! keeps its content by default (`content_retained = TRUE`). `force_replace`
 //! (or an explicit `retain_override = Some(false)`) writes a stub instead —
 //! `content_retained = FALSE` with the payload columns nulled — so the prior
-//! content is not preserved (VMP Part 5 retention).
+//! content is not preserved.
 //!
-//! **Unchanged writes (skip_unchanged_writes_PLAN P1)**: a write whose stored
+//! **Unchanged writes**: a write whose stored
 //! form equals the key's current stored value writes nothing — no close-out,
 //! no insert, no `_hist` row — and reports [`WriteOutcome::unchanged`]. Equal
 //! means: live in the same tier, the same binding (`parameter_type_id`, NULL
@@ -126,7 +126,7 @@
 //! per-position probe, which is also its version source; the array live
 //! probe's narrow columns as a prefilter, then the payload by `array_id`).
 //!
-//! **Long cell diff (skip_unchanged_writes_PLAN P2, §4)**: a long value is
+//! **Long cell diff**: a long value is
 //! merged with the key's current cells by position tuple. When every
 //! current cell shares one set of axis ids, one `value_kind` and one
 //! binding, equal to the new value's, a changed cell is closed out and
@@ -141,9 +141,9 @@
 //! `audit_long_value_coherence` checks the shared meta), and a diff appends
 //! its inserted cells, so value rows have no physical-order contract.
 //! Retention plays no part in equality: an unchanged write supersedes
-//! nothing, so `force_replace` stubs nothing (D3), and a cell diff stubs
-//! only the cells it closes. The no-commit rule (D1) lives in
-//! `api::commit_changes`; a direct caller of these functions inside its own
+//! nothing, so `force_replace` stubs nothing, and a cell diff stubs only the
+//! cells it closes. The no-commit rule lives in `api::commit`; a direct
+//! caller of these functions inside its own
 //! `conn::with_write_txn` still commits its (possibly empty) commit row.
 
 use std::borrow::Cow;
@@ -171,8 +171,7 @@ use crate::types::{
 
 /// The comparison columns of a current value row (table alias `$t`), read
 /// by the probes for the unchanged check: the 8 value columns, then the
-/// row's binding and its `content_retained` (critique C3.4: a current stub
-/// never compares equal). Plain columns, never aggregates: the probes read
+/// row's binding and its `content_retained`. Plain columns, never aggregates: the probes read
 /// the current rows in one UNION leg and the closed rows' max version in
 /// another (an aggregate per column cost ~1-2 ms of planning per point
 /// probe, measured).
@@ -236,8 +235,7 @@ macro_rules! long_cur_nulls {
 // the same text for runtime-built statements.
 // ---------------------------------------------------------------------------
 
-/// The payload columns a stub nulls, with `content_retained = FALSE` (VMP
-/// Part 5 retention): every typed value column of a scalar or long row.
+/// The payload columns a stub nulls, with `content_retained = FALSE`: every typed value column of a scalar or long row.
 macro_rules! stub_payload {
     () => {
         "content_retained = FALSE, v_float = NULL, v_int = NULL, v_bool = NULL, \
@@ -302,8 +300,8 @@ pub(crate) fn keeps_content(opts: &WriteOptions) -> bool {
 /// Write one canonicalized value for `key` at `commit_id`, applying the full
 /// history protocol for its tier (and any tier transition from the currently
 /// live tier). Runs inside the caller's write transaction.
-/// `parameter_type_id` is the declared member the value bound to at entry
-/// (D11, 2026-09-18): the API always passes `Some` (resolve/materialize
+/// `parameter_type_id` is the declared member the value bound to at entry:
+/// the API always passes `Some` (resolve/materialize
 /// guarantees a member); `None` is for callers below the entry check (tests,
 /// out-of-contract tools) and lands as SQL NULL.
 pub fn write_value(
@@ -408,7 +406,7 @@ pub fn write_long_values(
 }
 
 /// Delete the value currently live for `key` at `commit_id`: close-out on the
-/// scalar/long tiers, move-to-`_hist` on the array tier (VMP Part 5). A no-op
+/// scalar/long tiers, move-to-`_hist` on the array tier. A no-op
 /// (no live tier) returns a zero outcome. `force_replace`/`retain_override`
 /// control whether the superseded content is retained.
 pub fn delete_value(
@@ -433,8 +431,7 @@ pub(crate) struct DeleteWrite {
 }
 
 /// Delete the live value of every key of `w` at `commit_id` in set-based
-/// rounds of ≤ [`LONG_INSERT_CHUNK`] keys (set_based_long_and_delete_PLAN
-/// §3.4): the one delete implementation (`delete_value` delegates here with
+/// rounds of ≤ [`LONG_INSERT_CHUNK`] keys: the one delete implementation (`delete_value` delegates here with
 /// N = 1). Per round: the live probes of the three tiers (scalar; long, for
 /// the keys not live in scalar; array, for the keys live in neither), then
 /// per tier and retention mode one close-out: the scalar and long UPDATEs,
@@ -666,7 +663,7 @@ fn close_out_live(
     Ok(closed)
 }
 
-/// The hard check (plan D12) of one set-based statement's affected rows.
+/// The hard check of one set-based statement's affected rows.
 fn check_affected(what: &str, affected: usize, expected: usize) -> Result<(), DbError> {
     if affected != expected {
         return Err(DbError::Internal(format!(
@@ -685,8 +682,7 @@ fn check_affected(what: &str, affected: usize, expected: usize) -> Result<(), Db
 /// entity-scoped scalars: close the current row (content retained — defaults
 /// are small, low-churn authored content), insert the new one at
 /// `max(version) + 1` for the `(definition, slot)` partition. A scalar default
-/// is already canonical (rank 0: the canonicalization pipeline's NULL
-/// elimination / axis derivation / tier rule are identity — VMP Part 3), so
+/// is already canonical, so
 /// this consumes the typed [`ScalarValue`] directly; `parameter_type_id` is
 /// the D11 binding to the rank-0 declared member the default instantiates.
 /// Returns `(rows_closed, rows_written)`; a no-change write still versions
@@ -751,12 +747,11 @@ pub(crate) fn close_definition_default(
     )?)
 }
 
-/// The `rename_list_member` value rewrite (template_ir_plan §4.2 Layer 2 —
-/// the one data-touching hint), under the FULL history protocol: for every
+/// The `rename_list_member` value rewrite, under the FULL history protocol: for every
 /// CURRENT string value of `pd_id` equal to `from`, close the row at
 /// `commit_id`, insert the successor (`version + 1`, D11 binding carried,
 /// value = `to`), and — when the definition does not retain content
-/// (`retained = false`, VMP Part 5's stub contract) — turn the closed row
+/// — turn the closed row
 /// into a stub (payload nulled, `content_retained = FALSE`). Sequenced
 /// close → reinsert → stub so the reinsert can still read the pre-image.
 /// The rewritten values keep their metadata links (owner ruling OD3: the
@@ -814,8 +809,8 @@ pub(crate) fn rewrite_scalar_string_values(
     Ok((written, kept))
 }
 
-/// The `unmapped_values: drop` arm of the G6 translation table
-/// (template_ir_plan §4.2 v2, D14/D15 revision): close out every CURRENT
+/// The `unmapped_values: drop` arm of the G6 translation table:
+/// close out every CURRENT
 /// scalar value of `pd_id` that matches NO translation key (a non-string row
 /// never matches a string key, so it drops too — the v65 semantics: anything
 /// outside the table falls to the definition's default). Versioned close-out
@@ -1127,7 +1122,7 @@ const ARRAY_LIVE_SQL: &str = "SELECT v.entity_id, v.parameter_definition_id, v.a
           AND v.parameter_definition_id = k.p AND v.alternative_id = k.a";
 
 /// [`ARRAY_LIVE_SQL`] widened by the narrow comparison columns of the row
-/// ([`ArrayMeta`]): never a list column (CLAUDE.md invariant 5), so it
+/// ([`ArrayMeta`]): never a list column, so it
 /// stays a key-triple probe.
 const ARRAY_LIVE_META_SQL: &str =
     "SELECT v.entity_id, v.parameter_definition_id, v.alternative_id, \
@@ -1144,8 +1139,8 @@ const ARRAY_LIVE_META_ONE_SQL: &str = "SELECT array_id, version::INTEGER, parame
 /// The stored payloads of the bound `array_id`s, for the unchanged check:
 /// `(array_id, values, values_int IS NULL)`. Keyed by `array_id` alone
 /// behind the `OFFSET 0` fence, so the payload is read through the
-/// `array_id` index (CLAUDE.md invariants 5 and 6; guarded by
-/// `tests/array_id_index_scan.rs`).
+/// `array_id` index (engine rules: payload access by id, single-key
+/// index access; guarded by `tests/array_id_index_scan.rs`).
 #[doc(hidden)]
 pub const ARRAY_PAYLOAD_SQL: &str = "SELECT array_id, values, values_int IS NULL FROM \
        (SELECT array_id, values, values_int FROM value_array \
@@ -1386,7 +1381,7 @@ fn probe_keys<'a>(
 }
 
 /// Write every scalar of `w` at `commit_id` in set-based rounds of
-/// ≤ [`LONG_INSERT_CHUNK`] keys (set_based_scalar_write_PLAN §3.2): the one
+/// ≤ [`LONG_INSERT_CHUNK`] keys: the one
 /// scalar history implementation (`write_value` delegates here with N = 1).
 /// Per round: a grouped live + version probe of `value_scalar`, a live probe
 /// of `value_long` and `value_array` for the keys the first probe found not
@@ -1801,8 +1796,8 @@ fn write_array(
     }
 }
 
-/// SQL-side pre-image copy of the live array row into `value_array_hist`
-/// (VMP Part 5), keyed by its `array_id` (an index scan; the id is copied
+/// SQL-side pre-image copy of the live array row into `value_array_hist`,
+/// keyed by its `array_id` (an index scan; the id is copied
 /// verbatim). Retained → `SELECT *, c, TRUE` (column parity: the hist twin
 /// is the live columns in the same order, `content_hash` included, then the
 /// two history columns); stub → payload columns and `content_hash` nulled
@@ -1884,7 +1879,7 @@ impl ArrayWrite<'_> {
     }
 }
 
-/// Payload elements per set-based array round (plan D3): ~30 x 8 760, about
+/// Payload elements per set-based array round: ~30 x 8 760, about
 /// 2 MB of f64 plus the bind's transient `Value`s. A larger value is a round
 /// of its own.
 pub(crate) const ARRAY_ROUND_ELEMENTS: usize = 262_144;
@@ -1918,8 +1913,8 @@ const ARRAY_UPDATE_SQL: &str =
              unnest(?::DOUBLE[]) AS mx, unnest(?::UBIGINT[]) AS h) u \
      WHERE value_array.array_id = u.id";
 
-/// The insert of a round's new array rows with their pre-minted `array_id`s
-/// (critique C3): the set form of `write_array`'s INSERT.
+/// The insert of a round's new array rows with their pre-minted `array_id`s:
+/// the set form of `write_array`'s INSERT.
 const ARRAY_INSERT_SQL: &str = "INSERT INTO value_array \
        (array_id, entity_id, parameter_definition_id, alternative_id, parameter_type_id, \
         valid_from_commit, version, axis1_id, axis2_id, axis3_id, axis4_id, \
@@ -1955,18 +1950,16 @@ fn mint_array_ids(conn: &Connection, n: usize) -> Result<Vec<i64>, DbError> {
     Ok(ids)
 }
 
-/// Write every array value of `w` at `commit_id` in set-based rounds
-/// (set_based_long_and_delete_PLAN §3.3): the one array history
+/// Write every array value of `w` at `commit_id` in set-based rounds:
+/// the one array history
 /// implementation (`write_value` delegates here with N = 1). A round holds
 /// ≤ [`LONG_INSERT_CHUNK`] keys and ≤ [`ARRAY_ROUND_ELEMENTS`] payload
-/// elements, except a single larger value, which forms its own round (D3).
+/// elements, except a single larger value, which forms its own round.
 ///
 /// Per round: the scalar, long and array live probes under the per-key
 /// precedence and the version probe over `value_array` ∪
 /// `value_array_hist`; the per-key `close_out_tier` for each tier
-/// transition (D6); for the keys whose PRECEDENCE tier is array (critique
-/// C3: a damaged key live in long and array takes the INSERT and fails on
-/// the UNIQUE triple, as before), the pre-image copy to `value_array_hist`
+/// transition; for the keys whose PRECEDENCE tier is array, the pre-image copy to `value_array_hist`
 /// (one statement per retention mode, entirely in SQL) and one UPDATE in
 /// place by `array_id`; for every other key one INSERT with `array_id`s
 /// pre-minted from the sequence and assigned in input order. A round of one
@@ -2291,24 +2284,24 @@ pub(crate) fn resolve_axes(
     Ok((ids, created, axes.len() - created))
 }
 
-/// Write every long value of `w` at `commit_id` in set-based rounds
-/// (set_based_long_and_delete_PLAN §3.2): the one long history
+/// Write every long value of `w` at `commit_id` in set-based rounds:
+/// the one long history
 /// implementation (`write_value` delegates here with N = 1). A round holds
 /// ≤ [`LONG_INSERT_CHUNK`] keys and ≤ [`LONG_INSERT_CHUNK`] cells, except a
-/// single larger value, which forms its own round (plan D3).
+/// single larger value, which forms its own round.
 ///
 /// Per round: the scalar live probe; one grouped long probe returning, per
 /// position of each key, the max version over all its rows and its current
-/// cell (D5, skip_unchanged_writes_PLAN D7), streamed into a compact sorted
+/// cell, streamed into a compact sorted
 /// vector; the array live probe for the keys live in neither; the cell diff
 /// per key ([`LongDiff`]); the per-key `close_out_tier` for each tier
-/// transition (D6); per retention mode one key-level close-out UPDATE for
+/// transition; per retention mode one key-level close-out UPDATE for
 /// the keys rewritten whole and one position-joined UPDATE (chunked at
 /// [`LONG_INSERT_CHUNK`] cells) for the diffed keys' changed and removed
 /// cells; and one key-ordinal columnar INSERT of the changed and added
-/// cells (D7 as amended by critique C1-C2), chunked at
+/// cells, chunked at
 /// [`LONG_INSERT_CHUNK`] cells. A round of one key binds its probes and
-/// whole close-out as today's point statements (D4); the insert and the
+/// whole close-out as today's point statements; the insert and the
 /// cell close-out have one form for every N.
 ///
 /// Semantics are those of one per-key write per key in input order: the
@@ -2348,12 +2341,12 @@ pub(crate) fn write_longs(
 /// per position ([`LongCells::finish`]) they give the max version over
 /// every `value_long` row of the (key, positions), as `current_long_cells`
 /// reads it, plus the current cell: the version source of the write and
-/// the read of the cell diff in one statement (critique C6, D7). The
+/// the read of the cell diff in one statement. The
 /// current leg reads plain columns, not one aggregate per column, which
 /// measured ~2x the planning and execution cost of today's probe. Read
 /// through a streamed Arrow result ([`read_long_probe`]), never
 /// materialized: a 4.6 M-cell value would otherwise hold ~0.7 GB in
-/// DuckDB's result buffer (critique C5).
+/// DuckDB's result buffer.
 const LONG_PROBE_SQL: &str = concat!(
     "SELECT l.entity_id, l.parameter_definition_id, l.alternative_id, \
             l.i1_pos, l.i2_pos, l.i3_pos, l.i4_pos, l.version::INTEGER, 1::BIGINT, ",
@@ -2395,8 +2388,8 @@ const CUR_CMP: u8 = 1;
 /// stub, or one of two current rows at the position).
 const CUR_BAD: u8 = 2;
 
-/// One position tuple of a key as the long probe read it, in 32 bytes
-/// (critique C5: no `String` or heap cell per row): the max version over
+/// One position tuple of a key as the long probe read it, in 32 bytes:
+/// the max version over
 /// all its rows and its current cell.
 #[derive(Clone, Copy, Debug)]
 struct ProbeCell {
@@ -2428,7 +2421,7 @@ struct LongCells {
     /// The meta of the first current cell read.
     meta: Option<CellMeta>,
     /// A current cell disagreed with `meta` (axis ids, binding or kind;
-    /// critique C3.3: compared per cell) or was not comparable. Such a key
+    /// compared per cell) or was not comparable. Such a key
     /// is never diffed or judged unchanged: it is rewritten whole.
     incoherent: bool,
     /// Current rows over all positions.
@@ -2618,7 +2611,7 @@ impl<'a> TsCol<'a> {
         })
     }
 
-    /// `Ok(None)`: NULL; `Err(())`: not exact in µs (critique C3.5).
+    /// `Ok(None)`: NULL; `Err(())`: not exact in µs.
     fn get(&self, i: usize) -> Result<Option<i64>, ()> {
         let (unit, v) = match self {
             TsCol::S(p) => (TimeUnit::Second, opt(*p, i)),
@@ -2704,8 +2697,7 @@ impl<'a> ProbeCols<'a> {
 
     /// Row `r` folded into `cells` (see [`LongCells::push`]): a current
     /// cell's meta, and its payload decoded from the RAW stored columns by
-    /// the one decoder ([`StoredCell::decode`]; `None` for a malformed row
-    /// or a stub, critique C3.4).
+    /// the one decoder.
     fn push(&self, r: usize, cells: &mut LongCells) {
         let pos = [
             self.pos[0].value(r),
@@ -2781,8 +2773,7 @@ fn read_long_probe(
     Ok(())
 }
 
-/// What one long write does to its key's cells (skip_unchanged_writes_PLAN
-/// §4.1): the merge of the new value's cells with the probed ones, by
+/// What one long write does to its key's cells: the merge of the new value's cells with the probed ones, by
 /// position tuple.
 #[derive(Debug, Default)]
 struct LongDiff {
@@ -3016,10 +3007,7 @@ const LONG_CLOSE_CELLS_STUB_SQL: &str = concat!(
 /// cells: every current cell of the key but the bound kept positions (an
 /// anti-join on ≤ [`LONG_INSERT_CHUNK`] positions), content retained. The
 /// same rows as [`LONG_CLOSE_CELLS_SQL`] over the closed positions, at the
-/// key-level UPDATE's per-row cost (critique C5: the position-joined form
-/// costs ~7 µs per closed cell against ~5 µs for the key-level one, so a
-/// re-import that changes all but a few cells of a large value would
-/// otherwise be slower than the whole rewrite it replaces).
+/// key-level UPDATE's per-row cost.
 const LONG_CLOSE_EXCEPT_SQL: &str = concat!(
     "UPDATE value_long SET ",
     close_set!(),
@@ -3281,7 +3269,7 @@ fn write_long_round(
         .collect())
 }
 
-/// Rows per columnar-bind execution (plan D5, critique C7): the long insert
+/// Rows per columnar-bind execution: the long insert
 /// and the axis child rows.
 /// Every list element is a Rust `Value` plus a transient `duckdb_value` while
 /// the bind copies it, so a whole 1 M-cell value bound at once peaks near
@@ -3291,7 +3279,7 @@ fn write_long_round(
 pub(crate) const LONG_INSERT_CHUNK: usize = 16_384;
 
 /// The per-key columns of one long round, in key order: bound as short
-/// per-key lists that the per-cell key ordinal indexes (critique C1-C2).
+/// per-key lists that the per-cell key ordinal indexes.
 #[derive(Default)]
 struct LongKeys {
     e: Vec<i64>,
@@ -3357,7 +3345,7 @@ impl LongKeys {
 }
 
 /// The per-cell columns of one long round, built column-wise in ONE pass
-/// over the canonical rows (plan D4). Still the one encoder: the value
+/// over the canonical rows. Still the one encoder: the value
 /// columns come from [`VCols::of`], the accelerators from [`accel`], the
 /// positions from [`pad4_pos`] and the versions from the per-position
 /// version map; `k` is the cell's 1-based key ordinal into [`LongKeys`].
@@ -3427,7 +3415,7 @@ impl LongColumns {
         self.version.len()
     }
 
-    /// The hard length check (critique C2): every per-cell column holds
+    /// The hard length check: every per-cell column holds
     /// exactly one entry per cell (a short column whose chunk is all NULL
     /// would otherwise bind as a plain NULL and pass the list check), and
     /// every key ordinal lies in `1..=keys` (an out-of-range `list[k]` reads
@@ -3498,8 +3486,7 @@ impl LongColumns {
     }
 }
 
-/// The columnar `value_long` INSERT in the key-ordinal form (plan Appendix
-/// A.3', critique C1-C2), the one long insert for every N. The per-key
+/// The columnar `value_long` INSERT in the key-ordinal form, the one long insert for every N. The per-key
 /// columns bind as short per-key lists indexed by the cell's 1-based key
 /// ordinal `u.k`; every per-cell column is an `unnest` inside the FROM
 /// subquery (zipped by position; no join, so the rows keep list order, i.e.
@@ -3601,7 +3588,7 @@ pub(crate) fn exec_columnar(
     Ok(())
 }
 
-/// The columnar-bind guard (plan D4, critique C2), in EVERY build. The
+/// The columnar-bind guard, in EVERY build. The
 /// `unnest`s of one SELECT zip by position and NULL-pad a shorter (or empty)
 /// list silently, so a list of the wrong length would write NULL into the
 /// nullable columns with no error. Every bound list must have exactly `n`
@@ -3771,7 +3758,7 @@ impl VCols {
 
 /// The payload of one stored value row or long cell, decoded from its RAW
 /// stored columns: floats as bits, strings as their exact bytes, timestamps
-/// as µs. The stored side is never re-canonicalized (critique C3.1), and
+/// as µs. The stored side is never re-canonicalized, and
 /// equality is never decided by a hash (`encoding::content_hash` /
 /// `encode_value`, C3.2; the value encoding now encodes `v_str` as its raw
 /// bytes, spec §9.5, but a hash is still not an equality test). The one
@@ -3853,7 +3840,7 @@ impl StoredCell {
     /// Read the 8 value columns of a probe row starting at column `o`
     /// (`value_kind`, `v_float`, `v_int`, `v_bool`, `v_str`, `v_datetime`,
     /// `v_dur_months`, `v_dur_micros`) and decode them. A timestamp is
-    /// converted to µs by its unit (critique C3.5); a column of an
+    /// converted to µs by its unit; a column of an
     /// unexpected type, or a timestamp not exact in µs, yields `None`.
     fn read(r: &duckdb::Row, o: usize) -> duckdb::Result<Option<StoredCell>> {
         let kind = match r.get_ref(o)? {
@@ -3926,8 +3913,7 @@ impl CurRow {
     }
 
     /// Does this current row equal a new write of `v` bound to `pt`? The
-    /// binding compares as `IS NOT DISTINCT FROM` (a stored NULL against a
-    /// new member is a change, which rebinds; critique C3.6, D8).
+    /// binding compares as `IS NOT DISTINCT FROM`.
     fn equals(&self, v: &ScalarValue, pt: Option<i64>) -> bool {
         self.pt == pt
             && match (&self.cell, StoredCell::of_new(v)) {
@@ -3955,7 +3941,7 @@ fn unchanged_outcome(tier: Tier, version: u32, axes: (usize, usize), cells: usiz
 /// Two `v_min` / `v_max` values that do not prove a change: equal bits, or
 /// both NaN (DuckDB orders NaN as one value). The array prefilter only
 /// ever uses a mismatch, as evidence of a change; a match proves nothing
-/// and the payload bytes decide (critique C3.5).
+/// and the payload bytes decide.
 fn same_bound(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
 }
@@ -4073,8 +4059,8 @@ fn min_max(vals: &[f64]) -> (f64, f64) {
 }
 
 /// Constraint rejection through the NEW statements, driven at the internal
-/// entry points (appender_write_path_PLAN §7.2), plus the hard length check
-/// (critique C2). Every failure must surface as the error it is, roll the
+/// entry points, plus the hard length check.
+/// Every failure must surface as the error it is, roll the
 /// transaction back, and leave no rows and no `commit` row behind.
 #[cfg(test)]
 mod tests {
@@ -4759,7 +4745,7 @@ mod tests {
     /// The array counterpart of `single_key_long_round_matches_the_set_round`:
     /// a damaged key live in long and array (or scalar and array) takes the
     /// INSERT by its precedence tier and fails on the UNIQUE triple, in both
-    /// forms (critique C3).
+    /// forms.
     #[test]
     fn single_key_array_round_matches_the_set_round() {
         let nan = f64::from_bits(crate::encoding::CANONICAL_NAN_BITS);
@@ -4828,7 +4814,7 @@ mod tests {
     /// A nested-list round with an empty array, a one-element array, a NaN
     /// and new and replaced keys writes the same rows, `array_id`s and
     /// sequence state as one per-key write per key in the same order: the
-    /// pre-minted ids are those sequential inserts mint (critique C3, C8).
+    /// pre-minted ids are those sequential inserts mint.
     #[test]
     fn array_round_matches_per_key_writes() {
         let nan = f64::from_bits(crate::encoding::CANONICAL_NAN_BITS);

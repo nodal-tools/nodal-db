@@ -15,7 +15,8 @@
 use std::path::Path;
 use std::time::Instant;
 
-use nodal_db_core::api::{commit_change_set, ChangeSet, Segment};
+use crate::compat::commit_change_set;
+use nodal_db_core::api::{ChangeSet, Segment};
 use nodal_db_core::conn::with_write_txn;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{Action, MetadataChange, Scope, WriteOptions};

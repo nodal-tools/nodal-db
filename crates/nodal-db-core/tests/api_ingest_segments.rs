@@ -375,7 +375,10 @@ fn write_error_on_other_schema_version_names_the_version() {
         panic!("expected a SchemaMismatch error, got {err:?}")
     };
     assert_eq!(found, "0.3-test");
-    assert_eq!(expected, &nodal_db_core::compaction::SCHEMA_VERSION.to_string());
+    assert_eq!(
+        expected,
+        &nodal_db_core::compaction::SCHEMA_VERSION.to_string()
+    );
     assert_eq!(m, &err.to_string());
     assert!(m.contains("\"0.3-test\""), "{m}");
     assert!(

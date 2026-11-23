@@ -15,7 +15,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, commit_structural, delete_objects, preview_object_deletes, Segment,
+    commit, commit_structural, delete_objects, preview_object_deletes, ChangeSet, Segment,
 };
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::{
@@ -995,19 +995,20 @@ fn prepare_guards() {
     assert!(format!("{err}").contains("contradictory renames"), "{err}");
 
     // Both object-delete AND structurally reference one object (M2).
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![],
-        vec![set_ranks("s", &["victim"])],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("victim".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            structural: vec![set_ranks("s", &["victim"])],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("victim".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         o(),
@@ -1017,24 +1018,25 @@ fn prepare_guards() {
 
     // Activation referencing an alternative that is also object-deleted (M2,
     // the alternative endpoint — FIX 1). Pure, name-level: names need not exist.
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![],
-        vec![SC::SetEntityActivation {
-            class: "node".into(),
-            entity: "n1".into(),
-            alternative: "X".into(),
-            active: Some(true),
-        }],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("X".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            structural: vec![SC::SetEntityActivation {
+                class: "node".into(),
+                entity: "n1".into(),
+                alternative: "X".into(),
+                active: Some(true),
+            }],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("X".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         o(),
@@ -1076,26 +1078,28 @@ fn composed_editor_save_one_commit() {
         batches: vec![scalar_batch("n1", 5.0)],
         domains: vec![],
     };
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg],
-        vec![
-            create_alt("wet"),
-            SC::CreateScenario {
-                name: "sc".into(),
-                description: None,
-            },
-            set_ranks("sc", &["wet"]),
-        ],
-        vec![],
-        vec![(
-            ObjectDeleteKey {
-                kind: ObjectKind::Alternative,
-                class: None,
-                target: ObjectRef::Name("old".into()),
-            },
-            ObjectDeleteOpts { cascade: true },
-        )],
+        ChangeSet {
+            segments: vec![seg],
+            structural: vec![
+                create_alt("wet"),
+                SC::CreateScenario {
+                    name: "sc".into(),
+                    description: None,
+                },
+                set_ranks("sc", &["wet"]),
+            ],
+            object_deletes: vec![(
+                ObjectDeleteKey {
+                    kind: ObjectKind::Alternative,
+                    class: None,
+                    target: ObjectRef::Name("old".into()),
+                },
+                ObjectDeleteOpts { cascade: true },
+            )],
+            ..ChangeSet::default()
+        },
         "t",
         "editor save",
         o(),

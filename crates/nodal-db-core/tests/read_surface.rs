@@ -701,8 +701,10 @@ fn another_schema_version_is_not_refreshed() {
     let db = data_file(dir.path(), "other.duckdb");
     age(&db);
     let c = raw(&db);
-    c.execute_batch("UPDATE database_property SET value = '0.0-other' WHERE key = 'schema_version'")
-        .unwrap();
+    c.execute_batch(
+        "UPDATE database_property SET value = '0.0-other' WHERE key = 'schema_version'",
+    )
+    .unwrap();
     c.close().unwrap();
     let cat = catalog_sql(&db);
     let _ = write_parameter(
@@ -730,7 +732,12 @@ fn stale_reads_overlay_and_match_the_refreshed_file() {
     age(&db);
     // The frozen old surface carries no marker (read as major 0); mark it an
     // older revision of this build's major, the case the overlay serves.
-    set_marker(&db, read_surface::build_version().contract_major, 1, "0000000000000000");
+    set_marker(
+        &db,
+        read_surface::build_version().contract_major,
+        1,
+        "0000000000000000",
+    );
     let refreshed = dir.path().join("refreshed.duckdb");
     fs::copy(&db, &refreshed).unwrap();
     api::refresh_read_surface(&refreshed, false).unwrap();

@@ -46,7 +46,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use nodal_db_core::api::{commit_changes, DeleteKey, Segment};
+use nodal_db_core::api::{commit as api_commit, DeleteKey, Segment, ChangeSet};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::{CanonicalValue, LabelDomain};
 use nodal_db_core::conn::with_write_txn;
@@ -755,22 +755,13 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
         &PARAMS[0],
         &["ασ".to_string()],
     );
-    let rep = commit_changes(
-        &db,
-        vec![Segment {
+    let rep = api_commit(&db, ChangeSet { segments: vec![Segment {
             class: "node".into(),
             parameter: "sc_f".into(),
             alternative: "Base".into(),
             batches: vec![setup],
             domains: vec![],
-        }],
-        vec![],
-        vec![],
-        vec![],
-        "r",
-        "setup",
-        WriteOptions::default(),
-    );
+        }], ..ChangeSet::default() }, "r", "setup", WriteOptions::default());
     g.commit();
     writeln!(
         log,
@@ -778,16 +769,7 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
         result_text(&rep, |r| report_text(r, mode))
     )
     .unwrap();
-    let rep = commit_changes(
-        &db,
-        vec![],
-        vec![mixed],
-        vec![],
-        vec![],
-        "r",
-        "mixed",
-        WriteOptions::default(),
-    );
+    let rep = api_commit(&db, ChangeSet { structural: vec![mixed], ..ChangeSet::default() }, "r", "mixed", WriteOptions::default());
     writeln!(
         log,
         "## setup mixed {}",
@@ -1083,16 +1065,7 @@ fn run(seed: u64, commits: usize, big: bool, mode: Mode, dir: &Path, log: &mut S
             g.rollback();
             continue;
         }
-        let rep = commit_changes(
-            &db,
-            segments,
-            structural,
-            deletes,
-            vec![],
-            "r",
-            &format!("c{ci}"),
-            opts,
-        );
+        let rep = api_commit(&db, ChangeSet { segments, structural, deletes, ..ChangeSet::default() }, "r", &format!("c{ci}"), opts);
         if rep.is_ok() {
             g.commit();
         } else {

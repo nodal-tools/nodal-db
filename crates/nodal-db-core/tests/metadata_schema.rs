@@ -47,14 +47,21 @@ fn core_keys_equal_the_ddl_check_list() {
         .map(|s| s.trim().trim_matches('\'').to_string())
         .collect();
     let core: BTreeSet<String> = CORE_KEYS.iter().map(|s| s.to_string()).collect();
-    assert_eq!(core, ddl, "property::CORE_KEYS must equal the DDL CHECK list");
+    assert_eq!(
+        core, ddl,
+        "property::CORE_KEYS must equal the DDL CHECK list"
+    );
     for k in CORE_KEYS {
         assert_eq!(owner_of(k), Owner::Core, "{k}");
     }
     assert_eq!(owner_of("Schema_Version"), Owner::Core, "any case");
     assert_eq!(owner_of("flextool:frozen"), Owner::Tool);
     assert_eq!(owner_of("title"), Owner::User);
-    assert_eq!(owner_of(":x"), Owner::User, "the DDL classifies ':x' as user");
+    assert_eq!(
+        owner_of(":x"),
+        Owner::User,
+        "the DDL classifies ':x' as user"
+    );
     // The reserved `nodal:` namespace (OD-3): core-owned in any case, never
     // a tool's, with no DDL edit per key.
     assert_eq!(owner_of("nodal:future_key"), Owner::Core);

@@ -13,7 +13,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, purge, ChangeSet, Segment};
+use nodal_db_core::api::{commit, purge, ChangeSet, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::types::{
@@ -146,7 +146,7 @@ fn req(scope: PS) -> PurgeRequest {
 }
 
 fn call(db: &Path, set: ChangeSet) -> Result<WriteReport, DbError> {
-    commit_change_set(db, set, "t", "m", o())
+    commit(db, set, "t", "m", o())
 }
 
 fn purge1(db: &Path, scope: PS) -> WriteReport {

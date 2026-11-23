@@ -18,7 +18,7 @@ use duckdb::{Connection, OptionalExt};
 use crate::compaction::SCHEMA_VERSION;
 use crate::error::DbError;
 
-/// Base tables in a safe insertion order (§2.3). The ONLY engine-enforced FKs
+/// Base tables in a safe insertion order. The ONLY engine-enforced FKs
 /// are `→ commit(id)` and `→ axis(id)` (verified across `001–065`), so
 /// **`commit` first, then `axis`, then the rest in any order** satisfies every
 /// referential constraint. `value_array_hist` carries no FK by design.
@@ -205,8 +205,8 @@ pub(crate) fn check_selection(real_cols: &[(String, Vec<String>)]) -> Result<(),
     Ok(())
 }
 
-/// The authoritative per-table `GENERATED ALWAYS AS … VIRTUAL` column set
-/// (design §2.2, verified table-by-table against the DDL). These recompute from
+/// The authoritative per-table `GENERATED ALWAYS AS … VIRTUAL` column set.
+/// These recompute from
 /// the base columns and CANNOT be inserted into, so they are excluded from both
 /// the copy and the self-check hash. Tables absent from this list have no
 /// generated columns.
@@ -274,8 +274,7 @@ fn generated_for(table: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
-/// Per-table clustering key columns for the rebuild copy's `ORDER BY`
-/// (erasure_compaction_plan §4.1, decision D-E4: clustering is ALWAYS-ON).
+/// Per-table clustering key columns for the rebuild copy's `ORDER BY`.
 /// The rule, applied uniformly by [`cluster_order`]:
 ///
 ///   - table has a `valid_to_commit` column (from/to tiers and all narrow
@@ -288,10 +287,7 @@ fn generated_for(table: &str) -> &'static [&'static str] {
 ///   - otherwise (append-only tables, axis children, the all-live
 ///     `value_array`) ⇒ `ORDER BY <keys>` — natural/key order, locality only.
 ///
-/// **Mechanism, stated correctly** (critique M2, empirical on DuckDB 1.5.5;
-/// the compaction tests re-pass on 2.0.0, and 2.0.0 does not change list
-/// reads or list-segment skipping — the liveness-skipping claim itself was not
-/// re-measured on 2.0.0):
+/// **Mechanism, stated correctly**:
 /// the current-first win is **cheap contiguous validity-vector filtering**
 /// (~2× faster current-state scans on a 2 M-row/50%-dead fixture), NOT
 /// row-group skipping — 1.5.5 does not use null-count segment stats to
@@ -303,8 +299,7 @@ fn generated_for(table: &str) -> &'static [&'static str] {
 /// zero self-check changes; determinism costs no flag surface, and the sort
 /// is bounded by compaction already being a whole-file rewrite.
 ///
-/// **Closed rows by close commit (D-E4 amended 2026-10-24,
-/// `specs/compaction_growth_FINDINGS.md`).** The first cut sorted closed rows
+/// **Closed rows by close commit.** The first cut sorted closed rows
 /// by key, which interleaves every cell's versions. DuckDB keeps a hidden
 /// persistent ART for each `REFERENCES` (not listed in `duckdb_indexes()`);
 /// with the row ids of one commit scattered, the two commit-FK ARTs of
@@ -851,7 +846,7 @@ pub(crate) fn remove_temp(temp_path: &Path) {
     }
 }
 
-/// fsync a file's bytes to disk (durability before the rename, §3).
+/// fsync a file's bytes to disk.
 pub(crate) fn fsync_file(path: &Path) -> Result<(), DbError> {
     let f = fs::File::open(path).map_err(|source| DbError::SchemaDir {
         path: path.display().to_string(),

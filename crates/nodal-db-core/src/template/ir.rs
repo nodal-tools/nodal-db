@@ -1,25 +1,25 @@
-//! The template IR object model (`specs/template_ir_plan.md` §2, decision D1):
+//! The template IR object model:
 //! YAML 1.2 authoring surface over a JSON-compatible object model, parsed here
-//! into plain serde structs, plus the pure load-time validation (§2.2, §3.4,
-//! §3.5) and the normalized-object-model content hash (§4.1).
+//! into plain serde structs, plus the pure load-time validation and the
+//! normalized-object-model content hash.
 //!
-//! ## Serialization choices (D1), stated for the review record
+//! ## Serialization choices
 //! - Parser/emitter: **`serde_norway`** (the maintained `serde_yaml` fork).
 //!   Chosen because its plain-scalar resolution follows the **YAML 1.2 core
 //!   schema in every context**: only `true`/`false` resolve as booleans, so
 //!   `yes`/`no`/`on`/`off` stay strings even under `deserialize_any` (untagged
-//!   enums like [`Lit`]) — the Norway problem (§2.1 mitigation (a)) is closed
+//!   enums like [`Lit`]) — the Norway problem is closed
 //!   at the parser. The alternative `serde-saphyr` 1.3.0 was spike-tested and
 //!   **rejected**: its `deserialize_any` resolves `yes`/`no`/`on`/`off`/`y`/`n`
-//!   as YAML 1.1 booleans, which reopens the exact footgun the plan names.
-//! - Strict typing (§2.1 mitigation (b)): every struct below uses
+//!   as YAML 1.1 booleans, which reopens exactly that footgun.
+//! - Strict typing: every struct below uses
 //!   `deny_unknown_fields`, so a typo'd key fails at parse, before any write.
 //!   One deliberate deviation: `serde_norway` **coerces** a YAML integer into
 //!   a `String` field (`template_version: 69` loads as `"69"` rather than
 //!   erroring). This *unifies* the `69` vs `"69"` type-flap instead of
-//!   rejecting it — both spellings load identically — so the plan's concern
-//!   (silent divergence) cannot occur; flagged in the phase report.
-//! - JSON input (D1 "one loader reads both surfaces"): JSON is a YAML 1.2
+//!   rejecting it — both spellings load identically — so the two spellings
+//!   cannot silently diverge.
+//! - JSON input: JSON is a YAML 1.2
 //!   subset, so [`parse_str`] handles both through the single YAML parser.
 //! - Emission: `serde_norway::to_string` quotes any scalar its own parser
 //!   would not read back as a string (`'69'`, `'true'`, `'1.5'`); it leaves
@@ -27,7 +27,7 @@
 //!   through this loader are exact; a third-party YAML **1.1** consumer would
 //!   misread an unquoted `yes` — a documented caveat, not a loader bug.
 //!
-//! ## Normalization (§4.1, §8.1.7)
+//! ## Normalization
 //! [`normalized_model`] produces the canonical JSON object the content hash is
 //! minted over and the round-trip comparator compares. It is *semantic*:
 //! anchors are already gone (parse-time), map keys are emitted through
@@ -37,10 +37,10 @@
 //! literals are unified under their declared kind (`1` and `1.0` normalize
 //! identically under `kind: float`). Fields with no persisted store carrier —
 //! the identity block's `description`/`engine_schema`/`role`, unit registry
-//! extras (D7 "dropped at load"), and the whole `migrations:` block (chain
+//! extras, and the whole `migrations:` block (chain
 //! transport, not vocabulary state) — are **excluded**, so the hash is stable
 //! across chain-history edits and `template export` can reproduce it from the
-//! database alone. Exclusions are named in the phase report.
+//! database alone.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::marker::PhantomData;
@@ -128,7 +128,7 @@ pub const SCALAR_KINDS: [&str; 6] = ["float", "int", "bool", "string", "date_tim
 /// floats and strings).
 pub const LITERAL_KINDS: [&str; 4] = ["float", "int", "bool", "string"];
 
-/// Index-dimension kinds (`parameter_type_dimension.kind`, VMP Part 1).
+/// Index-dimension kinds.
 pub const DIM_KINDS: [&str; 5] = ["datetime", "period", "label", "integer", "time_pattern"];
 
 /// The store's name hygiene floor (was the `#2373` charset CHECK): classes,
@@ -146,7 +146,7 @@ fn default_true() -> bool {
 // Object model (template_ir_plan §2.2)
 // ---------------------------------------------------------------------------
 
-/// One template document. Top-level keys per §2.2 — all optional except
+/// One template document. Top-level keys are all optional except
 /// `template` and `classes`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,8 +169,8 @@ pub struct Template {
     pub migrations: Vec<Migration>,
 }
 
-/// The identity block (§1.1). `version` is a string by design (§4.1: stored as
-/// a string; `69` coerces to `"69"` — see the module docs).
+/// The identity block. `version` is a string by design (stored as a
+/// string; `69` coerces to `"69"` — see the module docs).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Identity {
@@ -178,20 +178,20 @@ pub struct Identity {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Engine-schema compatibility note (§1.1). Carried, compared against the
+    /// Engine-schema compatibility note. Carried, compared against the
     /// DB's `schema_version` at apply (warning on mismatch, never a block).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_schema: Option<String>,
-    /// `input` | `results` (§1.1, §7). No store carrier — excluded from the
+    /// `input` | `results`. No store carrier — excluded from the
     /// normalized model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
 }
 
-/// A unit declaration (D7): name + quantity-kind IRI + description are what
+/// A unit declaration: name + quantity-kind IRI + description are what
 /// the store persists (`units_of_measure`). Any *other* key is registry
 /// authoring/audit metadata — tolerated, surfaced as a load warning, and
-/// dropped (never persisted; D7 "express-never-assert").
+/// dropped.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Unit {
     pub name: String,
@@ -203,7 +203,7 @@ pub struct Unit {
     pub registry_extras: UniqueMap<Value>,
 }
 
-/// A value list (§1.1): named, ordered, typed members. Member order IS the
+/// A value list: named, ordered, typed members. Member order IS the
 /// ordinal (1-based) — semantic, kept by normalization.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,7 +225,7 @@ pub struct ListMember {
     pub description: Option<String>,
 }
 
-/// A presentation group (D8): persisted inside the Decision-7 `presentation`
+/// A presentation group: persisted inside the Decision-7 `presentation`
 /// metadata document, zero schema change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,7 +248,7 @@ pub struct ClassSet {
     pub members: Vec<String>,
 }
 
-/// An entity class, 0-D (no `dimensions`) or N-D (§2.3).
+/// An entity class, 0-D (no `dimensions`) or N-D.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Class {
@@ -256,7 +256,7 @@ pub struct Class {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Resolution semantics (`entity_class.active_by_default`); FlexTool
-    /// fidelity: false on node/unit/connection only (§8.1.3).
+    /// fidelity: false on node/unit/connection only.
     #[serde(default = "default_true")]
     pub active_by_default: bool,
     /// Completeness marker (`audit_required_class_empty`).
@@ -270,7 +270,7 @@ pub struct Class {
     pub parameters: Vec<Parameter>,
 }
 
-/// A dimension referent (§2.2): a bare name ALWAYS resolves as a class; a
+/// A dimension referent: a bare name ALWAYS resolves as a class; a
 /// class-set is always explicit `{class_set: name}` (shadowing rule).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -291,9 +291,9 @@ impl DimRef {
     }
 }
 
-/// A parameter definition (§2.2). `types` MAY be omitted with `value_list`
-/// (kind inferred, §3.5) or with neither (loads typeless, materializes on
-/// first write — §2.2, the INES `test`-class case).
+/// A parameter definition. `types` MAY be omitted with `value_list`
+/// or with neither (loads typeless, materializes on
+/// first write).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Parameter {
@@ -304,7 +304,7 @@ pub struct Parameter {
     pub types: Option<Vec<TypeDecl>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_list: Option<String>,
-    /// Three-state default declaration (D12, jkiviluo 2026-09-22): field
+    /// Three-state default declaration: field
     /// ABSENT = no opinion (the database keeps whatever default it has —
     /// omission never destroys); explicit `default: null` (or `~`, or JSON
     /// null) = a CLEAR instruction; a value = set. The absent-vs-null
@@ -327,9 +327,9 @@ pub struct Parameter {
     pub display_order: Option<i64>,
 }
 
-/// One member of the declared allowed-type set (D2/D3): a scalar kind, or
+/// One member of the declared allowed-type set: a scalar kind, or
 /// `indexed` with explicitly named-and-kinded dims. `rank` is never written —
-/// derived as `dims.len()` (§3.1).
+/// derived as `dims.len()`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeDecl {
@@ -340,7 +340,7 @@ pub struct TypeDecl {
 
 impl TypeDecl {
     /// The (value_kind tag, folded (name, kind) vector) the write path matches
-    /// and distinguishes on (`api.rs` `MatchKey`, VMP Part 7 as amended).
+    /// and distinguishes on.
     /// Folding is the crate-wide name [`fold`] (engine rule 8), the same
     /// fold the write path's matcher applies, so the two agree exactly.
     pub fn match_key(&self) -> (String, Vec<(String, String)>) {
@@ -377,7 +377,7 @@ pub struct DimSpec {
     pub kind: String,
 }
 
-/// A typed default literal, e.g. `{kind: float, value: 1.0}` (§2.3).
+/// A typed default literal, e.g. `{kind: float, value: 1.0}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefaultValue {
@@ -385,7 +385,7 @@ pub struct DefaultValue {
     pub value: Lit,
 }
 
-/// The three-state default declaration (D12, jkiviluo 2026-09-22).
+/// The three-state default declaration.
 ///
 /// - `Unspecified` — the `default:` key is ABSENT: no opinion; a reconcile
 ///   leaves whatever default the database holds (omission never destroys).
@@ -485,7 +485,7 @@ impl Lit {
     }
 }
 
-/// Explicit conditional-requirement rules (§5.2, D4): carried as data,
+/// Explicit conditional-requirement rules: carried as data,
 /// client-enforced in v1, persisted as a JSON document under the reserved
 /// `audit_rules` metadata key.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -513,7 +513,7 @@ pub struct WhenClause {
     pub require: Vec<String>,
 }
 
-/// Vocabulary-completing seed scaffolding (§1.2, D6): entities and base
+/// Vocabulary-completing seed scaffolding: entities and base
 /// (structural, alternative-NULL) memberships ONLY. Bounded by intent — model
 /// content never belongs here (a review rule, not a mechanism).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -565,8 +565,8 @@ pub struct EntityRef {
     pub entity: String,
 }
 
-/// One migration span (§4.3): identity-changing steps between two template
-/// versions, applied in `steps` order. `steps` MAY be empty (D-F1): an empty
+/// One migration span: identity-changing steps between two template
+/// versions, applied in `steps` order. `steps` MAY be empty: an empty
 /// span declares the transition reconcile-only — the runner stamps the
 /// version and moves on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -577,8 +577,7 @@ pub struct Migration {
     pub steps: Vec<MigrationStep>,
 }
 
-/// Rename-collision policy (D14/G2, jkiviluo 2026-09-22 — the v28/v66
-/// `_rename_or_drop_parameter_definition` shape): what `rename_parameter`
+/// Rename-collision policy: what `rename_parameter`
 /// does when the TARGET name already exists.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -588,14 +587,14 @@ pub enum OnCollision {
     #[default]
     Error,
     /// Drop the STALE SOURCE instead of renaming — a versioned close-out
-    /// through the object-delete cascade (values go with it; D14). The v28
-    /// intent: partial prior migration / template re-apply left both names
-    /// live, and the target is the survivor.
+    /// through the object-delete cascade. For the case where a partial
+    /// prior migration or a template re-apply left both names live, and the
+    /// target is the survivor.
     DropSource,
 }
 
 /// What `rename_parameter` + `map_values` does with current values that match
-/// NO translation key (G6 — the v65 flag→enum upgrade drops them to default).
+/// NO translation key.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnmappedValues {
@@ -603,18 +602,16 @@ pub enum UnmappedValues {
     #[default]
     Keep,
     /// Close them out (versioned, retention honored) so the entity falls to
-    /// the definition's default — the v65 semantics.
+    /// the definition's default.
     Drop,
     /// Refuse the step while any unmapped current value exists.
     Error,
 }
 
-/// Absent-SOURCE policy for the rename/merge step family (2026-09-22,
-/// port-finale Track A review; the global default is recorded in
-/// `template_ir_plan.md` §4.2 as a dated note). Under the one-final-reconcile
+/// Absent-SOURCE policy for the rename/merge step family. Under the one-final-reconcile
 /// execution model, a reconcile-only version's adds never materialize
-/// mid-chain, and an end-stamped upstream chain (FlexTool stamps
-/// `model.version` once, at the very end) leaves partially-applied field
+/// mid-chain, and an end-stamped upstream chain (one that stamps its
+/// version once, at the very end) leaves partially-applied field
 /// databases — so a per-version ladder's step may name a source a given
 /// entrant never had, or already migrated. The default TOLERATES that
 /// (note + no-op, never silent; `rename_list_member` still rewrites stray
@@ -658,18 +655,17 @@ impl UnmappedValues {
     }
 }
 
-/// The closed Layer-2 hint vocabulary plus the Layer-3 `run:` escape hatch
-/// (§4.2, D5; hint vocabulary v2 per D14/D15, jkiviluo 2026-09-22, from the
-/// FlexTool chain classification's G1–G7 gaps). Serialized as a ONE-KEY MAP
-/// per step (`- rename_class: {from, to}` / `- run: prog`) — the plan's §4.3
-/// authoring syntax. Hand-written serde impls below: the serde_yaml-0.9
+/// The closed vocabulary of declarative migration steps (rename / merge /
+/// drop hints) plus the `run:` escape hatch to a registered program.
+/// Serialized as a ONE-KEY MAP per step (`- rename_class: {from, to}` /
+/// `- run: prog`), the authoring syntax. Hand-written serde impls below: the serde_yaml-0.9
 /// family represents derived enums as YAML `!tags`, which is not the decided
 /// authoring surface.
 ///
-/// **D14 (drops).** Omission still never destroys; migration steps may
+/// **Drops.** Omission still never destroys; migration steps may
 /// destroy EXPLICITLY. Drops are versioned CLOSE-OUTS, never physical
-/// erasure, and execute through the one object-delete cascade
-/// (`object_delete.rs` — CLAUDE.md invariant #2: one dependency finder). The
+/// erasure, and execute through the one object-delete cascade.
+/// The
 /// plan output shows the blast radius before apply (delete preview).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MigrationStep {
@@ -681,9 +677,8 @@ pub enum MigrationStep {
         to: String,
         missing_source: MissingSource,
     },
-    /// Rename a definition within its class. v2 extensions: `on_collision`
-    /// (G2 — v28/v66's drop-stale-source), and `map_values` (G6 — v65's
-    /// old→new stored-string translation table, with `unmapped_values`
+    /// Rename a definition within its class. v2 extensions: `on_collision`,
+    /// and `map_values` (an old→new stored-string translation table, with `unmapped_values`
     /// policy for strings outside the table).
     RenameParameter {
         class: String,
@@ -699,9 +694,9 @@ pub enum MigrationStep {
         to: String,
         missing_source: MissingSource,
     },
-    /// Renames a (string) list member and, with `rewrite_values` (DEFAULT ON
-    /// per D15/G7 — the rewrite IS the hint's semantics; v25's un-rewritten
-    /// rename stranded strays until v55), rewrites matching current scalar
+    /// Renames a (string) list member and, with `rewrite_values` (DEFAULT ON:
+    /// the rewrite IS the hint's semantics; a rename without it strands the
+    /// stored strings), rewrites matching current scalar
     /// values and defaults of definitions bound to the list (mechanical,
     /// value-list-scoped, through the history protocol).
     RenameListMember {
@@ -713,13 +708,13 @@ pub enum MigrationStep {
     },
     /// Re-home a definition between classes. v1 guard: legal only while the
     /// definition holds no current values (the "carry 1:1" case is deferred
-    /// with the reshape door).
+    /// for now).
     MoveParameter {
         name: String,
         from_class: String,
         to_class: String,
     },
-    /// G3 (v41): merge `from` into `to` WITHIN one class. Target absent ⇒ a
+    /// Merge `from` into `to` WITHIN one class. Target absent ⇒ a
     /// plain rename (create-by-rename — chains run before the final
     /// reconcile, so a template-introduced target may not exist yet). Target
     /// present ⇒ copy current SCALAR values fill-if-absent per (entity,
@@ -730,7 +725,7 @@ pub enum MigrationStep {
         to: String,
         missing_source: MissingSource,
     },
-    /// G4 (v52 glpsol→highs, v56 D.4): make string member `from` become
+    /// Make string member `from` become
     /// `to`. Target member present ⇒ rewrite stored values/defaults and
     /// close the `from` member; absent ⇒ rename the member (rewrite always
     /// on — the rewrite is the merge).
@@ -740,26 +735,26 @@ pub enum MigrationStep {
         to: String,
         missing_source: MissingSource,
     },
-    /// D14/G1: explicit versioned close-out of a definition + its values
+    /// Explicit versioned close-out of a definition + its values
     /// (object-delete Parameter cascade). Target absent ⇒ no-op with a note
     /// (close-out intent already satisfied).
     DropParameter { class: String, parameter: String },
-    /// D14/G1: explicit versioned close-out of a class + its entities,
+    /// Explicit versioned close-out of a class + its entities,
     /// definitions, values, and dependent dimension classes (object-delete
     /// Class cascade, cross-kind closure).
     DropClass { class: String },
-    /// D14/G1: close out an ORPHAN value list (+ its member rows). Refuses
+    /// Close out an ORPHAN value list (+ its member rows). Refuses
     /// while any current definition binds it — there is no cascade here to
     /// share, and dropping a bound list would strand the binding (drop the
     /// definitions first, or rebind them via reconcile).
     DropValueList { list: String },
-    /// D14/G1: close out one string list member. While current values or
+    /// Close out one string list member. While current values or
     /// defaults still hold the string the step SKIPS, which PAUSES the chain
-    /// (no substamp, no span version stamp; a re-apply retries) — a drop
+    /// (no step progress or version stamp is recorded; a re-apply retries) — a drop
     /// never strands data; rewrite first (`merge_list_member` /
     /// `rename_list_member`) or delete the values.
     DropListMember { list: String, value: String },
-    /// Layer 3: a named tool-side program executed through the ordinary write
+    /// A named tool-side program executed through the ordinary write
     /// API (`MigrationRegistry`). The IR records identity/ordering only.
     Run(String),
 }
@@ -860,7 +855,7 @@ impl Serialize for MigrationStep {
 
 /// A JSON-compatible value whose MAP layers reject duplicate keys during
 /// deserialization, at every depth. `serde_json::Value` silently last-wins on
-/// duplicates, so a step body detouring through it (the D1 JSON bridge) would
+/// duplicates, so a step body detouring through it would
 /// lose the UniqueMap guarantee for its fields and any nested map
 /// (`map_values`). This carrier keeps the rejection all the way down.
 struct StrictJson(Value);
@@ -1203,7 +1198,7 @@ fn empty_descriptions_absent(t: &mut Template) {
 // ---------------------------------------------------------------------------
 
 /// Parse a template from YAML 1.2 text. JSON is a YAML subset, so JSON input
-/// parses through the same call (D1: one loader, both surfaces). Names come
+/// parses through the same call. Names come
 /// back in NFC ([`nfc_names`]).
 pub fn parse_str(text: &str) -> Result<Template, DbError> {
     check_yaml_shape(text)?;
@@ -1318,9 +1313,7 @@ fn check_yaml_shape(text: &str) -> Result<(), DbError> {
                 if c == b'-' && depth == 0 {
                     let col = i - line_start;
                     last_dash = Some(col);
-                    key_col = col
-                        + 1
-                        + b[i + 1..].iter().take_while(|&&x| x == b' ').count();
+                    key_col = col + 1 + b[i + 1..].iter().take_while(|&&x| x == b' ').count();
                     after_dash = true;
                     node_start = true;
                     json_key = false;
@@ -1378,7 +1371,7 @@ fn check_yaml_shape(text: &str) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Parse a template file (YAML or JSON — one parser, D1).
+/// Parse a template file.
 pub fn parse_file(path: &Path) -> Result<Template, DbError> {
     if let Ok(m) = std::fs::metadata(path) {
         if m.len() > MAX_TEMPLATE_BYTES as u64 {
@@ -1423,16 +1416,16 @@ pub struct Checked<'a> {
     /// explicit `types`, else the value-list-inferred rank-0 member, else
     /// empty (typeless).
     pub effective_types: HashMap<(usize, usize), Vec<TypeDecl>>,
-    /// The `template_content_hash` (§4.1), computed ONCE here and carried so
+    /// The `template_content_hash`, computed ONCE here and carried so
     /// plan/apply never recompute it.
     pub hash: String,
 }
 
-/// Validate a parsed template: name rules and per-kind uniqueness (§2.2),
-/// dangling in-template references, type-set distinguishability (§3.3), the
-/// D3 dim rules, literal kinds, default-vs-list membership (§3.3.4), seed
-/// shape/arity/element checks and the cross-member name-dup rule (D6), and
-/// audit-rule references (§5.2). All errors are collected and reported
+/// Validate a parsed template: name rules and per-kind uniqueness,
+/// dangling in-template references, type-set distinguishability, the
+/// dimension rules, literal kinds, default-vs-list membership, seed
+/// shape/arity/element checks and the cross-member name-dup rule, and
+/// audit-rule references. All errors are collected and reported
 /// together; warnings ride the returned [`Checked`].
 pub fn validate(t: &Template) -> Result<Checked<'_>, DbError> {
     let mut errs: Vec<String> = Vec::new();
@@ -2199,7 +2192,7 @@ fn uniform_list_kind(l: &ValueList) -> Result<String, String> {
 
 /// A canonical string for literal equality (kind-aware: `1` == `1.0` under
 /// float; used for duplicate detection and default-vs-list membership).
-/// Delegates to the crate-wide [`ScalarValue::identity_string`] — ONE scalar
+/// Delegates to the crate-wide `ScalarValue::identity_string` — ONE scalar
 /// identity encoding shared with the reconcile diff and list matching.
 pub fn canonical_literal_string(l: &Lit, kind: &str) -> String {
     match l.resolve(kind) {
@@ -2229,8 +2222,7 @@ fn opt(map: &mut Map<String, Value>, key: &str, v: &Option<String>) {
 }
 
 /// THE type-elision rule, shared by normalization and `template export`
-/// (review item 11 — one rule, two users, so a §3.5-style explicit override
-/// that inference would reproduce hashes identically whether written or
+/// (one rule, two users, so an explicit override that inference would reproduce hashes identically whether written or
 /// elided): a `types:` block is elidable iff the parameter binds a value
 /// list, the block is a single rank-0 member, and its kind equals the list's
 /// uniform member kind.
@@ -2263,7 +2255,7 @@ fn type_member_json(ty: &TypeDecl) -> Value {
 }
 
 /// The canonical, JSON-valued normalized object model (module docs). This is
-/// the hash input AND the round-trip comparator (§8.1.7): parse both sides,
+/// the hash input AND the round-trip comparator: parse both sides,
 /// compare `normalized_model` outputs.
 pub fn normalized_model(t: &Template) -> Value {
     let t = &nfc_names(t);
@@ -2495,7 +2487,7 @@ pub fn normalized_model(t: &Template) -> Value {
     Value::Object(root)
 }
 
-/// The canonical JSON form of the `audit_rules:` block (D4): rules sorted by
+/// The canonical JSON form of the `audit_rules:` block: rules sorted by
 /// (class, selector), `when` keys canonical (BTreeMap), `require` lists
 /// sorted. This exact value is persisted under the reserved `audit_rules`
 /// metadata key and compared by the reconcile diff — one normalization, three
@@ -2506,7 +2498,7 @@ pub fn normalized_audit_rules(t: &Template) -> Option<Value> {
 
 /// [`normalized_audit_rules`] over the block itself: the one canonical form
 /// of an `audit_rules` document, also used when a class or parameter rename
-/// rewrites the stored document (class_param_rename_PLAN §5.2), so a
+/// rewrites the stored document, so a
 /// rewritten document is exactly what a template with those names stores.
 pub fn normalize_audit_rules(rules: &AuditRules) -> Option<Value> {
     if rules.conditional_requirements.is_empty() {
@@ -2552,7 +2544,7 @@ pub fn parse_audit_rules_doc(doc: &str) -> Result<AuditRules, serde_json::Error>
     serde_json::from_value(v)
 }
 
-/// The `template_content_hash` value (§4.1): XXH3-64 (the project's one
+/// The `template_content_hash` value: XXH3-64 (the project's one
 /// content-hash function, `encoding::content_hash`) over the serialized
 /// normalized object model, as 16 lowercase hex digits.
 pub fn template_content_hash(t: &Template) -> String {

@@ -1,11 +1,13 @@
 //! Canonical axis byte encoding and the 64-bit content hash.
 //!
 //! Pure, deterministic, and free of any `duckdb` use: this module is the one
-//! canonicalizer's serialization half (`CLAUDE.md` invariant 2). It implements
+//! canonicalizer's serialization half. It implements
 //! `docs/dev/canonical_encoding.md` to the byte — two independent implementations
 //! that feed the same canonical content MUST produce identical bytes and thus
 //! identical hashes. The machine-checkable oracle is
 //! `conformance/encoding_vectors/*.json`, driven by `tests/encoding_vectors.rs`.
+//!
+//! "spec §N" in this module refers to the sections of that public document.
 //!
 //! Scope: axis encoding (spec §4–§7) + content hash (§2), the dormant value
 //! encoding (spec §9), and the stored array payload hash (spec §13,
@@ -116,7 +118,7 @@ pub enum EncodeError {
     /// A NaN reached an **axis** float (spec §3.3.1). Axis coordinates must be
     /// orderable/parametric, and NaN has no ordering, so a NaN axis float is
     /// rejected at the writer boundary, never hashed. (VALUE floats, by
-    /// contrast, canonicalize NaN — see [`NanPolicy`].)
+    /// contrast, canonicalize NaN — see `NanPolicy`.)
     #[error("NaN is not allowed as an index coordinate")]
     NanForbidden,
     /// A time-pattern clause with no terms (spec §7.7): a clause is the
@@ -470,8 +472,7 @@ pub fn datetime_reproduces(start_ts: i64, step: &Duration, coords: &[i64]) -> bo
 /// Civil `(year, month, day)` of a µs-since-epoch timestamp. Exposed for
 /// canon's datetime step *proposal* (canon owns step derivation; this module
 /// owns the clamp/reproduce verification, spec §7.1.2) so the two share one
-/// civil-calendar implementation — no second calendar to drift (CLAUDE.md
-/// invariant 2). A wrong proposal is harmless: `datetime_reproduces` rejects it
+/// civil-calendar implementation — no second calendar to drift. A wrong proposal is harmless: `datetime_reproduces` rejects it
 /// and the axis materializes, so this only affects completeness, never
 /// correctness.
 pub fn ymd_from_micros(ts_micros: i64) -> (i64, u32, u32) {
@@ -565,7 +566,7 @@ fn push_component_block(out: &mut Vec<u8>, components: &[(u8, Vec<u8>)]) {
 }
 
 /// Rank byte then each axis content hash (`u64` LE) — the value's shape/identity
-/// context (spec §9, OPEN-7). Scalars carry rank 0 and no hashes.
+/// context (spec §9). Scalars carry rank 0 and no hashes.
 fn push_shape(out: &mut Vec<u8>, axis_hashes: &[u64]) {
     out.push(axis_hashes.len() as u8);
     for h in axis_hashes {
@@ -601,11 +602,11 @@ const TIER_SCALAR: u8 = 0x00;
 const TIER_ARRAY: u8 = 0x01;
 const TIER_LONG: u8 = 0x02;
 
-/// The canonical byte string of a single value (spec §9, OPEN-7). Layout:
+/// The canonical byte string of a single value (spec §9). Layout:
 ///   1. key: entity_id, parameter_definition_id, alternative_id (`i64` LE each);
 ///   2. `value_kind` tag (string, §3.4);
 ///   3. tier tag byte (§9.3 step 3): scalar `0x00`, array `0x01`, long `0x02`;
-///   4. shape: rank `u8` + axis content hashes (`u64` LE each), §9 OPEN-7;
+///   4. shape: rank `u8` + axis content hashes (`u64` LE each), §9;
 ///   5. measure block, per tier:
 ///      - scalar: one component block (slot 1) of the measure;
 ///      - array:  one component block whose slot-1 bytes are a `u32` element

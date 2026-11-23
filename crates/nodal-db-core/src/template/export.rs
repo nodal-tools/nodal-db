@@ -1,4 +1,4 @@
-//! `template export` (§8.1.7): re-emit the IR from a loaded database. The
+//! `template export`: re-emit the IR from a loaded database. The
 //! exported document and the source template must be **semantically equal
 //! after normalization** — parse both, compare [`super::ir::normalized_model`]
 //! outputs (the same normalization that feeds `template_content_hash`).

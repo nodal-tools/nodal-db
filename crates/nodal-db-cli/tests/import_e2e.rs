@@ -2297,7 +2297,7 @@ fn name_folded_is_reported_once_per_spelling_across_segments() {
         .collect();
     assert_eq!(folded.len(), 2, "{stdout}");
     assert!(
-        folded[0].starts_with("warning: 1 entity_class name(s) matched")
+        folded[0].starts_with("warning: 1 class name(s) matched")
             && folded[0].contains("\"NODE\" is stored as \"Node\"")
             && folded[0].contains("in 3 place(s)"),
         "{stdout}"

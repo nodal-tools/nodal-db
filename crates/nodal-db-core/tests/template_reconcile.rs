@@ -1653,24 +1653,25 @@ seed:
     let opts = ApplyOptions::default();
     apply(&db, &t, &MigrationRegistry::new(), "tester", "", &opts).unwrap();
     // A user deletes the link and creates a unit spelled like the node.
-    nodal_db_core::api::commit_changes(
+    nodal_db_core::api::commit(
         &db,
-        vec![],
-        vec![nodal_db_core::types::StructuralChange::CreateEntity {
-            class: "unit".into(),
-            name: Some("N1".into()),
-            elements: vec![],
-            description: None,
-        }],
-        vec![],
-        vec![(
-            nodal_db_core::types::ObjectDeleteKey {
-                kind: nodal_db_core::types::ObjectKind::Entity,
-                class: Some("link".into()),
-                target: nodal_db_core::types::ObjectRef::Name("l1".into()),
-            },
-            nodal_db_core::types::ObjectDeleteOpts { cascade: true },
-        )],
+        nodal_db_core::api::ChangeSet {
+            structural: vec![nodal_db_core::types::StructuralChange::CreateEntity {
+                class: "unit".into(),
+                name: Some("N1".into()),
+                elements: vec![],
+                description: None,
+            }],
+            object_deletes: vec![(
+                nodal_db_core::types::ObjectDeleteKey {
+                    kind: nodal_db_core::types::ObjectKind::Entity,
+                    class: Some("link".into()),
+                    target: nodal_db_core::types::ObjectRef::Name("l1".into()),
+                },
+                nodal_db_core::types::ObjectDeleteOpts { cascade: true },
+            )],
+            ..nodal_db_core::api::ChangeSet::default()
+        },
         "user",
         "m",
         WriteOptions::default(),

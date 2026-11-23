@@ -14,7 +14,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, Segment};
+use nodal_db_core::api::{commit as api_commit, ChangeSet, Segment};
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WriteOptions, WriteReport};
 
@@ -74,12 +74,12 @@ fn seg(parameter: &str, batch: RecordBatch) -> Segment {
 }
 
 fn commit(db: &Path, segments: Vec<Segment>) -> WriteReport {
-    commit_changes(
+    api_commit(
         db,
-        segments,
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments,
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),

@@ -33,7 +33,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, head_commit, DeleteKey, Segment};
+use nodal_db_core::api::{commit, head_commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
@@ -185,12 +185,12 @@ fn seeded() -> (tempfile::TempDir, PathBuf) {
             }
         }
     }
-    commit_changes(
+    commit(
         &db,
-        segs,
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: segs,
+            ..ChangeSet::default()
+        },
         "t",
         "seed",
         WriteOptions::default(),
@@ -218,12 +218,12 @@ fn seeded() -> (tempfile::TempDir, PathBuf) {
             segs.push(seg("link", p, a, batch_for(tier, entities_of("link"), 1)));
         }
     }
-    commit_changes(
+    commit(
         &db,
-        segs,
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: segs,
+            ..ChangeSet::default()
+        },
         "t",
         "seed links",
         WriteOptions::default(),
@@ -349,12 +349,14 @@ fn assert_not_effective(
 ) -> String {
     let before = dump(db);
     let head = head_commit(db).unwrap();
-    let err = commit_changes(
+    let err = commit(
         db,
-        segments,
-        vec![],
-        deletes,
-        object_deletes,
+        ChangeSet {
+            segments,
+            deletes,
+            object_deletes,
+            ..ChangeSet::default()
+        },
         "t",
         "not effective",
         DELETE_WINS,
@@ -378,12 +380,14 @@ fn assert_refused_by_default(
     object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
 ) {
     let before = dump(db);
-    let err = commit_changes(
+    let err = commit(
         db,
-        segments,
-        vec![],
-        deletes,
-        object_deletes,
+        ChangeSet {
+            segments,
+            deletes,
+            object_deletes,
+            ..ChangeSet::default()
+        },
         "t",
         "refused",
         WriteOptions::default(),
@@ -428,8 +432,18 @@ fn d9_default_refuses_and_delete_wins_drops_the_write_in_every_tier() {
             assert_refused_by_default(&db, s, d, vec![]);
             let head = head_commit(&db).unwrap();
             let (s, d) = call();
-            let r = commit_changes(&db, s, vec![], d, vec![], "t", "dw", DELETE_WINS)
-                .unwrap_or_else(|e| panic!("{p} {v}: {e:?}"));
+            let r = commit(
+                &db,
+                ChangeSet {
+                    segments: s,
+                    deletes: d,
+                    ..ChangeSet::default()
+                },
+                "t",
+                "dw",
+                DELETE_WINS,
+            )
+            .unwrap_or_else(|e| panic!("{p} {v}: {e:?}"));
             assert!(r.commit_id > head, "{p} {v}: committed");
             assert_eq!(
                 dropped(&r),
@@ -452,12 +466,12 @@ fn d9_default_refuses_and_delete_wins_drops_the_write_in_every_tier() {
 #[test]
 fn d9_coverage_follows_the_database_fold() {
     let (_d, db) = seeded();
-    commit_changes(
+    commit(
         &db,
-        vec![seg("node", "ps", "Base", scalar_batch(&["ΑΣ"], 1.0))],
-        vec![],
-        vec![],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("node", "ps", "Base", scalar_batch(&["ΑΣ"], 1.0))],
+            ..ChangeSet::default()
+        },
         "t",
         "sigma",
         WriteOptions::default(),
@@ -466,7 +480,18 @@ fn d9_coverage_follows_the_database_fold() {
     let s = || vec![seg("node", "ps", "Base", scalar_batch(&["ΑΣ"], 2.0))];
     let d = || vec![dkey("node", "ps", "Base", "ασ")];
     assert_refused_by_default(&db, s(), d(), vec![]);
-    let r = commit_changes(&db, s(), vec![], d(), vec![], "t", "dw", DELETE_WINS).unwrap();
+    let r = commit(
+        &db,
+        ChangeSet {
+            segments: s(),
+            deletes: d(),
+            ..ChangeSet::default()
+        },
+        "t",
+        "dw",
+        DELETE_WINS,
+    )
+    .unwrap();
     assert_eq!(dropped(&r), vec![(0, "node:ps/Base/ΑΣ".into(), value(0))]);
     assert!(r.commit_id > 0);
     assert_eq!(live(&db, "node", "ps", "Base", "ασ"), 0);
@@ -539,12 +564,13 @@ fn d10_default_refuses_and_delete_wins_drops_the_covered_writes() {
                 assert_not_effective(&db, writes(), vec![], vec![(od.clone(), cascade(c))]);
                 continue;
             }
-            let r = commit_changes(
+            let r = commit(
                 &db,
-                writes(),
-                vec![],
-                vec![],
-                vec![(od.clone(), cascade(c))],
+                ChangeSet {
+                    segments: writes(),
+                    object_deletes: vec![(od.clone(), cascade(c))],
+                    ..ChangeSet::default()
+                },
                 "t",
                 "dw",
                 DELETE_WINS,
@@ -563,12 +589,13 @@ fn d10_default_refuses_and_delete_wins_drops_the_covered_writes() {
                 .into_iter()
                 .filter_map(|s| without(s, &want))
                 .collect();
-            let rr = commit_changes(
+            let rr = commit(
                 &ref_db,
-                kept,
-                vec![],
-                vec![],
-                vec![(od.clone(), cascade(c))],
+                ChangeSet {
+                    segments: kept,
+                    object_deletes: vec![(od.clone(), cascade(c))],
+                    ..ChangeSet::default()
+                },
                 "t",
                 "dw",
                 WriteOptions::default(),
@@ -596,12 +623,13 @@ fn d10_no_partial_value_survives_the_cascade() {
         vec![b.column(0).clone(), b.column(1).clone(), Arc::new(v)],
     )
     .unwrap();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "pl", "A", b)],
-        vec![],
-        vec![],
-        vec![(okey(ObjectKind::Alternative, None, "A"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "pl", "A", b)],
+            object_deletes: vec![(okey(ObjectKind::Alternative, None, "A"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "dw",
         DELETE_WINS,
@@ -683,8 +711,19 @@ fn dropped_writes_plus_deletes_that_find_nothing_make_no_commit() {
         let head = head_commit(&db).unwrap();
         let n_refs = referents(&db);
         let n_writes: usize = s.iter().map(|s| s.batches[0].num_rows()).sum();
-        let r = commit_changes(&db, s, vec![], d, o, "t", "no-op", DELETE_WINS)
-            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let r = commit(
+            &db,
+            ChangeSet {
+                segments: s,
+                deletes: d,
+                object_deletes: o,
+                ..ChangeSet::default()
+            },
+            "t",
+            "no-op",
+            DELETE_WINS,
+        )
+        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
         assert_eq!(r.commit_id, 0, "{what}: no commit");
         assert_eq!(dropped(&r).len(), n_writes, "{what}: {r:?}");
         assert_eq!(head_commit(&db).unwrap(), head, "{what}");
@@ -698,12 +737,13 @@ fn dropped_writes_plus_deletes_that_find_nothing_make_no_commit() {
 #[test]
 fn dropped_writes_beside_an_effective_delete_commit_the_delete() {
     let (_d, db) = seeded();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "ps", "Base", scalar_batch(&["n1"], 1.0))],
-        vec![],
-        vec![dkey("node", "ps", "Base", "n1")],
-        vec![],
+        ChangeSet {
+            segments: vec![seg("node", "ps", "Base", scalar_batch(&["n1"], 1.0))],
+            deletes: vec![dkey("node", "ps", "Base", "n1")],
+            ..ChangeSet::default()
+        },
         "t",
         "dw",
         DELETE_WINS,
@@ -739,12 +779,14 @@ fn a_restricted_covering_delete_refuses_the_call() {
     // A value delete covers the same write too: it takes effect, so the
     // write is dropped and the call commits (the object delete still ends
     // `Restricted`, as alone).
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "ps", "A", scalar_batch(&["n2"], 8.0))],
-        vec![],
-        vec![dkey("node", "ps", "A", "n2")],
-        od(),
+        ChangeSet {
+            segments: vec![seg("node", "ps", "A", scalar_batch(&["n2"], 8.0))],
+            deletes: vec![dkey("node", "ps", "A", "n2")],
+            object_deletes: od(),
+            ..ChangeSet::default()
+        },
         "t",
         "value delete covers too",
         DELETE_WINS,
@@ -769,19 +811,20 @@ fn a_restricted_covering_delete_refuses_the_call() {
 #[test]
 fn the_warning_names_a_covering_delete_that_took_effect() {
     let (_d, db) = seeded();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "ps", "A", scalar_batch(&["n2"], 8.0))],
-        vec![],
-        vec![],
-        vec![
-            // n2 has values and containers, so RESTRICT ends `Restricted`.
-            (okey(ObjectKind::Entity, Some("node"), "n2"), cascade(false)),
-            (
-                okey(ObjectKind::Parameter, Some("node"), "ps"),
-                cascade(true),
-            ),
-        ],
+        ChangeSet {
+            segments: vec![seg("node", "ps", "A", scalar_batch(&["n2"], 8.0))],
+            object_deletes: vec![
+                // n2 has values and containers, so RESTRICT ends `Restricted`.
+                (okey(ObjectKind::Entity, Some("node"), "n2"), cascade(false)),
+                (
+                    okey(ObjectKind::Parameter, Some("node"), "ps"),
+                    cascade(true),
+                ),
+            ],
+            ..ChangeSet::default()
+        },
         "t",
         "two covering deletes",
         DELETE_WINS,
@@ -810,29 +853,30 @@ fn the_warning_names_a_covering_delete_that_took_effect() {
 fn an_effective_restrict_delete_drops_its_writes() {
     let (_d, db) = seeded();
     // Alternative `C` exists but holds nothing.
-    commit_changes(
+    commit(
         &db,
-        vec![],
-        vec![StructuralChange::CreateAlternative {
-            name: "C".into(),
-            description: None,
-        }],
-        vec![],
-        vec![],
+        ChangeSet {
+            structural: vec![StructuralChange::CreateAlternative {
+                name: "C".into(),
+                description: None,
+            }],
+            ..ChangeSet::default()
+        },
         "t",
         "create C",
         WriteOptions::default(),
     )
     .unwrap();
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![
-            seg("node", "ps", "C", scalar_batch(&["n1", "n2"], 8.0)),
-            seg("node", "ps", "Base", scalar_batch(&["n3"], 8.0)),
-        ],
-        vec![],
-        vec![],
-        vec![(okey(ObjectKind::Alternative, None, "c"), cascade(false))],
+        ChangeSet {
+            segments: vec![
+                seg("node", "ps", "C", scalar_batch(&["n1", "n2"], 8.0)),
+                seg("node", "ps", "Base", scalar_batch(&["n3"], 8.0)),
+            ],
+            object_deletes: vec![(okey(ObjectKind::Alternative, None, "c"), cascade(false))],
+            ..ChangeSet::default()
+        },
         "t",
         "restrict C",
         DELETE_WINS,
@@ -923,12 +967,14 @@ fn a_structural_create_and_an_object_delete_of_it_are_refused() {
                 okey(ObjectKind::Class, None, "K"),
             ),
         ] {
-            let err = commit_changes(
+            let err = commit(
                 &db,
-                segments,
-                vec![change],
-                vec![],
-                vec![(od, cascade(true))],
+                ChangeSet {
+                    segments,
+                    structural: vec![change],
+                    object_deletes: vec![(od, cascade(true))],
+                    ..ChangeSet::default()
+                },
                 "t",
                 "create + delete",
                 opts,
@@ -941,17 +987,19 @@ fn a_structural_create_and_an_object_delete_of_it_are_refused() {
         }
         // No name in the call connects them: the new link l13 = (n1, n3)
         // is a container of n1, which the entity delete cascades over.
-        let err = commit_changes(
+        let err = commit(
             &db,
-            vec![seg("link", "cap", "B", scalar_batch(&["n1__n3"], 5.0))],
-            vec![StructuralChange::CreateEntity {
-                class: "link".into(),
-                name: None,
-                elements: vec!["n1".into(), "n3".into()],
-                description: None,
-            }],
-            vec![],
-            vec![(okey(ObjectKind::Entity, Some("node"), "n1"), cascade(true))],
+            ChangeSet {
+                segments: vec![seg("link", "cap", "B", scalar_batch(&["n1__n3"], 5.0))],
+                structural: vec![StructuralChange::CreateEntity {
+                    class: "link".into(),
+                    name: None,
+                    elements: vec!["n1".into(), "n3".into()],
+                    description: None,
+                }],
+                object_deletes: vec![(okey(ObjectKind::Entity, Some("node"), "n1"), cascade(true))],
+                ..ChangeSet::default()
+            },
             "t",
             "create container + delete element",
             opts,
@@ -1236,12 +1284,14 @@ fn delete_wins_equals_the_call_without_its_covered_writes() {
         // policy. Its object-delete outcomes are those of the deletes in
         // the full call (every dependent an uncovered write could add is
         // itself covered), so they predict which deletes take effect.
-        let rr = commit_changes(
+        let rr = commit(
             &ref_db,
-            kept,
-            vec![],
-            spellings.clone(),
-            okeys.clone(),
+            ChangeSet {
+                segments: kept,
+                deletes: spellings.clone(),
+                object_deletes: okeys.clone(),
+                ..ChangeSet::default()
+            },
             "t",
             "random",
             WriteOptions::default(),
@@ -1263,12 +1313,14 @@ fn delete_wins_equals_the_call_without_its_covered_writes() {
             })
         });
 
-        let call = commit_changes(
+        let call = commit(
             &db,
-            writes.iter().map(segment_of).collect(),
-            vec![],
-            spellings,
-            okeys,
+            ChangeSet {
+                segments: writes.iter().map(segment_of).collect(),
+                deletes: spellings,
+                object_deletes: okeys,
+                ..ChangeSet::default()
+            },
             "t",
             "random",
             DELETE_WINS,

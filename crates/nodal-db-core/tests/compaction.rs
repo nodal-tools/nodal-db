@@ -21,9 +21,8 @@ use duckdb::Connection;
 use nodal_db_core::api::head_commit;
 use nodal_db_core::api::{db_identity, write_parameter};
 use nodal_db_core::compaction::{
-    baseline_path, compact, compact_if_due, compact_if_needed, keeps_original, read_baseline,
-    sweep_orphan_temps, CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionReport,
-    CompactionTrigger,
+    baseline_path, compact, compact_if_due, keeps_original, read_baseline, sweep_orphan_temps,
+    CommitBackstop, CompactionBackoff, CompactionPolicy, CompactionReport, CompactionTrigger,
 };
 use nodal_db_core::error::DbError;
 use nodal_db_core::extract::{extract, ExtractOpts};
@@ -803,10 +802,22 @@ fn compact_without_a_wal_never_opens_the_original_read_write() {
     );
 }
 
-// --- compact_if_needed byte-growth watermark (R1 CALIBRATION FIX) -----------
+// --- the byte-growth watermark alone ---------------------------------------
+
+/// `compact_if_due` with the byte gate only (factor 3, no commit backstop).
+fn byte_gate(db: &Path) -> Result<CompactionReport, DbError> {
+    compact_if_due(
+        db,
+        CompactionPolicy {
+            growth_factor: 3.0,
+            max_commits: CommitBackstop::Off,
+        },
+        None,
+    )
+}
 
 #[test]
-fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
+fn byte_gate_fires_on_byte_growth_and_manages_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_bloated(dir.path(), 12);
     let sidecar = baseline_path(&db);
@@ -818,7 +829,7 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
     // (1) No baseline ⇒ establish it: compact once and shrink the file. The
     // sidecar then equals the post-compaction byte size.
     let before = std::fs::metadata(&db).unwrap().len();
-    let r1 = compact_if_needed(&db, 3.0).expect("establish-baseline run");
+    let r1 = byte_gate(&db).expect("establish-baseline run");
     assert!(
         r1.swapped,
         "first run (no baseline) must compact to establish it"
@@ -842,7 +853,7 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
 
     // (2) Immediately again ⇒ NO-OP: the file has not tripled since the
     // baseline, and the cheap gate must not touch it.
-    let r2 = compact_if_needed(&db, 3.0).expect("no-op run");
+    let r2 = byte_gate(&db).expect("no-op run");
     assert!(!r2.swapped, "must no-op below the 3x growth watermark");
     assert_eq!(
         std::fs::metadata(&db).unwrap().len(),
@@ -853,7 +864,7 @@ fn compact_if_needed_fires_on_byte_growth_and_manages_baseline() {
     // (3) Trip the watermark by shrinking the recorded baseline (equivalent to
     // the file having grown past 3x its last-compacted size). It must fire.
     std::fs::write(&sidecar, b"1").unwrap();
-    let r3 = compact_if_needed(&db, 3.0).expect("watermark-tripped run");
+    let r3 = byte_gate(&db).expect("watermark-tripped run");
     assert!(
         ran(&r3),
         "must fire once current bytes exceed 3x the baseline"
@@ -1460,9 +1471,9 @@ fn automatic_trigger_keeps_original_when_rebuild_is_not_smaller() {
     let b = read_baseline(&db).unwrap();
     assert_eq!((b.bytes, b.commit), (bytes, Some(head)));
 
-    // The same through compact_if_needed (the byte gate alone).
+    // The same through the byte gate alone.
     write_sidecar(&db, &format!("bytes=1\ncommit={head}\n"));
-    let r = compact_if_needed(&db, 3.0).unwrap();
+    let r = byte_gate(&db).unwrap();
     assert!(r.kept_original && r.trigger == Some(CompactionTrigger::Growth));
     assert_eq!(read_baseline(&db).unwrap().bytes, bytes);
 

@@ -1,5 +1,5 @@
-//! Apply `schema/*.sql` in numbered order into a connection — the `build.py`
-//! algorithm, in Rust (rust_implementation_plan.md Part 3 `schema_init`).
+//! Apply `schema/*.sql` in numbered order into a connection — the algorithm of
+//! `schema/build.py`, in Rust.
 //!
 //! Every run-time path (the CLI `init` verb, the Python skin's `init`,
 //! compaction's and extract's fresh temp, every test fixture) applies the
@@ -30,67 +30,61 @@ use crate::error::DbError;
 /// loudly; ADDING one is caught by `embedded_schema_matches_directory_census`
 /// below (a bare `include_str!` list cannot self-detect an omission).
 pub static EMBEDDED_SCHEMA: &[(&str, &str)] = &[
-    ("001_meta.sql", include_str!("../../../schema/001_meta.sql")),
+    ("001_meta.sql", include_str!("../schema/001_meta.sql")),
     (
         "010_entities.sql",
-        include_str!("../../../schema/010_entities.sql"),
+        include_str!("../schema/010_entities.sql"),
     ),
     (
         "020_alternatives.sql",
-        include_str!("../../../schema/020_alternatives.sql"),
+        include_str!("../schema/020_alternatives.sql"),
     ),
     (
         "030_parameters.sql",
-        include_str!("../../../schema/030_parameters.sql"),
+        include_str!("../schema/030_parameters.sql"),
     ),
-    ("040_axes.sql", include_str!("../../../schema/040_axes.sql")),
-    (
-        "050_values.sql",
-        include_str!("../../../schema/050_values.sql"),
-    ),
+    ("040_axes.sql", include_str!("../schema/040_axes.sql")),
+    ("050_values.sql", include_str!("../schema/050_values.sql")),
     (
         "055_provenance.sql",
-        include_str!("../../../schema/055_provenance.sql"),
+        include_str!("../schema/055_provenance.sql"),
     ),
-    (
-        "060_display.sql",
-        include_str!("../../../schema/060_display.sql"),
-    ),
+    ("060_display.sql", include_str!("../schema/060_display.sql")),
     (
         "065_semantic.sql",
-        include_str!("../../../schema/065_semantic.sql"),
+        include_str!("../schema/065_semantic.sql"),
     ),
     (
         "070_views_current.sql",
-        include_str!("../../../schema/070_views_current.sql"),
+        include_str!("../schema/070_views_current.sql"),
     ),
     (
         "080_views_read.sql",
-        include_str!("../../../schema/080_views_read.sql"),
+        include_str!("../schema/080_views_read.sql"),
     ),
     (
         "090_views_resolution.sql",
-        include_str!("../../../schema/090_views_resolution.sql"),
+        include_str!("../schema/090_views_resolution.sql"),
     ),
     (
         "100_views_completeness.sql",
-        include_str!("../../../schema/100_views_completeness.sql"),
+        include_str!("../schema/100_views_completeness.sql"),
     ),
     (
         "110_views_history.sql",
-        include_str!("../../../schema/110_views_history.sql"),
+        include_str!("../schema/110_views_history.sql"),
     ),
     (
         "120_views_audit.sql",
-        include_str!("../../../schema/120_views_audit.sql"),
+        include_str!("../schema/120_views_audit.sql"),
     ),
     (
         "130_read_surface.sql",
-        include_str!("../../../schema/130_read_surface.sql"),
+        include_str!("../schema/130_read_surface.sql"),
     ),
     (
         "900_bootstrap.sql",
-        include_str!("../../../schema/900_bootstrap.sql"),
+        include_str!("../schema/900_bootstrap.sql"),
     ),
 ];
 
@@ -188,12 +182,12 @@ fn stamp_created_by(conn: &Connection) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Seed one default alternative after the schema is applied (decision D3). This
+/// Seed one default alternative after the schema is applied. This
 /// is an OBJECT seed — the same raw-INSERT shape the old `900_bootstrap.sql`
 /// used for `Base`, now parameterized and explicit — so it does NOT go through
-/// (or bypass) the value canonicalization pipeline (CLAUDE.md invariant 2). It
+/// (or bypass) the value canonicalization pipeline. It
 /// attaches the row to the bootstrap commit (the sole `commit` row of a fresh
-/// DB, `max(id)`), matching the pre-D3 `currval('seq_commit')` behavior.
+/// DB, `max(id)`), matching `currval('seq_commit')`.
 fn seed_default_alternative(conn: &Connection, name: &str) -> Result<(), DbError> {
     conn.execute(
         "INSERT INTO alternative (id, name, valid_from_commit) \
@@ -207,14 +201,14 @@ fn seed_default_alternative(conn: &Connection, name: &str) -> Result<(), DbError
 /// Build a fresh database at `db_path` and apply the full embedded schema
 /// ([`EMBEDDED_SCHEMA`]). Opens read-write, applies, closes — the `init`
 /// primitive of compaction, extract and the tests. Seeds NO alternative
-/// (decision D3; shim over `init_schema_with_default(.., None)`).
+/// (shim over `init_schema_with_default(.., None)`).
 pub fn init_schema(db_path: &Path) -> Result<(), DbError> {
     init_schema_with_default(db_path, None)
 }
 
 /// Build a fresh database at `db_path` applying the numbered schema files from
 /// an explicit directory (the CLI `init --schema-dir` dev override, plan Q4).
-/// Seeds NO alternative (decision D3; shim over `_with_default(.., None)`).
+/// Seeds NO alternative (shim over `_with_default(.., None)`).
 pub fn init_schema_from_dir(db_path: &Path, dir: &Path) -> Result<(), DbError> {
     init_schema_from_dir_with_default(db_path, dir, None)
 }
@@ -222,13 +216,13 @@ pub fn init_schema_from_dir(db_path: &Path, dir: &Path) -> Result<(), DbError> {
 /// Build a fresh database at `db_path` from in-memory `(file name, sql)`
 /// sources, applied in lexical name order — the compile-time-embedded schema
 /// path of the CLI `init` verb (plan Q4: `include_str!` embedding). Seeds NO
-/// alternative (decision D3; shim over `_with_default(.., None)`).
+/// alternative (shim over `_with_default(.., None)`).
 pub fn init_schema_from_sources(db_path: &Path, sources: &[(&str, &str)]) -> Result<(), DbError> {
     init_schema_from_sources_with_default(db_path, sources, None)
 }
 
-/// As [`init_schema`], but optionally seed one default alternative (decision
-/// D3): `Some(name)` ⇒ exactly one alternative row exists in the fresh DB;
+/// As [`init_schema`], but optionally seed one default alternative:
+/// `Some(name)` ⇒ exactly one alternative row exists in the fresh DB;
 /// `None` ⇒ zero (the value write path auto-creates on first use).
 ///
 /// Every init function creates a new file: a path that already exists (any
@@ -241,7 +235,7 @@ pub fn init_schema_with_default(
     init_schema_from_sources_with_default(db_path, EMBEDDED_SCHEMA, default_alternative)
 }
 
-/// As [`init_schema_from_dir`], with the optional D3 default-alternative seed.
+/// As [`init_schema_from_dir`], with the optional default-alternative seed.
 pub fn init_schema_from_dir_with_default(
     db_path: &Path,
     dir: &Path,
@@ -260,7 +254,7 @@ pub fn init_schema_from_dir_with_default(
     Ok(())
 }
 
-/// As [`init_schema_from_sources`], with the optional D3 default-alternative seed.
+/// As [`init_schema_from_sources`], with the optional default-alternative seed.
 pub fn init_schema_from_sources_with_default(
     db_path: &Path,
     sources: &[(&str, &str)],
@@ -325,7 +319,7 @@ mod tests {
         }
     }
 
-    /// D3: a fresh DB seeds NO alternative unless one is explicitly requested.
+    /// a fresh DB seeds NO alternative unless one is explicitly requested.
     #[test]
     fn fresh_db_seeds_no_alternative_by_default() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -358,7 +352,7 @@ mod tests {
         }
     }
 
-    /// DB-identity (schema_interop.md §9): every init path mints ONE fresh,
+    /// DB-identity: every init path mints ONE fresh,
     /// well-formed UUID per database — distinct across databases, stable
     /// across reopens (each `api::db_identity` call is a fresh connection).
     #[test]

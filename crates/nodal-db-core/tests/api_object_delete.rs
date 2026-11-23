@@ -17,7 +17,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, delete_objects, preview_object_deletes, read_parameter, write_parameter,
+    commit, delete_objects, preview_object_deletes, read_parameter, write_parameter, ChangeSet,
     DeleteKey, Segment,
 };
 use nodal_db_core::error::DbError;
@@ -676,12 +676,14 @@ fn combined_atomicity_one_commit() {
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write node_3 in altA, delete node_1 in altA, cascade-delete altB.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "altA", scalar_batch("node_3", 3.0))],
-        vec![],
-        vec![dk("node", "demand", "altA", "node_1")],
-        vec![(oalt("altB"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "altA", scalar_batch("node_3", 3.0))],
+            deletes: vec![dk("node", "demand", "altA", "node_1")],
+            object_deletes: vec![(oalt("altB"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -734,12 +736,13 @@ fn combined_atomicity_one_commit() {
 fn same_commit_write_then_cascade_guard() {
     let (_dir, db) = fresh_db();
     let commits_before = count(&db, "SELECT count(*) FROM commit");
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![seg("node", "demand", "fresh", scalar_batch("node_1", 7.0))],
-        vec![],
-        vec![],
-        vec![(oalt("fresh"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "fresh", scalar_batch("node_1", 7.0))],
+            object_deletes: vec![(oalt("fresh"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "hazard",
         o(),
@@ -807,7 +810,11 @@ fn preview_matches_commit() {
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
     // And the blocker framing lists the same dependent tables.
-    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
+    for tc in cc
+        .per_table
+        .iter()
+        .filter(|t| !t.table.ends_with("metadata_link"))
+    {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -1377,12 +1384,14 @@ fn param_combined_atomicity_one_commit() {
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write keep/node_2, delete keep/node_1, cascade-delete profile.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "keep", "altA", scalar_batch("node_2", 2.0))],
-        vec![],
-        vec![dk("node", "keep", "altA", "node_1")],
-        vec![(opar("node", "profile"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "keep", "altA", scalar_batch("node_2", 2.0))],
+            deletes: vec![dk("node", "keep", "altA", "node_1")],
+            object_deletes: vec![(opar("node", "profile"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -1457,7 +1466,11 @@ fn param_preview_matches_commit() {
             .unwrap_or_else(|| panic!("preview missing {}", tc.table));
         assert_eq!(pc.rows, tc.rows, "{} count matches", tc.table);
     }
-    for tc in cc.per_table.iter().filter(|t| !t.table.ends_with("metadata_link")) {
+    for tc in cc
+        .per_table
+        .iter()
+        .filter(|t| !t.table.ends_with("metadata_link"))
+    {
         assert!(
             blocker(&p.blockers, &tc.table).is_some(),
             "blocker for {}",
@@ -1765,12 +1778,12 @@ fn entity_bare_delete_no_dependents() {
     .expect("solo");
     delete_objects(&db, vec![], "t", "noop", o()).ok();
     // Close the only value so `solo` has no dependents.
-    commit_changes(
+    commit(
         &db,
-        vec![],
-        vec![],
-        vec![dk("node", "demand", "Base", "solo")],
-        vec![],
+        ChangeSet {
+            deletes: vec![dk("node", "demand", "Base", "solo")],
+            ..ChangeSet::default()
+        },
         "t",
         "clear",
         o(),
@@ -1894,12 +1907,14 @@ fn entity_combined_atomicity_one_commit() {
     let commits_before = count(&db, "SELECT count(*) FROM commit");
     // ONE commit: write demand/node_3 (new), delete the pre-existing demand/node_2,
     // cascade-delete node_1 — three effects, one commit.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("node_3", 9.0))],
-        vec![],
-        vec![dk("node", "demand", "Base", "node_2")],
-        vec![(oent("node", "node_1"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("node", "demand", "Base", scalar_batch("node_3", 9.0))],
+            deletes: vec![dk("node", "demand", "Base", "node_2")],
+            object_deletes: vec![(oent("node", "node_1"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -2827,12 +2842,14 @@ fn class_combined_atomicity_one_commit() {
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
     // ONE commit: write gen/g2, delete gen/g1, cascade-delete class node.
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("gen", "cap", "Base", scalar_batch("g2", 2.0))],
-        vec![],
-        vec![dk("gen", "cap", "Base", "g1")],
-        vec![(oclass("node"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg("gen", "cap", "Base", scalar_batch("g2", 2.0))],
+            deletes: vec![dk("gen", "cap", "Base", "g1")],
+            object_deletes: vec![(oclass("node"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "one atomic save",
         o(),
@@ -3133,12 +3150,13 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
     // alternative — which ALSO covers node_1's coord. The value delete closes it
     // first; the object cascade's live-guard then finds it already closed and does
     // NOT re-close or re-count it (§2/§8.4 D5).
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![],
-        vec![],
-        vec![dk("node", "demand", "victim", "node_1")],
-        vec![(oalt("victim"), cascade(true))],
+        ChangeSet {
+            deletes: vec![dk("node", "demand", "victim", "node_1")],
+            object_deletes: vec![(oalt("victim"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "overlap",
         o(),
@@ -3181,17 +3199,18 @@ fn overlapping_value_delete_and_object_cascade_counts_once() {
 fn same_commit_array_write_then_cascade_guard() {
     let (_dir, db) = fresh_db();
     let hist_before = count(&db, "SELECT count(*) FROM value_array_hist");
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![seg(
-            "node",
-            "profile",
-            "afresh",
-            array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
-        )],
-        vec![],
-        vec![],
-        vec![(oalt("afresh"), cascade(true))],
+        ChangeSet {
+            segments: vec![seg(
+                "node",
+                "profile",
+                "afresh",
+                array_batch("node_1", &[0, 1, 2], &[1.0, 2.0, 3.0]),
+            )],
+            object_deletes: vec![(oalt("afresh"), cascade(true))],
+            ..ChangeSet::default()
+        },
         "t",
         "array hazard",
         o(),

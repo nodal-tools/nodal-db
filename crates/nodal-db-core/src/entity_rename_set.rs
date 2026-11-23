@@ -1,4 +1,4 @@
-//! The set path of `RenameEntity` (entity_rename_PLAN §3.2, P0 spike): a
+//! The set path of `RenameEntity`: a
 //! run of at least [`RENAME_SET_MIN`] consecutive `RenameEntity` items of a
 //! call is applied as one batch, with a constant number of statements per
 //! run (per distinct class: its lookup and its class-set co-members).
@@ -17,7 +17,7 @@
 //!    rows older than this commit; one `UPDATE … FROM` edits rows of this
 //!    commit in place. The tables equal the per-item path's.
 //!
-//! P0 spike (10^6 entities): 10^4 renames per item 90–140 s, as a set
+//! Measured (10^6 entities): 10^4 renames per item 90–140 s, as a set
 //! 2.7–3.6 s; the two cross near 20 items.
 
 use std::collections::{HashMap, HashSet};

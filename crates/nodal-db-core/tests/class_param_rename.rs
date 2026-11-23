@@ -11,7 +11,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, commit_structural, DeleteKey, Segment};
+use nodal_db_core::api::{commit, commit_structural, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema;
 use nodal_db_core::template::ir::TypeDecl;
@@ -309,12 +309,15 @@ fn call(
     deletes: Vec<DeleteKey>,
     object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(
+    commit(
         db,
-        segments,
-        structural,
-        deletes,
-        object_deletes,
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            object_deletes,
+            ..ChangeSet::default()
+        },
         "t",
         "m",
         WriteOptions::default(),
@@ -382,7 +385,7 @@ fn class_rename_keeps_the_id_and_history() {
     let id = class_id(&db, "node");
     let before = q1(&db, "SELECT max(id) FROM commit");
     let r = cs(&db, vec![ren_class("node", "bus")]);
-    assert_eq!(r.structural[0].kind, StructuralKind::EntityClass);
+    assert_eq!(r.structural[0].kind, StructuralKind::Class);
     assert_eq!(r.structural[0].effect, SE::Renamed);
     assert_eq!(r.structural[0].object_id, id);
     assert_eq!(class_id(&db, "bus"), id);
@@ -1489,13 +1492,7 @@ fn renames_on_a_stamped_db_need_the_flag() {
     assert_eq!(
         got,
         vec![
-            (
-                0,
-                StructuralKind::EntityClass,
-                None,
-                "node".into(),
-                "bus".into()
-            ),
+            (0, StructuralKind::Class, None, "node".into(), "bus".into()),
             (
                 1,
                 StructuralKind::Parameter,

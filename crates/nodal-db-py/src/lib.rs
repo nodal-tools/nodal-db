@@ -1,18 +1,18 @@
 //! `nodal_db` — the thin Python skin over `nodal-db-core`.
 //!
-//! **This is the write-path SDK and nothing more**
-//! (`specs/engine_portability_FINDINGS.md` §7): marshal Arrow tables and
-//! scalars in, call the one core, translate `DbError` into the exception
-//! hierarchy out. No canonicalization, tier, history, or reconcile rule is
-//! implemented here (CLAUDE.md invariant 2) — a rule you cannot find in
-//! `nodal-db-core` does not exist in this crate either.
+//! **This is the write-path SDK and nothing more**: marshal Arrow tables
+//! and scalars in, call the one core, translate `DbError` into the
+//! exception hierarchy out. No canonicalization, tier, history, or
+//! reconcile rule is implemented here (every write goes through the core's
+//! one pipeline) — a rule you cannot find in `nodal-db-core` does not exist
+//! in this crate either.
 //!
-//! ## Connection discipline (CLAUDE.md invariant 1)
-//! [`Database`] holds the PATH only — never a connection. Every method opens,
+//! ## Connection discipline
+//! `Database` holds the PATH only — never a connection. Every method opens,
 //! works, and closes inside the core (per-operation connections), so a
 //! long-lived `Database` object in a notebook can never starve a writer.
 //!
-//! ## GIL / reentrancy (template_ir_plan D13 — the Layer-3 contract)
+//! ## GIL / reentrancy (template programs)
 //! Every entry point releases the GIL (`py.detach`) around the core call, so
 //! other Python threads run during DB work. `template_apply` registers plain
 //! Python callables as `run:` migration programs: the core invokes them at a
@@ -113,8 +113,8 @@ create_exception!(
     ApiError,
     "A value write and an object delete covering it (its entity, a \
      container entity of it, its parameter definition, its alternative, or \
-     a class above them) were in the same call (DbError::CoveredWrite, \
-     D10). Refused up front, nothing was written. Attributes: `key_index` \
+     a class above them) were in the same call (DbError::CoveredWrite). \
+     Refused up front, nothing was written. Attributes: `key_index` \
      (the covering object-delete key's position in the call), `kind` \
      (its object kind — \"entity\", \"parameter\", \"alternative\", \
      \"class\" or \"scenario\"), `target` (its name, or \"(a, b, ...)\" for \
@@ -129,8 +129,8 @@ create_exception!(
     WriteAndDeleteSameKey,
     ApiError,
     "A call wrote a value and also deleted it by the same \
-     (class, parameter, alternative, entity) key (DbError::WriteAndDeleteSameKey, \
-     D9). Refused up front, nothing was written. Attributes: `key_index` \
+     (class, parameter, alternative, entity) key (DbError::WriteAndDeleteSameKey). \
+     Refused up front, nothing was written. Attributes: `key_index` \
      (the delete key's position in the call), `class_name`, `parameter`, \
      `alternative`, `entity` (the key, as given), and `resolved` — the \
      same key's resolved `(entity_id, parameter_definition_id, \
@@ -215,7 +215,7 @@ create_exception!(
      next apply of a changed template, so such renames are refused by default; \
      nothing was written. Attributes: `template_name`, `template_version` \
      (None when not stamped) and `renames`, a list of dicts (`change_index`, \
-     `kind` - \"entity_class\" or \"parameter\" - `class_name` (None for a \
+     `kind` - \"class\" or \"parameter\" - `class_name` (None for a \
      class), `current`, `new_name`), one per refused item. Ask the user, then \
      resend the allowed items with \"allow_on_template\": True. Case-only \
      renames and description-only revisions need no flag. A subclass of \
@@ -294,7 +294,7 @@ use nodal_db_core::schema_init::EMBEDDED_SCHEMA;
 
 /// A lightweight handle: **it holds the database PATH only, never a
 /// connection.** Every method opens a fresh per-operation connection inside
-/// the core and closes it before returning (CLAUDE.md invariant 1) — keeping
+/// the core and closes it before returning — keeping
 /// a `Database` object alive is free and never blocks anyone. There is no
 /// `close()` because there is nothing to close.
 #[pyclass(module = "nodal_db", frozen)]
@@ -539,14 +539,15 @@ impl Database {
             ..Default::default()
         };
         let report = py
-            .detach(move || api::commit_change_set(&path, set, &user, &message, opts))
+            .detach(move || api::commit(&path, set, &user, &message, opts))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
     }
 
-    /// Commit writes AND deletes atomically under ONE commit row — the
-    /// editor-save shape, mirroring `api::commit_changes`.
+    /// Commit every channel of one save (value writes, structural changes,
+    /// value deletes, object deletes, purges, metadata) atomically under ONE
+    /// commit row; the Python face of `api::commit`.
     ///
     /// * `segments`: list of dicts `{"class", "parameter", "alternative",
     ///   "batch", "domains"?}` (see `write_parameter` for the batch shape).
@@ -646,7 +647,7 @@ impl Database {
                         expect_commit = None, covered_writes = "refuse",
                         value_metadata = None))]
     #[allow(clippy::too_many_arguments)]
-    fn commit_changes<'py>(
+    fn commit<'py>(
         &self,
         py: Python<'py>,
         segments: Option<&Bound<'py, PyAny>>,
@@ -692,8 +693,7 @@ impl Database {
             expect_commit,
             covered_writes,
         };
-        // The one write entry point (invariant 2): every channel in one
-        // change set.
+        // The one write entry point: every channel in one change set.
         let set = api::ChangeSet {
             segments: segs,
             structural: structs,
@@ -703,7 +703,7 @@ impl Database {
             metadata,
         };
         let report = py
-            .detach(move || api::commit_change_set(&path, set, &user, &message, opts))
+            .detach(move || api::commit(&path, set, &user, &message, opts))
             .map_err(db_err)
             .and_then(|v| with_notices(py, v))?;
         report_to_py(py, &report)
@@ -711,7 +711,7 @@ impl Database {
 
     /// Apply structural (create/rename/set-ranks/activation/membership) changes
     /// in one atomic commit — the structural-only convenience over
-    /// `commit_changes`. `changes` is a list of
+    /// `commit`. `changes` is a list of
     /// `"op"`-keyed dicts.
     #[pyo3(signature = (changes, *, user, message = String::new(), expect_commit = None))]
     fn commit_structural<'py>(
@@ -736,7 +736,7 @@ impl Database {
     }
 
     /// Delete (append-only close-out) named values in one atomic commit —
-    /// the deletes-only convenience over `commit_changes`. `keys` is a list
+    /// the deletes-only convenience over `commit`. `keys` is a list
     /// of `(class, parameter, alternative, entity)` tuples. When no key
     /// finds a live value, nothing is committed (`commit_id` 0).
     #[pyo3(signature = (keys, *, user, message = String::new(), expect_commit = None))]
@@ -765,7 +765,7 @@ impl Database {
     }
 
     /// Purge: close out every item of each request's scope in one atomic
-    /// commit (the purges-only convenience over `commit_changes`; see its
+    /// commit (the purges-only convenience over `commit`; see its
     /// `purges` for the request dicts). A purge keeps history and never
     /// shrinks the file. Returns the report; its `"purges"` list has one
     /// outcome per request (`closed_out`, `objects`, `spared`, `unbound`).
@@ -814,7 +814,7 @@ impl Database {
 
     /// Read-only preview of object deletes: what `cascade=True` would close
     /// out and what `cascade=False` would block on, per key (same dict shape
-    /// as `commit_changes`' `object_deletes`, minus `cascade`). Best-effort
+    /// as `commit`' `object_deletes`, minus `cascade`). Best-effort
     /// snapshot — the commit-time outcome is authoritative.
     fn preview_object_deletes<'py>(
         &self,
@@ -873,8 +873,8 @@ impl Database {
     /// ordinary API (e.g. `nodal_db.open(db_path).write_parameter(...)`) —
     /// calling back into `nodal_db` from inside a program is the intended
     /// use and is reentrancy-safe (module docs). Programs MUST be idempotent:
-    /// a crash between a program's own commit and the progress substamp
-    /// re-runs it (the core's Layer-3 contract). A program that raises
+    /// a crash between a program's own commit and the apply recording its
+    /// progress re-runs it. A program that raises
     /// aborts the apply; the original exception propagates.
     ///
     /// `recreate_removed=True` re-creates the declared classes, parameters
@@ -964,7 +964,7 @@ impl Database {
         }
     }
 
-    // -- G8 migration verbs (flextool_port_finale_plan.md §1, D-F4) --------
+    // -- Migration verbs -------------------------------------------------------
     // Thin 1:1, logic-free exposure of nodal_db_core::verbs — the write
     // surface `run:` migration programs and the Spine importer use. Every
     // rule lives in the core.
@@ -1205,9 +1205,9 @@ impl Database {
 
     /// Hard erasure: physically remove every value row of one alternative
     /// and write the `erasure_marker`, in one atomic transaction — the
-    /// sanctioned exception to append-only history. `expect_present` is the
-    /// rerun-overwrite belt: names that MUST have a current alternative row
-    /// or the erase refuses, touching nothing.
+    /// sanctioned exception to append-only history. `expect_present` lists
+    /// alternatives that MUST exist (e.g. the replacement run's) or the
+    /// erase refuses, touching nothing.
     #[pyo3(signature = (alternative, *, user, note = None, expect_present = Vec::new()))]
     fn erase_alternative<'py>(
         &self,
@@ -1414,8 +1414,8 @@ impl MaxCommits {
     }
 }
 
-/// The typed erase target for an alternative name (the only erase scope in
-/// v1), mirroring the CLI's construction.
+/// The typed erase target for an alternative name (the only erase scope),
+/// mirroring the CLI's construction.
 fn erase_key(name: &str) -> ObjectDeleteKey {
     ObjectDeleteKey {
         kind: nodal_db_core::types::ObjectKind::Alternative,

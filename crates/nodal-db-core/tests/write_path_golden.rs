@@ -44,7 +44,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::{TimeUnit, Value};
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, DeleteKey, Segment};
+use nodal_db_core::api::{commit, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::axis::AxisCache;
 use nodal_db_core::canon::{CanonicalValue, TS_MAX_US, TS_MIN_US};
 use nodal_db_core::conn::with_write_txn;
@@ -710,43 +710,43 @@ fn api_script(db: &Path, log: &mut String) {
     // a1: multi-segment fresh writes (array with -0.0, which canon
     // normalizes; scalars; a sparse int long; a 600-cell long; a second
     // and a third alternative for the object deletes below).
-    let r = commit_changes(
+    let r = commit(
         db,
-        vec![
-            seg(
-                "profile",
-                "Base",
-                batch(
-                    &["n1"; 4],
-                    &[("t", vec![0, 1, 2, 3])],
-                    f64s(&[-0.0, 1.0, 2.0, 3.0]),
+        ChangeSet {
+            segments: vec![
+                seg(
+                    "profile",
+                    "Base",
+                    batch(
+                        &["n1"; 4],
+                        &[("t", vec![0, 1, 2, 3])],
+                        f64s(&[-0.0, 1.0, 2.0, 3.0]),
+                    ),
                 ),
-            ),
-            seg(
-                "demand",
-                "Base",
-                batch(&["n1", "n2"], &[], f64s(&[4.5, -0.0])),
-            ),
-            seg(
-                "flow",
-                "Base",
-                batch(&["n1"; 3], &[("t", vec![0, 2, 5])], i64s(&[1, 2, 3])),
-            ),
-            seg(
-                "big",
-                "Base",
-                batch(
-                    &["n3"; 600],
-                    &[("t", (0..600).map(|i| i * 3 + (i % 2)).collect())],
-                    i64s(&(0..600).collect::<Vec<_>>()),
+                seg(
+                    "demand",
+                    "Base",
+                    batch(&["n1", "n2"], &[], f64s(&[4.5, -0.0])),
                 ),
-            ),
-            seg("demand", "altV", batch(&["n1"], &[], f64s(&[8.0]))),
-            seg("demand", "altW", batch(&["n2"], &[], f64s(&[6.0]))),
-        ],
-        vec![],
-        vec![],
-        vec![],
+                seg(
+                    "flow",
+                    "Base",
+                    batch(&["n1"; 3], &[("t", vec![0, 2, 5])], i64s(&[1, 2, 3])),
+                ),
+                seg(
+                    "big",
+                    "Base",
+                    batch(
+                        &["n3"; 600],
+                        &[("t", (0..600).map(|i| i * 3 + (i % 2)).collect())],
+                        i64s(&(0..600).collect::<Vec<_>>()),
+                    ),
+                ),
+                seg("demand", "altV", batch(&["n1"], &[], f64s(&[8.0]))),
+                seg("demand", "altW", batch(&["n2"], &[], f64s(&[6.0]))),
+            ],
+            ..ChangeSet::default()
+        },
         "golden",
         "a1 segments",
         o,
@@ -758,36 +758,38 @@ fn api_script(db: &Path, log: &mut String) {
     // of an alternative the call does not write — all in one commit (the
     // order of the plan's §4.1; an object delete covering a value the call
     // writes is refused, skip_unchanged_writes_PLAN D10).
-    let r = commit_changes(
+    let r = commit(
         db,
-        vec![
-            seg(
-                "profile",
-                "Base",
-                batch(&["n1"; 3], &[("t", vec![0, 1, 2])], f64s(&[9.0, 8.0, 7.0])),
-            ),
-            seg(
-                "big",
-                "Base",
-                batch(
-                    &["n3"; 300],
-                    &[("t", (0..300).map(|i| i * 5).collect())],
-                    i64s(&(0..300).map(|i| -i).collect::<Vec<_>>()),
+        ChangeSet {
+            segments: vec![
+                seg(
+                    "profile",
+                    "Base",
+                    batch(&["n1"; 3], &[("t", vec![0, 1, 2])], f64s(&[9.0, 8.0, 7.0])),
                 ),
-            ),
-            seg(
-                "flow",
-                "altV",
-                batch(&["n1"; 2], &[("t", vec![1, 4])], i64s(&[10, 20])),
-            ),
-        ],
-        vec![],
-        vec![
-            dk("demand", "Base", "n2"),
-            dk("flow", "Base", "n1"),
-            dk("demand", "Base", "nobody"),
-        ],
-        vec![oalt("altW", false)],
+                seg(
+                    "big",
+                    "Base",
+                    batch(
+                        &["n3"; 300],
+                        &[("t", (0..300).map(|i| i * 5).collect())],
+                        i64s(&(0..300).map(|i| -i).collect::<Vec<_>>()),
+                    ),
+                ),
+                seg(
+                    "flow",
+                    "altV",
+                    batch(&["n1"; 2], &[("t", vec![1, 4])], i64s(&[10, 20])),
+                ),
+            ],
+            deletes: vec![
+                dk("demand", "Base", "n2"),
+                dk("flow", "Base", "n1"),
+                dk("demand", "Base", "nobody"),
+            ],
+            object_deletes: vec![oalt("altW", false)],
+            ..ChangeSet::default()
+        },
         "golden",
         "a2 writes+deletes",
         o,
@@ -796,12 +798,12 @@ fn api_script(db: &Path, log: &mut String) {
     writeln!(log, "## report a2\n{}", report_text(&r)).unwrap();
 
     // a3: cascade-delete the alternative: closes rows written by a1 and a2.
-    let r = commit_changes(
+    let r = commit(
         db,
-        vec![],
-        vec![],
-        vec![],
-        vec![oalt("altV", true)],
+        ChangeSet {
+            object_deletes: vec![oalt("altV", true)],
+            ..ChangeSet::default()
+        },
         "golden",
         "a3 object delete",
         o,
@@ -824,12 +826,14 @@ fn api_commit(
     opts: WriteOptions,
     log: &mut String,
 ) {
-    let r = commit_changes(
+    let r = commit(
         db,
-        segments,
-        structural,
-        deletes,
-        vec![],
+        ChangeSet {
+            segments,
+            structural,
+            deletes,
+            ..ChangeSet::default()
+        },
         "golden",
         tag,
         opts,

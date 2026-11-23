@@ -1,20 +1,24 @@
-//! One error type for the DB-facing layer (`conn`, `axis`, `schema_init`).
+//! The core's error type: [`DbError`], returned by every fallible public
+//! function (connections, schema application, canonicalization, the write
+//! path, reads, templates, maintenance).
 //!
-//! `thiserror` per the plan (Part 3 `error`). The pure `canon`/`encoding`
-//! modules keep their own errors; those fold in here via `#[from]` so a
-//! write path returns a single `DbError`.
+//! The pure `canon` / `encoding` modules keep their own errors; those fold in
+//! here via `#[from]`, so every call returns a single `DbError`.
 
 use crate::encoding::EncodeError;
 use crate::types::{ObjectKind, StructuralKind};
 use crate::MINIMUM_DUCKDB;
 
-/// Errors raised by connection handling, schema application, and axis dedup.
+/// The one error type of the core: every fallible public function returns
+/// it. Match on the variant to tell retryable states ([`DbError::Busy`],
+/// [`DbError::Conflict`], [`DbError::Stale`]) and typed refusals from
+/// plain errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     /// The RW (or RO) lock could not be acquired within the bounded-backoff
-    /// budget: another connection holds the file. CLAUDE.md invariant 1 — an
-    /// idle RO handle starves every commit — makes this a first-class,
-    /// user-visible state, never a stack trace (VMP Part 6).
+    /// budget: another connection holds the file. Because an idle read-only
+    /// handle starves every commit, this is a first-class, user-visible
+    /// (and retryable) state, never a stack trace.
     #[error(
         "database busy: could not acquire the lock after {attempts} attempts \
              (another read-only or read-write connection holds the file)"
@@ -22,7 +26,7 @@ pub enum DbError {
     Busy { attempts: u32 },
 
     /// The bundled DuckDB is older than the line the schema semantics were
-    /// verified on (mirrors `build.py`'s version gate; risk R1).
+    /// verified on (mirrors `build.py`'s version gate).
     #[error("bundled DuckDB {found} < required {}.{} (schema verified on 2.0.x)",
             MINIMUM_DUCKDB.0, MINIMUM_DUCKDB.1)]
     VersionTooOld { found: String },
@@ -39,13 +43,13 @@ pub enum DbError {
     UnknownAxisKind { id: i64, kind: String },
 
     /// A materialized axis reached the write boundary with an empty or
-    /// mismatched child list (F1 guard, Phase-2b critique): its declared
+    /// mismatched child list: its declared
     /// `length` must equal the number of coordinate/position child rows, and
     /// must be non-zero. A release-mode check so a malformed axis can never be
     /// persisted (the debug-only `encode_axis` assert is not enough).
     ///
     /// The same guard refuses an axis whose text is not what canon produces
-    /// (`problem` says which, plan T6): a label or tag that is not in NFC,
+    /// (`problem` says which): a label or tag that is not in NFC,
     /// or a label axis that holds one label twice. Canon never builds
     /// either; a path that bypassed it would store labels whose bytes
     /// depend on write order.
@@ -60,7 +64,7 @@ pub enum DbError {
     /// The history write protocol exhausted its bounded conflict-retry budget:
     /// a concurrent writer kept winning the write-write race on the same key
     /// (DuckDB `TransactionException: Conflict …`). Surfaced to the user, never
-    /// a stack trace (VMP Part 5 retry semantics).
+    /// a stack trace.
     #[error("write conflict: transaction still lost the race after {attempts} retries")]
     Conflict { attempts: u32 },
 
@@ -157,18 +161,18 @@ pub enum DbError {
         kind: String,
     },
 
-    /// The public write API (`api::write_parameter` / `api::ingest_segments`)
-    /// was handed a batch it cannot interpret — wrong column count, a
-    /// non-string entity column, an unsupported Arrow type for a dimension or
-    /// the value column, etc. A caller-facing contract error, never a stack
-    /// trace. The message carries its own context (segment ordinal and
+    /// A caller-contract error of the public API: a batch it cannot
+    /// interpret (wrong column count, a non-string entity column, an
+    /// unsupported Arrow type), an empty user, an empty change set, an
+    /// unknown or invalid name, a refused combination of items, and the
+    /// other refusals that have no typed variant of their own. Never a
+    /// stack trace. The message carries its own context (segment ordinal and
     /// class:parameter where known) — no entry-point prefix is added here, so
-    /// wrapped errors are never double-prefixed (CLI critique F5).
+    /// wrapped errors are never double-prefixed.
     #[error("{0}")]
     Api(String),
 
-    /// D10 (skip_unchanged_writes_PLAN, the P2 review): a value write in a
-    /// call also carries an object delete whose cascade covers it — the
+    /// A value write in a call also carries an object delete whose cascade covers it — the
     /// cascade closes only rows older than the commit, so under the long
     /// cell diff it would close the unchanged old cells and keep the
     /// changed ones the write just inserted, a partial value under a
@@ -177,17 +181,15 @@ pub enum DbError {
     /// in-transaction repeat on resolved ids
     /// (`object_delete::written_value_covered`, `resolved` names the
     /// covered write's `(entity_id, parameter_definition_id,
-    /// alternative_id)`). Its own variant (editor request R3,
-    /// `nodal-editor/specs/core_requests_2026-10-27.md`) so a caller can
-    /// match the refusal structurally and name the covering object delete,
-    /// instead of matching `message`, which stays exactly what either
-    /// check has always produced. Boxed (clippy::result_large_err): the
+    /// alternative_id)`). A typed variant so a caller can match the refusal
+    /// structurally and name the covering object delete, instead of
+    /// matching `message`. Boxed (clippy::result_large_err): the
     /// details would otherwise bloat every `Result<_, DbError>` in the
     /// crate, not just this refusal's own callers.
     #[error("{}", .0.message)]
     CoveredWrite(Box<CoveredWriteDetails>),
 
-    /// D9 (critique C1): a call writes a value and also deletes it by the
+    /// A call writes a value and also deletes it by the
     /// same key. Deletes run after the writes, so the delete would close
     /// the row the write just inserted when the write changed the value,
     /// but succeed (as a no-op) when it did not — the outcome would depend
@@ -196,19 +198,14 @@ pub enum DbError {
     /// (`api::reject_write_and_delete`, `resolved: None`) and the
     /// resolved-id repeat inside `apply_deletes` (`resolved` names the
     /// same key's `(entity_id, parameter_definition_id, alternative_id)`).
-    /// A parallel typed variant to [`DbError::CoveredWrite`] (editor
-    /// request R3): the ask was specifically about D10, but the two
-    /// refusals are structurally twins, so this one gets the same
-    /// treatment rather than staying a bare `Api` string. `message` is
-    /// unchanged by this — it never carried ids, and still does not.
-    /// Boxed for the same reason as `CoveredWrite`.
+    /// The typed twin of [`DbError::CoveredWrite`]; `message` carries no
+    /// ids. Boxed for the same reason as `CoveredWrite`.
     #[error("{}", .0.message)]
     WriteAndDeleteSameKey(Box<WriteAndDeleteSameKeyDetails>),
 
-    /// A `commit_changes` call renamed classes or parameters of a
+    /// A `commit` call renamed classes or parameters of a
     /// template-stamped database (metadata `template_name` present)
-    /// without `allow_on_template` on the item (class_param_rename_PLAN
-    /// OD7). The core cannot tell which classes and parameters the template
+    /// without `allow_on_template` on the item. The core cannot tell which classes and parameters the template
     /// declares, so every rename that changes a class or parameter's folded
     /// name (case-only renames and description-only revisions are exempt),
     /// of an object that existed before the call, is refused by default: a
@@ -225,7 +222,7 @@ pub enum DbError {
     /// A purge's vocabulary request (`Classes`, `Parameters`, `ValueLists`)
     /// would close classes, parameters or value lists that existed before
     /// the call, on a template-stamped database (metadata `template_name`
-    /// present), without `allow_on_template` (purge plan §3.7, OD7). The
+    /// present), without `allow_on_template`. The
     /// core cannot tell declared from local vocabulary, so every such
     /// request is refused; `requests` lists each one with what it would
     /// close, so a client can ask once and resend with the flag. Requests
@@ -238,7 +235,7 @@ pub enum DbError {
     TemplateStampedPurge(Box<TemplateStampedPurgeDetails>),
 
     /// A value write whose batch instantiates none of its parameter's
-    /// declared member types (VMP Part 7 entry check, set-membership): for
+    /// declared member types: for
     /// example a string batch for a parameter declared float only, or an
     /// indexed batch whose dimension names or kinds no member declares.
     /// The write path never widens a declared type set, so nothing was
@@ -289,7 +286,7 @@ pub enum DbError {
     Arrow(#[from] duckdb::arrow::error::ArrowError),
 }
 
-/// [`DbError::CoveredWrite`] (D10)'s payload, boxed out of the enum so a
+/// [`DbError::CoveredWrite`]'s payload, boxed out of the enum so a
 /// large struct variant does not grow every `Result<_, DbError>` in the
 /// crate (clippy::result_large_err).
 #[derive(Debug)]
@@ -312,7 +309,7 @@ pub struct CoveredWriteDetails {
     pub message: String,
 }
 
-/// [`DbError::WriteAndDeleteSameKey`] (D9)'s payload, boxed for the same
+/// [`DbError::WriteAndDeleteSameKey`]'s payload, boxed for the same
 /// reason as [`CoveredWriteDetails`].
 #[derive(Debug)]
 pub struct WriteAndDeleteSameKeyDetails {

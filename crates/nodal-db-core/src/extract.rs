@@ -5,7 +5,7 @@
 //!
 //! > validate (dest absent, no stale `<dest>.wal`, dest ≠ src, one source
 //! > identity) → `init_schema` a temp next to dest → `ATTACH` the source
-//! > read-only → copy each base table's selection (by [`Selection`] class) in
+//! > read-only → copy each base table's selection (by its selection class) in
 //! > one transaction → restore the source's sequence state → self-check →
 //! > write the extract commit E, the new `db_identity` row and a
 //! > `kind='horizon'` erasure marker → CHECKPOINT → no-clobber publish.
@@ -33,9 +33,9 @@
 //! counters (kept verbatim, never renumbered) audit clean.
 //!
 //! ## Invariants
-//! - **Invariant 2:** the extract computes no encodings, hashes or axis
-//!   dedup. It copies canonical bytes and writes three bookkeeping rows.
-//! - **Invariant 3:** nothing is removed from the source, and nothing in the
+//! - **One canonicalizer:** the extract computes no encodings, hashes or
+//!   axis dedup. It copies canonical bytes and writes three bookkeeping rows.
+//! - **Append-only history:** nothing is removed from the source, and nothing in the
 //!   extract's own history is rewritten: its lineage is "source ≤ H, then
 //!   E", and the marker records what it omits. The file is invisible until
 //!   that marker exists (the publish is the atomic point).
@@ -518,7 +518,7 @@ fn found_version(versions: Vec<String>) -> String {
 
 /// As-of-N refusals, each loud and named:
 /// - N is not a commit id of the source;
-/// - the `schema_version` row valid at N is not this build's (a belt: no
+/// - the `schema_version` row valid at N is not this build's (a second guard: no
 ///   in-place schema bump path exists, but a hand-edited file could carry
 ///   one, and it is the row the extract would copy);
 /// - an erasure marker was written after N (content valid at N was later

@@ -1,15 +1,16 @@
-//! The public Arrow-in / plain-data-out write path (plan Part 3 `api`; VMP
-//! Parts 3-6). `write_parameter` is the one function that ties the whole write
-//! path together end-to-end: name resolution (auto-create, decision B), the
-//! declared-type lookup from the DB (critique S2), `canon` → `tier` → axis
-//! dedup → the `history` protocol, all inside ONE atomic, conflict-retried
-//! commit. `read_parameter` reads a written parameter back through the SQL
-//! views for round-trip verification.
+//! The public Arrow-in / plain-data-out write path. [`commit`] is the one
+//! write entry point: every channel of a save (value writes, structural
+//! changes, value and object deletes, purges, metadata) in ONE atomic,
+//! conflict-retried commit, through name resolution (missing referents are
+//! auto-created and reported), the declared-type lookup, `canon` → `tier` →
+//! axis dedup → the `history` protocol. [`write_parameter`],
+//! [`ingest_segments`] and [`delete_values`] are wrappers over it.
+//! [`read_parameter`] reads a written parameter back through the SQL views.
 //!
 //! ## Batch column contract (logical-long)
 //! `batch` has, in order:
-//!   - column 0: `entity` — the entity **names** as `Utf8` (decision B is
-//!     resolve-by-name; ids would defeat auto-create). One value is written per
+//!   - column 0: `entity` — the entity **names** as `Utf8` (names, not ids,
+//!     so missing entities can be auto-created). One value is written per
 //!     distinct entity name.
 //!   - columns `1..rank+1`: the `rank` dimension columns, in declared position
 //!     order (position = column index). Arrow type fixes the index kind:
@@ -17,18 +18,19 @@
 //!     **name** becomes the dimension name when a definition is auto-created.
 //!   - last column: `value` — the measure. Arrow type fixes the measure kind:
 //!     `Float64`/`Int64`/`Boolean`/`Utf8`/`Timestamp(µs)`.
+//!
 //! Rank 0 (scalar) is a two-column batch `(entity, value)`.
 //!
-//! The **library decides the tier** (VMP Part 6): callers never pick scalar /
-//! array / long. Ordinal domains for label dimensions arrive by the in-process
+//! The **library decides the tier**: callers never pick scalar / array /
+//! long. Ordinal domains for label dimensions arrive by the in-process
 //! `domains` arg and/or Arrow field metadata `nodal:label_domain` (a JSON array
-//! of the ordered labels) — decision D, both channels.
+//! of the ordered labels); both channels are accepted.
 //!
 //! ## Concurrency contract
 //! Safe to call from multiple threads and processes on one DB file: writes are
-//! serialized, in-process by `conn`'s per-path lock (api critique F1) and
-//! cross-process by DuckDB's file lock. Connections stay per-operation
-//! (CLAUDE.md invariant 1) — never shared, never long-lived.
+//! serialized, in-process by `conn`'s per-path lock and cross-process by
+//! DuckDB's file lock. Connections stay per-operation — never shared, never
+//! long-lived.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -46,6 +48,7 @@ use crate::canon::{canonicalize_indexed, index_domains, CanonicalValue, DomainIn
 use crate::conn::{
     head_on, with_read_named, with_read_plain, with_write_txn_retrying_ends, TxnEnd, TxnOptions,
 };
+use crate::entity_tuple::TupleIndex;
 use crate::error::{
     CoveredWriteDetails, DbError, UndeclaredValueTypeDetails, WriteAndDeleteSameKeyDetails,
 };
@@ -53,7 +56,6 @@ use crate::history::{
     self as history, keeps_content, resolve_axes, write_arrays, write_longs, write_scalars,
     ArrayWrite, DeleteWrite, LongWrite, ScalarWrite, ARRAY_ROUND_ELEMENTS, LONG_INSERT_CHUNK,
 };
-use crate::entity_tuple::TupleIndex;
 use crate::object_delete::{
     apply_object_delete, cascade_scope, prepare_object_deletes, preview_one, reaches_created,
     written_value_covered, PreparedObjectDelete, WrittenIds,
@@ -66,21 +68,20 @@ use crate::text::{nfc, NameFolds, Normalized};
 use crate::types::fold;
 use crate::types::{
     CoveredWrites, CoveringDelete, DeclaredType, IndexKind, MetadataChange, MetadataEffect,
-    ObjectDeleteKey, ObjectDeleteOpts,
-    ObjectDeletePreview, ObjectDeleteResult, ObjectKind, ObjectRef, PurgePreview, PurgeRequest,
-    ShapedData, StructuralChange, StructuralEffect, StructuralKind, Tier, ValueKey, ValueKind,
-    Warning, WarningKind, WriteOptions, WriteReport,
+    ObjectDeleteKey, ObjectDeleteOpts, ObjectDeletePreview, ObjectDeleteResult, ObjectKind,
+    ObjectRef, PurgePreview, PurgeRequest, ShapedData, StructuralChange, StructuralEffect,
+    StructuralKind, Tier, ValueKey, ValueKind, Warning, WarningKind, WriteOptions, WriteReport,
 };
 
 /// One ingest segment: a `(class, parameter, alternative)` target plus its
-/// logical-long batches and label domains (`specs/arrow_ipc_bulk_format.md`
-/// §2.2/§4). Batches whose columns have the same Arrow types are ONE
+/// logical-long batches and label domains (the segment of the Arrow-IPC bulk
+/// format, `docs/dev/arrow_import_format.md`). Batches whose columns have the same Arrow types are ONE
 /// logical table (concatenated); batches of different column types are
 /// separate groups of one target — values of several declared types for
 /// one parameter and alternative in one call — each group bound to the
 /// declared member it instantiates, and an entity may appear in one group
 /// only. Dense wire rows are expanded to logical-long *before* they reach
-/// here (spec §6.3 — the importer expands, the core canonicalizes).
+/// here (the importer expands, the core canonicalizes).
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub class: String,
@@ -95,18 +96,18 @@ pub struct Segment {
 ///
 /// Missing referents (entity class, the parameter definition within that class,
 /// the alternative, and every entity named in the batch) are **auto-created**
-/// with a machine-readable [`Warning`] appended to the returned report
-/// (decision B — never a hard error, never a mere log line). Name resolution,
+/// with a machine-readable [`Warning`] appended to the returned report.
+/// Name resolution,
 /// auto-creation, and every value write happen in one transaction, retried as a
-/// whole on a write-write conflict (VMP Part 5).
+/// whole on a write-write conflict.
 ///
 /// `user` / `message` stamp the `commit` row this call creates.
 ///
-/// A thin single-segment wrapper over [`ingest_segments`] (spec OPEN-Q3-6):
+/// A thin single-segment wrapper over [`ingest_segments`]:
 /// the per-parameter body is shared, the transaction shape is identical.
 /// It carries no metadata statement: rewriting a value that has metadata
 /// links fails with [`DbError::ValueMetadataUnstated`]; use
-/// [`commit_change_set`] with a keep / set / clear statement.
+/// [`commit`] with a keep / set / clear statement.
 #[allow(clippy::too_many_arguments)]
 pub fn write_parameter(
     db: &Path,
@@ -135,9 +136,8 @@ pub fn write_parameter(
 }
 
 /// Ingest one or more segments in ONE atomic, conflict-retried transaction
-/// with ONE `commit` row covering every value written
-/// (`specs/arrow_ipc_bulk_format.md` §9.2, OPEN-Q3-6: whole-invocation
-/// atomicity — all segments commit or nothing persists). This is the core
+/// with ONE `commit` row covering every value written (whole-invocation
+/// atomicity: all segments commit or nothing persists). This is the core
 /// entry point behind `nodal-db import`; [`write_parameter`] is its
 /// single-segment wrapper.
 ///
@@ -153,15 +153,15 @@ pub fn ingest_segments(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    // A pure-write ingest is a `commit_changes` with no deletes (delete design
-    // MAJOR-2): the write path and the retried-commit shape are shared, so
-    // writes-only and writes+deletes cannot drift.
-    commit_changes(
+    // A pure-write ingest is a `commit` with only the segments channel: the
+    // write path and the retried-commit shape are shared, so writes-only and
+    // mixed saves cannot drift.
+    commit(
         db,
-        segments,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        ChangeSet {
+            segments,
+            ..ChangeSet::default()
+        },
         user,
         message,
         opts,
@@ -171,7 +171,7 @@ pub fn ingest_segments(
 /// A typed delete target: one `(class, parameter, alternative, entity)` value,
 /// all four given by NAME (resolved case-insensitively, never auto-created).
 /// Carries no value, so there is nothing to canonicalize — deletes ride plain
-/// owned strings, not the Arrow/`Segment` machinery (delete design §4c).
+/// owned strings, not the Arrow/`Segment` machinery.
 #[derive(Clone, Debug)]
 pub struct DeleteKey {
     pub class: String,
@@ -180,155 +180,117 @@ pub struct DeleteKey {
     pub entity: String,
 }
 
-/// Commit writes AND deletes in ONE atomic, conflict-retried transaction under a
-/// single `commit` row (delete design MAJOR-2). This is the primary write-path
-/// entry: [`ingest_segments`] is the writes-only wrapper and [`delete_values`]
-/// the deletes-only wrapper. The combined entry exists because
-/// splitting an editor save into two core calls would let a failed second call
-/// leave the first half committed on its own (identical re-writes are skipped,
-/// but a changed first half would still land without its deletes). Running both
-/// halves in one closure makes the save atomic.
+/// Everything one atomic commit can carry, by channel: the argument of
+/// [`commit`], the one write entry point. `Default` is the empty set, so a
+/// caller names only the channels it uses and a channel added later does
+/// not break its literal.
+#[derive(Clone, Debug, Default)]
+pub struct ChangeSet {
+    /// Value writes: one [`Segment`] per `(class, parameter, alternative)`.
+    pub segments: Vec<Segment>,
+    /// Structural changes: creates, renames, scenario rankings,
+    /// activations, memberships (applied first).
+    pub structural: Vec<StructuralChange>,
+    /// Value deletes, by name.
+    pub deletes: Vec<DeleteKey>,
+    /// Object deletes (entities, parameters, alternatives, classes,
+    /// scenarios) with their cascade options.
+    pub object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
+    /// Purges: close out everything in a scope except what this call writes.
+    pub purges: Vec<PurgeRequest>,
+    /// The metadata channel: pool and link ops and the keep / set / clear
+    /// statements for new value versions (applied last).
+    pub metadata: Vec<MetadataChange>,
+}
+
+/// Commit a [`ChangeSet`] in ONE atomic, conflict-retried transaction
+/// under one `commit` row. This is the write entry point: every other write
+/// function ([`write_parameter`], [`ingest_segments`], [`delete_values`],
+/// the verbs, template apply) and the Python skin go through it, so the
+/// canonicalization pipeline exists once. A save is never split into
+/// several calls: a failed second call would leave the first half
+/// committed on its own.
 ///
-/// Segments are prepared (validated, deduped) up front, purely; deletes are
-/// validated + deduped up front too. Then, inside one retried closure and under
-/// one `commit_id`, the prepared writes run FIRST, then the `DeleteKey`s are
-/// resolved (case-insensitive, lookup-only — never auto-created) and closed out
-/// in one set-based round (`history::delete_values`). A missing referent or
-/// already-absent value is a machine-readable [`Warning`] + skip, never a hard
-/// error (delete design §2).
-/// Non-empty `user`; empty across ALL channels ⇒ [`DbError::Api`].
+/// `user` must be non-empty; `message` may be empty. A set that is empty in
+/// every channel is refused as [`DbError::Api`].
 ///
-/// `object_deletes` (object_delete plan §2) join the SAME atomic commit, applied
-/// AFTER value writes and value deletes: a coord closed by a staged value delete
-/// is no longer live when an object cascade runs (not double-closed, not
-/// double-counted — D5), and a later phase's class delete can compose over
-/// already-settled value state. Each is resolved lookup-only and closed under
-/// the `valid_from < commit_id` guard; per-request outcomes land in
-/// `report.object_deletes`.
+/// **Order of the channels.** Inside one retried transaction and under one
+/// commit id: structural changes, then value writes (segments), then value
+/// deletes, then object deletes, then purges, then metadata.
 ///
-/// `structural` (structural_write_api_plan §2/§4) is the fourth channel, applied
-/// FIRST inside the retried closure (structural → segments → deletes →
-/// object_deletes): a same-save value write / rank / activation may target a
-/// referent an earlier structural item just created, and items apply
-/// sequentially against the one open txn, so create → use resolves. Pure,
-/// name-level guards (§4.5) reject caller-contract problems (one set-ranks per
-/// scenario, contradictory renames, the cross-channel object-delete orphan)
-/// before any DB work; per-item outcomes land in `report.structural`.
-/// Empty across every channel ⇒ [`DbError::Api`].
+/// - *Structural* items apply in order against the one open transaction,
+///   so a value write, ranking or activation of the same call may target a
+///   referent a structural item just created. Name-level guards reject
+///   caller-contract problems (one set-ranks per scenario, contradictory
+///   renames, an object delete of something the call creates) before any
+///   database work. Per-item outcomes land in `report.structural`.
+/// - *Segments* are validated and deduplicated up front; missing referents
+///   (class, parameter, alternative, entities) are auto-created, each with
+///   a [`WarningKind::AutoCreated`] warning.
+/// - *Value deletes* resolve case-insensitively and lookup-only (never
+///   auto-created). A missing referent or an already-absent value is a
+///   warning ([`WarningKind::UnknownReferent`],
+///   [`WarningKind::NothingToDelete`]) and a skip, never an error.
+/// - *Object deletes* resolve lookup-only and run after the value deletes:
+///   a value a value delete of this call closed is not closed or counted
+///   twice. Per-request outcomes land in `report.object_deletes`.
+/// - *Purges* resolve lookup-only after the structural changes (an unknown
+///   or blank name, `Values.parameter` without its class, or a name a
+///   rename of this call freed is refused). Each request closes everything
+///   in its scope except exactly what the call itself writes, at each
+///   scope's own level (see [`crate::types::PurgeScope`]); a row this call
+///   wrote is never closed, and closed values follow their definition's
+///   retention (`retain_override` included). A request whose cascade
+///   reaches objects outside every request's scope refuses the whole call
+///   unless it sets `allow_outside_scope`. Outcomes land in
+///   `report.purges`.
+/// - *Metadata*: pool creates and revisions in item order, the keep / set
+///   / clear statements and the value-link items, the object links, then
+///   the pool deletes (RESTRICT judged on the post-call state). A value
+///   that gets a new version in this call (not an unchanged write, not a
+///   new value, not a deleted one) and has metadata links needs a
+///   statement (`Scope::Value` over `Scope::Target` over `Scope::Save`) or
+///   the whole call fails with [`DbError::ValueMetadataUnstated`]. A save-
+///   or target-scope `Set` also annotates new values; a value-scope `Set` /
+///   `Clear` also edits an unchanged value. Outcomes land in
+///   `report.metadata` and `report.value_links`.
 ///
-/// **Unchanged values and no-op calls** (skip_unchanged_writes_PLAN D1,
-/// D2): a value equal to the stored one is not rewritten (it counts in
-/// `report.values_unchanged`, not `values_written`). A call that changes
-/// nothing — every value unchanged, every delete a miss, every structural
-/// item `NoOp`, every object delete `NotFound`, nothing auto-created —
-/// makes **no commit**: the transaction is rolled back, the report says
+/// **Unchanged values and no-op calls.** A value equal to the stored one is
+/// not rewritten (it counts in `report.values_unchanged`, not
+/// `values_written`). A call that changes nothing (every value unchanged,
+/// every delete a miss, every structural item `NoOp`, every object delete
+/// `NotFound`, nothing auto-created, no purge closing anything) makes **no
+/// commit**: the transaction is rolled back, the report says
 /// `commit_id == 0`, the head (the polling cookie) does not move and the
-/// commit message is not recorded. Its `seq_commit` value stays consumed
-/// (commit ids may skip, as after a conflict retry). A value delete of a
-/// key the same call writes is refused up front as
-/// [`DbError::WriteAndDeleteSameKey`], whatever the content (D9), and so is
-/// a value write that an object delete in the same call covers — its
-/// entity (or a container of it), parameter definition, alternative or
-/// class — as [`DbError::CoveredWrite`], whatever the content, the tier or
-/// the delete's `cascade` option (D10).
+/// commit message is not recorded. Commit ids may therefore skip, as after
+/// a conflict retry.
 ///
-/// **Covered writes under `DeleteWins`.** With
-/// `opts.covered_writes == CoveredWrites::DeleteWins` neither case is
+/// **Writes a delete of the same call covers.** A value delete of a key the
+/// same call writes is refused up front as [`DbError::WriteAndDeleteSameKey`],
+/// whatever the content, and so is a value write that an object delete in
+/// the same call covers (its entity or a container of it, its parameter
+/// definition, alternative or class) as [`DbError::CoveredWrite`], whatever
+/// the content, the tier or the delete's `cascade` option.
+///
+/// With `opts.covered_writes == CoveredWrites::DeleteWins` neither case is
 /// refused: the delete wins. Inside the transaction, after the structural
 /// changes and before the first segment, the deletes are resolved
-/// lookup-only (`DropPlan`) and every write they cover is dropped before
-/// it is resolved, canonicalized or buffered (so a dropped write
-/// auto-creates nothing), each reported as a
-/// [`WarningKind::DroppedByDelete`] warning. The deletes then run as usual
-/// and the uncovered writes proceed normally, and no covered value can be
-/// left partly closed by a cascade. The delete wins only when it takes
-/// effect: after the deletes ran, every dropped write needs a covering
-/// delete that did (a value delete; an object delete that ended `Deleted`
-/// or whose target did not exist), else the whole call is refused as
-/// [`DbError::Api`] and rolled back (a RESTRICT delete that ended
-/// `Restricted` would otherwise lose the write while the object survives).
-/// A dropped write is not a write: a call whose writes are all dropped and
+/// lookup-only and every write they cover is dropped before it is
+/// resolved, canonicalized or buffered (so a dropped write auto-creates
+/// nothing), each reported as a [`WarningKind::DroppedByDelete`] warning.
+/// The delete wins only when it takes effect: after the deletes ran, every
+/// dropped write needs a covering delete that did (a value delete; an
+/// object delete that ended `Deleted` or whose target did not exist), else
+/// the whole call is refused as [`DbError::Api`] and rolled back (a
+/// RESTRICT delete that ended `Restricted` would otherwise lose the write
+/// while the object survives). A call whose writes are all dropped and
 /// whose deletes delete nothing makes no commit.
 ///
 /// Under either policy, an object delete that reaches an object a
 /// structural change of the same call creates (or a child of it) is
-/// refused: by name before the transaction (`prepare_structural`), and on
-/// the resolved ids after the structural changes ran.
-#[allow(clippy::too_many_arguments)]
-pub fn commit_changes(
-    db: &Path,
-    segments: Vec<Segment>,
-    structural: Vec<StructuralChange>,
-    deletes: Vec<DeleteKey>,
-    object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
-    user: &str,
-    message: &str,
-    opts: WriteOptions,
-) -> Result<WriteReport, DbError> {
-    commit_change_set(
-        db,
-        ChangeSet {
-            segments,
-            structural,
-            deletes,
-            object_deletes,
-            purges: Vec::new(),
-            metadata: Vec::new(),
-        },
-        user,
-        message,
-        opts,
-    )
-}
-
-/// Everything one atomic commit can carry, by channel (purge plan §3.4):
-/// the argument of [`commit_change_set`], the one write entry point.
-/// `Default` is the empty set, so a caller names only the channels it uses
-/// and a channel added later does not break its literal.
-#[derive(Clone, Debug, Default)]
-pub struct ChangeSet {
-    pub segments: Vec<Segment>,
-    pub structural: Vec<StructuralChange>,
-    pub deletes: Vec<DeleteKey>,
-    pub object_deletes: Vec<(ObjectDeleteKey, ObjectDeleteOpts)>,
-    pub purges: Vec<PurgeRequest>,
-    /// The metadata channel: pool and link ops and the keep / set / clear
-    /// statements for new value versions (applied last; see
-    /// [`commit_change_set`]).
-    pub metadata: Vec<MetadataChange>,
-}
-
-/// Commit a [`ChangeSet`] in ONE atomic, conflict-retried transaction under
-/// one `commit` row: the body of [`commit_changes`] (whose documentation
-/// describes every channel but purges), of every wrapper and of the Python
-/// skin (CLAUDE.md invariant 2: one pipeline).
-///
-/// **Purges** (purge plan §3.5) run LAST, after the object deletes, under
-/// the same commit id. Their names resolve lookup-only after the
-/// structural changes (an unknown or blank name, `Values.parameter`
-/// without its class, or a name a rename of this call freed is refused).
-/// Each request closes everything in its scope except exactly what the
-/// call itself writes, at each scope's own level (true replace; see
-/// [`crate::types::PurgeScope`]); every close carries the same-commit
-/// guard, so a row this call wrote is never closed, and closed values
-/// follow their definition's retention (`retain_override` included). A
-/// request whose cascade reaches objects outside every request's scope
-/// refuses the whole call unless it sets `allow_outside_scope`.
-/// Per-request outcomes land in `report.purges`; a call whose purges close
-/// nothing and that writes nothing makes no commit.
-///
-/// **Metadata** (`ChangeSet::metadata`) runs after the purges: pool creates
-/// and revisions in item order, the keep / set / clear statements and the
-/// value-link items, the object links, then the pool deletes (RESTRICT
-/// judged on the post-call state). A value that gets a new version in this
-/// call (not an unchanged write, not a new value, not a deleted one) and
-/// has metadata links needs a statement — `Scope::Value` over
-/// `Scope::Target` over `Scope::Save` — or the whole call fails with
-/// [`DbError::ValueMetadataUnstated`]. A save- or target-scope `Set` also
-/// annotates new values; a value-scope `Set` / `Clear` also edits an
-/// unchanged value. Outcomes land in `report.metadata` and
-/// `report.value_links`.
-pub fn commit_change_set(
+/// refused: by name before the transaction, and on the resolved ids after
+/// the structural changes ran.
+pub fn commit(
     db: &Path,
     set: ChangeSet,
     user: &str,
@@ -605,7 +567,7 @@ pub fn commit_change_set(
                     StructuralKind::Alternative => ObjectKind::Alternative,
                     StructuralKind::Scenario => ObjectKind::Scenario,
                     StructuralKind::Entity => ObjectKind::Entity,
-                    StructuralKind::EntityClass => ObjectKind::Class,
+                    StructuralKind::Class => ObjectKind::Class,
                     StructuralKind::Parameter => ObjectKind::Parameter,
                     _ => return None,
                 };
@@ -1005,8 +967,7 @@ fn nfc_structural_names(ch: &mut StructuralChange, n: &mut Normalized) {
 /// Refuse every segment, value-delete key, object-delete key and metadata
 /// item of the call that addresses a class, parameter, alternative,
 /// scenario or entity by a name a rename earlier in the call freed and that
-/// does not resolve now (class_param_rename_PLAN §4.5 f, OD5;
-/// entity_rename_PLAN §4). A same-call create of the old name makes it
+/// does not resolve now. A same-call create of the old name makes it
 /// resolve again (to the new object), and a case-only rename frees no
 /// name, so neither is refused. Runs after the structural changes and
 /// before the first value write. Segment entity labels are checked only
@@ -1057,9 +1018,7 @@ fn refuse_renamed_away_references(
             return Ok(None);
         }
         match class_id(class)? {
-            Some(cid) if renamed_classes.contains(&cid) => {
-                calls.renamed_entity_of(conn, cid, name)
-            }
+            Some(cid) if renamed_classes.contains(&cid) => calls.renamed_entity_of(conn, cid, name),
             _ => Ok(None),
         }
     };
@@ -1154,7 +1113,12 @@ fn refuse_renamed_away_references(
                 Some(subject)
             }
             MetadataChange::LinkValue { value, .. } | MetadataChange::UnlinkValue { value, .. } => {
-                values.push((&value.class, &value.parameter, &value.alternative, &value.entity));
+                values.push((
+                    &value.class,
+                    &value.parameter,
+                    &value.alternative,
+                    &value.entity,
+                ));
                 None
             }
             MetadataChange::ValueMetadata { scope, .. } => {
@@ -1182,9 +1146,9 @@ fn refuse_renamed_away_references(
         let Some(s) = subject else { continue };
         let hit = match s {
             Subject::Class(n) => calls.renamed_class(conn, n)?.map(|t| ("class", n, t)),
-            Subject::Alternative(n) => {
-                calls.renamed_alternative(conn, n)?.map(|t| ("alternative", n, t))
-            }
+            Subject::Alternative(n) => calls
+                .renamed_alternative(conn, n)?
+                .map(|t| ("alternative", n, t)),
             Subject::Scenario(n) => calls.renamed_scenario(conn, n)?.map(|t| ("scenario", n, t)),
             Subject::Entity { class, name } => match calls.renamed_class(conn, class)? {
                 Some(t) => Some(("class", class, t)),
@@ -1216,7 +1180,7 @@ fn nfc_object_delete_key(k: &mut ObjectDeleteKey, n: &mut Normalized) {
     }
 }
 
-/// What a `commit_changes` attempt submitted and what its deletes did, for
+/// What a `commit` attempt submitted and what its deletes did, for
 /// [`wrote_nothing`].
 struct NoopEvidence {
     /// Values buffered (every one must have come back unchanged).
@@ -1231,8 +1195,7 @@ struct NoopEvidence {
     purges: usize,
 }
 
-/// Did this call provably change nothing (skip_unchanged_writes_PLAN D1,
-/// critique C2)? A false "nothing" would roll back real writes, so this is
+/// Did this call provably change nothing? A false "nothing" would roll back real writes, so this is
 /// an allow-list: `true` only when every item of every channel positively
 /// reported a known no-op — every value unchanged, no delete closed a row,
 /// every structural item `NoOp`, every object delete `NotFound`, no axis
@@ -1306,7 +1269,7 @@ fn wrote_nothing(report: &WriteReport, ev: &NoopEvidence) -> bool {
         && value_links.carried == 0
 }
 
-/// D9 (critique C1): a call that writes a value and also deletes it is
+/// a call that writes a value and also deletes it is
 /// rejected up front, whatever the content. Deletes run after the writes,
 /// so the delete would close the row the write just inserted (a span
 /// CHECK error) when the write changed the value, but succeed when the
@@ -1341,7 +1304,7 @@ fn reject_write_and_delete(
     Ok(())
 }
 
-/// D10 (P2 review): a call that writes a value and also deletes an object
+/// a call that writes a value and also deletes an object
 /// whose cascade covers it (its entity, a container entity of it, its
 /// parameter definition, its alternative, or a class above them) is
 /// rejected up front, whatever the content, the tier or the request's
@@ -1407,7 +1370,7 @@ fn object_target_label(k: &ObjectDeleteKey) -> String {
     }
 }
 
-/// The [`DbError::CoveredWrite`] (D10) refusal; `ids` names the covered
+/// The [`DbError::CoveredWrite`] refusal; `ids` names the covered
 /// (entity, parameter definition, alternative) when the commit-time check
 /// found it.
 fn object_delete_covers_write_error(
@@ -1447,14 +1410,14 @@ fn object_delete_covers_write_error(
 /// the first segment, from the deletes alone (lookup-only, nothing is
 /// created). A write is covered when
 ///   - a value delete names the same key, compared by DuckDB's `lower()`
-///     fold of all four names, which is how both sides resolve (D9); or
+///     fold of all four names, which is how both sides resolve; or
 ///   - an object delete names its alternative, class, (class, parameter) or
 ///     (class, entity), compared by the same fold: this catches a referent
 ///     that does not exist yet and that the write would auto-create; or
 ///   - the resolved entity, parameter definition or alternative of the
 ///     write lies in an object delete's full cascade closure
 ///     ([`cascade_scope`], whatever `cascade` says), which adds containers,
-///     element-tuple targets and a class's children (D10).
+///     element-tuple targets and a class's children.
 ///
 /// Each covered key collects EVERY covering delete: the drop stands only if
 /// at least one of them takes effect ([`DropPlan::check_effective`], after
@@ -1815,7 +1778,7 @@ fn dropped_warning(
     }
 }
 
-/// The [`DbError::WriteAndDeleteSameKey`] (D9) refusal; `ids` names the
+/// The [`DbError::WriteAndDeleteSameKey`] refusal; `ids` names the
 /// same key's resolved (entity, parameter definition, alternative) when
 /// the resolved-id check (inside `apply_deletes`) found it, `None` from
 /// the up-front name check (`reject_write_and_delete`).
@@ -1837,9 +1800,9 @@ fn same_key_error(i: usize, k: &DeleteKey, ids: Option<(i64, i64, i64)>) -> DbEr
 }
 
 /// Delete (append-only close-out) each named value in ONE atomic, conflict-
-/// retried commit — the deletes-only wrapper over [`commit_changes`]. Missing
+/// retried commit — the deletes-only wrapper over [`commit`]. Missing
 /// referents and already-absent values are machine-readable warnings and
-/// skipped, never a hard error (delete design §2).
+/// skipped, never a hard error.
 pub fn delete_values(
     db: &Path,
     keys: Vec<DeleteKey>,
@@ -1847,12 +1810,12 @@ pub fn delete_values(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(
+    commit(
         db,
-        Vec::new(),
-        Vec::new(),
-        keys,
-        Vec::new(),
+        ChangeSet {
+            deletes: keys,
+            ..ChangeSet::default()
+        },
         user,
         message,
         opts,
@@ -1861,7 +1824,7 @@ pub fn delete_values(
 
 /// Apply one or more structural (create/rename/set-ranks/activation/membership)
 /// changes in ONE atomic, conflict-retried commit — the structural-only wrapper
-/// over [`commit_changes`] (structural_write_api_plan §2.1). Per-item outcomes
+/// over [`commit`]. Per-item outcomes
 /// land in `report.structural`.
 pub fn commit_structural(
     db: &Path,
@@ -1870,12 +1833,12 @@ pub fn commit_structural(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(
+    commit(
         db,
-        Vec::new(),
-        changes,
-        Vec::new(),
-        Vec::new(),
+        ChangeSet {
+            structural: changes,
+            ..ChangeSet::default()
+        },
         user,
         message,
         opts,
@@ -1883,8 +1846,7 @@ pub fn commit_structural(
 }
 
 /// Delete (append-only close-out) one or more OBJECTS in ONE atomic, conflict-
-/// retried commit — the objects-only wrapper over [`commit_changes`]
-/// (object_delete plan §2). Each request is a typed [`ObjectDeleteKey`] plus its
+/// retried commit — the objects-only wrapper over [`commit`]. Each request is a typed [`ObjectDeleteKey`] plus its
 /// [`ObjectDeleteOpts`] (the `cascade` report contract). Missing / already-closed
 /// / same-commit-created targets yield [`crate::types::ObjectDeleteResult::NotFound`]
 /// in `report.object_deletes`, never a hard error.
@@ -1895,21 +1857,21 @@ pub fn delete_objects(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_changes(
+    commit(
         db,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        object_deletes,
+        ChangeSet {
+            object_deletes,
+            ..ChangeSet::default()
+        },
         user,
         message,
         opts,
     )
 }
 
-/// Purge (purge plan §3): close out every item of each request's scope in
+/// Purge: close out every item of each request's scope in
 /// ONE atomic, conflict-retried commit — the purges-only wrapper over
-/// [`commit_change_set`]. A purge keeps history (as-of reads see
+/// [`commit`]. A purge keeps history (as-of reads see
 /// everything) and never shrinks the file. Outcomes land in
 /// `report.purges`.
 pub fn purge(
@@ -1919,7 +1881,7 @@ pub fn purge(
     message: &str,
     opts: WriteOptions,
 ) -> Result<WriteReport, DbError> {
-    commit_change_set(
+    commit(
         db,
         ChangeSet {
             purges: requests,
@@ -1931,11 +1893,11 @@ pub fn purge(
     )
 }
 
-/// Read-only preview of each purge request (purge plan §3.6): what it would
+/// Read-only preview of each purge request: what it would
 /// close (`objects`, `cascade`: rows counted once per table), its reach
 /// outside its scope and whether it closes vocabulary of a template-stamped
 /// database, through the same sets and statements the commit runs, on one
-/// fresh RO connection opened and closed per call (CLAUDE.md invariant 1).
+/// fresh RO connection opened and closed per call.
 /// Nothing is written, so no survivor spares anything: the counts are upper
 /// bounds of a call that also writes. Names are refused as the commit
 /// refuses them.
@@ -1954,15 +1916,15 @@ pub fn preview_purge(
     })
 }
 
-/// Read-only preview of each object delete (object_delete plan §3, decision D6):
+/// Read-only preview of each object delete:
 /// what a `cascade:true` would close out (`cascade`) and what a `cascade:false`
 /// would block on (`blockers`) — the SAME dependency rows in two framings,
 /// driven by the SAME leg registry the commit path uses, so preview and commit
 /// cannot drift by *implementation*. It is nonetheless a best-effort snapshot:
 /// the commit-time [`crate::types::ObjectDeleteOutcome`] is authoritative, and a
-/// concurrent writer between preview and commit can still move the counts
-/// (critique C5). Runs under one fresh RO connection, opened and closed per call
-/// (CLAUDE.md invariant 1) — cheap enough to call every frame the dialog is open.
+/// concurrent writer between preview and commit can still move the counts.
+/// Runs under one fresh RO connection, opened and closed per call
+/// — cheap enough to call every frame the dialog is open.
 pub fn preview_object_deletes(
     db: &Path,
     mut keys: Vec<ObjectDeleteKey>,
@@ -1982,10 +1944,9 @@ pub fn preview_object_deletes(
 
 /// Validate delete keys purely (no DB): every component non-empty, and — over
 /// the full 4-tuple folded to `lower()` — reject fold-colliding distinct
-/// spellings (a caller-contract ambiguity, mirroring the write path's entity
-/// dedup, critique MINOR-4) while silently deduping exact-identical keys. The
+/// spellings while silently deduping exact-identical keys. The
 /// surviving keys carry their original `deletes`-vec index so a warning maps
-/// back to the caller's key (MINOR-3).
+/// back to the caller's key.
 fn prepare_deletes(keys: &[DeleteKey]) -> Result<Vec<(usize, DeleteKey)>, DbError> {
     let mut seen: HashMap<(String, String, String, String), usize> = HashMap::new();
     let mut out: Vec<(usize, DeleteKey)> = Vec::new();
@@ -2041,13 +2002,13 @@ enum DeleteResolution {
     /// Resolved to the `i`-th key of the delete round.
     Key(usize),
     /// Resolved to the same key as an earlier delete key (two spellings that
-    /// DuckDB's `lower()` folds together): nothing left to delete (D10).
+    /// DuckDB's `lower()` folds together): nothing left to delete.
     Repeat,
 }
 
 /// Resolve every `DeleteKey` (lookup-only, case-insensitive: never
 /// auto-create) and close out their live values under `commit_id` in one
-/// set-based round (set_based_long_and_delete_PLAN §3.4, D9). The class,
+/// set-based round. The class,
 /// parameter and alternative lookups are today's point lookups, memoized per
 /// exact spelling (nothing renames or creates them during the delete
 /// phase); the entity names of each class resolve in one lookup
@@ -2059,7 +2020,7 @@ enum DeleteResolution {
 /// value yields [`WarningKind::NothingToDelete`]. Two keys that resolve to
 /// one value (the up-front fold dedup makes that unreachable; this is the
 /// second line): the first deletes, the later ones get `NothingToDelete`,
-/// as a second per-key delete would (plan D10).
+/// as a second per-key delete would.
 /// Retention obeys the definition's `retain_content` unless the caller
 /// overrode it, as in the write path (`write_prepared`).
 ///
@@ -2258,9 +2219,9 @@ fn unknown(report: &mut WriteReport, key_index: usize, level: &str, name: &str) 
     report.warnings.push(Warning {
         kind: WarningKind::UnknownReferent {
             key_index,
-            level: level.into(),
+            level: crate::types::object_type_tag(level).into(),
         },
-        object_type: level.into(),
+        object_type: crate::types::object_type_tag(level).into(),
         name: name.into(),
         id: 0,
     });
@@ -2357,7 +2318,7 @@ pub(crate) fn lookup_parameter(
 /// This is an optimizer behaviour, not a documented contract; the guard is
 /// `tests/entity_name_index_scan.rs` (production SQL, realistic fixture,
 /// unfenced negative control). Pre-agreed fallbacks if a DuckDB bump breaks
-/// the fence (name_index_and_unused_indexes_PLAN.md D1, §10 C1), in order:
+/// the fence, in order:
 /// (d) the aggregate fence `SELECT any_value(id) FILTER (WHERE
 /// entity_class_id = ?1 AND valid_to_commit IS NULL) FROM entity WHERE
 /// lower(name) = lower(?2)`; then (c) fetch `(id, entity_class_id,
@@ -2435,7 +2396,7 @@ pub(crate) struct EntityRow {
     pub(crate) description: Option<String>,
     pub(crate) version: i64,
     /// The current row's `valid_from_commit`: equal to the writing commit
-    /// when this commit created or already revised it (the D-S5 branch).
+    /// when this commit created or already revised it.
     pub(crate) valid_from: i64,
     /// The current row's `rowid` as read (the close addresses it).
     pub(crate) rowid: i64,
@@ -2490,14 +2451,13 @@ struct PreparedSegment {
     group_of: Vec<usize>,
     /// Per-entity row indices into its group's `sub_all`, ascending (i.e.
     /// original row order). O(nrows) total, vs O(entities × nrows) for the
-    /// boolean masks these replace (critique F4).
+    /// boolean masks these replace.
     rows: Vec<Vec<u32>>,
 }
 
 /// One value-type group of a segment: the segment's batches whose columns
 /// all have the same Arrow data types, concatenated into one logical table.
-/// A group instantiates exactly one declared member (VMP Part 7 entry
-/// check, per batch); groups of one segment may bind to different members
+/// A group instantiates exactly one declared member; groups of one segment may bind to different members
 /// (a float constant for one entity, a string for another) or to the same
 /// one (an indexed member does not fix the measure kind).
 struct PreparedGroup {
@@ -2955,10 +2915,7 @@ fn write_prepared(
             // or type row): a later group is held to it.
             typed_here = report.warnings[before..].iter().any(|w| {
                 w.kind == WarningKind::AutoCreated
-                    && matches!(
-                        w.object_type.as_str(),
-                        "parameter_type" | "parameter_definition"
-                    )
+                    && matches!(w.object_type.as_str(), "parameter_type" | "parameter")
             });
         }
         match definition {
@@ -3165,7 +3122,7 @@ struct CachedParameter {
 }
 
 /// The per-attempt class / parameter / alternative resolution cache of the
-/// segment phase (set_based_long_and_delete_PLAN §10 C11). An editor save
+/// segment phase. An editor save
 /// carries many segments of one class and alternative; without the cache
 /// every segment re-runs the same lookups.
 ///
@@ -3181,7 +3138,7 @@ struct CachedParameter {
 /// auto-create the `parameter_type` of a definition that has none, which is
 /// never cached: only a set read non-empty from the DB is, and nothing in
 /// the segment phase closes or adds members of a declared set. Lives in one
-/// transaction attempt (a closure local of `commit_changes`), never across
+/// transaction attempt (a closure local of `commit`), never across
 /// attempts or commits.
 struct ResolveCache {
     enabled: bool,
@@ -3312,7 +3269,7 @@ pub mod test_hooks {
         out
     }
 
-    /// Make the next `n` `commit_changes` attempts on this thread fail with
+    /// Make the next `n` `commit` attempts on this thread fail with
     /// a synthetic write-write conflict after their segment phase, so the
     /// retry loop re-runs them.
     #[cfg(debug_assertions)]
@@ -3359,16 +3316,16 @@ pub mod test_hooks {
 struct WriteBuffers {
     scalars: Vec<ScalarWrite>,
     longs: Vec<LongWrite<'static>>,
-    /// The cells buffered in `longs` (plan D3 flush threshold).
+    /// The cells buffered in `longs`.
     long_cells: usize,
     arrays: Vec<ArrayWrite<'static>>,
-    /// The payload elements buffered in `arrays` (plan D3).
+    /// The payload elements buffered in `arrays`.
     array_elems: usize,
     /// Every value key buffered by the commit, flushed or not: the
-    /// same-call write-and-delete check (skip_unchanged_writes_PLAN D9).
+    /// same-call write-and-delete check.
     keys: HashSet<(i64, i64, i64)>,
-    /// Values buffered by the commit (the no-op evidence, D1: every one
-    /// must come back unchanged).
+    /// Values buffered by the commit (the no-op evidence: every one must
+    /// come back unchanged).
     values: usize,
     /// The tiers of the values actually written (not unchanged), for
     /// `WriteReport::tiers`.
@@ -3512,9 +3469,9 @@ impl WriteBuffers {
 }
 
 /// Read a written parameter back for one class/parameter/alternative into a
-/// `RecordBatch`, through the `read_parameter` SQL view/macro (VMP Part 6; plan
-/// Part 3 — reads are SQL, the library never gatekeeps them). One fresh RO
-/// connection, opened and closed per call (CLAUDE.md invariant 1). Enough to
+/// `RecordBatch`, through the `read_parameter` SQL view/macro (reads are
+/// SQL; the library never gatekeeps them). One fresh RO
+/// connection, opened and closed per call. Enough to
 /// round-trip-verify a write; the columns are the macro's canonical long shape
 /// (`entity, alternative, tier, value_kind, idx*_*, v_*`).
 pub fn read_parameter(
@@ -3555,7 +3512,7 @@ pub const READ_VALUES_SQL: &str = "SELECT * FROM read_values(?, ?, ?::VARCHAR[],
 /// (entity, alternative) pair of `entities` x `alternatives` (all current
 /// alternatives when `None`), through the `read_values` SQL macro, in
 /// `read_parameter`'s columns. One fresh RO connection, opened and closed
-/// per call (CLAUDE.md invariant 1).
+/// per call.
 ///
 /// This is the editor's per-entity read: it fetches only the arrays it
 /// needs (by `array_id`, an index scan) instead of every array of the
@@ -3566,8 +3523,7 @@ pub const READ_VALUES_SQL: &str = "SELECT * FROM read_values(?, ?, ?::VARCHAR[],
 /// a name that does not resolve contributes no rows (no error). Row order
 /// is unspecified.
 ///
-/// No Rust-side rendering: the macro is the one renderer of axes
-/// (CLAUDE.md invariant 2 applied to reads).
+/// No Rust-side rendering: the macro is the one renderer of axes.
 pub fn read_values(
     db: &Path,
     class: &str,
@@ -3597,7 +3553,7 @@ pub fn read_values(
 }
 
 /// The database's head commit id: `COALESCE(max(commit.id), 0)`, read on one
-/// per-operation RO connection (CLAUDE.md invariant 1). Quote it to
+/// per-operation RO connection. Quote it to
 /// [`WriteOptions::expect_commit`] for an atomic read → compute → write-only-
 /// if-nobody-committed cycle. Compaction preserves commit ids, so a repack
 /// never moves the head; every commit (any writer, any process) and an
@@ -3608,11 +3564,10 @@ pub fn head_commit(db: &Path) -> Result<i64, DbError> {
 
 /// The database's stable identity UUID — the `db_identity` reserved metadata
 /// key, minted once by `900_bootstrap.sql` at init and never changed thereafter
-/// (specs/schema_interop.md §9: the anchor output DBs stamp their
-/// "produced from input DB <identity> at commit C under scenario S" provenance
-/// against). It survives reopen and compaction (the repack copies
-/// `database_property` rows as data). One fresh RO connection per call
-/// (CLAUDE.md invariant 1). Plain-SQL equivalent:
+/// (output databases can record "produced from input DB `<identity>` at
+/// commit C under scenario S" against it). It survives reopen and compaction (the repack copies
+/// `database_property` rows as data). One fresh RO connection per call.
+/// Plain-SQL equivalent:
 /// `SELECT value FROM database_property WHERE lower(key) = 'db_identity' AND valid_to_commit IS NULL`.
 pub fn db_identity(db: &Path) -> Result<String, DbError> {
     with_read_plain(db, |conn| {
@@ -3712,7 +3667,7 @@ pub(crate) fn parse_index_kind(s: &str) -> Result<IndexKind, DbError> {
 
 /// Merge the caller's label domains with any carried in Arrow field metadata
 /// (`nodal:label_domain` = a JSON array of the ordered labels) for a label
-/// dimension the arg did not cover (decision D — both channels).
+/// dimension the arg did not cover.
 fn effective_domains(
     batch: &RecordBatch,
     inferred: &[(String, IndexKind)],
@@ -3808,7 +3763,7 @@ fn resolve_entity_class(
     )?;
     warnings.push(Warning {
         kind: WarningKind::AutoCreated,
-        object_type: "entity_class".into(),
+        object_type: "class".into(),
         name: name.into(),
         id,
     });
@@ -3871,7 +3826,7 @@ enum Resolved {
     /// The class is N-D and `first_missing` is the first name (in input
     /// order) without a current entity: auto-creating it is refused with
     /// `err`. Nothing was inserted. The caller canonicalizes the entities
-    /// before it first, so a canon error there still wins (plan §3.5).
+    /// before it first, so a canon error there still wins.
     NdRefused { first_missing: usize, err: DbError },
 }
 
@@ -3879,7 +3834,7 @@ enum Resolved {
 /// ordinal, its DuckDB `lower()` fold and the id and stored name of the
 /// current entity of the class holding that folded name (NULL when missing).
 /// The fold is DuckDB's,
-/// returned to Rust, never recomputed there (CLAUDE.md invariant 2). The
+/// returned to Rust, never recomputed there. The
 /// predicate is the expansion of `cur_cls = ? AND cur_name = lower(n)` on the
 /// base columns (the VIRTUAL `cur_*` columns are `CASE WHEN valid_to_commit
 /// IS NULL THEN … END`): the same rows, but the plain column filters run
@@ -3890,8 +3845,8 @@ const ENTITY_LOOKUP_SQL: &str = "WITH k AS (SELECT unnest(?::VARCHAR[]) AS n, \
      LEFT JOIN entity e ON e.entity_class_id = ? AND e.valid_to_commit IS NULL \
                        AND lower(e.name) = lower(k.n)";
 
-/// The single-name form of `ENTITY_LOOKUP_SQL` (plan D3(b), a
-/// statement-form switch only): the fold, the id and the stored name (NULL
+/// The single-name form of `ENTITY_LOOKUP_SQL` (a statement-form switch
+/// only): the fold, the id and the stored name (NULL
 /// when missing; one row always, through the outer join on a one-row
 /// relation). `?1` name, `?2` class id. The entity comes through the same
 /// `OFFSET 0` fence as [`ENTITY_NAME_LOOKUP_SQL`] (see there for why, the
@@ -3989,8 +3944,8 @@ pub(crate) type EntityCache = HashMap<(i64, String), CachedEntity>;
 const ENTITY_INSERT_SQL: &str = "INSERT INTO entity (entity_class_id, name, valid_from_commit) \
      SELECT ?, unnest(?::VARCHAR[]), ? RETURNING id, name";
 
-/// Resolve every entity name of one segment in one set-based round
-/// (set_based_scalar_write_PLAN §3.4, D7): one lookup statement (none for
+/// Resolve every entity name of one segment in one set-based round:
+/// one lookup statement (none for
 /// names an earlier segment of the commit resolved, see [`EntityCache`]), at
 /// most one N-D probe, and one columnar insert per ≤ `LONG_INSERT_CHUNK`
 /// missing names. This is the write path's one decision-B entity
@@ -3998,11 +3953,10 @@ const ENTITY_INSERT_SQL: &str = "INSERT INTO entity (entity_class_id, name, vali
 ///
 /// Names are resolved by DuckDB's `lower()` (Unicode). Two distinct input
 /// spellings that DuckDB folds to the same name are ambiguous and rejected
-/// with the same Api error `prepare_segment` raises for ASCII case-aliases
-/// (critique C2: the up-front dedup folds ASCII only, so `"Ä"`/`"ä"` reach
-/// here). Missing names are inserted in input order; their `AutoCreated`
+/// with the same Api error `prepare_segment` raises for ASCII case-aliases.
+/// Missing names are inserted in input order; their `AutoCreated`
 /// warnings follow in the same order, as the per-entity resolver pushed
-/// them. Never auto-creates into an N-D class (critique F10): an N-D
+/// them. Never auto-creates into an N-D class: an N-D
 /// entity's identity is its member tuple, which the batch does not carry.
 #[allow(clippy::too_many_arguments)]
 fn resolve_entities(
@@ -4152,11 +4106,10 @@ type ParameterResolution = (i64, i64, DeclaredType, Option<Vec<DbDeclared>>, Str
 
 /// Resolve the parameter definition within `class_id`, auto-creating it (and its
 /// `parameter_type` + `parameter_type_dimension` declaration) when absent. The
-/// declared type SET is READ FROM THE DB for an existing definition (critique
-/// S2; template_ir_plan D2(a)); only a freshly created definition takes its
+/// declared type SET is READ FROM THE DB for an existing definition; only a freshly created definition takes its
 /// declared type from the batch's inferred dimensions. Returns
 /// `(pd_id, parameter_type_id, shape)` — the member id is the exactly-one
-/// binding persisted on every value row (D11, 2026-09-18); auto-created /
+/// binding persisted on every value row; auto-created /
 /// auto-materialized declarations bind their freshly created row. The fourth
 /// element is the declared set as read from the DB, `None` when this call
 /// created it (what [`ResolveCache`] may keep).
@@ -4208,7 +4161,7 @@ fn resolve_parameter(
         let pt_id = create_parameter_type(conn, commit_id, pd_id, inferred, value_kind)?;
         warnings.push(Warning {
             kind: WarningKind::AutoCreated,
-            object_type: "parameter_definition".into(),
+            object_type: "parameter".into(),
             name: name.into(),
             id: pd_id,
         });
@@ -4233,7 +4186,7 @@ fn inferred_declared(inferred: &[(String, IndexKind)]) -> DeclaredType {
 }
 
 /// One member of a definition's declared allowed-type set as stored in the DB:
-/// the `parameter_type` row id (the D11 binding persisted on value rows), the
+/// the `parameter_type` row id, the
 /// `value_kind` tag, the dimension names in declared order, and the
 /// `(position, kind)` shape canon consumes. `pub(crate)`: the template
 /// module's DB snapshot reads declared sets through the SAME reader/validation
@@ -4282,7 +4235,7 @@ fn batch_desc(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> String
 }
 
 /// The projection member matching AND set-distinguishability are both defined
-/// on (VMP Part 7 as amended 2026-09-18, D2(a)): the `value_kind` tag plus the
+/// on: the `value_kind` tag plus the
 /// ordered `(case-folded dimension name, index kind)` vector — rank is implied
 /// by the vector's length. One key, two uses: a batch instantiates the member
 /// whose key equals the batch's, and a set is valid iff member keys are
@@ -4318,8 +4271,7 @@ fn batch_key(inferred: &[(String, IndexKind)], value_kind: ValueKind) -> MatchKe
     )
 }
 
-/// Hold the batch to an EXISTING declared allowed-type set (VMP Part 7 as
-/// amended 2026-09-18, D2(a); template_ir_plan §3.3): the batch must
+/// Hold the batch to an EXISTING declared allowed-type set: the batch must
 /// instantiate **exactly one** declared member — value-kind tag, rank,
 /// per-position index kinds, and dimension names in declared order. A batch
 /// instantiating no member is rejected loudly, naming the allowed set; the
@@ -4430,8 +4382,7 @@ struct MatchSubject<'a> {
 }
 
 /// Read a definition's full current declared-type set from `parameter_type` /
-/// `parameter_type_dimension` (VMP Part 2 "one or more declarations"; Part 7
-/// entry check amended to set-membership, 2026-09-18 D2(a)). Empty = no
+/// `parameter_type_dimension` (one or more declarations). Empty = no
 /// current `parameter_type` row. Multi-row is the legal declared-set state —
 /// duplicate ranks are legal (members differ on names/kinds); exact-duplicate
 /// members are refused at match time (`validate_declared`). Per member,
@@ -4550,10 +4501,10 @@ pub(crate) fn read_all_declared_types(
 
 /// Insert the `parameter_type` (+ its dimension rows) declaring the batch's
 /// shape: `value_kind = 'indexed'` for rank ≥ 1 else the measure kind tag;
-/// dimension names/kinds from the inferred columns (VMP Part 2/7). Returns the
+/// dimension names/kinds from the inferred columns. Returns the
 /// created `parameter_type` id.
 ///
-/// `pub(crate)` for the template loader (template_ir_plan §1.3): declared
+/// `pub(crate)` for the template loader: declared
 /// type-set members are created through this one insert path, so the loader
 /// and the auto-create path cannot drift. When `inferred` is non-empty the
 /// `value_kind` argument is ignored (the row stores `'indexed'`).
@@ -4593,7 +4544,7 @@ pub(crate) fn create_parameter_type(
     Ok(pt_id)
 }
 
-/// The definition's `retain_content` — VMP Part 5's primary retention lever
+/// The definition's `retain_content` — the primary retention lever
 /// (default TRUE; FALSE on result classes) that `history::write_value` must see
 /// via `retain_override`, else a FALSE definition silently keeps full payloads.
 fn read_retain_content(conn: &Connection, pd_id: i64) -> Result<bool, DbError> {
@@ -4644,7 +4595,7 @@ mod tests {
         (report, ev)
     }
 
-    /// The D1 predicate is an allow-list (critique C2): the all-no-op report
+    /// The D1 predicate is an allow-list: the all-no-op report
     /// passes, and every single deviation from it commits.
     #[test]
     fn wrote_nothing_is_an_allow_list() {

@@ -19,7 +19,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_changes, delete_values, DeleteKey, Segment};
+use nodal_db_core::api::{commit as api_commit, delete_values, ChangeSet, DeleteKey, Segment};
 use nodal_db_core::encoding::array_payload_hash;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WriteOptions, WriteReport};
@@ -83,7 +83,17 @@ fn arrays(ents: &[String], pay: impl Fn(usize) -> Vec<f64>) -> Segment {
 }
 
 fn commit_opts(db: &Path, seg: Segment, opts: WriteOptions) -> WriteReport {
-    commit_changes(db, vec![seg], vec![], vec![], vec![], "t", "m", opts).expect("commit")
+    api_commit(
+        db,
+        ChangeSet {
+            segments: vec![seg],
+            ..ChangeSet::default()
+        },
+        "t",
+        "m",
+        opts,
+    )
+    .expect("commit")
 }
 
 fn commit(db: &Path, seg: Segment) -> WriteReport {

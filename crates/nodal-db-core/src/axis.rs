@@ -1,9 +1,9 @@
-//! DB-facing content-verified axis dedup (VMP Part 4, critique #7).
+//! DB-facing content-verified axis dedup.
 //!
 //! Axes are the design's CF coordinate variables: immutable, content-addressed,
 //! shared by FK from every array- and long-tier dimension. This module persists
-//! the [`CanonicalAxis`] values that `canon` already produced (CLAUDE.md
-//! invariant 2 — it does **not** re-canonicalize) into the `axis` table and its
+//! the [`CanonicalAxis`] values that `canon` already produced (it does
+//! **not** re-canonicalize) into the `axis` table and its
 //! materialized child tables, deduping by content.
 //!
 //! **Hash is an accelerator, byte-equality is the truth.** `content_hash` is
@@ -13,14 +13,14 @@
 //! `encode_axis` bytes. A hash match is never trusted alone — v1's
 //! `ON CONFLICT DO NOTHING` reuse silently mis-attached values on collision.
 //!
-//! F3 (Arrow-schema boundary): dedup touches **no** Arrow → `canon` path. The
+//! The Arrow-schema boundary: dedup touches **no** Arrow → `canon` path. The
 //! only Arrow the `canon` pipeline consumes is the caller's write batch, whose
 //! concrete types (`Int64`, `Utf8`, `TimestampMicrosecond`, `Float64`,
 //! `Boolean`) canon downcasts strictly. Here, candidate reconstruction reads
 //! scalar columns via typed row getters, and every timestamp crosses as an
 //! `i64` µs count through `epoch_us(...)` on read and `make_timestamp(?)` on
 //! write — so a DuckDB Arrow export's `Utf8View`/dictionary/non-µs-timestamp
-//! quirks cannot reach this code. The full value-read Arrow boundary is Phase 3.
+//! quirks cannot reach this code.
 
 use std::collections::HashMap;
 
@@ -35,8 +35,8 @@ use crate::error::DbError;
 use crate::history::{clip, exec_columnar, list, opt_list};
 use crate::text::{describe, is_nfc};
 
-/// A client-side dedup cache, scoped to one write session (Phase 3 threads it
-/// across a batch so a handful of axes serving thousands of values are looked
+/// A client-side dedup cache, scoped to one write session (the write path
+/// threads it across a batch so a handful of axes serving thousands of values are looked
 /// up once). Keyed by content hash → the `(id, axis)` rows seen for that hash;
 /// within a bucket, equality is still decided by byte-compare, never the hash.
 #[derive(Debug, Default)]
@@ -69,7 +69,7 @@ impl AxisCache {
 /// Reuse an existing axis with byte-identical content, else insert a new one.
 /// Returns the `axis.id` to reference. `cache` accelerates repeats within the
 /// write session; a cache miss falls back to a `content_hash + kind` candidate
-/// query and per-candidate byte-compare (VMP Part 4).
+/// query and per-candidate byte-compare.
 pub fn dedup_or_insert(
     conn: &Connection,
     cache: &mut AxisCache,
@@ -80,8 +80,7 @@ pub fn dedup_or_insert(
 
 /// [`dedup_or_insert`], also reporting whether it inserted a new axis
 /// (`true`) or reused an existing one (`false`): the write path's
-/// `axes_created` / `axes_reused` counts (set_based_long_and_delete_PLAN
-/// D8). Each insert adds exactly one `axis` row, so the count of `true`
+/// `axes_created` / `axes_reused` counts. Each insert adds exactly one `axis` row, so the count of `true`
 /// equals the `axis` row-count delta the counts were once taken from.
 pub(crate) fn dedup_or_insert_created(
     conn: &Connection,
@@ -152,7 +151,7 @@ fn ensure_wellformed(axis: &CanonicalAxis) -> Result<(), DbError> {
     Ok(())
 }
 
-/// T6 guard (`specs/Done/unicode_text_rule_PLAN.md`): an axis's text is what
+/// T6 guard: an axis's text is what
 /// canon produces: every label and tag in NFC (the text rule, `text.rs`)
 /// and no label twice in one label axis. Checked before every insert, in
 /// release builds, so a write path that bypassed canon fails loudly

@@ -1,28 +1,26 @@
-//! Template reconcile: the three-layer migration model's v1 mechanics
-//! (`specs/template_ir_plan.md` §4, D5) plus the fresh-init load, which is the
-//! same operation against an empty vocabulary (§7 "idempotency &
-//! re-application").
+//! Template reconcile: the three-layer migration model plus the fresh-init
+//! load, which is the same operation against an empty vocabulary (so a load
+//! and a re-apply are idempotent).
 //!
-//! - **Layer 1 — declarative reconcile.** [`plan`] diffs the DB's current
-//!   vocabulary against the template and emits the minimal ADDITIVE write set
+//! - **Declarative reconcile.** [`plan`] diffs the DB's current vocabulary
+//!   against the template and emits the minimal ADDITIVE write set
 //!   ([`Action`]); [`apply`] executes it in one commit. Re-applying an
 //!   unchanged template is a no-op (`template_content_hash` short-circuit,
 //!   then an empty diff).
-//! - **Layer 2 — identity hints.** The closed [`super::ir::MigrationStep`]
-//!   vocabulary (v2 per D14/D15: renames with collision policy and value
-//!   translation, `rename_list_member` with its default-on value rewrite,
+//! - **Identity hints.** The closed [`super::ir::MigrationStep`] vocabulary
+//!   (renames with collision policy and value translation,
+//!   `rename_list_member` with its default-on value rewrite,
 //!   `move_parameter`, the `merge_*` steps, and the explicit `drop_*`
 //!   close-outs) executes as ordinary from/to close-out versioning — one
 //!   commit per step, so history shows each migration step. Drops route
-//!   through the ONE object-delete cascade (`object_delete.rs`); the plan
-//!   shows their blast radius via the same delete preview (D14).
-//! - **Layer 3 — the `run:` escape hatch.** Named tool-side programs from the
-//!   caller's [`MigrationRegistry`], executed in declared order **through the
-//!   public write API** (each program commits via `api::commit_changes` etc.;
-//!   the IR records identity/ordering only — invariant CLAUDE.md #2 by
-//!   construction).
+//!   through the ONE object-delete cascade; the plan shows their blast radius
+//!   via the same delete preview.
+//! - **The `run:` escape hatch.** Named tool-side programs from the caller's
+//!   [`MigrationRegistry`], executed in declared order **through the public
+//!   write API** (each program commits via `api::commit` etc.; the template
+//!   records identity and ordering only, so no second write path exists).
 //!
-//! ## Chain integrity (review items 1-4)
+//! ## Chain integrity
 //! `apply` guards, in order, BEFORE any write: the staleness check
 //! (`ApplyOptions::expect_commit`), the retarget guard (a DB stamped with a
 //! DIFFERENT `template_name` refuses unless `allow_retarget` — ONE decision,
@@ -31,25 +29,25 @@
 //! forward-reachable FROM the template's own version through its chain), the
 //! unreachable-chain guard (a stamped version the template's non-empty chain
 //! cannot walk to the target refuses loudly; only a template with NO
-//! `migrations:` at all bridges by plain reconcile, §4.2 L1), and the blocked
+//! `migrations:` at all bridges by plain reconcile), and the blocked
 //! pre-check (the full simulated plan must carry no reshape blockers before
 //! any span commits).
 //!
-//! **Crash resume.** Each declarative step's commit also writes the
-//! `template_migration_step` progress substamp (same commit — atomic); the
+//! **Crash resume.** Each declarative step's commit also records the step's
+//! progress (`template_migration_step`, in the same commit — atomic); the
 //! span's version stamp clears it. An interrupted chain resumes by skipping
-//! completed steps. A step that SKIPS (D14 — a `drop_list_member` that would
-//! strand data) writes NO substamp and PAUSES the chain: the span's version
-//! never stamps, any stale certified hash is closed, and the next apply
-//! retries the paused step — version advancement stays blocked until the
-//! operator clears the blocker (explicit destruction is never evaporated). A `run:` program commits through the public API on its
-//! own, so its substamp lands AFTER it in a separate commit — a crash in
-//! that window re-runs the program. **`run:` programs MUST therefore be
-//! idempotent**; that is the Layer-3 contract (true cross-program atomicity
-//! is impossible from outside the program's own commits, so the contract is
-//! stated rather than pretended away).
+//! completed steps. A step that SKIPS (a `drop_list_member` that would strand
+//! data) records no progress and PAUSES the chain: the span's version never
+//! stamps, any stale certified hash is closed, and the next apply retries the
+//! paused step — version advancement stays blocked until the operator clears
+//! the blocker (explicit destruction is never evaporated). A `run:` program
+//! commits through the public API on its own, so its progress record lands
+//! AFTER it in a separate commit — a crash in that window re-runs the
+//! program. **`run:` programs MUST therefore be idempotent** (true
+//! cross-program atomicity is impossible from outside the program's own
+//! commits, so the contract is stated rather than pretended away).
 //!
-//! ## Partial-apply honesty (review item 14)
+//! ## Partial-apply honesty
 //! When anything the template declares could not be applied (a narrowed type
 //! member kept because values bind it, a seed membership the user excluded, a
 //! default withheld because a non-scalar default occupies the slot, a seed
@@ -60,19 +58,18 @@
 //! out), so the no-op short-circuit can never certify unconverged state —
 //! plan/apply keep replanning until the skips clear, then the hash lands.
 //!
-//! ## Layering (§7, doc note)
+//! ## Layering
 //! Layered composition is REDECLARATION-based: a second template composes by
-//! declaring its own (disjoint) vocabulary in full; D6's element-closure
+//! declaring its own (disjoint) vocabulary in full; element-closure
 //! validation is per-document, so a layered template that seeds N-D entities
-//! must declare their element entities itself. v1 keeps one primary template
-//! per DB (last applied stamps identity).
+//! must declare their element entities itself. One primary template per DB
+//! (the last applied stamps identity).
 //!
-//! **Write-path discipline (CLAUDE.md invariant #2).** This module lives in
-//! the one core and writes structural rows exactly the way `api.rs`'s
-//! auto-create resolvers do (same tables, same from/to protocol); declared
-//! type members go through `api::create_parameter_type` (the one insert
-//! path); defaults and the rename-hint value rewrite are value writes and
-//! land through `history` (retention-honoring close-outs, VMP Part 5). No
+//! **Write-path discipline.** This module lives in the one core and writes
+//! structural rows exactly the way `api.rs`'s auto-create resolvers do (same
+//! tables, same from/to protocol); declared type members go through
+//! `api::create_parameter_type` (the one insert path); defaults and the
+//! rename-hint value rewrite are value writes and land through `history`. No
 //! domain row is written outside this crate. Usage guards (the narrowing and
 //! move checks) are plain COUNT aggregates — no `error()`-style side-effect
 //! guards anywhere, so no projection-pushdown hazard class applies.
@@ -108,23 +105,23 @@ use crate::types::{
 };
 
 use super::dbvocab::{read_vocab, DbParam, DbVocab};
-use crate::property;
 use super::ir::{
     self, effective_member_kind, Checked, Class, ListMember, Migration, MigrationStep,
     MissingSource, OnCollision, Parameter, Template, TypeDecl, UnmappedValues,
 };
+use crate::property;
 
 // ---------------------------------------------------------------------------
 // The migration-program registry (Layer 3)
 // ---------------------------------------------------------------------------
 
-/// A named tool-side migration program (§4.2 Layer 3): runs with the DB path
+/// A named tool-side migration program: runs with the DB path
 /// and the commit author, and does ALL its writes through the public write API
 /// (its own commits). The IR's `run:` step names it; the registry binds it.
 /// **Contract: programs must be idempotent** (module docs, "Crash resume").
 pub type MigrationProgram = Box<dyn Fn(&Path, &str) -> Result<(), DbError> + Send + Sync>;
 
-/// The runner's program table. Tenants register their migration code here;
+/// The runner's program table. A tool registers its migration code here;
 /// an IR `run:` step naming an unregistered program is a hard error (the
 /// chain cannot silently skip an imperative step).
 #[derive(Default)]
@@ -168,8 +165,7 @@ pub struct ApplyOptions {
     /// `DbError::Stale`.
     pub expect_commit: Option<i64>,
     /// Re-create the declared classes, parameters and value lists that
-    /// were removed locally (purge plan §3.8, V-OD1: closed by a commit
-    /// that is not template-owned — an object delete, a purge, a
+    /// were removed locally (closed by a commit that is not template-owned — an object delete, a purge, a
     /// `drop_value_list`), as ordinary creates with new ids, noted in the
     /// plan. Without it a changed template blocks on them.
     pub recreate_removed: bool,
@@ -257,7 +253,7 @@ pub enum Action {
         display_order: Option<i64>,
     },
     /// Dimension rows of a NEW class, emitted after every `CreateClass` so
-    /// forward references between new classes resolve (§2.2 by-name).
+    /// forward references between new classes resolve.
     CreateClassDims {
         class: String,
         dims: Vec<PlannedDim>,
@@ -298,8 +294,8 @@ pub enum Action {
         parameter: String,
         member: TypeDecl,
     },
-    /// Close out a declared member the template no longer carries (§4.2:
-    /// "narrowing is flagged when current data instantiates a removed
+    /// Close out a declared member the template no longer carries
+    /// ("narrowing is flagged when current data instantiates a removed
     /// member"). Apply skips-with-warning when any current value binds it —
     /// a skip withholds convergence (module docs).
     NarrowParameterType {
@@ -335,7 +331,7 @@ pub enum Action {
         member: String,
     },
     /// Replace the template-owned keys of the Decision-7 `presentation`
-    /// document (D8); `doc` is the full merged document to store.
+    /// document; `doc` is the full merged document to store.
     SetPresentation {
         doc: String,
     },
@@ -499,7 +495,7 @@ pub struct PlannedSpan {
     pub steps: Vec<String>,
 }
 
-/// The dry-run output (§4.2 plan-then-apply): pending migration spans, the
+/// The dry-run output: pending migration spans, the
 /// diff's action list, blockers (apply refuses while any exist), skips
 /// (declared state the apply will NOT converge on — convergence withheld),
 /// warnings, and notes.
@@ -599,7 +595,7 @@ pub struct ApplyOutcome {
     /// empty diff): no commit was made.
     pub no_op: bool,
     /// Commit ids THIS apply made directly: one per executed migration step /
-    /// substamp / version stamp, plus the final reconcile commit.
+    /// progress record / version stamp, plus the final reconcile commit.
     pub commits: Vec<i64>,
     /// `run:` program executions with their public-API commit ids.
     pub run_programs: Vec<RunProgramReport>,
@@ -608,12 +604,12 @@ pub struct ApplyOutcome {
     /// False when any skip occurred: `template_content_hash` was withheld
     /// (module docs, "Partial-apply honesty"). A chain-step skip (a
     /// `drop_list_member` that would strand data) PAUSES the chain before
-    /// its substamp (D14): the span's version does not stamp, `plan.skipped`
+    /// its progress record: the span's version does not stamp, `plan.skipped`
     /// says why, and a re-apply RETRIES the paused step.
     pub converged: bool,
     pub warnings: Vec<String>,
     /// Informational chain-step notes: cascade close-out counts of executed
-    /// drops (the D14 blast-radius record) and no-op/already-applied notes.
+    /// drops and no-op/already-applied notes.
     pub notes: Vec<String>,
 }
 
@@ -668,8 +664,8 @@ fn max_commit(conn: &Connection) -> Result<i64, DbError> {
 /// Read-only dry run: validate, snapshot the DB vocabulary, simulate any
 /// pending migration chain on the snapshot (renames applied in memory; `run:`
 /// programs noted, not simulated), and diff. Guard conditions apply would
-/// refuse on are surfaced as blockers. One per-operation RO connection
-/// (CLAUDE.md invariant 1). Best-effort snapshot — [`apply`] recomputes
+/// refuse on are surfaced as blockers. One per-operation RO connection.
+/// Best-effort snapshot — [`apply`] recomputes
 /// everything; quote `db_commit` to `expect_commit` to pin it.
 pub fn plan(db: &Path, t: &Template) -> Result<ReconcilePlan, DbError> {
     plan_with(db, t, &ApplyOptions::default())
@@ -808,9 +804,9 @@ fn blast_radius_note(conn: &Connection, step: &MigrationStep) -> Result<Option<S
 
 /// Apply the template under the full guard sequence (module docs): the
 /// pending migration chain (one commit per declarative step with its progress
-/// substamp; `run:` programs through the registry and the public API; a
+/// record; `run:` programs through the registry and the public API; a
 /// version stamp per span), then the final reconcile diff in ONE commit that
-/// also stamps identity (§7).
+/// also stamps identity.
 pub fn apply(
     db: &Path,
     t: &Template,
@@ -1221,7 +1217,7 @@ fn blocked_error(p: &ReconcilePlan) -> DbError {
     ))
 }
 
-/// Parse the `template_migration_step` progress substamp: `from->to:index`.
+/// Parse the `template_migration_step` progress record: `from->to:index`.
 fn parse_substamp(v: Option<&str>) -> Option<(String, String, i64)> {
     let v = v?;
     let (span, idx) = v.rsplit_once(':')?;
@@ -1238,7 +1234,7 @@ fn parse_substamp(v: Option<&str>) -> Option<(String, String, i64)> {
 /// version through its own chain) and unreachable (a non-empty chain that
 /// cannot walk from the stamped version to the target). A template with NO
 /// `migrations:` block bridges any same-name version gap by plain reconcile —
-/// the §4.2 Layer-1 case, made explicit here.
+/// the declarative-reconcile case, made explicit here.
 fn chain_guards(vocab: &DbVocab, t: &Template, opts: &ApplyOptions) -> Result<(), DbError> {
     let Some(dbv) = &vocab.template_version else {
         return Ok(());
@@ -2149,7 +2145,11 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
                 p.skipped.push(format!(
                     "seed membership {}:{} <- {}:{} not created: its {role} seed {}:{} was \
                      skipped",
-                    m.group.class, m.group.entity, m.member.class, m.member.entity, r.class,
+                    m.group.class,
+                    m.group.entity,
+                    m.member.class,
+                    m.member.entity,
+                    r.class,
                     r.entity
                 ));
                 continue;
@@ -2235,7 +2235,7 @@ fn diff(vocab: &DbVocab, chk: &Checked<'_>, recreate: bool) -> Result<ReconcileP
     Ok(p)
 }
 
-/// The removed-locally blocker (purge plan §3.8, V-OD1) for a declared
+/// The removed-locally blocker for a declared
 /// class, parameter or value list missing from the database: when an
 /// object of its folded name was closed by a commit that is not
 /// template-owned (an object delete, a purge, `drop_value_list`), a changed
@@ -2269,8 +2269,8 @@ fn removed_locally(
     true
 }
 
-/// The renamed-away blocker for a declared class missing from the database
-/// (class_param_rename_PLAN §6.2, critique S2): when its folded name is an
+/// The renamed-away blocker for a declared class missing from the database:
+/// when its folded name is an
 /// earlier spelling of a live class (a user renamed it away, e.g. in the
 /// editor), re-creating it would fork the class into a second, empty one
 /// (its parameters with template defaults, its seeds) while the renamed
@@ -2503,7 +2503,7 @@ fn planned_member(m: &ListMember, ordinal: i64) -> PlannedListMember {
     }
 }
 
-/// The template-owned subtree of the presentation document (D8).
+/// The template-owned subtree of the presentation document.
 fn desired_presentation(t: &Template) -> Value {
     let mut sub = Map::new();
     if !t.parameter_groups.is_empty() {
@@ -2667,9 +2667,7 @@ pub(crate) fn value_list_binding_count(conn: &Connection, lid: i64) -> Result<i6
 }
 
 /// Close out a value list, its member rows and the list's and members'
-/// `semantic_annotation` rows under `c` (the single close path shared by the
-/// `drop_value_list` migration step and verb, and in set form by the purge
-/// — invariant #2: one door). Caller checks [`value_list_binding_count`]
+/// `semantic_annotation` rows under `c`. Caller checks [`value_list_binding_count`]
 /// first. Returns the number of member rows closed; exactly one list row
 /// must close.
 pub(crate) fn close_value_list(conn: &Connection, c: i64, lid: i64) -> Result<usize, DbError> {
@@ -2764,8 +2762,7 @@ pub(crate) struct PdRow {
     pub(crate) retain_content: bool,
     pub(crate) version: i64,
     /// The current row's `valid_from_commit`: equal to the writing commit
-    /// when this commit created or already revised it (the D-S5 branch of
-    /// [`revise_pd_row`]).
+    /// when this commit created or already revised it.
     pub(crate) valid_from: i64,
 }
 
@@ -2795,8 +2792,8 @@ pub(crate) fn read_pd_row(conn: &Connection, pd_id: i64) -> Result<PdRow, DbErro
 
 /// The one `parameter_definition` revision site: close the current row, insert
 /// the successor (same id, `version + 1`) from `row`. A row this commit
-/// created or already revised (`valid_from == c`) is edited in place instead
-/// (D-S5: it was never visible; closing it would trip the span CHECK), so
+/// created or already revised (`valid_from == c`) is edited in place instead,
+/// so
 /// two revisions of one definition in one commit bump its version once.
 pub(crate) fn revise_pd_row(conn: &Connection, c: i64, row: &PdRow) -> Result<(), DbError> {
     let description = stored_description(row.description.as_deref());
@@ -2851,8 +2848,7 @@ pub(crate) struct EcRow {
     pub(crate) required: bool,
     pub(crate) display_order: Option<i64>,
     pub(crate) version: i64,
-    /// The current row's `valid_from_commit` (the D-S5 branch of
-    /// [`revise_ec_row`]).
+    /// The current row's `valid_from_commit`.
     pub(crate) valid_from: i64,
 }
 
@@ -2879,7 +2875,7 @@ pub(crate) fn read_ec_row(conn: &Connection, id: i64) -> Result<EcRow, DbError> 
 
 /// The one `entity_class` revision site: close the current row, insert the
 /// same-id successor at `version + 1`; or, for a row this commit created or
-/// already revised (`valid_from == c`), edit it in place (D-S5).
+/// already revised (`valid_from == c`), edit it in place.
 pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<(), DbError> {
     let description = stored_description(row.description.as_deref());
     if row.valid_from == c {
@@ -2918,10 +2914,10 @@ pub(crate) fn revise_ec_row(conn: &Connection, c: i64, row: &EcRow) -> Result<()
     Ok(())
 }
 
-/// The one `scenario` create site (structural_write_api_plan §4.2): the G8
+/// The one `scenario` create site: the G8
 /// verb `set_scenario_alternatives`' scenario auto-create, the structural
 /// `CreateScenario`/`SetScenarioAlternatives` appliers all insert here, so
-/// `scenario` keeps a single writer (invariant 2).
+/// `scenario` keeps a single writer.
 pub(crate) fn insert_scenario_row(
     conn: &Connection,
     c: i64,
@@ -2937,7 +2933,7 @@ pub(crate) fn insert_scenario_row(
 
 /// Versioned scenario rename (close current row + insert same-id successor,
 /// version+1) — mirrors [`revise_list_row`]. A row this commit created or
-/// already revised (`valid_from == c`) is edited in place (D-S5).
+/// already revised (`valid_from == c`) is edited in place.
 pub(crate) fn revise_scenario_row(
     conn: &Connection,
     c: i64,
@@ -2962,7 +2958,7 @@ pub(crate) fn revise_scenario_row(
 /// Versioned alternative rename (close + same-id successor, version+1) — mirrors
 /// [`revise_list_row`]. The insert site for a NEW alternative stays
 /// `api::insert_alternative_row`. A row this commit created or already
-/// revised (`valid_from == c`) is edited in place (D-S5).
+/// revised (`valid_from == c`) is edited in place.
 pub(crate) fn revise_alternative_row(
     conn: &Connection,
     c: i64,
@@ -3017,11 +3013,11 @@ fn revise_identity_row(
     )?;
     Ok(())
 }
-/// The one `membership` INSERT site (structural_write_api_plan §4.2): base
-/// (`alternative_id = None` ⇒ stored NULL, NEVER 0 — critique M4) and
+/// The one `membership` INSERT site: base
+/// and
 /// alternative-scoped rows both insert here. The loader's seed base row
 /// (`Action::CreateSeedMembership`, via [`insert_base_membership_row`]) and the
-/// structural `SetMembership` applier share this one site (invariant 2, m1).
+/// structural `SetMembership` applier share this one site.
 pub(crate) fn insert_membership_row(
     conn: &Connection,
     c: i64,
@@ -3295,10 +3291,9 @@ pub(crate) fn insert_entity_row(
     )?)
 }
 
-/// The one `entity` revision site (`RenameEntity`, entity_rename_PLAN §3
-/// step 6): close the current row and insert the same-id successor at
+/// The one `entity` revision site: close the current row and insert the same-id successor at
 /// `version + 1`; or, for a row this commit created or already revised
-/// (`valid_from == c`), edit it in place (D-S5). The close addresses the
+/// (`valid_from == c`), edit it in place. The close addresses the
 /// row by the `rowid` its fenced read returned, guarded by its id, span and
 /// current-row filter; never through the name index (an `UPDATE` cannot be
 /// fenced). P0 spike (10^6 entities, 10^5 prior revisions): ~2.6 ms per
@@ -3307,7 +3302,7 @@ pub(crate) fn insert_entity_row(
 /// (`the_rename_close_by_rowid_reads_few_row_groups`; keep its copy of the
 /// statement in step).
 /// Every entity revision goes through here, or through the batch writes of
-/// `entity_rename_set::apply_rename_run` (invariant 2).
+/// `entity_rename_set::apply_rename_run`.
 pub(crate) fn revise_entity_row(
     conn: &Connection,
     c: i64,
@@ -3868,7 +3863,7 @@ fn hint_class_id(conn: &Connection, step: &str, name: &str) -> Result<i64, DbErr
         .ok_or_else(|| DbError::Api(format!("{step}: class {name:?} not found")))
 }
 
-/// Per-step side reports (D14). `skips` withhold convergence exactly like
+/// Per-step side reports. `skips` withhold convergence exactly like
 /// reconcile skips; `notes` are informational (cascade counts, no-op notes).
 #[derive(Default)]
 pub(crate) struct StepEffects {
@@ -3893,9 +3888,9 @@ impl StepEffects {
     }
 }
 
-/// Execute one explicit drop (D14) through the ONE object-delete cascade
+/// Execute one explicit drop through the ONE object-delete cascade
 /// (`object_delete.rs` — same preparation, resolution, closure walk, and
-/// guarded close-outs as `api::delete_objects`; CLAUDE.md invariant #2).
+/// guarded close-outs as `api::delete_objects`).
 /// `NotFound` — absent, already closed, or a stale name — is a no-op note:
 /// the close-out's intent is already satisfied (the chain's steps stay
 /// re-runnable over partially-applied state, the FlexTool house style).

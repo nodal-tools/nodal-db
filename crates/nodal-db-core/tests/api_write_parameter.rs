@@ -186,8 +186,8 @@ fn scalar_new_class_auto_creates_and_reads_back() {
         .inspect(|w| assert_eq!(w.kind, WarningKind::AutoCreated))
         .map(|w| (w.object_type.clone(), w.name.clone()))
         .collect();
-    assert!(created.contains(&("entity_class".into(), "node".into())));
-    assert!(created.contains(&("parameter_definition".into(), "demand".into())));
+    assert!(created.contains(&("class".into(), "node".into())));
+    assert!(created.contains(&("parameter".into(), "demand".into())));
     assert!(created.contains(&("alternative".into(), "scen_a".into())));
     assert!(created.contains(&("entity".into(), "node_1".into())));
     assert_eq!(created.len(), 4, "exactly the four referents auto-created");

@@ -341,7 +341,8 @@ fn run(db: &Path, method: &str, t: &[(i64, String)]) -> Times {
                 params![c],
             )
             .unwrap();
-            conn.execute_batch("DROP TABLE ren; DROP TABLE rid").unwrap();
+            conn.execute_batch("DROP TABLE ren; DROP TABLE rid")
+                .unwrap();
             tm.insert += s.elapsed();
         }
         _ => unreachable!(),
@@ -380,11 +381,9 @@ fn ms(d: Duration) -> f64 {
 fn lookups(db: &Path) {
     let conn = open(db);
     let node: i64 = conn
-        .query_row(
-            "SELECT id FROM entity_class WHERE name = 'unit'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT id FROM entity_class WHERE name = 'unit'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     let pair: i64 = conn
         .query_row(
@@ -394,7 +393,9 @@ fn lookups(db: &Path) {
         )
         .unwrap();
     for k in [1usize, 10, 30, 100, 300, 1000] {
-        let names: Vec<String> = (0..k).map(|i| format!("u{}", i * 97 % N_UNIT as usize)).collect();
+        let names: Vec<String> = (0..k)
+            .map(|i| format!("u{}", i * 97 % N_UNIT as usize))
+            .collect();
         let s = Instant::now();
         let mut ids = Vec::new();
         for n in &names {
@@ -461,7 +462,10 @@ fn lookups(db: &Path) {
             |r| r.get(0),
         )
         .unwrap();
-    println!("whole-class tuple load: {:8.2} ms ({all} tuples)", ms(s.elapsed()));
+    println!(
+        "whole-class tuple load: {:8.2} ms ({all} tuples)",
+        ms(s.elapsed())
+    );
 }
 
 #[test]
@@ -494,7 +498,10 @@ fn entity_rename_close_forms() {
                 if method == "rowid_guarded" && only.is_none() {
                     continue;
                 }
-                if only.as_deref().is_some_and(|o| !o.split(',').any(|m| m == method)) {
+                if only
+                    .as_deref()
+                    .is_some_and(|o| !o.split(',').any(|m| m == method))
+                {
                     continue;
                 }
                 let copy = dir.path().join("run.duckdb");

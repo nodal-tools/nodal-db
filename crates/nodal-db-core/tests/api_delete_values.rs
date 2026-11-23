@@ -15,7 +15,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, delete_values, read_parameter, write_parameter, DeleteKey, Segment,
+    commit, delete_values, read_parameter, write_parameter, ChangeSet, DeleteKey, Segment,
 };
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{WarningKind, WriteOptions};
@@ -407,8 +407,8 @@ fn unknown_referent_warns_with_level_and_skips() {
     .expect("write");
 
     for (key, level) in [
-        (dk("nope", "demand", "Base", "node_1"), "entity_class"),
-        (dk("node", "nope", "Base", "node_1"), "parameter_definition"),
+        (dk("nope", "demand", "Base", "node_1"), "class"),
+        (dk("node", "nope", "Base", "node_1"), "parameter"),
         (dk("node", "demand", "nope", "node_1"), "alternative"),
         (dk("node", "demand", "Base", "nope"), "entity"),
     ] {
@@ -545,12 +545,12 @@ fn combined_write_and_delete_one_commit() {
     .expect("seed");
     let before = count(&db, "SELECT count(*) FROM commit");
 
-    let r = commit_changes(
+    let r = commit(
         &db,
-        vec![seg("node", "demand", "Base", scalar_batch("node_2", 9.0))], // write
-        vec![],                                                           // no structural
-        vec![dk("node", "demand", "Base", "node_1")],                     // delete
-        vec![],                                                           // no object deletes
+        ChangeSet { segments: vec![seg("node", "demand", "Base", scalar_batch("node_2", 9.0))], structural: // write
+        vec![], deletes: // no structural
+        vec![dk("node", "demand", "Base", "node_1")], object_deletes: // delete
+        vec![], ..ChangeSet::default() }, // no object deletes
         "t",
         "atomic save",
         o(),
@@ -604,24 +604,25 @@ fn combined_error_rolls_back_whole_invocation() {
     .expect("seed");
     let commits_before = count(&db, "SELECT count(*) FROM commit");
 
-    let err = commit_changes(
+    let err = commit(
         &db,
-        vec![
-            // seg 1 overwrites node_1/demand → CLOSES version 1, writes version 2.
-            seg("node", "demand", "Base", scalar_batch("node_1", 2.0)),
-            // seg 2 fails at canonicalization (MissingDomain) mid-transaction.
-            seg(
-                "node",
-                "level_param",
-                "Base",
-                undomained_label_batch("node_1"),
-            ),
-        ],
-        vec![], // no structural
-        // queued delete, never reached (another key: a value written and
-        // deleted in one call is rejected up front, D9)
-        vec![dk("node", "demand", "Base", "node_2")],
-        vec![], // no object deletes
+        ChangeSet {
+            segments: vec![
+                // seg 1 overwrites node_1/demand → CLOSES version 1, writes version 2.
+                seg("node", "demand", "Base", scalar_batch("node_1", 2.0)),
+                // seg 2 fails at canonicalization (MissingDomain) mid-transaction.
+                seg(
+                    "node",
+                    "level_param",
+                    "Base",
+                    undomained_label_batch("node_1"),
+                ),
+            ],
+            // queued delete, never reached (another key: a value written and
+            // deleted in one call is rejected up front)
+            deletes: vec![dk("node", "demand", "Base", "node_2")],
+            ..ChangeSet::default()
+        },
         "t",
         "must roll back",
         o(),

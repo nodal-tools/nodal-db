@@ -1,9 +1,8 @@
-//! Physical repack (Sense A) — reclaim dead *blocks* without dropping any
-//! logical content (`specs/compaction_DESIGN.md`, including its overriding
-//! "Critique resolutions" B1/B2/B3/R1/R2/R3).
+//! Physical repack — reclaim dead *blocks* without dropping any logical
+//! content.
 //!
 //! DuckDB's single-file block manager never returns the dead blocks of many
-//! prior commit-checkpoints to a smaller file (§0/§1). There is no in-place
+//! prior commit-checkpoints to a smaller file. There is no in-place
 //! shrink, so [`compact`] rebuilds the whole file into a fresh, densely-packed
 //! sibling and atomically renames it over the original:
 //!
@@ -16,19 +15,19 @@
 //! the query level. The catalog (75 views, 38 macros, 18 sequences, indexes) is
 //! reconstructed by `init_schema`, never copied — only base-table data crosses.
 //!
-//! ## Clustering (erasure_compaction_plan §4.1, D-E4 — always-on)
+//! ## Clustering (always on)
 //! The rebuild copy ORDER-BYs each table per `rebuild::CLUSTER_KEYS`: current-first on
-//! versioned tables (closed rows grouped by close commit, D-E4 amended
-//! 2026-10-24), key/natural order elsewhere. Content is untouched (the
+//! versioned tables (closed rows grouped by close commit), key/natural order
+//! elsewhere. Content is untouched (the
 //! order-independent self-check still covers every row); only physical layout
 //! changes — see the `CLUSTER_KEYS` docs for the verified mechanism.
 //!
-//! ## Size guard (`specs/compaction_growth_FINDINGS.md` §5)
+//! ## Size guard
 //! The rebuilt temp's on-disk size (after its `CHECKPOINT` and close, so its
 //! WAL is empty) is compared with the source's (the file plus its WAL, if
 //! any, measured the same way) before the swap ([`keeps_original`]):
-//! - the **growth** and **no-baseline** triggers ([`compact_if_due`] /
-//!   [`compact_if_needed`]) keep the original when the rebuild is **not
+//! - the **growth** and **no-baseline** triggers ([`compact_if_due`])
+//!   keep the original when the rebuild is **not
 //!   smaller**;
 //! - the **commit-count backstop** ([`CompactionTrigger::Commits`]) keeps it
 //!   only when the rebuild is strictly **larger**: an equal-size rebuild
@@ -45,9 +44,9 @@
 //!
 //! The kept-original path is the self-check-abort path: the repack never
 //! writes the original (only a leftover WAL is folded into it first, see
-//! "Crash safety"), so crash safety and invariant 3 are unchanged.
+//! "Crash safety"), so crash safety and append-only history are unchanged.
 //!
-//! ## Crash safety (§3)
+//! ## Crash safety
 //! The original is only ever *read* (attached RO) until the final `rename`,
 //! with one sanctioned exception at the very start: a leftover `<db>.wal`
 //! (a writer crashed after committing, before its checkpoint).
@@ -57,8 +56,7 @@
 //! entry, before the rename flips it). POSIX `rename` over an existing path is
 //! atomic — a reader sees the old inode or the new one, never a splice.
 //!
-//! **A leftover WAL is folded first, never deleted (R2 crash window, option
-//! (b), owner decision 2026-11-03).** Before anything is measured or copied,
+//! **A leftover WAL is folded first, never deleted.** Before anything is measured or copied,
 //! `fold_stale_wal` opens the original read-write (the core's open path),
 //! runs `CHECKPOINT` and closes: DuckDB replays the WAL and folds it into
 //! the file by its own crash-safe recovery protocol, and removes it. So
@@ -81,7 +79,7 @@
 //! original and WAL untouched) rather than orphan it. It also aborts if the
 //! rebuilt temp's own WAL is not empty.
 //!
-//! **Windows single-writer assumption (§3):** `rename`-over-an-open-file fails
+//! **Windows single-writer assumption:** `rename`-over-an-open-file fails
 //! on Windows while any handle to the target is open. Both connections (the temp
 //! and the RO attach of the source) are closed before the rename, and the whole
 //! op holds the exclusive per-path lock + the source's file lock, so within the
@@ -89,8 +87,8 @@
 //! violation surfaces as an error and leaves the original intact — a failed
 //! compaction is never a lost DB.
 //!
-//! ## Lock discipline (invariants #1/#2, §4)
-//! Compaction is an exclusive whole-DB rewrite: it holds [`conn::path_lock`] for
+//! ## Lock discipline
+//! Compaction is an exclusive whole-DB rewrite: it holds the per-path lock for
 //! the entire op (init, copy, self-check, swap) and holds the source's file lock
 //! via the RO `ATTACH` so no concurrent commit races the copy. When a WAL is
 //! folded, the fold's read-write open briefly takes the source's exclusive
@@ -100,7 +98,7 @@
 //! surfaces as [`DbError::Busy`]. It runs as a distinct locked phase (never
 //! inside a write transaction) so a compaction failure can never roll back a
 //! durable commit. It moves already-canonicalized bytes verbatim — it computes
-//! no value encodings, hashes or axis dedup (invariant #2).
+//! no value encodings, hashes or axis dedup.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -117,7 +115,7 @@ use crate::rebuild::{
 use crate::schema_init::init_schema;
 
 /// Report of one repack. `swapped == false` marks either a gate no-op
-/// ([`compact_if_needed`] / [`compact_if_due`] below their thresholds:
+/// ([`compact_if_due`] below their thresholds:
 /// `trigger == None`, `rows_per_table` empty) or a kept original
 /// (`kept_original == true`: a rebuild ran and was discarded). In both cases
 /// the file is unchanged and `bytes_after` / `blocks_after` mirror the
@@ -133,7 +131,7 @@ pub struct CompactionReport {
     /// Copied row counts (live + dead) per base table — makes the self-check
     /// inspectable, not just pass/fail.
     pub rows_per_table: Vec<(String, u64)>,
-    /// `false` ⇒ [`compact_if_needed`] / [`compact_if_due`] skipped under the
+    /// `false` ⇒ [`compact_if_due`] skipped under the
     /// threshold (or [`CompactionBackoff`] skipped it after a recent failure).
     pub swapped: bool,
     /// Why the repack ran; `None` when it did not (`swapped == false`).
@@ -173,14 +171,13 @@ pub enum CompactionTrigger {
     Commits,
 }
 
-/// The commit-count backstop's `N` (save_path_open_reduction plan §5, D5):
+/// The commit-count backstop's `N`:
 /// how many commits after the last compaction [`compact_if_due`] repacks
 /// even when the byte gate has not tripped.
 ///
 /// **Why a commit count.** Every RW load→checkpoint cycle adds a roughly
-/// constant cost to every later open of the file (engine-FK catalog growth,
-/// `commit_fixed_cost_FINDINGS.md`: ≈0.85-0.9 ms per commit per open on the
-/// 0.4 schema, ≈1.1-1.25 ms on the 0.6 schema with its extra foreign keys to
+/// constant cost to every later open of the file (engine-FK catalog growth:
+/// measured ≈1.1-1.25 ms per commit per open, with the foreign keys to
 /// `commit`), and
 /// that growth barely moves the byte size, so the 3× byte gate almost never
 /// trips on it. A repack resets it. The backstop works around a DuckDB
@@ -188,7 +185,7 @@ pub enum CompactionTrigger {
 /// revisit it when that is fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitBackstop {
-    /// Byte gate only (the pre-backstop behavior of [`compact_if_needed`]).
+    /// Byte gate only.
     Off,
     /// A fixed `N`; `Fixed(0)` is the same as [`CommitBackstop::Off`].
     Fixed(u64),
@@ -226,10 +223,9 @@ impl Default for CompactionPolicy {
     }
 }
 
-/// Floor of the size-scaled commit backstop (owner, 2026-11-22: the middle
-/// setting, fewer repacks than a pure open-time budget would need). Every
-/// commit+checkpoint cycle adds ≈1.1–1.25 ms to every later open on the 0.6
-/// schema, independent of the file size (measured on compacted 20 MiB and
+/// Floor of the size-scaled commit backstop (a middle setting: fewer repacks
+/// than a pure open-time budget would need). Every commit+checkpoint cycle
+/// adds ≈1.1–1.25 ms to every later open, independent of the file size (measured on compacted 20 MiB and
 /// 96 MiB files, DuckDB 2.0.0: +51 ms after 40 cycles, +63 after 50, +82
 /// after 75, +108 after 100; faster than linearly beyond). At 60 an open is
 /// at most ≈+70 ms over its compacted time.
@@ -272,7 +268,7 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// by `schema/build.py`'s `SCHEMA_VERSION`). Duplicated here only to gate a
 /// source read *cheaply* before a temp is built (R2); it is cross-checked
 /// against the freshly-init'd temp's own `metadata` row (see
-/// [`assert_temp_schema_version`]) so it can never silently drift from the DDL.
+/// `assert_temp_schema_version`) so it can never silently drift from the DDL.
 ///
 /// **Bump rule:** bump iff the COPY CONTRACT changes — the base-table set or a
 /// table's insertable column shape (what the named-column `INSERT..SELECT`
@@ -281,7 +277,7 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// copied. A view or macro change bumps the READ-SURFACE revision instead
 /// (`schema/130_read_surface.sql`; the DDL hash test forces it), which is
 /// what brings it to existing files: a write refreshes an older file's
-/// surface (`read_surface` module, `docs/dev/engine_rules.md` §9).
+/// surface (see the `read_surface` module).
 /// Precedents: the DB-identity metadata row (20fe969) added bootstrap
 /// data — no bump; the `erasure_marker` base table (0.3) changed the table set
 /// — bump; the `array_id` surrogate key on `value_array` / `value_array_hist`
@@ -292,8 +288,7 @@ pub fn failure_backoff_commits(n: u64) -> u64 {
 /// version) — bump; the pre-0.1.0 format freeze (7: plain integer versions
 /// from here on, `version INTEGER`, time-pattern clauses, the `nodal:` core
 /// namespace and the new core keys, wider CHECK lists) — bump.
-/// Consequence of a bump (erasure_compaction_plan §9 step
-/// 1): existing files refuse writes and compaction until re-created
+/// Consequence of a bump: existing files refuse writes and compaction until re-created
 /// (init + import) — through 0.x, re-creating IS the migration story.
 ///
 /// **Shape:** a plain integer that rises by one per format change (stored
@@ -319,7 +314,7 @@ pub fn is_current_schema_version(found: &str) -> bool {
     found == SCHEMA_VERSION.to_string()
 }
 
-/// Default byte-growth watermark for [`compact_if_needed`]: repack once the DB
+/// Default byte-growth watermark of [`CompactionPolicy`]: repack once the DB
 /// file has grown to at least this multiple of its size right after the last
 /// successful compaction (3.0 ⇒ compact when the file has tripled).
 ///
@@ -347,53 +342,17 @@ pub fn compact(db_path: &Path) -> Result<CompactionReport, DbError> {
     compact_locked(db_path, CompactionTrigger::Requested)
 }
 
-/// [`compact`] gated by a cheap byte-growth watermark (R1 CALIBRATION FIX). The
-/// gate is pure filesystem — the DB file's current byte size vs the baseline
-/// (its size right after the last successful compaction, persisted in the
-/// [`baseline_path`] sidecar) — with **NO DB open**:
-///
-/// - no baseline (missing / zero / unparseable) ⇒ compact once to establish it;
-/// - baseline `b` present ⇒ compact iff `current_bytes >= growth_factor * b`,
-///   else no-op with `swapped == false`.
-///
-/// Only when it decides to compact does it open the source (schema_version gate,
-/// repack, atomic swap). So the common no-op commit is two `stat`s plus a
-/// tiny file read. Pass [`DEFAULT_GROWTH_FACTOR`] for the documented default.
-/// The sidecar is advisory: a stale/missing/torn baseline costs at most one
-/// extra or skipped compaction and self-corrects on the next run.
-///
-/// The byte gate alone, kept for compatibility: it does not see the
-/// per-commit open-cost growth. The save path, the CLI's `--if-needed` and
-/// the skin's `compact(if_needed=True)` use [`compact_if_due`].
-pub fn compact_if_needed(db_path: &Path, growth_factor: f64) -> Result<CompactionReport, DbError> {
-    // Cheap gate FIRST — no lock, no DB open.
-    let current = fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-    let trigger = match read_baseline(db_path) {
-        // No baseline (establish it on the first run), or a degenerate one.
-        None | Some(Baseline { bytes: 0, .. }) => Some(CompactionTrigger::NoBaseline),
-        Some(b) if current >= (b.bytes as f64 * growth_factor) as u64 => {
-            Some(CompactionTrigger::Growth)
-        }
-        Some(_) => None,
-    };
-    match trigger {
-        Some(t) => compact_locked(db_path, t),
-        None => Ok(no_op_report(current)),
-    }
-}
-
-/// The save-path gate (save_path_open_reduction plan §5.2): [`compact`] when
+/// The save-path gate: [`compact`] when
 /// due under `policy`, else a no-op report (`swapped == false`). In order:
 ///
 /// 1. no usable baseline (missing / torn / zero bytes) ⇒ compact;
-/// 2. the byte gate (`current >= growth_factor × baseline bytes`, as
-///    [`compact_if_needed`]) ⇒ compact;
+/// 2. the byte gate (`current >= growth_factor × baseline bytes`) ⇒ compact;
 /// 3. the commit backstop (`policy.max_commits`, threshold `N`):
 ///    - an old-format sidecar (bytes only, written by an older build) is
 ///      **adopted**: rewritten with the same bytes and `commit = head`, no
-///      compaction (plan D6, C8 iii);
+///      compaction;
 ///    - `head < baseline commit` ⇒ the baseline belongs to another file
-///      (restored or replaced under the sidecar) ⇒ compact (plan C8 i);
+///      (restored or replaced under the sidecar) ⇒ compact;
 ///    - `head − baseline commit >= N` ⇒ compact.
 ///
 /// `head`: the caller's knowledge of the head commit. The editor passes the
@@ -538,7 +497,7 @@ fn no_op_report(current: u64) -> CompactionReport {
 /// The full locked repack: exclusive lock → orphan sweep → source probe (R2
 /// schema gate + block metrics) → temp init + copy + self-check → atomic swap →
 /// baseline sidecar refresh. Shared by [`compact`] and the fire paths of
-/// [`compact_if_needed`] / [`compact_if_due`].
+/// [`compact_if_due`].
 fn compact_locked(db_path: &Path, trigger: CompactionTrigger) -> Result<CompactionReport, DbError> {
     // A non-UTF-8 path is refused before anything is named after it (L2).
     utf8_path(db_path)?;
@@ -1043,13 +1002,13 @@ fn temp_prefix(db_path: &Path) -> Option<String> {
 }
 
 /// Delete any abandoned `<db-filename>.compact.*.tmp` (and matching `*.wal`)
-/// siblings from a prior crashed run (§3 orphan cleanup). Best-effort: called
+/// siblings from a prior crashed run. Best-effort: called
 /// under the per-path lock, so no live temp of ours is ever swept.
 ///
-/// The baseline sidecar (`<db-filename>.compaction-baseline`, R1) can never
+/// The baseline sidecar (`<db-filename>.compaction-baseline`) can never
 /// match: its name begins `…compaction-baseline`, so `starts_with(prefix)` —
 /// where `prefix` ends in the dot of `…compact.` — is false. The explicit
-/// `compaction-baseline` exclusion below is belt-and-braces.
+/// `compaction-baseline` exclusion below is a second guard.
 pub fn sweep_orphan_temps(db_path: &Path) {
     let dir = parent_dir(db_path);
     let Some(prefix) = temp_prefix(db_path) else {
@@ -1070,11 +1029,11 @@ pub fn sweep_orphan_temps(db_path: &Path) {
     }
 }
 
-/// The compaction baseline sidecar for `db_path` (R1 CALIBRATION FIX; plan
-/// §5.2): `<db-filename>.compaction-baseline`, a sibling recording the DB
+/// The compaction baseline sidecar for `db_path`:
+/// `<db-filename>.compaction-baseline`, a sibling recording the DB
 /// file's byte size and its head commit right after the last successful
 /// repack. NOT stored in the DB — a `metadata` row would need the write
-/// pipeline (invariant #2), would mutate the `commit` log (breaking the
+/// pipeline, would mutate the `commit` log (breaking the
 /// verbatim-commit-log property the editor's staleness cookie relies on),
 /// and would itself grow the file.
 ///

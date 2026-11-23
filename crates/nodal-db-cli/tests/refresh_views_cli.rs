@@ -54,6 +54,18 @@ fn check_code(db: &Path) -> (i32, String) {
 
 #[test]
 fn check_exit_codes_and_refresh() {
+    // An error (a missing file) is 1, never a status code.
+    let missing = bin()
+        .args([
+            "maintain",
+            "refresh-views",
+            "--check",
+            "/nonexistent/x.duckdb",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("a.duckdb");
     init(&db);
@@ -66,7 +78,7 @@ fn check_exit_codes_and_refresh() {
     );
 
     set_marker(&db, v.contract_major, v.revision + 1, "00000000000000aa");
-    assert_eq!(check_code(&db).0, 2, "newer");
+    assert_eq!(check_code(&db).0, 4, "newer");
     let out = bin()
         .args(["maintain", "refresh-views"])
         .arg(&db)
@@ -74,14 +86,14 @@ fn check_exit_codes_and_refresh() {
         .unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("left alone"));
-    assert_eq!(check_code(&db).0, 2, "a newer file is left alone");
+    assert_eq!(check_code(&db).0, 4, "a newer file is left alone");
 
     let c = Connection::open(&db).unwrap();
     c.execute_batch("DROP MACRO TABLE nodal_read_surface")
         .unwrap();
     c.close().unwrap();
     let (code, out) = check_code(&db);
-    assert_eq!(code, 1, "{out}");
+    assert_eq!(code, 3, "stale: {out}");
     assert!(
         out.contains("missing") && out.contains("predates versioning"),
         "{out}"
@@ -121,7 +133,7 @@ fn a_blocked_refresh_fails_loudly() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("refresh-views failed"), "{err}");
-    assert_eq!(check_code(&db).0, 1, "nothing changed");
+    assert_eq!(check_code(&db).0, 3, "nothing changed: still stale");
 }
 
 /// The state of the file's read surface after a (possibly killed) refresh:
@@ -192,4 +204,28 @@ fn a_killed_refresh_leaves_the_old_or_the_new_surface() {
     // informative: both outcomes are valid; the run is useful when some
     // kills landed mid-refresh
     eprintln!("killed refreshes: {old} left the old surface, {new} the new one");
+}
+
+/// A database another process holds open read-write is busy: every command
+/// exits 75 (retry later), not 1, so a script can tell it from an error.
+#[test]
+fn a_locked_database_exits_75() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("locked.duckdb");
+    init(&db);
+    // This test process holds DuckDB's file lock; the CLI child cannot open.
+    let holder = Connection::open(&db).unwrap();
+    for args in [
+        &["maintain", "refresh-views", "--force"][..],
+        &["purge", "--scope", "values", "--user", "t"],
+    ] {
+        let out = bin().args(args).arg(&db).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(75),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    drop(holder);
 }

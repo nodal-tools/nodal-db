@@ -12,8 +12,8 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
 use nodal_db_core::api::{
-    commit_changes, commit_structural, delete_objects, delete_values, head_commit, ingest_segments,
-    write_parameter, DeleteKey, Segment,
+    commit, commit_structural, delete_objects, delete_values, head_commit, ingest_segments,
+    write_parameter, ChangeSet, DeleteKey, Segment,
 };
 use nodal_db_core::compaction::compact;
 use nodal_db_core::conn::{with_write_txn_retrying_opts, TxnOptions};
@@ -245,18 +245,18 @@ fn every_wrapper_honors_expect_commit() {
         (
             "commit_changes",
             Box::new(|db: &Path, o| {
-                commit_changes(
+                commit(
                     db,
-                    vec![Segment {
-                        class: "node".into(),
-                        parameter: "demand".into(),
-                        alternative: "Base".into(),
-                        batches: vec![scalar_batch("n1", 9.0)],
-                        domains: vec![],
-                    }],
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
+                    ChangeSet {
+                        segments: vec![Segment {
+                            class: "node".into(),
+                            parameter: "demand".into(),
+                            alternative: "Base".into(),
+                            batches: vec![scalar_batch("n1", 9.0)],
+                            domains: vec![],
+                        }],
+                        ..ChangeSet::default()
+                    },
                     "tester",
                     "",
                     o,

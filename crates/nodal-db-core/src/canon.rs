@@ -1,7 +1,7 @@
-//! The canonicalization pipeline (VMP Part 3) — the single point where tier /
-//! axis-form drift would originate (CLAUDE.md invariant 2). Pure and
-//! deterministic over Arrow arrays (`duckdb::arrow`, no DB connection). The four
-//! normative steps, in order:
+//! The canonicalization pipeline: the single place where tier and axis-form
+//! decisions are made, so no second writer can drift from them. Pure and
+//! deterministic over Arrow arrays (`duckdb::arrow`, no DB connection). The
+//! four normative steps, in order:
 //!   1. NULL elimination (NULL ≡ absent): drop index tuples whose value is NULL.
 //!   2. Axis derivation from data (parametric-first): per dimension, derive the
 //!      axis from the distinct present coords — regular progressions MUST
@@ -53,7 +53,7 @@ pub fn timestamp_in_range(us: i64) -> bool {
     (TS_MIN_US..=TS_MAX_US).contains(&us)
 }
 
-/// A caller-supplied ordered domain for one label dimension (VMP Part 3 step 2).
+/// A caller-supplied ordered domain for one label dimension.
 /// `labels[i]` has ordinal `i`; present labels take their ordinal from this list.
 #[derive(Clone, Debug)]
 pub struct LabelDomain {
@@ -72,12 +72,12 @@ pub struct CanonicalValue {
 }
 
 impl CanonicalValue {
-    /// Content hash of each derived axis (spec §2), declared order.
+    /// Content hash of each derived axis, declared order.
     pub fn axis_hashes(&self) -> Result<Vec<u64>, EncodeError> {
         self.axes.iter().map(hash_axis).collect()
     }
 
-    /// The canonical value encoding for a given key (spec §9, OPEN-7).
+    /// The canonical value encoding for a given key.
     pub fn encode(&self, key: &ValueKey) -> Result<Vec<u8>, EncodeError> {
         let hashes = self.axis_hashes()?;
         match &self.shape {
@@ -730,7 +730,7 @@ fn read_coord(
     }
 }
 
-/// Derive a datetime axis body, parametric-first (VMP Part 3 step 2, spec §7.1).
+/// Derive a datetime axis body, parametric-first.
 fn derive_datetime_axis(coords_sorted: &[i64]) -> AxisBody {
     match datetime_candidate_step(coords_sorted) {
         Some(step) => AxisBody::DatetimeParametric {
@@ -802,7 +802,7 @@ fn datetime_candidate_step(coords: &[i64]) -> Option<Duration> {
     None
 }
 
-/// Derive an integer axis body, parametric-first (spec §7.1.2.3).
+/// Derive an integer axis body, parametric-first.
 fn derive_integer_axis(coords_sorted: &[i64]) -> AxisBody {
     match integer_regular_step(coords_sorted) {
         Some(step) => AxisBody::IntegerParametric {

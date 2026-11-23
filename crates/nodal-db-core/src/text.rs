@@ -1,28 +1,25 @@
-//! Unicode text normalization: the one NFC definition of the core (plan T5,
-//! `specs/Done/unicode_text_rule_PLAN.md` §3).
+//! Unicode text normalization: the one NFC definition of the core.
 //!
 //! Every component of the core that normalizes text calls [`nfc`]; none
 //! normalizes with its own code or tables. This mirrors
 //! `encoding::canonical_value_f64` for floats: one definition shared by
-//! storage and hash, so the two cannot drift (`CLAUDE.md` invariant 2).
-//! The tables are those of the exactly pinned `unicode-normalization`
-//! crate, Unicode [`UNICODE_VERSION`] (spec §3.4.1.1; bumping it is a
-//! rehash-class change).
+//! storage and hash, so the two cannot drift. The tables are those of the
+//! exactly pinned `unicode-normalization` crate, Unicode [`UNICODE_VERSION`]
+//! (bumping it is a rehash-class change).
 //!
-//! **The text rule** (plan T1-T3, owner decision 2026-10-26): identifiers
-//! are NFC, data text is bytes. Names (entity, class, parameter,
-//! alternative, scenario, value list, unit, class set) and index labels
-//! (map keys, label domains) are normalized to NFC at the writer boundary,
-//! before any comparison, lookup or store; NFC-equal spellings are one
-//! identifier and read back in NFC. String values, list members,
+//! **The text rule:** identifiers are NFC, data text is bytes. Names (entity,
+//! class, parameter, alternative, scenario, value list, unit, class set) and
+//! index labels (map keys, label domains) are normalized to NFC at the writer
+//! boundary, before any comparison, lookup or store; NFC-equal spellings are
+//! one identifier and read back in NFC. String values, list members,
 //! descriptions and commit messages are stored and compared exactly as
 //! written. Normalizing is reported, not silent
 //! ([`WarningKind::TextNormalized`]).
 //!
 //! The conformance oracle (`conformance/oracle/`) is the one sanctioned
-//! exception: it is a second, independent implementation and must never
-//! call this code (`tests/python_oracle.rs` guards that it does not import
-//! the Python skin).
+//! exception: it is a second, independent implementation and must never call
+//! this code (`tests/python_oracle.rs` guards that it does not import the
+//! Python skin).
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -31,8 +28,7 @@ use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
 
 use crate::types::{FoldedSpelling, Warning, WarningKind};
 
-/// The Unicode version of the normalization tables (spec §3.4.1.1 pins
-/// 16.0.0; `tests/text_nfc.rs` fails when the crate pin moves it).
+/// The Unicode version of the normalization tables (pinned to 16.0.0; `tests/text_nfc.rs` fails when the crate pin moves it).
 pub const UNICODE_VERSION: (u8, u8, u8) = unicode_normalization::UNICODE_VERSION;
 
 /// `s` in Unicode Normalization Form C. Borrowed exactly when `s` is
@@ -54,7 +50,7 @@ pub fn nfc(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// The stored form of a description (class_param_rename_PLAN OD3/S6): a
+/// The stored form of a description: a
 /// stored description is never the empty string, so `Some("")` means "no
 /// description" (NULL). Exactly the empty string; no trimming. Every
 /// writer of a description column maps through this, and the template IR
@@ -209,7 +205,7 @@ impl NameFolds {
                         stored: first.stored.clone(),
                         spellings: f.list.clone(),
                     },
-                    object_type: (*referent).to_string(),
+                    object_type: crate::types::object_type_tag(referent).to_string(),
                     name: name.to_string(),
                     id: first.id,
                 }

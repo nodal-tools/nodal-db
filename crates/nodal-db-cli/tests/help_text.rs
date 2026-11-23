@@ -50,3 +50,31 @@ fn import_help_names_the_format_page_and_describes_force_replace() {
     assert!(text.contains("content-less stub"), "{text}");
     assert!(!text.contains("no-op"), "{text}");
 }
+
+#[test]
+fn top_level_help_is_release_ready() {
+    let text = help(&["--help"]);
+    assert!(
+        text.contains("nodal-db: create, import into and maintain nodal-db database files"),
+        "{text}"
+    );
+    assert!(!text.contains("migrate"), "{text}");
+    assert!(text.contains("75"), "exit codes documented: {text}");
+    for bad in ["v1 core", "belt", "init-with-template", "Template IR"] {
+        assert!(!text.contains(bad), "{bad:?} in:\n{text}");
+    }
+    // Every subcommand's summary is one line.
+    let commands = text
+        .split("Commands:")
+        .nth(1)
+        .unwrap()
+        .split("Options:")
+        .next()
+        .unwrap();
+    for line in commands.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            line.starts_with("  ") && !line.starts_with("    "),
+            "wrapped summary: {line:?}"
+        );
+    }
+}

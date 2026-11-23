@@ -1,4 +1,4 @@
-//! Same-call guards where two channels of one `commit_change_set` meet on
+//! Same-call guards where two channels of one `commit` meet on
 //! one object (pre-release review 1):
 //!
 //! - an activation or membership set in the same call as an object delete
@@ -22,7 +22,7 @@ use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 
-use nodal_db_core::api::{commit_change_set, head_commit, ChangeSet, Segment};
+use nodal_db_core::api::{commit, head_commit, ChangeSet, Segment};
 use nodal_db_core::error::DbError;
 use nodal_db_core::schema_init::init_schema_with_default;
 use nodal_db_core::types::{
@@ -64,7 +64,7 @@ fn opts(covered: CoveredWrites) -> WriteOptions {
 const POLICIES: [CoveredWrites; 2] = [CoveredWrites::Refuse, CoveredWrites::DeleteWins];
 
 fn run(db: &Path, set: ChangeSet, o: WriteOptions) -> Result<WriteReport, DbError> {
-    commit_change_set(db, set, "t", "m", o)
+    commit(db, set, "t", "m", o)
 }
 
 fn q(db: &Path, sql: &str) -> i64 {

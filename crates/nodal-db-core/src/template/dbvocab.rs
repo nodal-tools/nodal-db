@@ -1,6 +1,6 @@
 //! Read the database's CURRENT vocabulary into an in-memory snapshot — the
-//! "DB side" of the reconcile diff (§4.2 Layer 1) and the source `template
-//! export` re-emits from (§8.1.7). Reads current rows only (`valid_to_commit
+//! "DB side" of the reconcile diff and the source `template
+//! export` re-emits from. Reads current rows only (`valid_to_commit
 //! IS NULL`); history never participates in a diff.
 //!
 //! Runs on an already-open connection so the reconcile apply can re-read
@@ -195,7 +195,7 @@ pub struct DbVocab {
     /// The same for live parameter definitions, keyed by (the class id the
     /// closed row had, folded old name).
     pub renamed_parameters: BTreeMap<(i64, String), Vec<RenamedAway>>,
-    /// Classes removed locally (purge plan §3.8, V-OD1): the folded name
+    /// Classes removed locally: the folded name
     /// of every class whose id has no live row any more, closed by a
     /// commit that is not template-owned ([`template_owned`]). The
     /// reconcile's removed-locally blocker reads it.
@@ -215,7 +215,7 @@ pub struct RemovedLocally {
     pub at_commit: i64,
 }
 
-/// The template-owned commits (purge plan §3.8, V-S1): every commit that
+/// The template-owned commits: every commit that
 /// wrote a version of the core property `template_applied_commit`
 /// (each template-apply and migration-step commit writes one), plus the
 /// ranges a `run:` program's progress commit records (`"a..=c"`: the

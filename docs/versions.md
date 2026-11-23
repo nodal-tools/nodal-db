@@ -49,7 +49,8 @@ The 0.x releases are for test users. During 0.x:
 - **A new schema version means re-creating files.** There are no
   migrations: create a new file with the new release (`nodal-db init`)
   and import the data again (`nodal-db import`, the Spine import or your
-  own writer). Release notes say when the schema version changes, and
+  own writer). The release notes (`CHANGELOG.md` in the repository,
+  copied to each GitHub release) say when the schema version changes, and
   changes are batched so that this happens rarely.
 - **The read surface can break** with a `contract_major` bump, stated in
   the release notes.

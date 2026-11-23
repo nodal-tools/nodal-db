@@ -113,9 +113,10 @@ checked against an independent Python implementation, verifies that the
 output is reproduced exactly.
 
 **Why:** the same data always produces the same bytes, whoever writes it.
-History diffs, axis sharing and equality checks depend on this. The
-project's founding lesson is that two independent canonicalizers drift,
-so there is exactly one.
+History diffs, axis sharing and equality checks depend on this. When
+several programs each encode values in their own way, their encodings
+tend to drift apart over time. So nodal-db has exactly one
+canonicalizer, and every writer goes through it.
 
 ## Commits and append-only history
 
@@ -342,7 +343,7 @@ Besides values, the core API writes structure: creating and renaming
 alternatives and scenarios, setting a scenario's alternative ranking,
 setting entity activation and group membership, and creating entities,
 classes and parameter definitions. Values, structural changes and
-deletions can be combined into **one commit** (`commit_changes`), which
+deletions can be combined into **one commit** (`commit`), which
 is what an editor save needs.
 
 Deleting an object (alternative, scenario, parameter, entity or class)
@@ -394,13 +395,14 @@ Python exceptions (`nodal_db.Busy`, `nodal_db.Conflict`,
 `nodal_db.ApiError`, …). A `Database` handle holds only the file path;
 every method opens and closes its own connection.
 
-The package is built from source with `maturin` (see
-[Build](usage.md#build)); published packages, when available, are listed
-on the [Releases page](https://github.com/nodal-tools/nodal-db/releases).
+The package is published on PyPI (`pip install nodal-db`; see
+[Install](usage.md#install)) and can be built from source with
+`maturin` (see [Build from source](usage.md#build-from-source)).
 
 ## Spine database import
 
-The `nodal_spine_import` Python package (in `python/` in the repository)
+The `nodal_spine_import` Python package (in `python/` in the repository;
+in 0.1.0 it is not published as a package, run it from a checkout)
 imports a Spine Toolbox database (read through `spinedb_api`) into a new
 nodal-db database. It writes through the Python skin, declares parameter
 types from the shapes of the values actually found, and reports

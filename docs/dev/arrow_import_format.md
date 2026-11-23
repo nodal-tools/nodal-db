@@ -414,7 +414,8 @@ durably, so completed steps survive a later crash.
 ## Errors
 
 Errors print to standard error as `Error: E<n>: <message>` and exit
-with code 1; the database is unchanged. Warnings print to standard
+with code 1, except E9 (busy, retryable), which exits with code 75; the
+database is unchanged. Warnings print to standard
 output and do not affect the exit code (0). The class (`E1` to `E10`)
 is stable; the message text may change between releases.
 

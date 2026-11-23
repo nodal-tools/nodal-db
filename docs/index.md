@@ -111,13 +111,13 @@ nodal-db owes a lot to the Spine database schema, the data model of
 [Spine Toolbox](https://github.com/spine-tools/Spine-Toolbox): entity
 classes and N-dimensional entities, alternatives stacked into
 scenarios, and parameter values of many shapes all follow its design.
-nodal-db tries to remove some of that schema's limitations. For
-example, parameter values are stored in typed tables that plain SQL can
-read, rather than in an encoded form that needs a library to decode,
-and every change is kept as append-only history with as-of reads of
-earlier commits. The
-[Spine importer](features.md#spine-database-import) converts an
-existing Spine database into a nodal-db file.
+Where nodal-db departs from that design, it does so deliberately.
+Parameter values live in typed tables, so any SQL tool can read them
+without a decoding library. Every change is kept as append-only history,
+so the database can be read as it was at any earlier commit. The
+[design rationale](dev/design_rationale.md) explains these choices. The
+[Spine importer](features.md#spine-database-import) converts an existing
+Spine database into a nodal-db file.
 
 ## Status
 

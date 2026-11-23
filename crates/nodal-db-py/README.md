@@ -1,37 +1,57 @@
-# nodal-db-py — the thin Python skin (`import nodal_db`)
+# nodal-db (Python)
 
-The **write-path SDK** for nodal-db: a **logic-free marshaling
-layer** over the one Rust core. It marshals Arrow tables and scalars in,
-calls `nodal-db-core`, and translates `DbError` into a Python exception
-hierarchy out. It implements **no** canonicalization, tier, history, or
-reconcile rule — a rule you cannot find in `nodal-db-core` does not
-exist here either (one canonicalizer, never two). For reads beyond the
-conveniences below, SQL is the API: any DuckDB client reads the
-views/macros directly (`docs/dev/building_against_nodal-db.md`).
+`import nodal_db`: the Python package of
+[nodal-db](https://github.com/nodal-tools/nodal-db), a general-purpose
+database format for structured, versioned modelling data, stored in
+DuckDB files with append-only history.
 
-## Connection discipline (the rule the API shape enforces)
+The package is a thin layer over nodal-db's Rust core. It passes Arrow
+tables and scalars to the core and turns the core's errors into Python
+exceptions; every rule (how values are encoded and stored, how history
+is kept) lives in the core, so a file written from Python is the same as
+one written by the `nodal-db` CLI or from Rust. For reads beyond the
+conveniences below, SQL is the interface: any DuckDB 2.0 client reads
+the database's views and macros directly.
 
-`nodal_db.open(path)` returns a handle that holds the **path only —
-never a connection**. Every method opens a fresh per-operation
-connection inside the core and closes it before returning (an idle
-connection would starve every writer). Keeping a `Database`
-object alive in a notebook is free and blocks nobody; there is no
-`close()` because there is nothing to close. `query()` returns a
-`pyarrow.RecordBatchReader` backed by already-materialized batches, not
-by a live connection.
+Documentation: <https://nodal-tools.github.io/nodal-db/> (the
+[usage guide](https://nodal-tools.github.io/nodal-db/usage/) and the
+[reference](https://nodal-tools.github.io/nodal-db/reference/)).
 
-## Usage sketch
+## Install
+
+```sh
+pip install nodal-db
+```
+
+Wheels are built for Linux x86_64 (manylinux_2_28) and macOS arm64, one
+wheel per platform for CPython 3.11 and later. `pyarrow>=16` is
+installed with it.
+
+## Connection discipline
+
+`nodal_db.open(path)` returns a handle that holds the **path only, never
+a connection**. Every method opens a connection, does its work and
+closes it before returning, because DuckDB's file lock means that an
+idle connection, even a read-only one, blocks every writer. Keeping a
+`Database` object alive in a notebook is free and blocks nobody; there
+is no `close()` because there is nothing to close. `query()` returns a
+`pyarrow.RecordBatchReader` backed by batches that were already read,
+not by a live connection.
+
+## Usage
 
 ```python
 import pyarrow as pa
 import nodal_db
 
-# A tool initializes its store once, then loads its template.
+# Create a database (optionally with a default alternative), then load a template.
 db = nodal_db.init("model.duckdb", default_alternative="Base")
 db.template_apply("template.yaml", user="my_tool")
 
-# Interactive writes: logical-long Arrow batches; the CORE decides the
-# storage tier and auto-creates missing referents (with warnings).
+# Writes take Arrow batches in long form: an entity column, any index
+# columns, and a value column. The core decides how to store the value
+# and creates missing classes, parameters, alternatives and entities
+# (reported as warnings).
 capacity = pa.record_batch({
     "entity": ["coal_plant", "gas_plant"],
     "value":  pa.array([400.0, 250.0], pa.float64()),
@@ -40,8 +60,8 @@ report = db.write_parameter("unit", "capacity", "Base", capacity,
                             user="analyst", message="initial capacities")
 assert report["tiers"] == ["scalar"]
 
-# A time series: dimension columns between entity and value; Arrow
-# types pick the index kind (timestamp[us] -> datetime).
+# A time series: index columns between entity and value; the Arrow type
+# picks the index kind (timestamp[us] -> datetime).
 flow = pa.record_batch({
     "entity": ["coal_plant"] * 3,
     "time":   pa.array([...], pa.timestamp("us")),
@@ -49,8 +69,9 @@ flow = pa.record_batch({
 })
 db.write_parameter("unit", "flow", "scenario_a", flow, user="analyst")
 
-# An editor save: writes + deletes, atomically, ONE commit row.
-db.commit_changes(
+# One save: writes and deletes (and structural changes, purges and
+# metadata) in one atomic commit.
+db.commit(
     segments=[{"class": "unit", "parameter": "capacity",
                "alternative": "Base", "batch": capacity}],
     deletes=[("unit", "capacity", "Base", "old_plant")],
@@ -61,23 +82,23 @@ db.commit_changes(
 batch = db.read_parameter("unit", "capacity", "Base")     # pyarrow.RecordBatch
 table = db.query("SELECT * FROM read_parameter('unit', 'capacity')").read_all()
 
-# Rerun-overwrite lifecycle: hard-erase a superseded result alternative
-# (the marker + as-of guard are the core's; expect_present is the
-# ordering belt — the erase refuses unless the replacement run exists).
+# Replace a superseded result alternative: erase it physically (an
+# erasure marker records it). expect_present makes the erase refuse
+# unless the replacement run's alternative exists.
 db.erase_alternative("run_2026_09_01", user="my_tool",
                      expect_present=["run_2026_09_22"])
 ```
 
 ### Migration programs (template `run:` steps)
 
-Tenants register **plain Python callables** as migration programs for
-the duration of one `template_apply` call. The IR names them; the
-registry binds them; they write through the ordinary API:
+A template can name migration programs (`run:` steps). The caller
+registers them as **plain Python callables** for the duration of one
+`template_apply` call; they write through the ordinary API:
 
 ```python
 def backfill_efficiency(db_path, user):
-    # Called BY the core mid-chain. Writing through the skin from here
-    # is the intended use (see the reentrancy contract below).
+    # Called by the core during the apply. Writing through nodal_db from
+    # here is the intended use (see the reentrancy rules below).
     inner = nodal_db.open(db_path)
     inner.write_parameter("unit", "efficiency", "Base", some_batch, user=user)
 
@@ -85,108 +106,100 @@ db.template_apply("template_v2.yaml", user="my_tool",
                   programs={"backfill_efficiency": backfill_efficiency})
 ```
 
-Contract (the core's Layer-3 rules, surfaced verbatim):
-
 - **Programs must be idempotent.** A program commits through the public
-  API on its own; the progress substamp lands in a separate commit, so a
-  crash in that window re-runs the program on resume.
-- A chain naming an **unregistered** program fails loudly before any
-  step runs (`nodal_db.ApiError`).
-- A program that **raises** aborts the apply; the **original Python
-  exception** propagates to the `template_apply` caller (not a wrapped
-  rendering). Steps already committed keep their substamps; re-apply
-  resumes after them.
+  API on its own, and the apply records the program's progress in a
+  separate commit afterwards, so a crash between the two re-runs the
+  program when the apply is resumed.
+- A template naming a program that is **not registered** fails before
+  any step runs (`nodal_db.ApiError`).
+- A program that **raises** aborts the apply, and the **original Python
+  exception** propagates to the `template_apply` caller. Steps already
+  committed stay recorded; applying again resumes after them.
 
-## GIL / reentrancy contract
+## Threads and reentrancy
 
-1. Every skin entry point **releases the GIL** around the core call
-   (other Python threads run during DB work).
-2. A `run:` program is invoked by the core at a point where the core
-   holds **no connection and no in-process path lock** — the `run:` step
-   sits between per-operation commits by construction.
-3. The wrapper re-acquires the GIL **only for the callable itself**; the
-   program's own `nodal_db` calls release it again (rule 1). Hence a
-   program calling back into the API cannot deadlock: no lock is held
-   across the callback on either side.
-4. Corollary for program authors: do all DB work through `nodal_db` (or
-   fresh, short-lived connections you close yourself); never stash a
-   long-lived connection — the file lock starves the chain's next
-   commit, surfacing as `nodal_db.Busy`.
-5. **A program must NOT call `template_apply` on the database it is
-   migrating.** Its own step's progress substamp lands only after it
-   returns, so a nested apply would re-execute the program itself. The
-   core refuses this (process-locally, by canonical DB path) with
-   `nodal_db.ApiError` naming the reentrancy; a second *process*
-   applying concurrently cannot be detected and is the ordinary
-   concurrent-writer race. Value writes, reads, plans, erases — all
-   fine; re-applying the in-flight template is the one forbidden call.
-6. **No detached writers.** Any thread (or process) a program spawns
-   must finish its writes before the program returns: the per-program
-   commit attribution in `run_programs` is a commit-id watermark range
-   taken around the call, so a write landing after the program returns
-   is misattributed to a later step (or to none) and, worse, races the
-   chain's own commits. Join your threads.
+1. Every method **releases the GIL** while the core works, so other
+   Python threads run during database work.
+2. The core calls a `run:` program at a point where it holds **no
+   connection and no in-process lock**.
+3. The GIL is taken again **only for the program itself**, and the
+   program's own `nodal_db` calls release it again (rule 1). A program
+   calling back into the API therefore cannot deadlock.
+4. For program authors: do all database work through `nodal_db` (or
+   short-lived connections you close yourself); never keep a connection
+   open, or the next commit of the apply fails with `nodal_db.Busy`.
+5. **A program must not call `template_apply` on the database it is
+   migrating.** Its progress is recorded only after it returns, so a
+   nested apply would run the program again. The core refuses this
+   within one process with `nodal_db.ApiError`; a second *process*
+   applying at the same time cannot be detected and is an ordinary
+   concurrent-writer race. Value writes, reads, plans and erases are
+   all fine.
+6. **No detached writers.** Any thread or process a program starts must
+   finish its writes before the program returns: the apply attributes
+   commits to a program by the range of commit ids around the call, so a
+   later write is attributed to the wrong step and races the apply's own
+   commits.
 
 ## Errors
 
-One hierarchy, mapped 1:1 from the core's `DbError` (message text is the
-core's own): `NodalDbError` (base) with `Busy`, `Conflict`, `ApiError`,
-`VersionTooOld`, `SchemaError`, `DatabaseError`, `CanonError`,
-`ArrowError`, `InternalError`, `UnreplayableWal`, `ShadowedBuiltin`, and `Stale` and `SchemaMismatch` (both
-subclasses of `ApiError`).
-`Busy` and `Conflict` are defined, retryable outcomes, never hangs.
-`Stale` is raised when a write's `expect_commit=` precondition fails
-(someone committed since the caller read `head_commit()`); nothing was
-written, and it carries `expected` and `found` as attributes.
-`SchemaMismatch` is raised when the file was made by another nodal-db
-schema version (a write fails on it, or compaction, extract or erase
-refuses it); it carries `found` (the file's `schema_version`) and
-`expected` (this build's).
-`UnreplayableWal` is raised when compaction cannot fold a leftover
-`<db>.wal` into the file (DuckDB cannot replay or remove it); nothing
-was changed, and it carries `wal` (the path) and `cause`. Move the WAL
-aside, then compact.
-`ShadowedBuiltin` is raised by any call on a file that defines a macro
-named like a DuckDB built-in function in its `main` schema (for example
-`CREATE MACRO lower(x) AS ...` run with direct SQL), which DuckDB would use
-instead of the built-in; it carries `name`, `schema` and `kind`. Drop the
-macro with direct SQL (the message gives the statement), then compact the
-file: anything written while the macro existed may have left duplicate
-names, which compaction refuses loudly.
+Every error derives from `nodal_db.NodalDbError`:
 
-## Arrow interop and version coupling
+- `Busy` (the file is locked by another process) and `Conflict` (a write
+  conflict outlasted the retry budget): defined, retryable outcomes,
+  never hangs.
+- `ApiError`: a batch, name or argument the core cannot accept. Its
+  subclasses: `Stale` (an `expect_commit=` precondition failed; nothing
+  was written; carries `expected` and `found`), `SchemaMismatch` (the
+  file was made by another schema version; `found`, `expected`),
+  `CoveredWrite` and `WriteAndDeleteSameKey` (a write and a delete that
+  cover each other in one call), `UndeclaredValueType`,
+  `ValueMetadataUnstated`, `ReadSurfaceStale`, `TemplateStampedRename`
+  and `TemplateStampedPurge`.
+- `VersionTooOld`, `SchemaError`, `DatabaseError`, `CanonError`,
+  `ArrowError`, `InternalError`.
+- `UnreplayableWal`: compaction cannot fold a leftover `<db>.wal` into
+  the file; nothing was changed. Carries `wal` and `cause`. Move the WAL
+  aside, then compact.
+- `ShadowedBuiltin`: the file defines a macro named like a DuckDB
+  built-in function in its `main` schema (for example `CREATE MACRO
+  lower(x) AS ...` run with direct SQL), which DuckDB would use instead
+  of the built-in. Carries `name`, `schema` and `kind`. Drop the macro
+  with direct SQL (the message gives the statement), then compact the
+  file.
 
-- **In**: any Arrow PyCapsule producer — `pyarrow.RecordBatch`
-  (`__arrow_c_array__`), `pyarrow.Table` / `RecordBatchReader` / polars
-  (`__arrow_c_stream__`). Imported zero-copy over the C data interface.
-- **Out**: `pyarrow.RecordBatch` (`read_parameter`) and
+`ReadSurfaceStaleWarning` (a `UserWarning`) is issued once per file when
+its views are older than this package's. Each exception's docstring
+lists its attributes; the
+[reference](https://nodal-tools.github.io/nodal-db/reference/#exceptions)
+shows the whole tree.
+
+## Arrow interop
+
+- **In**: any Arrow PyCapsule producer: `pyarrow.RecordBatch`,
+  `pyarrow.Table`, `pyarrow.RecordBatchReader`, polars. Imported
+  zero-copy over the Arrow C data interface.
+- **Out**: `pyarrow.RecordBatch` (`read_parameter`, `read_values`) and
   `pyarrow.RecordBatchReader` (`query`), exported zero-copy.
-- The bridge is the maintained `arrow-pyarrow` crate (split out of
-  arrow-rs), **pinned `=60.2.0`** to the workspace `arrow` pin — one
-  arrow in the tree, so imported batches ARE the core's `RecordBatch`
-  type at compile time. Version coupling is three-way and matched-bump:
-  duckdb-rs ⇒ `arrow` ⇒ `arrow-pyarrow` (whose pyo3 requirement then
-  dictates the `pyo3` line; 60.2.0 ⇒ pyo3 ^0.29). See the root
-  `Cargo.toml` comments. Runtime needs `pyarrow>=16` (PyCapsule
-  interface both directions).
+- Requires `pyarrow>=16` (the PyCapsule interface in both directions).
 
-## Building
+## Building from source
 
-Wheels are abi3: **one wheel per platform, CPython ≥ 3.11** (abi3-py311 —
-the documented floor, the same one the DuckDB 2.0 Python client needs).
+From a checkout of the repository:
 
 ```sh
 python -m venv .venv && . .venv/bin/activate
 pip install maturin
-maturin develop            # build + install into the venv (debug)
-maturin build --release    # release wheel into target/wheels/
-pytest crates/nodal-db-py/tests
+cd crates/nodal-db-py
+maturin develop            # build and install into the venv (debug)
+maturin build --release    # a release wheel into target/wheels/
+pip install pytest 'duckdb>=2.0' && pytest tests
 ```
 
-`cargo test --workspace` needs no maturin and no libpython: this crate
-builds only as an extension module (undefined Python symbols are the
-normal extension-module linking model) and carries no Rust test harness
-— its tests are the pytest suite, run against the maturin-built module.
-CI note: the existing `cargo test --workspace` + schema smoke jobs run
-unchanged; a wheel-gate job would add `maturin build` + this crate's
-pytest suite.
+The first build compiles the bundled DuckDB (several minutes). Version
+coupling between duckdb-rs, `arrow`, `arrow-pyarrow` and `pyo3` is
+described in the repository's root `Cargo.toml`.
+
+## License
+
+EUPL-1.2. See the repository's `LICENSE` and README.

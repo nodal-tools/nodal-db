@@ -30,10 +30,10 @@ One DuckDB file is the database. Around it:
   template right after), `import` (the
   [Arrow-IPC bulk format](arrow_import_format.md)), `erase-alternative`,
   `extract` (a history-free copy into a new file), `maintain compact`,
-  and `template load` / `plan` / `apply` / `export`. It is the write
-  boundary for clients in languages without bindings. `migrate` is a
-  reserved verb that is not implemented; the reconcile runner in v1 is
-  `template apply`.
+  `purge`, `maintain refresh-views` and `template load` / `plan` /
+  `apply` / `export` (`template apply` runs a template's migrations and
+  reconcile). It is the write boundary for clients in languages without
+  bindings.
 - **Python skin** (`nodal_db`,
   [`crates/nodal-db-py`](https://github.com/nodal-tools/nodal-db/tree/main/crates/nodal-db-py))
   — a thin PyO3/maturin wrapper over the core: it marshals Arrow data in
@@ -69,10 +69,11 @@ matches `schema/*.sql`).
   datetime axes, and the CRS property) · `050` value tables (three storage tiers
   plus the `_hist` twin of the dense-array tier) · `055` provenance (`run`) ·
   `060` display modes · `065` semantic annotations
-- `070`–`120` the read surface: `_current` views, read macros
+- `070`–`130` the read surface: `_current` views, read macros
   (`read_parameter`, `value_rows`, …), scenario and activation
   resolution, completeness, `_asof` history views, and the audit views
-  (`audit_health` and others). Validation is *reporting*, not
+  (`audit_health` and others); `130` records the read-surface version.
+  Validation is *reporting*, not
   constraints: questionable data is surfaced by audit views rather than
   rejected at write time, so a partly finished model can always be
   stored.
@@ -196,7 +197,7 @@ Cargo workspace, three crates: `nodal-db-core`, `nodal-db-cli`,
 | `conn` | Connection discipline: open-work-close, a per-path in-process lock, bounded-backoff retry, write transactions that stamp the commit row. |
 | `axis` | Content-verified axis deduplication (the hash narrows, byte equality decides). |
 | `history` | The history write protocol: from/to close-out, array `_hist` pre-image, version counter, tier transitions; the columnar-bind bulk inserts; one set-based writer per tier and the set-based delete (rounds per commit). |
-| `api` | The public write/read surface: `write_parameter`, `ingest_segments`, `commit_changes`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `read_values`, `db_identity`. |
+| `api` | The public write/read surface: `commit`, `write_parameter`, `ingest_segments`, `delete_values`, `commit_structural`, `delete_objects`, `preview_object_deletes`, `read_parameter`, `read_values`, `db_identity`. |
 | `object_delete` | Close-out of objects and their dependents, driven by one leg registry (cascade, RESTRICT report and preview cannot drift apart). |
 | `structural` | The structural (non-value) write path: create/rename alternatives and scenarios, scenario ranking, activation, membership, entity / class / parameter creation, and class / parameter renames and description revisions (with the per-call rename checks and the rewrite of the name-keyed template documents). |
 | `verbs` | Idempotent single-purpose write verbs (`ensure_entity`, `set_scenario_alternatives`, …) used by template migration programs and importers; thin wrappers over the `structural` and `api` paths. |
@@ -288,7 +289,7 @@ per-position probe streams the stored cells through Arrow into a
 compact position-sorted vector (32 bytes per cell, no per-row string;
 about 180 MB for a 4.6 million-cell value) and the diff is a sort-merge
 with the new value's cells, which canon emits in position order. On
-top, `commit_changes` and its wrappers make no commit for
+top, `commit` and its wrappers make no commit for
 a call that provably changed nothing (every item reported a known
 no-op: unchanged values, deletes that found nothing, structural no-ops,
 object deletes that found nothing, no auto-create); the transaction is
@@ -475,8 +476,8 @@ discipline. The client-side rules are in
 ## 7. Deletion, erasure and the change model
 
 Value deletes, structural changes, object deletes, purges and metadata
-ride the same atomic commit as value writes (`api::commit_change_set`,
-which `api::commit_changes` and every wrapper call). The order inside
+ride the same atomic commit as value writes (`api::commit`, which
+every wrapper calls). The order inside
 the transaction: structural changes, value writes, value deletes, object
 deletes, purges, then the metadata channel (`metadata.rs`): pool creates
 and revisions, the keep / set / clear statements and value-link items,
@@ -588,7 +589,7 @@ The CLI verb is `nodal-db maintain compact`; Python has
 **When to compact: `compact_if_due`.** Two costs grow between
 compactions. The file accretes dead blocks (every commit's checkpoint
 strands some), and every read-write commit-checkpoint cycle adds a
-roughly constant cost (≈1.2 ms on the 0.6 schema) to every *later* open of the file, while
+roughly constant cost (≈1.2 ms, measured) to every *later* open of the file, while
 barely moving its byte size. `compaction::compact_if_due(db, policy,
 head)` gates on both, cheapest first:
 
@@ -603,9 +604,9 @@ head)` gates on both, cheapest first:
    per-open growth does not shrink with the file size (≈+63 ms after 50
    commits and +108 ms after 100 on both a 20 MiB and a 96 MiB file), so
    the clamp sets the open-time budget: at most ≈+70 ms (N = 60) to
-   ≈+110 ms (N = 100) over the compacted open. The owner chose this middle
-   setting (2026-11-22) over a tighter budget (N = 30..40, ≈+50 ms),
-   trading somewhat slower opens for fewer multi-second repacks of large
+   ≈+110 ms (N = 100) over the compacted open. This middle setting is
+   preferred over a tighter budget (N = 30..40, ≈+50 ms): it trades
+   somewhat slower opens for fewer multi-second repacks of large
    files. A head below
    the recorded commit means the baseline belongs to another file
    (restored or replaced) ⇒ compact. The backstop works around a DuckDB
@@ -750,7 +751,7 @@ The components described on this page are implemented except for the
 following:
 
 - **In development**: the editor (separate repository).
-- **Planned**: CLI `migrate` (verb reserved); pruning history in place
+- **Planned**: pruning history in place
   (an extract is the supported way to drop history today).
 - **Not planned for now** (design left open, no code): a serving
   process, value inheritance, symbols, structured units, in-place

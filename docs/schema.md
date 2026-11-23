@@ -29,7 +29,7 @@ The DDL files form layers, each building on the ones before:
 | 040_axes | Shared, immutable axis objects (time grids, periods, labels, …) that array values index into. |
 | 050_values | The three storage tiers — scalar, dense array (one flat list per value), long (one row per cell) — and the definition-level default/prefill mirrors. |
 | 055–065 | Run provenance, authored display modes, and the ontology crosswalk (`semantic_annotation`). |
-| 070–120 | Views and table macros only: current state, the unified read surface, scenario resolution, completeness, history (as-of), and audits. |
+| 070–130 | Views and table macros only: current state, the unified read surface, scenario resolution, completeness, history (as-of), audits, and the read-surface version (`130`). |
 
 ### Conventions that apply to every table
 

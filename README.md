@@ -8,6 +8,25 @@ energy-system modelling. Documentation:
 <https://nodal-tools.github.io/nodal-db/> (sources in `docs/`); see
 `CONTRIBUTING.md` for development setup.
 
+## Install
+
+Release 0.1.0 ships the Python package on PyPI and the `nodal-db` CLI on
+[GitHub Releases](https://github.com/nodal-tools/nodal-db/releases), for
+Linux x86_64 (manylinux_2_28) and macOS arm64:
+
+```bash
+pip install nodal-db          # the Python package (import nodal_db); Python 3.11+
+```
+
+The CLI binary is a single file: download the archive for your platform
+from the release page and put `nodal-db` on your `PATH`. To build from
+source instead, see `CONTRIBUTING.md`.
+
+The Spine importer (`python/nodal_spine_import`, converts a Spine
+database into a nodal-db file) is not packaged in 0.1.0: run it from a
+checkout of this repository (see the
+[usage guide](https://nodal-tools.github.io/nodal-db/usage/)).
+
 ## Versions and compatibility
 
 Release 0.1.0 is the first public release; the 0.x releases are for test
@@ -20,9 +39,10 @@ version means re-creating files (init + import, no migrations);
 migrations start at 1.0.0. Details:
 [Versions and compatibility](docs/versions.md).
 
-## Testing tiers
+## Development
 
-Managed with [`just`](https://github.com/casey/just); recipes in `justfile`.
+Building and testing are described in `CONTRIBUTING.md`. In short, with
+[`just`](https://github.com/casey/just) (recipes in `justfile`):
 
 | Command | Tier | What runs |
 |---|---|---|
@@ -34,15 +54,15 @@ Managed with [`just`](https://github.com/casey/just); recipes in `justfile`.
 
 The quick gate is what you run on every change; `just full` is for pre-release.
 Slow tests are marked `#[ignore = "slow: pre-release tier"]` so they drop out
-of the quick gate automatically — tag any new slow test the same way. First run
-compiles bundled DuckDB (minutes: ~4 on 32 cores, longer on small machines;
-cached thereafter). `just venv` creates the
+of the quick gate automatically — tag any new slow test the same way. The first
+build compiles the bundled DuckDB (about 4 minutes on a 32-core machine,
+considerably longer on a laptop; reused thereafter). `just venv` creates the
 Python venv the smoke suite and conformance oracles need.
 
 Every `cargo test` (and `cargo run` / `cargo bench`) in the repo runs with
 DuckDB capped at 4 threads and an 8 000 MB memory basis per instance, and
 at most 8 tests at once per test binary (`.cargo/config.toml [env]`); a
-value in your environment wins. See CONTRIBUTING "Machine budget".
+value in your environment wins. See CONTRIBUTING "Resource caps".
 
 ## Inspecting a database
 
@@ -54,7 +74,8 @@ machine's standalone CLI may lag) refuses the file with a storage-version error
 First make one to look at (or point the commands at any `.duckdb` file):
 
 ```bash
-cargo run -p nodal-db-cli -- init /tmp/demo.duckdb
+rm -f /tmp/demo.duckdb                     # init refuses an existing path
+nodal-db init /tmp/demo.duckdb             # or: cargo run -p nodal-db-cli -- init /tmp/demo.duckdb
 # ... then `nodal-db import` some data, or inspect a smoke/test DB.
 ```
 
@@ -71,7 +92,7 @@ The `.venv` DuckDB is pinned to 2.0.0, so it always matches the file. Open
 # Interactive shell:
 .venv/bin/python -q
 >>> import duckdb; c = duckdb.connect('/tmp/demo.duckdb', read_only=True)
->>> c.sql(\"SELECT * FROM read_parameter('node', 'demand') WHERE alternative = 'Base'\")
+>>> c.sql("SELECT * FROM read_parameter('node', 'demand') WHERE alternative = 'Base'")
 ```
 
 ### DuckDB CLI + web UI (needs a 2.0 CLI)
@@ -100,7 +121,7 @@ SHOW TABLES;                                    -- every table and view
 SELECT * FROM read_parameter('<class>', '<parameter>');  -- values, any tier, all alternatives
 SELECT * FROM value_rows;                        -- current values as long rows
 SELECT * FROM value_cells;                       -- array/long cells expanded
-SELECT * FROM audit_health;                      -- integrity + maintenance health, one row
+SELECT * FROM audit_health;                      -- integrity + maintenance health, one row per table group
 SELECT * FROM commit_log ORDER BY id;            -- the write/version history (user, message, UTC time)
 ```
 

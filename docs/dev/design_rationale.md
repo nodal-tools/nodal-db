@@ -55,12 +55,15 @@ a measurement, the text says so.
 - **The tier cliff:** from two dimensions up, one missing cell moves a
   whole value to the long tier, which today costs about four times the
   storage.
-- **Writes are whole-value in every tier.** Changing one cell writes a
+- **Scalar and dense-array writes are whole-value; long writes are
+  diffed per cell.** Changing one cell of a dense array writes a
   complete new version of the value, and the old version is kept as
-  history unless retention is switched off. For long histories, a
-  [history-free extract](../features.md#history-free-extract) writes a
-  smaller file with the current content only.
-- **Not implemented yet:** chunked storage of dense arrays is parked. See
+  history unless retention is switched off. Changing one cell of a long
+  value closes out and re-inserts that cell only, as long as the axes,
+  the value kind and the parameter type stay the same. For long
+  histories, a [history-free extract](../features.md#history-free-extract)
+  writes a smaller file with the current content only.
+- **Chunked storage of dense arrays is parked.** See
   [Known limitations and open directions](#known-limitations-and-open-directions).
 
 ## The problem
@@ -95,10 +98,8 @@ The storage has to meet these requirements at the same time:
 ### Opaque encoded value per row
 
 Each value is serialized into one column (for example as JSON or a
-binary container) and decoded by the application. The Spine database
-schema, which much of nodal-db's data model is based on, stores
-parameter values as one encoded value column with a separate type
-column.
+binary container) and decoded by the application. Several established
+modelling databases use this pattern.
 
 - **For:** one simple table for all shapes; any value shape fits; a
   value is read or written as a unit.
@@ -230,9 +231,10 @@ and with them every chunk; removing one cell of a multi-dimensional
 value moves it to the long tier. As-of reads would need no new idea:
 they already select each row by its own commit span.
 
-For comparison, the long tier already counts versions per cell in its
-schema, but its write path still closes out and re-inserts every cell
-of a value on each write.
+For comparison, the long tier versions each cell on its own: a write
+on the same axes, value kind and parameter type closes out and
+re-inserts only the cells that changed (the cell diff, described
+below).
 
 ## How the chosen design works
 
@@ -300,12 +302,12 @@ point to the same axes.
 **Rendering coordinates when reading.** A read computes each cell's
 coordinate from its own position (`start + position × step`, through the
 scalar macros `axis_param_ts`, `axis_param_num` and `axis_param_coord`)
-and joins stored coordinates only for the axes current values use. It
-used to join `axis_position`, which lists every position of every axis
-in the file, once per dimension. A file with 500 extra hourly axes then
-paid 0.5 to 1.5 s more on every `value_rows` and `read_parameter` call,
-scalar reads included, whether or not anything used those axes. Three
-choices follow:
+and joins stored coordinates only for the axes current values use.
+Joining `axis_position`, which lists every position of every axis in the
+file, once per dimension, would make a file with 500 extra hourly axes
+pay 0.5 to 1.5 s more on every `value_rows` and `read_parameter` call,
+scalar reads included, whether or not anything used those axes (that
+was measured). Three choices follow:
 
 - *Arithmetic, not a filtered expansion.* Filtering the expansion to the
   axes in use first (`WHERE axis_id IN (…)` in front of
@@ -316,30 +318,30 @@ choices follow:
   the optimizer. There is no accumulation: each position is computed
   from the start, exactly as the expansion did, so the result is
   bit-identical (a test compares every rendering surface, floats by bit
-  pattern, against the old text). A side effect, in the safe
-  direction: the expansion evaluated every position of every
-  parametric axis, so one axis whose arithmetic overflowed at a high
-  position made every read fail; now only rendered positions are
-  evaluated, and such a file reads where it used to fail.
+  pattern, against the expansion). A side effect, in the safe
+  direction: an expansion evaluates every position of every parametric
+  axis, so one axis whose arithmetic overflowed at a high position would
+  make every read fail; only rendered positions are evaluated, so such a
+  file still reads.
 - *The stored-position legs are written twice*, once unfiltered
   (`axis_position_stored`, behind `axis_position`) and once filtered to
   the axes in use (`axis_position_stored_in_use`). The spellings with one
   text (an axis-id list argument, or a filter on the unfiltered view)
   were measured and fell apart on a file with 500 stored axes. The
   equality test covers both copies, so they cannot drift apart silently.
-- *`read_parameter` reads one parameter's rows only.* It no longer joins
+- *`read_parameter` reads one parameter's rows only.* It does not join
   the parameter to `value_rows` above the tier union, where the filter
-  never reached the array tier: every call unnested every array in the
-  file (8.76 million cells on the gate's fixture), even for a scalar
-  parameter.
+  would never reach the array tier: every call would unnest every array
+  in the file (8.76 million cells on the gate's fixture), even for a
+  scalar parameter.
 
 The remaining cost is in `value_rows`: a view cannot see the caller's
 filter, so it joins the stored positions of every axis any current value
 uses, and finds them with one scan of the long tier's key columns per
 call. On a one-axis file that makes a `value_rows` point read a few tens
-of milliseconds slower than before, growing with the long tier; on a
-file whose values own hundreds of irregular axes it is slower than the
-expansion was. Engine reads use `read_parameter` and the point-read
+of milliseconds slower than the expansion, growing with the long tier;
+on a file whose values own hundreds of irregular axes it is slower than
+the expansion. Engine reads use `read_parameter` and the point-read
 macros instead ([engine rules](engine_rules.md) §7).
 
 ### Canonical form
@@ -711,14 +713,16 @@ of 15, in ms.
   below what the dead fraction alone suggests. The benchmark showed no
   read-speed benefit against the compacted file, and none is claimed.
 
-### The `array_id` key, before and after
+### Why arrays are keyed by `array_id`
 
-The results-scale data, ingested through the Arrow-IPC import lane into
-one file per schema and read with the bundled DuckDB 2.0.0, on the same
+A dense array is fetched by its `array_id` with an index scan. The
+alternative, a composite key on the key triple alone, was measured on
+the results-scale data, ingested through the Arrow-IPC import lane into
+one file per design and read with the bundled DuckDB 2.0.0, on the same
 host (load average about 2 to 8). Warm minimum over 15 reads; "cold" is
 a fresh connection with opening excluded.
 
-| Read | Before (composite key) | After (`array_id`) |
+| Read | Composite key only | `array_id` |
 |---|---|---|
 | One whole series, `read_parameter_dense` | 84.8 ms (cold 182 ms) | 2.4 ms (cold 6.1 ms) |
 | One week of one series, or one cell | 85.0 / 84.9 ms | 2.4 / 2.5 ms |
@@ -727,28 +731,29 @@ a fresh connection with opening excluded.
 | One series' minimum and maximum only | 2.0 ms | 2.3 ms |
 | Import of the 87.6 million values, one commit | 1 200 s | 1 187 s and 1 219 s (two runs) |
 
-The `read_parameter` path does not use the index yet and became a few
-per cent slower. A paired, interleaved comparison of the whole-parameter
+The `read_parameter` path does not use the index and is a few per cent
+slower with it. A paired, interleaved comparison of the whole-parameter
 `read_parameter` read (one process, one file, 21 pairs) put the cost at
 4.1 % (median ratio 1.041, 95 % bootstrap interval 1.003 to 1.059); the
 later full re-run measured 5.2 % (1.052, interval 1.043 to 1.062). A
 read of more than 50 series at once falls back to scanning the list
 data (51 series: 88 ms warm in this comparison, 24 ms warm and 179 ms
-cold in the later re-run, 90 ms warm and 192 ms cold in the
-2026-10-25 re-run). The file grew by 256 KiB (0.04 %).
+cold in the later re-run, 90 ms warm and 192 ms cold in a third
+run). The index adds 256 KiB to the file (0.04 %).
 
-### The columnar write path, before and after
+### Why writes bind columns as lists
 
-Until this change, a long value was inserted with multi-row `VALUES`
-statements carrying 30 parameters per cell, an array with one parameter
-per element, and each child row of a materialized axis with its own
-statement. DuckDB 2.0 parses such statements several times more
-slowly than 1.5.5 (preparing one 8 761-placeholder statement took about
-64 ms against about 13 ms). Each column is now bound as one list parameter (see the
-[architecture page](architecture.md)). Measured with the write-path
-comparison described above:
+The writer binds each column of a write as one list parameter (see the
+[architecture page](architecture.md)), so a statement's text does not
+depend on the number of cells. The alternative, multi-row `VALUES`
+statements with one placeholder per field (30 parameters per long cell,
+one per array element, one statement per child row of a materialized
+axis), is slow to prepare in DuckDB 2.0, which parses such statements
+several times more slowly than 1.5.5 (preparing one 8 761-placeholder
+statement took about 64 ms against about 13 ms). Measured with the
+write-path comparison described above:
 
-| Write | Before | After | Ratio (95 % interval) |
+| Write | Placeholders per field | Columns as lists | Ratio (95 % interval) |
 |---|---|---|---|
 | New 8 760-cell long value | 1 781 ms | 143 ms | 0.080 (0.080–0.081) |
 | Replace an 8 760-cell long value | 1 851 ms | 239 ms | 0.127 (0.124–0.129) |
@@ -758,34 +763,35 @@ comparison described above:
 | New scalar (400 per commit) | 7.0 ms | 2.9 ms | 0.42 (0.40–0.45) |
 | Replace a scalar (400 per commit) | 5.8 ms | 2.8 ms | 0.48 (0.47–0.49) |
 | 100 new scalar entities through `write_parameter` | 9.0 ms | 5.5 ms | 0.62 (0.60–0.65) |
-| Read: current cells of one 876-cell long value | 0.61 ms | 0.60 ms | 1.01 (0.97–1.03), unchanged |
+| Read: current cells of one 876-cell long value | 0.61 ms | 0.60 ms | 1.01 (0.97–1.03), equal |
 
-The stored rows are byte-identical before and after: a physical-write
-golden test (`tests/write_path_golden.rs`) was generated by the old code
-and passes unchanged. The import of the 87.6 million dense values
-through `nodal-db import` (one commit) went from 1 200 s to 97 s (one
-full-scale run, load average 4 to 12), with the file size identical to
-the byte (735 326 208 B); the later full re-run measured 86 s.
+Both forms store byte-identical rows: a physical-write golden test
+(`tests/write_path_golden.rs`) generated with the placeholder form
+passes with the list form. The import of the 87.6 million dense values
+through `nodal-db import` (one commit) takes 97 s with lists against
+1 200 s with placeholders (one full-scale run, load average 4 to 12),
+with the file size identical to the byte (735 326 208 B); a later full
+run measured 86 s.
 
-### The set-based scalar write, before and after
+### Why scalars are written set-based
 
 DuckDB 2.0 serves a point lookup on the key triple, or on an entity
 name, with a scan of the table rather than with the compound key index,
-at a floor of roughly 0.5–1 ms per statement. The per-key scalar writer
-spent five to eight such statements per value (name lookup, auto-create,
-three live-tier probes, version, close-out, insert), about 5–8 ms per
-value. A commit now resolves each segment's entity names in one
-statement, buffers all of its scalars, and writes them in one round per
-16 384 keys: one probe for the live tier and version, one close-out per
-retention mode, one columnar insert (see the
+at a floor of roughly 0.5–1 ms per statement. A per-key scalar writer
+spends five to eight such statements per value (name lookup,
+auto-create, three live-tier probes, version, close-out, insert), about
+5–8 ms per value. So a commit resolves each segment's entity names in
+one statement, buffers all of its scalars, and writes them in one round
+per 16 384 keys: one probe for the live tier and version, one close-out
+per retention mode, one columnar insert (see the
 [architecture page](architecture.md)). A round of one key uses
 point-filter forms of the same statements, which are cheaper at that
-size. Long and array values are unchanged. Measured with the write-path
-comparison described above (whole commits; the 100 000-scalar file was
-built once and copied per sample; load average 2.7–10.8, the one row
-whose load moved by more than 2× was re-run at 4.6–8.0):
+size. Measured with the write-path comparison described above (whole
+commits; the 100 000-scalar file was built once and copied per sample;
+load average 2.7–10.8, the one row whose load moved by more than 2× was
+re-run at 4.6–8.0):
 
-| Write | Before | After | Ratio (95 % interval) |
+| Write | Per-key writer | Set-based writer | Ratio (95 % interval) |
 |---|---|---|---|
 | 10 000 new scalar entities, one commit (per value) | 4.98 ms | 0.020 ms | 0.004 (0.004–0.004) |
 | 100 new scalar entities on a 100 000-scalar file (per value) | 8.75 ms | 0.99 ms | 0.113 (0.109–0.115) |
@@ -794,37 +800,38 @@ whose load moved by more than 2× was re-run at 4.6–8.0):
 | Single-value save, 100 000-scalar file (whole commit) | 94.2 ms | 95.3 ms | 1.00 (0.99–1.02) |
 | New scalar through `write_value` (400 per commit, per value) | 2.74 ms | 2.60 ms | 0.94 (0.91–0.96) |
 | Replace a scalar through `write_value` (400 per commit, per value) | 2.81 ms | 2.51 ms | 0.89 (0.89–0.90) |
-| Long, array and axis writes; read of one long value | | | 0.99–1.01, unchanged |
+| Long, array and axis writes; read of one long value | | | 0.99–1.01, equal |
 
 The 10 000-entity row is the unit of the benchmark gate's synthetic
-build: 100 000 scalars in 10 such commits now take seconds instead of
+build: 100 000 scalars in 10 such commits take seconds rather than
 about ten minutes. The editor-shaped save gains most from resolving an
 entity once per commit rather than once per segment; with a different
 entity in each segment it gains less. A single-value save is dominated
-by opening and closing the file and does not change.
+by opening and closing the file and is the same either way.
 
-The stored rows are byte-identical: the physical-write golden was
-extended with API-path scalar commits (several scalar segments, tier
+Both writers store byte-identical rows: the physical-write golden
+covers API-path scalar commits (several scalar segments, tier
 transitions, retention, deletes in the same commit), generated by the
-per-key writer, and passes unchanged; a randomized script of 220–400
-commits per seed (7 seeds) gave identical row dumps on both writers.
-Two error paths changed on purpose. Two spellings of one entity that only
+per-key writer; a randomized script of 220–400 commits per seed
+(7 seeds) gave identical row dumps on both writers. Two error paths are
+stricter in the set-based writer. Two spellings of one entity that only
 DuckDB's Unicode `lower()` folds together (`"Ä"` and `"ä"`) in one batch
-are now rejected with the same error as an ASCII case alias, instead of
-failing later on a raw constraint error. Two segments whose
-class, parameter or alternative names resolve to the same target in the
-database are rejected as a duplicate target even when the up-front name
-comparison keeps them apart (it folds case in Rust, which differs from
-DuckDB on a few letters); this too used to fail on a raw constraint error.
+are rejected with the same error as an ASCII case alias, never as a raw
+constraint error. Two segments whose class, parameter or alternative
+names resolve to the same target in the database are rejected as a
+duplicate target even when the up-front name comparison keeps them
+apart (it folds case in Rust, which differs from DuckDB on a few
+letters).
 
-### The set-based long, array and delete write, before and after
+### Why long values, arrays and deletes are written set-based
 
-The same per-statement floor made long values, arrays and deletes cost
-5–11 ms per key: a 24-cell long value spent almost nothing encoding its
-cells and the rest on five to seven statements (live tier, version scan,
-close-out, insert), and a delete paid four name lookups, the entity
-lookup being a 4–5 ms scan on a file with 100 000 entities. A commit now
-buffers its long values and arrays next to its scalars, with their axes
+The same per-statement floor makes a per-key writer pay 5–11 ms per key
+for long values, arrays and deletes: a 24-cell long value spends almost
+nothing encoding its cells and the rest on five to seven statements
+(live tier, version scan, close-out, insert), and a delete pays four
+name lookups, the entity lookup being a 4–5 ms scan on a file with
+100 000 entities. So a commit buffers its long values and arrays next
+to its scalars, with their axes
 deduplicated as they arrive, and writes each tier in rounds of up to
 16 384 keys (and 16 384 long cells or 262 144 array elements; a larger
 value is a round of its own): one probe per tier for the live state and
@@ -834,10 +841,11 @@ copy to the history table; new arrays get their `array_id`s from the
 sequence before the insert, assigned in input order, so they are the
 ids a key-by-key writer would mint. A commit's deletes are one round
 too, with each class's entity names resolved in one statement. A round
-of one key keeps the point statements, so single-value saves are
-unchanged. The long insert also changed form: its per-cell lists are
-unnested in a subquery and the per-key columns are short lists indexed
-per cell, which halves the insert of a large value.
+of one key keeps the point statements, so single-value saves cost the
+same either way. In the long insert, the per-cell lists are unnested in
+a subquery and the per-key columns are short lists indexed per cell,
+which halves the insert of a large value compared with unnesting
+everything at the top level.
 
 Measured with the write-path comparison (whole commits, opening and
 closing the file included; the "big" file is 101 MiB, with 100 000
@@ -846,7 +854,7 @@ and 2 000 24-element arrays, copied per sample; 15 pairs per row, 21 for
 the `write_value` and scalar rows; load average 3.5–16.5, the two single-value rows
 re-run with 31 pairs at 3.5–6.8 after the load moved by more than 2×):
 
-| Write | Before | After | Ratio (95 % interval) |
+| Write | Per-key writer | Set-based writer | Ratio (95 % interval) |
 |---|---|---|---|
 | Delete 1 000 scalar values, big file | 8 386 ms | 147 ms | 0.018 (0.017–0.019) |
 | Delete 1 000 24-cell long values, big file | 10 837 ms | 482 ms | 0.045 (0.044–0.046) |
@@ -861,27 +869,27 @@ re-run with 31 pairs at 3.5–6.8 after the load moved by more than 2×):
 | Single long value save, big file | 137.6 ms | 138.9 ms | 1.00 (0.98–1.02) |
 | Single value delete, big file | 115.7 ms | 115.6 ms | 0.99 (0.97–1.01) |
 | Single array save, big file | 132.1 ms | 129.2 ms | 0.98 (0.90–1.04) |
-| Scalar writes; read of one long value | | | 0.99–1.01, unchanged |
+| Scalar writes; read of one long value | | | 0.99–1.01, equal |
 
 The factors include opening and closing the file, about 100–130 ms per
-commit on the big file, which this change does not touch: the delete
-statements themselves gained more than the end-to-end ratios show, and
-a single-value save or delete stays at that floor. The bulk ingest of
+commit on the big file, the same for both writers: the delete
+statements themselves gain more than the end-to-end ratios show, and a
+single-value save or delete stays at that floor. The bulk ingest of
 876 000 long cells (results-scale harness, 1 000 series in 10 commits)
-went from 11.6 s to 5.6 s through the core API and from 10.3 s to 4.4 s
-through `nodal-db import`, with byte-identical file sizes.
+takes 5.6 s against 11.6 s through the core API and 4.4 s against
+10.3 s through `nodal-db import`, with byte-identical file sizes.
 
-The stored rows are byte-identical: the physical-write golden was
-extended with long, array and delete commits (diverged per-cell
-versions, retention stubs, transitions between all three tiers, new and
-replaced arrays with NaN and −0.0, every delete warning) generated by
-the key-by-key writers, and passes unchanged; a randomized script of
+Both writers store byte-identical rows: the physical-write golden
+covers long, array and delete commits (diverged per-cell versions,
+retention stubs, transitions between all three tiers, new and replaced
+arrays with NaN and −0.0, every delete warning) generated by the
+key-by-key writers; a randomized script of
 120–250 commits per seed (6 seeds, ranks 1–4, every value kind,
 retention, erasure, deletes with misses, duplicates and final-sigma
 pairs, rounds above 16 384 cells) gave identical rows, reports and
-sequences on both writers. Behaviour kept on purpose: two delete keys
-whose spellings only DuckDB's `lower()` folds together still delete
-once and report the second as nothing to delete.
+sequences on both writers. Two delete keys whose spellings only
+DuckDB's `lower()` folds together delete once and report the second as
+nothing to delete.
 
 ## Known limitations and open directions
 
@@ -897,29 +905,31 @@ once and report the second as nothing to delete.
   reads every array of its parameter. A fast path for those is planned. The index
   lookup depends on DuckDB's planner heuristics, so a test checks the
   plan shape on every build.
-- **Long-tier size.** Done: the unique index that guarantees at most
-  one current row per cell was reordered (same columns, same rule), and
-  the long tier went from about 78 to about 30 bytes per cell (see
-  [Storage](#storage)); a lean long table costs 4–8. The index still
-  costs about 38 bytes per cell on values of rank 3–4 whose first
-  dimension is short. A database written before the change gets the
-  smaller index on its next compaction or extract.
-- **Long-tier write speed.** Done: a commit writes its long values,
-  arrays and deletes set-based (see
-  [the set-based long, array and delete write](#the-set-based-long-array-and-delete-write-before-and-after)).
+- **Long-tier size.** The long tier costs about 30 bytes per cell (see
+  [Storage](#storage)); a lean long table costs 4–8. Most of the
+  difference is the unique index that guarantees at most one current row
+  per cell, whose key order is chosen for size (see
+  [engine rules](engine_rules.md)). It costs about 38 bytes per cell on
+  values of rank 3–4 whose first dimension is short.
+- **Long-tier write speed.** A commit writes its long values, arrays and
+  deletes set-based (see
+  [why they are written set-based](#why-long-values-arrays-and-deletes-are-written-set-based)).
   Long-tier writes are still slower per value than dense-array writes
   (about 14 µs per cell written alone, about 5–6 µs in a bulk ingest,
   against about 1 µs per array value). Large result sets are best kept
   dense: complete grids of float values.
-- **Scalar write speed.** Done: a commit writes its scalars set-based
-  (see [the set-based scalar write](#the-set-based-scalar-write-before-and-after)),
+- **Scalar write speed.** A commit writes its scalars set-based
+  (see [why scalars are written set-based](#why-scalars-are-written-set-based)),
   about 0.02 ms per value in a 10 000-value commit. What remains per
   commit is a fixed cost: opening and closing the file (about 60 ms of
   a one-value save on a 100 000-scalar file) and resolving each
   segment's class, parameter and alternative (a few statements per
   segment).
-- **Edits rewrite whole values.** Changing one cell creates a full new
-  version, in either tier. There is no per-cell history.
+- **Dense-array edits rewrite whole values.** Changing one cell of a
+  dense array creates a full new version of the array. A long value is
+  diffed per cell instead, but only while its axes, value kind and
+  parameter type stay the same; a rewrite on other axes replaces every
+  cell.
 - **The multi-dimensional tier cliff.** One missing cell in a
   multi-dimensional float value moves the whole value to the long tier,
   at about four times the storage today.
